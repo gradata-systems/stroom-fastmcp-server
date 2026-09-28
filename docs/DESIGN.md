@@ -469,7 +469,7 @@ Names follow the environment's versioned conventions, learned from sibling conte
 
 ## LangGraph agent design
 
-The agent is a `StateGraph` whose nodes map one-to-one to the workflow steps and whose edges are the loops. It needs only this server, reached through `langchain-mcp-adapters` with a client-credentials token, so it runs under its own service account.
+The agent is a `StateGraph` whose nodes map one-to-one to the workflow steps and whose edges are the loops. It needs only this server, reached through `fastmcp.Client` with a client-credentials token (`langchain-mcp-adapters` pins `mcp<2`, so the agent wraps the tools itself), so it runs under its own service account.
 
 ```mermaid
 flowchart TD

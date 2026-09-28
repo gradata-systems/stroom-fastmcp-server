@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 3 (indexing on Lucene or Elasticsearch). 52 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 52 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -52,5 +52,21 @@ here, never against a shared instance.
 cd dev/stroom && ./init-env.sh && docker compose up -d
 ```
 
-`dev/e2e_phase2.py` and `dev/e2e_phase3.py` run the Phase 2 and 3 exit tests against it. The Phase 0 spike (`spike/phase0.py`) proves the risky Stroom APIs against it; results are in
+`dev/e2e_phase2.py` and `dev/e2e_phase3.py` run the Phase 2 and 3 exit tests against it.
+`dev/e2e_agent_transport.py` checks the agent against a local server over MCP (no model needed). The Phase 0 spike (`spike/phase0.py`) proves the risky Stroom APIs against it; results are in
 [spike/FINDINGS.md](spike/FINDINGS.md).
+
+## LangGraph agent
+
+`agent/` is a LangGraph build agent that uses only this server. Install it with the `agent` extra.
+
+- `graph.py`: one node per workflow step. Each node is a small tool-calling agent with its own tool subset. Routing between nodes is code, not the model: step verdicts, processing gates and search results decide the next node. Retry loops are capped at 5 attempts, after which the agent asks the user for help.
+- `gating.py`: when a tool replies `needs_confirmation`/`needs_approval`/`needs_guidance`, the agent raises a LangGraph `interrupt`. If the user agrees, the tool is re-called with the id; a decline returns the user's note to the model.
+- `mcp_tools.py`: loads the tools with `fastmcp.Client`. It does not use `langchain-mcp-adapters`, which pins `mcp<2`.
+- `run.py`: a terminal runner. It needs `AGENT_MCP_URL`, a Keycloak client-credentials token (or `AGENT_BEARER`) and `AGENT_MODEL`:
+
+```
+uv run --extra agent python -m agent.run --sample sample.csv "Onboard Acme VPN logs"
+```
+
+For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak. The server refuses to start that way unless it is bound to localhost.

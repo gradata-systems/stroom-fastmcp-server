@@ -51,9 +51,11 @@ class Settings(BaseSettings):
     audit_log_file: Path | None = None
 
     # Keycloak (OAuth2 authorization server)
-    keycloak_realm_url: str
-    keycloak_audience: str
-    public_base_url: str
+    keycloak_realm_url: str = ''
+    keycloak_audience: str = ''
+    public_base_url: str = ''
+    # Development only: no authentication. Refused unless the server listens on localhost.
+    dev_no_auth: bool = False
 
     # HTTP listener. Leave TLS unset only when TLS is terminated in front of the server.
     host: str = '0.0.0.0'

@@ -34,16 +34,21 @@ async def lifespan(server: FastMCP):
         await elastic.close()
 
 
-mcp = FastMCP(
-    "stroom",
-    lifespan=lifespan,
-    auth=KeycloakAuthProvider(
+if settings.dev_no_auth:
+    if settings.host not in ('127.0.0.1', 'localhost', '::1'):
+        raise SystemExit("dev_no_auth is only allowed when the server listens on localhost")
+    logger.warning("Authentication is disabled (dev_no_auth); for local development only")
+    auth = None
+else:
+    if not (settings.keycloak_realm_url and settings.keycloak_audience and settings.public_base_url):
+        raise SystemExit("Set STROOM_MCP_KEYCLOAK_REALM_URL, _KEYCLOAK_AUDIENCE and _PUBLIC_BASE_URL")
+    auth = KeycloakAuthProvider(
         realm_url=settings.keycloak_realm_url,
         base_url=settings.public_base_url,
         audience=settings.keycloak_audience,
-    ),
-    middleware=[AuditMiddleware()],
-)
+    )
+
+mcp = FastMCP("stroom", lifespan=lifespan, auth=auth, middleware=[AuditMiddleware()])
 
 for tool in (t for module in TOOL_MODULES for t in module.ALL_TOOLS):
     mcp.tool(tool)
