@@ -5,8 +5,8 @@
 1. CSV, JSON, XML and syslog samples each go from sample to valid Events: feed, upload, template,
    converter and XSLT, pipeline, stepping, processing (exactly one Events stream per raw stream),
    validation and documentation.
-2. A reported field fix: draft change, compare_outputs shows only that field changing, save; processing the
-   sample again is refused, since reprocessing is left to the user.
+2. A reported field fix: draft change, compare_outputs shows only that field changing, save, reprocess (one task;
+   Stroom supersedes the earlier output, leaving exactly one Events stream).
 3. Promotion of the CSV build, then an in-place fix through a working copy written back on promotion.
 
 Confirmations and approvals are granted here the way a user would, by passing the returned id back.
@@ -212,12 +212,19 @@ async def field_fix(ctx, csv: dict):
     check(step['verdict'] == 'clean', 'draft steps clean')
     await translation.update_xslt(ctx, csv['xslt']['uuid'], draft)
     try:
-        await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=csv['pipeline']['uuid'],
-                     stream_ids=[csv['raw']])
+        await processing_writes.create_processor_filter(ctx, csv['pipeline']['uuid'], stream_ids=[csv['raw']])
         refused = ''
     except ToolError as e:
         refused = str(e)
-    check('left to the user' in refused, f"processing the sample again is refused (reprocessing is the user's): {refused}")
+    check('use reprocess_streams' in refused, f"a second plain filter is refused: {refused}")
+    run = await agreed(processing_writes.reprocess_streams, ctx=ctx, pipeline_uuid=csv['pipeline']['uuid'],
+                       stream_ids=[csv['raw']])
+    check(run.get('max_tasks') == 1, f"reprocess filter {run.get('filter_id')} runs one task at a time")
+    gate = await processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']], filter_id=run['filter_id'])
+    check(gate['gate'] == 'pass', f"the reprocess made exactly one new Events stream: {gate['streams']}")
+    everything = await processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']], timeout_seconds=5)
+    check(everything['streams'][0]['events'] == gate['streams'][0]['events'],
+          "Stroom marked the earlier Events stream superseded (deleted), leaving one")
 
 
 async def promotion(ctx, csv: dict, stamp: str):

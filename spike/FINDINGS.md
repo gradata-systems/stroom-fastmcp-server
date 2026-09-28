@@ -70,7 +70,7 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Locate (live, read-only) | On a `Keycloak-V1.2` Events stream from a 4-part raw stream, event 3 went to part 0 record 3: one earlier record produced no event, and counting handled it. The stored event matched a fresh step, and the pipeline's only code is its own XSLT. | Works on production data. For JSON sources, the record input shown is the XSLT's input (the parser's JSON XML). |
 | summarise_fix (local) | A one-line Description change: ready, 4 of 4 records changed only `Event/EventDetail/Description`, stepping clean, a readable unified diff and manual steps. The same draft with the wrong `expected_paths` came back not ready, naming the unexpected field. | Proven before it is offered. |
 | Two gates in one call | Consent ids are single use, so after the template confirmation the repeated call for approval found its confirmation id already used up. | An earlier gate's id now survives the call being repeated for a later gate, and is discarded once the action completes. The agent collects ids across repeated interrupts. |
-| Reprocessing refused | The Phase 2 field fix now checks that processing the sample again is refused, with the pipeline and stream ids for the user. | Phase 2 and 3 exit tests pass again with this. |
+| Reprocessing in development | A second plain filter on a processed stream is refused and points to `reprocess_streams` (at most 10 streams, `maxProcessingTasks` 1). After the reprocess, Stroom itself marked the pipeline's earlier Events stream for that raw stream `DELETED`, leaving exactly one. | No delete tool is needed for superseded outputs. Phase 2 and 3 exit tests pass. |
 
 ## Not yet tested
 

@@ -16,8 +16,9 @@ _RULES = """Rules for every run:
 - Step every sample record (step_sample) before processing; fix blocking groups and treat review groups as
   questions to resolve. Draft code is tried with draft_code before anything is saved.
 - Document what you build (write_documentation) and use the user's source notes for field meanings.
-- Reprocessing is the user's job: if a stream was already processed by a pipeline, give the user the pipeline
-  and stream ids and wait for them. Switching readers from one index version to the next is also theirs.
+- While developing a pipeline in the build, reprocess sample streams after a fix with reprocess_streams (at most
+  10 per call, one task at a time) and wait_for_processing with its filter_id. Reprocessing production data, and
+  switching readers from one index version to the next, are the user's.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, and only after the user confirms that
   the index template for the destination index has been written."""
 
@@ -189,6 +190,6 @@ pipeline once the user approves.{_docs(source_docs)}"""
    - Apply: follow update_events_pipeline (ask new version or in place, confirm names, copy_pipeline, update_xslt
      or update_text_converter with the draft, compare_outputs, write_documentation, promote_build).
    - Manual: give summarise_fix's manual_steps and diff.
-   Either way, reprocessing existing data is the user's to do.
+   Either way, reprocessing production data is the user's to do.
 
 {_RULES}"""

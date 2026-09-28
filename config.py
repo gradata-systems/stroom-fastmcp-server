@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     event_logging_version: str = '3.5.2'
     # Ask the user through MCP elicitation when the client supports it.
     use_elicitation: bool = True
+    # Reprocessing during development (pipelines this server built): streams per call, and the filter's
+    # concurrent task limit. Reprocessing with production pipelines stays with the user.
+    max_reprocess_streams: int = 10
+    reprocess_max_tasks: int = 1
     # Task limit on feed-wide processor filters.
     max_feed_filter_tasks: int = 2
 

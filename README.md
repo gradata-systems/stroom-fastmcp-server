@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 53 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 54 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -15,7 +15,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 53 tool
 | Pipelines | `create_pipeline`*, `copy_pipeline`*, `set_pipeline_property` |
 | Streams and errors | `find_streams`, `get_stream_children`, `read_stream`, `get_stream_attributes`, `summarise_errors`, `summarise_events` |
 | Stepping | `step_pipeline`, `step_sample`, `compare_outputs` (with unsaved draft code) |
-| Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `wait_for_processing` |
+| Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
@@ -29,8 +29,10 @@ otherwise returned as an id to pass back. Everything is written under `MCP Works
 Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
 - Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards their Keycloak
   token, whose `aud` must include `stroom` as well as the MCP audience. There is no shared API key.
-- Reprocessing is the user's. A processor filter is refused for streams the pipeline already processed, and the
-  agent tells the user which streams to reprocess. Moving readers from one index version to the next is also theirs.
+- Reprocessing is allowed while developing a pipeline in the workspace: `reprocess_streams` takes at most 10 streams
+  per call and runs one task at a time, and Stroom supersedes (deletes) the earlier output. Promoted pipelines are
+  refused by the write guard, so reprocessing production data is the user's, as is moving readers from one index
+  version to the next.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.
 

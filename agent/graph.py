@@ -44,9 +44,10 @@ NODES: dict[str, tuple[str, list[str]]] = {
                           "{raw_stream_ids} and report the verdict.", ['step_sample', 'step_pipeline']),
     'process_sample': ("Start processing the sample: create_processor_filter on pipeline {translation_pipeline} with "
                        "stream_ids {raw_stream_ids}, then wait_for_processing. Validate one Events record with "
-                       "read_stream, validate_events and check_event_quality. If a stream was already processed, do not "
-                       "work round it: reprocessing is the user's, so tell them the pipeline and stream ids.",
-                       ['create_processor_filter', 'wait_for_processing', 'read_stream', 'validate_events',
+                       "read_stream, validate_events and check_event_quality. If a stream was already processed (after a "
+                       "fix), use reprocess_streams (at most 10 at a time) and wait_for_processing with its filter_id.",
+                       ['create_processor_filter', 'reprocess_streams', 'wait_for_processing', 'read_stream',
+                        'validate_events',
                         'check_event_quality', 'summarise_errors', 'processing_status']),
     'plan_indexing': ("Choose the indexing template (find_pipeline_templates stage=indexing gives the backend), the "
                       "field convention (get_field_conventions; ask the user if none is set), and for Elasticsearch "
@@ -61,11 +62,13 @@ NODES: dict[str, tuple[str, list[str]]] = {
     'step_indexing': ("Run step_sample on indexing pipeline {indexing_pipeline} over Events streams {events_stream_ids}.",
                       ['step_sample', 'step_pipeline']),
     'index_sample': ("create_processor_filter on indexing pipeline {indexing_pipeline} with stream_ids "
-                     "{events_stream_ids} (for Elasticsearch the user first confirms the index template is written), "
-                     "wait_for_processing with expect_events=false, then "
+                     "{events_stream_ids} (for Elasticsearch the user first confirms the index template is written; "
+                     "streams already indexed by it go through reprocess_streams), wait_for_processing with "
+                     "expect_events=false (and the filter_id after a reprocess), then "
                      "create_verification_dashboard and run_test_searches (stream ids, an exact match on key fields "
                      "using values from stepped documents, and a time range).",
-                     ['create_processor_filter', 'wait_for_processing', 'create_verification_dashboard',
+                     ['create_processor_filter', 'reprocess_streams', 'wait_for_processing',
+                      'create_verification_dashboard',
                       'run_test_searches', 'summarise_errors', 'step_pipeline']),
     'document': ("Write documentation for pipelines {translation_pipeline} and {indexing_pipeline} with "
                  "write_documentation (describe_translation and summarise_events help), then summarise for the user.",
