@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # Upper bound on serialized tool output, to protect the model's context window.
     max_response_chars: int = 100_000
     max_stream_chars: int = 20_000
+    # Records stepped per step_sample call before stopping.
+    max_sample_records: int = 500
+    # Error triage rules (see error_rules.yaml).
+    error_rules_file: Path = Path('error_rules.yaml')
+    # Template pipeline sources (and, later, write scope).
+    access_policy_file: Path = Path('access_policy.yaml')
 
     # Audit trail as JSON lines; stdout when unset (suits Kubernetes log shipping).
     audit_log_file: Path | None = None

@@ -251,7 +251,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-53 tools in 9 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+52 tools in 9 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -329,10 +329,11 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `step_pipeline` | Step one record (first, next, last, or a record index) with optional draft code per element; returns each element's input, output and errors | `stepping/v1/step` |
+| `step_pipeline` | Step one record (first, last, or a record index) with optional draft code per element; returns the chosen elements' input and output and every element's errors, triaged | `stepping/v1/step` |
 | `step_sample` | Step every record of the sample streams to completion (capped by `max_sample_records`, default 500); one compact verdict per record, errors triaged | `stepping/v1/step` |
 | `compare_outputs` | Step the same records through two pipelines, or one pipeline with current and draft code, and diff each record's output (event XML or index document); reports fields added, removed and changed | `stepping/v1/step` |
-| `end_stepping` | Release the stepping session | `stepping/v1/terminateStepping` |
+
+Stepping holds no session between calls: each step is a fresh request from the last record's location, and a session id only polls a step that is still running (Stroom drops it when the step completes). So there is nothing to release afterwards.
 
 **Indexing** (`tools/indexing.py`; Lucene or Elasticsearch per build)
 

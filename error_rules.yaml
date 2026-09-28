@@ -1,0 +1,16 @@
+# Error triage rules, checked in order; the first match decides a group's class.
+# Fields (all optional): severity (list), element (glob on element id), own (true = element set by
+# the pipeline itself, false = inherited from its template), message (regex), class, reason.
+# Classes: blocking (must fix), review (may be caused by our content), benign (report only).
+rules:
+  # Add environment-specific rules here, e.g. known-harmless decoration lookup misses:
+  # - {element: decorationFilter, severity: [WARNING, INFO], message: 'lookup', class: benign,
+  #    reason: 'User decoration miss for accounts not in reference data'}
+
+  - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
+  - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}
+  - {own: true, severity: [ERROR], class: blocking, reason: "Error in this pipeline's own element"}
+  - {own: false, severity: [ERROR], class: review, reason: 'Error in an inherited element; check whether our output causes it'}
+  - {own: true, severity: [WARNING], class: review, reason: "Warning in this pipeline's own element"}
+  - {severity: [WARNING, INFO], class: benign, reason: 'Warning or info from an inherited element'}
+  - {class: review, reason: 'No rule matched'}

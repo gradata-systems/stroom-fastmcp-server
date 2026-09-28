@@ -95,6 +95,20 @@ def merge_layers(layers: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def own_elements(layers: list[dict[str, Any]]) -> set[str]:
+    """Elements the pipeline itself adds or configures, as opposed to ones inherited unchanged.
+
+    Errors in these are the pipeline's own doing; errors in the rest come from its template.
+    """
+    if not layers:
+        return set()
+    data = layers[-1].get('pipelineData') or {}
+    added, _ = _changes(data, 'elements')
+    props, _ = _changes(data, 'properties')
+    refs, _ = _changes(data, 'pipelineReferences')
+    return {e['id'] for e in added} | {p['element'] for p in props} | {r['element'] for r in refs}
+
+
 def chain_order(elements: list[dict[str, Any]], links: list[dict[str, str]]) -> list[str]:
     """Element ids in processing order, following links from the element nothing feeds into."""
     targets = {link['to'] for link in links}

@@ -22,6 +22,18 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Verification search | `dashboard/v1/search` against a dashboard built from scratch (query + table components, table columns `${Field}`), polled with `queryKey` until `complete`: stream ids 3/3, `UserId = 'bob'` 1/1, `EventTime` BETWEEN 2/2. `TableSettings` in `componentResultRequests` rejects `pageSize` (dashboard-only). | `run_test_searches` is backend-neutral; the dashboard only needs the index doc as its data source. |
 | Other filters | Content-pack processor filters (Example Index, Example Dynamic Index) also indexed the spike's Events stream; shard doc counts are not a reliable signal until flushed. | Verify with searches, not shard counts; match tasks to a filter by id. |
 
+## Phase 1 additions
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| Error streams | MARKER fetch returns `summary` entries per severity and `storedError` entries (severity, element, message). Locations are `-1`: no record position. A bad date was a WARNING in the XSLT that caused two schema ERRORs. | Record positions come from stepping; triage keeps the cause (own XSLT warning, review) next to its effect (schema error, blocking). |
+| Stepping to a record | `REFRESH` with a `stepLocation` jumps straight to a record; `LAST` works. | `step_pipeline` takes a record index. |
+| Empty XSLTFilter | The template's unset `decorationFilter` output is identical to its input. | Unset XSLT steps after the first are optional (pass-through). |
+| Segmented streams | `data/v1/fetch` returns one record per call from an Events stream, whatever `recordCount` asks for. | `read_stream` and `summarise_events` read record by record. |
+| Receipt headers | Held in the `Meta Data` child part as `key:value` lines (`Feed`, `ReceivedTime`, `RemoteAddress`, `UploadUserId`, custom headers). | `get_stream_attributes` reads that part. |
+| Schema selection | Stroom's XMLSchema docs carry a `systemId` equal to what Events name in `xsi:schemaLocation`; lxml loads Stroom's XSD directly. On live a Keycloak record validated against v3.5.2 picked this way. | `validate_events` needs no version configuration in the normal case. |
+| Content search | Live `findInContent` answered "content is currently being indexed (17% complete)" on first use. | Pass the message through; the agent retries. |
+
 ## Not yet tested
 
 - Elastic indexing: the local stack uses Lucene instead; Elasticsearch is exercised against the live instance later. Dashboard search is proven on Lucene.

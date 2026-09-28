@@ -1,0 +1,13 @@
+# Where the agent looks for template pipelines, per stage. Folders are explorer paths from System;
+# names are glob patterns. Pipelines that other pipelines inherit from are also candidates, and
+# Stroom's standard templates are the last resort.
+pipeline_templates:
+  translation:
+    folders: [System/Template Pipelines]
+    names: ['Event Data (*)']
+  indexing:
+    folders: [System/Template Pipelines, System/Template Pipelines/Elasticsearch]
+    names: ['Indexing', 'Events to Elasticsearch', 'Indexing - Elasticsearch']
+  discovery:
+    folders: [System/Template Pipelines/Elasticsearch]
+    names: ['Raw to Elasticsearch']

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import ssl
 import time
@@ -110,3 +111,40 @@ class StroomGateway:
 
     async def pipeline_layers(self, uuid: str) -> list[dict[str, Any]]:
         return await self.post('/pipeline/v1/fetchPipelineLayers', {'type': 'Pipeline', 'uuid': uuid})
+
+    async def find_meta(self, terms: list[dict[str, Any]], limit: int, op: str = 'AND') -> dict[str, Any]:
+        """Stream metadata matching expression terms, newest first."""
+        return await self.post('/meta/v1/find', {
+            'expression': {'type': 'operator', 'op': op, 'children': terms},
+            'pageRequest': {'offset': 0, 'length': limit},
+            'sortList': [{'id': 'Id', 'desc': True}],
+        })
+
+    async def fetch_data(self, meta_id: int, record_index: int, record_count: int, mode: str = 'TEXT',
+                         child_type: str | None = None) -> dict[str, Any]:
+        """Records from a stream (TEXT), or its error markers (MARKER)."""
+        return await self.post('/data/v1/fetch', {
+            'sourceLocation': {'metaId': meta_id, 'partIndex': 0, 'recordIndex': record_index, 'childType': child_type},
+            'displayMode': mode,
+            'recordCount': record_count,
+            'expandedSeverities': ['INFO', 'WARN', 'ERROR', 'FATAL'],
+        })
+
+    async def step(self, request: dict[str, Any], poll_seconds: float = 0.5, max_wait: float = 120) -> dict[str, Any]:
+        """Run one stepping request to completion.
+
+        Each step is a fresh request with no session id; Stroom creates a session, and drops it
+        once the step completes or after 10 s idle. The session id is only used to poll a step
+        that has not completed yet.
+        """
+        request = {k: v for k, v in request.items() if k != 'sessionUuid'}
+        result = await self.post('/stepping/v1/step', request)
+        waited = 0.0
+        while not result.get('complete'):
+            if waited >= max_wait:
+                await self.post('/stepping/v1/terminateStepping', {**request, 'sessionUuid': result['sessionUuid']})
+                raise ToolError("Stepping did not finish in time; try fewer records or a smaller stream")
+            await asyncio.sleep(poll_seconds)
+            waited += poll_seconds
+            result = await self.post('/stepping/v1/step', {**request, 'sessionUuid': result['sessionUuid']})
+        return result
