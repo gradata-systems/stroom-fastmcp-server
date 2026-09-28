@@ -178,6 +178,25 @@ Report sections: Purpose and data; Processing; Field mapping; Event types; Schem
 Return it in the chat and save it with write_documentation in a build, then promote_build beside the
 pipeline once the user approves.{_docs(source_docs)}"""
 
+    @mcp.prompt(description="Build an events pipeline for a feed that already holds data.")
+    def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
+        return f"""Build an events pipeline, then indexing, for the existing feed "{feed}" from the data it already holds.
+
+1. survey_feed feed={feed}: it samples the newest streams and groups records into kinds of event (shapes), with
+   counts and examples. Not every kind appears in every stream.
+2. start_build. Create a test feed '{feed}-MCP-TEST' in the build with the source feed's encoding, and upload the
+   survey's sample to it. Never process the source feed: its streams are only read and stepped.
+3. Draft the text converter if needed and the translation with build_translation_xslt, one rule per shape, then
+   create_pipeline and step_sample the test feed's streams until clean.
+4. survey_feed again with before_stream_id=oldest_stream_read and known_signatures=every signature so far. New
+   shapes: upload their sample to the test feed, add rules, regenerate, step all test streams. Repeat until a
+   survey is saturated or finds no older streams, then tell the user which kinds of event the pipeline covers
+   and their share of the data.
+5. Continue as onboard_data_source from processing: process the test feed's streams, stage 2, documentation,
+   promotion. Processing the source feed itself is the user's decision at promotion.
+
+{_RULES}{_docs(source_docs)}"""
+
     @mcp.prompt(description="Diagnose a reported problem in an events pipeline and propose a fix.")
     def fix_pipeline_issue(stream_id: int, issue: str, event_id: int | None = None) -> str:
         where = f"event {event_id} of stream {stream_id}" if event_id else f"stream {stream_id}"

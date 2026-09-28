@@ -72,7 +72,7 @@ flowchart TD
 
 ## Further use cases
 
-Five further jobs. The evaluation is read-only. The two updates start from existing production content rather than a new source: both work on draft code or copies until a person approves, and both compare new output with current output record by record, so the only differences are the intended ones.
+Six further jobs. The evaluation is read-only. The two updates start from existing production content rather than a new source: both work on draft code or copies until a person approves, and both compare new output with current output record by record, so the only differences are the intended ones.
 
 **Update an events pipeline**
 
@@ -125,6 +125,16 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 | Event types | `EventDetail` types, `TypeId`s and `Action`s, with counts and examples |
 | Schema conformance | Validation and quality pass rates, schema version gap, recent error groups |
 | Suggestions | Prioritised changes with rationale and draft XSLT |
+
+**Build a pipeline for a feed that already holds data**
+
+The user names an existing Raw Events feed instead of giving a sample. Not every kind of event shows up in every stream, so the agent samples stream after stream until more streams add nothing new.
+
+1. **Survey.** `survey_feed` reads the feed's newest streams and groups their records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples.
+2. **Work on a copy.** The survey returns a sample holding a few examples of each shape, in the feed's own format. It goes to a test feed in the build (`<FEED>-MCP-TEST`, with the source feed's encoding); the source feed's streams are only read and stepped, never processed.
+3. **Translate every shape.** The mapping gets one rule per shape (`build_translation_xslt`), and the pipeline steps the test streams until clean. Records no rule matches are logged, not dropped, so a missed shape shows up in stepping.
+4. **Look further back.** The agent surveys again from the oldest stream it read, passing the signatures it already knows, so only new shapes come back with a sample. Each new sample goes to the test feed, the mapping gains rules, and every test stream is stepped again. This repeats until a survey is saturated or there are no older streams, and the agent reports which kinds of event the pipeline covers and their share of the data.
+5. **Continue as onboarding.** Processing, stage 2, documentation and promotion run on the test feed's streams as for a new source. Whether the promoted pipeline then processes the source feed is the user's decision at promotion.
 
 **Fix a reported pipeline issue**
 
@@ -265,7 +275,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-57 tools in 11 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+58 tools in 12 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -334,6 +344,12 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. For Elasticsearch, the same hand-over: pre-created disabled for the user to enable | `processorFilter/v1` |
 | `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
 | `wait_for_processing` | Poll `processing_status` with backoff until all tasks are complete or failed, or a timeout; then reports, per input stream, the child Events stream id and record count, flagging inputs with none or more than one; can count only one filter's outputs | as above |
+
+**Sampling** (`tools/sampling.py`, read-only)
+
+| Tool | Purpose | Stroom API |
+| --- | --- | --- |
+| `survey_feed` | Sample an existing feed's streams, newest first, and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples, and a sample of the (new) shapes in the feed's own format for a test feed. Continues further back with `before_stream_id` and `known_signatures` | `meta/v1/find`, `data/v1/fetch` |
 
 **Diagnosis** (`tools/diagnosis.py`, read-only)
 
@@ -413,6 +429,7 @@ Resources carry the reference knowledge the model needs but should not have to d
 | `index_event_data` | `events_feed`, `index_pattern` | Stage 2 only, against an existing Events feed |
 | `create_discovery_index` | `feed?`, `sample?`, `timestamp_field?` | Index raw structured data directly for exploration, without an event-logging translation |
 | `evaluate_events_pipeline` | `pipeline`, `sample_size?`, `source_docs?` | Report on what a pipeline does, its data and event types, schema conformance and suggested fixes, returned in the chat and saved as its Documentation doc |
+| `onboard_existing_feed` | `feed`, `source_docs?` | Build the events pipeline from the data a feed already holds: survey its streams for kinds of event, translate them from samples in a test feed, look further back until nothing new turns up, then index as for a new source |
 | `fix_pipeline_issue` | `stream_id`, `issue`, `event_id?` | Locate a reported event, confirm the problem, prove a fix, then apply it or give the manual steps, as the user chooses |
 
 **Where the knowledge comes from.** The XSD and examples are vendored into `knowledge/` from the [event-logging-schema](https://github.com/gchq/event-logging-schema) repo at a pinned tag. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/), each under about 4,000 tokens, with links to the full page.
@@ -576,6 +593,8 @@ class BuildState(TypedDict):
 
 `create_discovery_index` runs `onboard_feed` or takes an existing feed, skips stage 1 and `research_conventions`, and enters at `select_indexing_template` with discovery-stage templates; `draft_indexing` drafts the near-identity XSLT and the permissive template, and the rest of stage 2 runs unchanged.
 
+`onboard_existing_feed` starts at `survey` (survey the feed, start the build, create the test feed, upload the survey's sample), then runs `draft_translation` and `step_and_validate` as in onboarding. When stepping is clean and the survey is not saturated, `resurvey` looks further back with the known signatures: new shapes go back to `draft_translation` with their sample uploaded, and a survey with nothing new moves on (to `process_sample` once saturated, or after at most 6 surveys). The kinds of event seen so far travel in the state, so the drafting step sees every shape it has to translate.
+
 `fix_pipeline_issue` runs `locate_issue` (locate the event, plan and confirm the problem), then `draft_fix`, which loops until `summarise_fix` says the fix is ready. A `draft_fix` attempt that proposes no fix means the issue did not reproduce, so the graph asks the user instead of looping. `offer_fix` interrupts with the diff and asks whether to apply it: yes runs `apply_fix` (copy, update, compare, document, promote, as in `update_events_pipeline`); no runs `explain_fix`, which returns the manual steps and the diff.
 
 `evaluate_events_pipeline` is a read-only chain: load the baseline, sample, map the translation, inventory events, measure conformance, report. Its only write is the Documentation doc, promoted on approval like any other change; its suggestions can seed an `update_events_pipeline` run.
@@ -633,6 +652,6 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | 1. Read and validate | Explorer, template discovery, streams, errors, stepping (read-only), pipeline evaluation, validation tools, resources | Agent can explain errors in an existing broken pipeline and produce an evaluation report for a working one |
 | 2. Stage 1 writes | Feeds, translation, pipelines, processing, write guard and approvals, translation updates with backups and output diffs, pipeline documentation, workspace promotion | CSV, JSON, XML and Syslog samples each reach valid Events; a reported field fix lands with a diff limited to that field |
 | 3. Stage 2 | Indexing on both backends (Lucene locally, Elasticsearch live), ES template tools, convention profiles, indexing pipeline, stepping checks, versioned indexing copies, discovery indices | Sample events indexed and found by the verification searches, mapping matches the selected convention; a v2 copy indexes an added field beside v1 |
-| 4. LangGraph agent | State graph, checkpointer, interrupts, evaluation set of 10 samples | 8 of 10 samples reach indexed events with at most one human hint |
+| 4. LangGraph agent | State graph, checkpointer, interrupts, evaluation set of 10 samples (`dev/eval`) | 8 of 10 samples reach indexed events with at most one human hint. Every case's reference solution passes on the local stack; the agent run needs a model |
 
 Sources: [Stroom 7.13 OpenAPI spec](https://gchq.github.io/stroom/v7.13/stroom.json), [Stroom API docs](https://gchq.github.io/stroom-docs/docs/user-guide/api/), [Elasticsearch indexing in Stroom](https://gchq.github.io/stroom-docs/docs/user-guide/indexing/elasticsearch/indexing/), [event-logging-schema](https://github.com/gchq/event-logging-schema).

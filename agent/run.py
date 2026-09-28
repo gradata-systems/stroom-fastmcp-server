@@ -68,7 +68,7 @@ def ask(payload: dict) -> dict:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('request', help="What to do, e.g. 'Stream 1234 event 5: the user name is missing'")
-    parser.add_argument('--mode', default='onboard', choices=['onboard', 'fix_pipeline_issue'])
+    parser.add_argument('--mode', default='onboard', choices=['onboard', 'onboard_existing_feed', 'fix_pipeline_issue'])
     parser.add_argument('--sample', type=Path)
     parser.add_argument('--docs', type=Path, help='vendor documentation or annotated sample notes')
     args = parser.parse_args()

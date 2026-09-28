@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 57 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 58 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -16,6 +16,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 57 tool
 | Streams and errors | `find_streams`, `get_stream_children`, `read_stream`, `get_stream_attributes`, `summarise_errors`, `summarise_events` |
 | Stepping | `step_pipeline`, `step_sample`, `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
+| Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
@@ -45,7 +46,7 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
 
 Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts: `onboard_data_source`,
 `update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`,
-`fix_pipeline_issue`.
+`onboard_existing_feed`, `fix_pipeline_issue`.
 Field conventions: `conventions/*.yaml`. Elasticsearch (templates only) is optional: `STROOM_MCP_ES_URL`.
 Error triage rules: `error_rules.yaml`. Template sources: `access_policy.yaml`.
 
@@ -88,11 +89,16 @@ cd dev/stroom && ./init-env.sh && docker compose up -d
 
 ```
 uv run --extra agent python -m agent.run --sample sample.csv "Onboard Acme VPN logs"
+uv run --extra agent python -m agent.run --mode onboard_existing_feed "Build a pipeline for feed ACME-VPN-V1.0"
 uv run --extra agent python -m agent.run --mode fix_pipeline_issue "Stream 15768876 event 3: the user id is missing"
 ```
 
 In `fix_pipeline_issue` mode the agent locates the event, confirms the problem, proves a fix, and asks whether
 to apply it or give you the manual steps.
+
+The Phase 4 exit test (8 of 10 samples indexed with at most one hint each) is in [dev/eval](dev/eval/README.md):
+10 cases across CSV, JSON, XML, syslog and key=value, each with a reference solution. `--reference`
+runs those through the local stack without a model; `--agent` runs the agent with the model you give it.
 
 For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak and calls Stroom with
 `STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the

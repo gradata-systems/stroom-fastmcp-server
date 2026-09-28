@@ -7,7 +7,7 @@ from langchain_core.messages import BaseMessage, ToolMessage
 from agent.gating import parse
 
 Mode = Literal['onboard', 'update_events_pipeline', 'update_indexing_pipeline', 'create_discovery_index',
-               'evaluate_events_pipeline', 'fix_pipeline_issue']
+               'evaluate_events_pipeline', 'fix_pipeline_issue', 'onboard_existing_feed']
 
 
 class BuildState(TypedDict, total=False):
@@ -34,6 +34,8 @@ class BuildState(TypedDict, total=False):
     template_check: dict[str, Any]    # the last check_index_template result
     template_choice: str              # accept | changed | change_pipeline | change_template
     filter_ready: dict[str, Any]      # an Elasticsearch indexing filter created disabled: id, link
+    survey: dict[str, Any]            # onboard_existing_feed: source feed, shapes seen, how far back, saturated
+    test_feed: str                    # the build's feed that survey samples are uploaded to
     attempts: dict[str, int]
     notes: list[str]                  # short progress notes shown to the user
     last_node: str
@@ -54,6 +56,14 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
             update['build'] = data.get('build')
         elif name == 'upload_sample' and data.get('stream_id'):
             update.setdefault('raw_stream_ids', []).append(data['stream_id'])
+        elif name == 'survey_feed' and 'shapes' in data:
+            update['survey'] = {'feed': data.get('feed'), 'oldest_stream_read': data.get('oldest_stream_read'),
+                                'saturated': data.get('saturated'), 'new_shapes': data.get('new_shapes'),
+                                'signatures': [s['signature'] for s in data.get('shapes') or []],
+                                'shapes': [{k: s.get(k) for k in ('signature', 'count', 'example')}
+                                           for s in data.get('shapes') or []][:30]}
+        elif name == 'create_feed' and data.get('name'):
+            update['test_feed'] = data['name']
         elif name == 'draft_index_mapping' and data.get('plan'):
             update['field_plan'] = data['plan']
         elif name == 'propose_index_template' and data.get('dev_tools'):

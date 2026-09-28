@@ -1,6 +1,8 @@
 """The build graph: nodes are small tool-using agents; routing between them is code.
 
 Onboarding runs stage 1 (sample to Events) then stage 2 (indexing) then documentation and promotion.
+onboard_existing_feed starts from a feed that already holds data: it surveys the feed's streams for kinds of
+event, translates them from samples in a test feed, and surveys further back until nothing new turns up.
 fix_pipeline_issue locates a reported event, confirms the problem, drafts and proves a fix, then asks the
 person whether to apply it or have the manual steps.
 Loops (draft, step, fix) are bounded by attempt counts; when a loop runs out the graph interrupts and asks
@@ -37,12 +39,24 @@ NODES: dict[str, tuple[str, list[str]]] = {
                           "(input fields or constants to event-logging paths, one rule per kind of event, time patterns "
                           "from profile_sample) and fix any problems it reports in the mapping. Hand-edit XSLT only for "
                           "what a mapping cannot express. Use step_sample with draft_code until clean, then save with create_text_converter / "
-                          "create_xslt (or update_xslt) and create_pipeline once. Previous findings to fix: {findings}",
+                          "create_xslt (or update_xslt) and create_pipeline once. Kinds of event seen in the source feed "
+                          "(translate every one; none means this does not apply): {survey_shapes}. Previous findings to "
+                          "fix: {findings}",
                           ['find_pipeline_templates', 'list_template_children', 'describe_template_contract',
                            'find_similar_translations', 'get_document', 'build_translation_xslt', 'check_xslt',
                            'step_sample', 'step_pipeline', 'profile_sample',
                            'create_text_converter', 'update_text_converter', 'create_xslt', 'update_xslt',
                            'create_pipeline', 'read_stream', 'get_stream_attributes']),
+    'survey': ("Survey the existing feed named in the request with survey_feed. start_build (a short name for the "
+               "source), read the source feed's settings (find_documents type Feed, get_document) and create_feed "
+               "'<FEED>-MCP-TEST' in the build with the same encoding, then upload_sample the survey's sample to it. "
+               "Never process the source feed itself.",
+               ['survey_feed', 'start_build', 'find_documents', 'get_document', 'create_feed', 'upload_sample',
+                'profile_sample', 'record_source_notes']),
+    'resurvey': ("Look further back in feed {survey_feed}: survey_feed with before_stream_id={survey_oldest} and "
+                 "known_signatures={survey_signatures}. If it finds new shapes, upload_sample its sample to the test "
+                 "feed {test_feed}. Report how many new kinds of event it found.",
+                 ['survey_feed', 'upload_sample']),
     'step_and_validate': ("Run step_sample on the translation pipeline {translation_pipeline} over streams "
                           "{raw_stream_ids} and report the verdict.", ['step_sample', 'step_pipeline']),
     'process_sample': ("Start processing the sample: create_processor_filter on pipeline {translation_pipeline} with "
@@ -129,6 +143,10 @@ def _prompt(name: str, state: BuildState) -> str:
     values = {k: state.get(k) for k in ('translation_pipeline', 'indexing_pipeline', 'raw_stream_ids',
                                         'events_stream_ids', 'build')}
     fix = state.get('fix') or {}
+    survey = state.get('survey') or {}
+    values.update(survey_shapes=json.dumps(survey.get('shapes')) if survey.get('shapes') else 'none',
+                  survey_feed=survey.get('feed'), survey_oldest=survey.get('oldest_stream_read'),
+                  survey_signatures=json.dumps(survey.get('signatures') or []), test_feed=state.get('test_feed'))
     values.update(backend=state.get('backend') or 'unknown', field_plan=json.dumps(state.get('field_plan')),
                   user_template=state.get('user_template') or 'none',
                   filter_id=(state.get('filter_ready') or {}).get('filter_id'))
@@ -151,6 +169,14 @@ def _node(name: str, model: BaseChatModel, tools: dict[str, BaseTool]) -> Callab
         update = harvest(result['messages'])
         if 'fix' in update:
             update['fix_attempt'] = attempts[name]
+        if 'survey' in update and state.get('survey'):
+            earlier = state['survey']
+            update['survey']['signatures'] = list(dict.fromkeys(earlier.get('signatures', []) +
+                                                                 update['survey']['signatures']))
+            update['survey']['shapes'] = (earlier.get('shapes', []) + [
+                s for s in update['survey']['shapes'] if s['signature'] not in earlier.get('signatures', [])])[:40]
+            if update['survey'].get('oldest_stream_read') is None:
+                update['survey']['oldest_stream_read'] = earlier.get('oldest_stream_read')
         if 'raw_stream_ids' in update:
             update['raw_stream_ids'] = sorted(set((state.get('raw_stream_ids') or []) + update['raw_stream_ids']))
         last = result['messages'][-1].content if result['messages'] else ''
@@ -235,8 +261,24 @@ def await_enable(state: BuildState) -> dict[str, Any]:
 
 
 # Routing: code, not model choices.
+MAX_SURVEYS = 6
+
+
 def start(state: BuildState) -> str:
-    return 'locate_issue' if state.get('mode') == 'fix_pipeline_issue' else 'intake'
+    return {'fix_pipeline_issue': 'locate_issue', 'onboard_existing_feed': 'survey'}.get(state.get('mode'), 'intake')
+
+
+def after_survey(state: BuildState) -> str:
+    return 'draft_translation' if state.get('raw_stream_ids') else 'ask_for_help'
+
+
+def after_resurvey(state: BuildState) -> str:
+    survey = state.get('survey') or {}
+    if survey.get('new_shapes'):
+        return 'draft_translation'
+    if survey.get('saturated') or (state.get('attempts') or {}).get('resurvey', 0) >= MAX_SURVEYS:
+        return 'process_sample'
+    return 'resurvey'
 
 
 def after_locate(state: BuildState) -> str:
@@ -258,6 +300,8 @@ def after_offer(state: BuildState) -> str:
 
 def after_step(state: BuildState) -> str:
     if state.get('step_verdict') == 'clean':
+        if state.get('mode') == 'onboard_existing_feed' and not (state.get('survey') or {}).get('saturated'):
+            return 'resurvey'
         return 'process_sample'
     return 'draft_translation' if (state.get('attempts') or {}).get('draft_translation', 0) < MAX_ATTEMPTS else 'ask_for_help'
 
@@ -301,7 +345,8 @@ RESUME_AT = {'intake': 'draft_translation', 'onboard_feed': 'draft_translation',
              'step_and_validate': 'draft_translation', 'process_sample': 'process_sample',
              'plan_indexing': 'plan_indexing', 'step_indexing': 'plan_indexing', 'index_sample': 'plan_indexing',
              'locate_issue': 'locate_issue', 'draft_fix': 'draft_fix', 'propose_template': 'plan_indexing',
-             'check_template': 'plan_indexing', 'verify_index': 'plan_indexing'}
+             'check_template': 'plan_indexing', 'verify_index': 'plan_indexing', 'survey': 'survey',
+             'resurvey': 'resurvey'}
 
 
 def after_help(state: BuildState) -> str:
@@ -320,11 +365,14 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_node('review_template', review_template)
     graph.add_node('flag_pipeline_changes', flag_pipeline_changes)
     graph.add_node('await_enable', await_enable)
-    graph.add_conditional_edges(START, start, ['intake', 'locate_issue'])
+    graph.add_conditional_edges(START, start, ['intake', 'locate_issue', 'survey'])
+    graph.add_conditional_edges('survey', after_survey, ['draft_translation', 'ask_for_help'])
+    graph.add_conditional_edges('resurvey', after_resurvey, ['draft_translation', 'process_sample', 'resurvey'])
     graph.add_edge('intake', 'onboard_feed')
     graph.add_edge('onboard_feed', 'draft_translation')
     graph.add_edge('draft_translation', 'step_and_validate')
-    graph.add_conditional_edges('step_and_validate', after_step, ['process_sample', 'draft_translation', 'ask_for_help'])
+    graph.add_conditional_edges('step_and_validate', after_step, ['process_sample', 'resurvey', 'draft_translation',
+                                                                   'ask_for_help'])
     graph.add_conditional_edges('process_sample', after_processing, ['plan_indexing', 'ask_for_help'])
     graph.add_edge('plan_indexing', 'step_indexing')
     graph.add_conditional_edges('step_indexing', after_step_indexing, ['index_sample', 'propose_template', 'check_template',
@@ -340,7 +388,7 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_conditional_edges('verify_index', after_index_sample, ['await_enable', 'document', 'plan_indexing',
                                                                      'ask_for_help'])
     graph.add_conditional_edges('ask_for_help', after_help, ['draft_translation', 'process_sample', 'plan_indexing',
-                                                             'locate_issue', 'draft_fix'])
+                                                             'locate_issue', 'draft_fix', 'survey', 'resurvey'])
     graph.add_conditional_edges('locate_issue', after_locate, ['draft_fix', 'ask_for_help'])
     graph.add_conditional_edges('draft_fix', after_draft_fix, ['offer_fix', 'draft_fix', 'ask_for_help'])
     graph.add_conditional_edges('offer_fix', after_offer, ['apply_fix', 'explain_fix'])
