@@ -1,4 +1,5 @@
 """Tools that step pipelines record by record, optionally with draft (unsaved) code."""
+import re
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
@@ -46,6 +47,24 @@ async def _step(stroom: StroomGateway, pipeline: _Pipeline, stream_id: int, step
     if location:
         request['stepLocation'] = location
     return await stroom.step(request)
+
+
+_ELEMENT = re.compile(r'<[A-Za-z_]')
+
+
+def _empty_output(result: dict[str, Any], element: str, record: Any) -> list[dict[str, Any]]:
+    """A marker when an XSLT produced no elements at all.
+
+    When no template matches the input (typically a wrong xpath-default-namespace), XSLT's built-in
+    rules copy the text through, nothing raises an error, and processing silently writes nothing.
+    """
+    output = (((result.get('stepData') or {}).get('elementMap') or {}).get(element) or {}).get('output') or ''
+    body = re.sub(r'^\s*<\?xml[^>]*\?>', '', output)
+    if _ELEMENT.search(body):
+        return []
+    return [{'severity': 'ERROR', 'element': element, 'record': record, 'location': None,
+             'message': "Output contains no XML elements: the XSLT's templates did not match the input. "
+                        "Check xpath-default-namespace and the match patterns against the element's input."}]
 
 
 def _markers(result: dict[str, Any], record: int | None = None) -> list[dict[str, Any]]:
@@ -97,7 +116,8 @@ async def step_pipeline(
     location = result.get('foundLocation') or {}
     return {'pipeline': pipeline.doc.get('name'), 'stream_id': stream_id,
             'record': location.get('recordIndex'), 'draft_code_used': sorted(draft_code or {}),
-            'elements': outputs, **triage(_markers(result, location.get('recordIndex')),
+            'elements': outputs, **triage(_markers(result, location.get('recordIndex'))
+                                          + _empty_output(result, pipeline.default_outputs()[-1], location.get('recordIndex')),
                                           ctx.lifespan_context['rules'], pipeline.own)}
 
 
@@ -125,7 +145,7 @@ async def step_sample(
         while result.get('foundRecord') and len(records) < cap:
             location = result['foundLocation']
             key = f"{stream_id}:{location['recordIndex']}"
-            found = _markers(result, key)
+            found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
             markers += found
             records.append({'record': key, 'errors': len(found)})
             if first_output is None:
@@ -147,4 +167,95 @@ async def step_sample(
     return result
 
 
-ALL_TOOLS = [step_pipeline, step_sample]
+def _field_values(xml: str) -> dict[str, list[str]]:
+    """Every value in an output document keyed by a readable path, e.g. 'Event/EventSource/User/Id'.
+
+    Elements named by an attribute (event-logging Data/@Name, records:2 data/@name, JSON XML @key) get
+    that name in the path, so reordering them does not show as a change.
+    """
+    from lxml import etree
+    values: dict[str, list[str]] = {}
+    try:
+        root = etree.fromstring(xml.encode('utf-8'))
+    except etree.XMLSyntaxError:
+        return {'(unparseable output)': [xml[:200]]}
+
+    def walk(node, path):
+        name = etree.QName(node).localname
+        label = next((node.get(a) for a in ('Name', 'name', 'key') if node.get(a)), None)
+        here = f"{path}/{name}[{label}]" if label else f"{path}/{name}"
+        for attr, value in node.attrib.items():
+            local = etree.QName(attr).localname
+            if local not in ('Name', 'name', 'key', 'schemaLocation', 'version', 'Version', 'StreamId', 'EventId'):
+                values.setdefault(f"{here}/@{local}", []).append(value)
+        text = (node.text or '').strip()
+        if text and len(node) == 0:
+            values.setdefault(here, []).append(text)
+        for child in node:
+            if isinstance(child.tag, str):
+                walk(child, here)
+    for child in root:
+        if isinstance(child.tag, str):
+            walk(child, '')
+    return {k.lstrip('/'): v for k, v in values.items()}
+
+
+async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[int], element: str,
+                   code: dict[str, str] | None, cap: int) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for stream_id in stream_ids:
+        result = await _step(stroom, pipeline, stream_id, 'FIRST', None, code)
+        while result.get('foundRecord') and len(outputs) < cap:
+            location = result['foundLocation']
+            elements = (result.get('stepData') or {}).get('elementMap') or {}
+            outputs[f"{stream_id}:{location['recordIndex']}"] = (elements.get(element) or {}).get('output', '')
+            result = await _step(stroom, pipeline, stream_id, 'FORWARD', location, code)
+    return outputs
+
+
+async def compare_outputs(
+        ctx: Context,
+        pipeline_uuid: PipelineUuid,
+        stream_ids: Annotated[list[int], Field(description="Streams whose records to compare.")],
+        draft_code: DraftCode = None,
+        other_pipeline_uuid: Annotated[str | None, Field(
+            description="Compare against this pipeline instead of draft code, e.g. a v2 copy.")] = None,
+        element: Annotated[str | None, Field(
+            description="Element whose output to compare. Defaults to the pipeline's own XSLT step.")] = None,
+        max_records: Annotated[int, Field(ge=1, le=500)] = 50,
+) -> dict[str, Any]:
+    """
+    Step the same records through the current pipeline and a candidate (draft code, or another pipeline
+    such as a new version) and diff each record's output field by field. Reports, per field path, how many
+    records gained, lost or changed a value, with examples. Use it to prove a change touches only the fields
+    it should.
+    """
+    if not draft_code and not other_pipeline_uuid:
+        raise ToolError("Give draft_code or other_pipeline_uuid to compare against")
+    stroom = gateway_from(ctx)
+    base = await _Pipeline.load(stroom, pipeline_uuid)
+    other = await _Pipeline.load(stroom, other_pipeline_uuid) if other_pipeline_uuid else base
+    element = element or base.default_outputs()[0]
+    before = await _outputs(stroom, base, stream_ids, element, None, max_records)
+    after = await _outputs(stroom, other, stream_ids, element if element in other.types else other.default_outputs()[0],
+                           draft_code if not other_pipeline_uuid else None, max_records)
+    by_path: dict[str, dict[str, Any]] = {}
+    changed_records = 0
+    for record, old_xml in before.items():
+        old, new = _field_values(old_xml), _field_values(after.get(record, ''))
+        record_changed = False
+        for path in sorted(set(old) | set(new)):
+            if old.get(path) == new.get(path):
+                continue
+            kind = 'added' if path not in old else 'removed' if path not in new else 'changed'
+            entry = by_path.setdefault(path, {'path': path, 'added': 0, 'removed': 0, 'changed': 0, 'example': None})
+            entry[kind] += 1
+            entry['example'] = entry['example'] or {'record': record, 'before': old.get(path), 'after': new.get(path)}
+            record_changed = True
+        changed_records += record_changed
+    return {'records_compared': len(before), 'records_changed': changed_records, 'element': element,
+            'fields_changed': sorted(by_path.values(), key=lambda e: -(e['added'] + e['removed'] + e['changed'])),
+            'unchanged': not by_path}
+
+
+ALL_TOOLS = [step_pipeline, step_sample, compare_outputs]

@@ -7,7 +7,7 @@ Stroom runs XSLT 2.0/3.0 (Saxon). Declare `xmlns:stroom="stroom"` to use Stroom 
 | Parser (template) | XSLT input | `xpath-default-namespace` |
 | --- | --- | --- |
 | `DSParser` (Event Data (Text)) | `<records><record><data name="field" value="..."/>` | `records:2` |
-| `JSONParser` (Event Data (JSON)) | JSON as `map`/`array`/`string` elements, keys in `@key` | `http://www.w3.org/2005/xpath-functions` |
+| `JSONParser` (Event Data (JSON)) | JSON as `map`/`array`/`string` elements, keys in `@key` | `http://www.w3.org/2013/XSL/json` |
 | `XMLParser` (Event Data (XML)) | the source XML | the source namespace |
 | Indexing pipelines | `<Events>` from the Events stream, with `@StreamId` and `@EventId` on each `Event` | `event-logging:3` |
 

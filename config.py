@@ -15,10 +15,18 @@ class Settings(BaseSettings):
     stroom_api_key: SecretStr
     stroom_ca_certs: Path | None = None
     stroom_request_timeout: float = 60.0
+    # Path of the data receiver, relative to stroom_url.
+    datafeed_path: str = '/stroom/datafeed'
 
     # Where the agent builds everything before it is promoted.
     workspace_folder: str = 'MCP Workspace'
     event_logging_version: str = '3.5.2'
+    # Ask the user through MCP elicitation when the client supports it.
+    use_elicitation: bool = True
+    # Most raw streams reprocess_streams will take in one call.
+    max_reprocess_streams: int = 20
+    # Task limit on feed-wide processor filters.
+    max_feed_filter_tasks: int = 2
 
     # Upper bound on serialized tool output, to protect the model's context window.
     max_response_chars: int = 100_000

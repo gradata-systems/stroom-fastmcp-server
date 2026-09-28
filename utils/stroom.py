@@ -14,6 +14,15 @@ from security.audit import audit
 logger = logging.getLogger(__name__)
 
 
+# REST resource for each document type the tools read or write.
+RESOURCES = {
+    'Feed': 'feed/v1', 'Pipeline': 'pipeline/v1', 'XSLT': 'xslt/v1', 'TextConverter': 'textConverter/v1',
+    'XMLSchema': 'xmlSchema/v1', 'Dictionary': 'dictionary/v1', 'ElasticIndex': 'elasticIndex/v1',
+    'ElasticCluster': 'elasticCluster/v1', 'Index': 'index/v2', 'Dashboard': 'dashboard/v1',
+    'Documentation': 'documentation/v1',
+}
+
+
 def gateway_from(ctx: Context) -> 'StroomGateway':
     return ctx.lifespan_context['stroom']
 
@@ -111,6 +120,35 @@ class StroomGateway:
 
     async def pipeline_layers(self, uuid: str) -> list[dict[str, Any]]:
         return await self.post('/pipeline/v1/fetchPipelineLayers', {'type': 'Pipeline', 'uuid': uuid})
+
+    async def get_doc(self, doc_type: str, uuid: str) -> dict[str, Any]:
+        if doc_type not in RESOURCES:
+            raise ToolError(f"Documents of type '{doc_type}' are not supported here")
+        return await self.get(f'/{RESOURCES[doc_type]}/{uuid}')
+
+    async def put_doc(self, doc: dict[str, Any], expected_version: str | None = None) -> dict[str, Any]:
+        """Save a document. With expected_version, refuse if someone else saved it since it was read."""
+        if expected_version is not None:
+            current = await self.get_doc(doc['type'], doc['uuid'])
+            if current.get('version') != expected_version:
+                raise ToolError(f"{doc['type']} '{doc.get('name')}' changed since it was read (version "
+                                f"{current.get('version')}); read it again and reapply the change")
+        return await self.request('PUT', f"/{RESOURCES[doc['type']]}/{doc['uuid']}", doc)
+
+    async def datafeed(self, feed: str, data: bytes, headers: dict[str, str]) -> httpx.Response:
+        """POST data to Stroom's datafeed receiver, as a sending system would."""
+        url = self.settings.stroom_url.rstrip('/') + self.settings.datafeed_path
+        try:
+            response = await self._client.post(url, content=data, headers={'Feed': feed, **headers})
+        except httpx.HTTPError as e:
+            audit('stroom_request', outcome='error', error=str(e), method='POST', path=self.settings.datafeed_path)
+            raise ToolError("Stroom's datafeed is unavailable") from e
+        audit('stroom_request', outcome='success' if response.is_success else 'error', status=response.status_code,
+              method='POST', path=self.settings.datafeed_path, feed=feed, bytes=len(data))
+        if response.is_error:
+            raise ToolError(f"Stroom refused the upload ({response.status_code}): "
+                            f"{response.headers.get('Stroom-Error') or response.text[:300]}")
+        return response
 
     async def find_meta(self, terms: list[dict[str, Any]], limit: int, op: str = 'AND') -> dict[str, Any]:
         """Stream metadata matching expression terms, newest first."""

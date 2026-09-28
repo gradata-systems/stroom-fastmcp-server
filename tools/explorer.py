@@ -5,24 +5,11 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from utils.stroom import gateway_from
+from utils.stroom import RESOURCES, gateway_from
 
-DocType = Literal['Feed', 'Pipeline', 'XSLT', 'TextConverter', 'XMLSchema', 'Dictionary', 'ElasticIndex',
+DocType = Literal['Feed', 'Pipeline', 'XSLT', 'TextConverter', 'XMLSchema', 'Dictionary', 'ElasticIndex', 'Index',
                   'ElasticCluster', 'Dashboard', 'Documentation', 'Folder']
 
-# REST resource for each readable document type.
-_RESOURCES = {
-    'Feed': 'feed/v1',
-    'Pipeline': 'pipeline/v1',
-    'XSLT': 'xslt/v1',
-    'TextConverter': 'textConverter/v1',
-    'XMLSchema': 'xmlSchema/v1',
-    'Dictionary': 'dictionary/v1',
-    'ElasticIndex': 'elasticIndex/v1',
-    'ElasticCluster': 'elasticCluster/v1',
-    'Dashboard': 'dashboard/v1',
-    'Documentation': 'documentation/v1',
-}
 # Fields never returned to the model.
 _SECRET_FIELDS = {'apiKeySecret', 'password', 'caCertificate'}
 
@@ -69,10 +56,9 @@ async def get_document(
     Fetch a document's full content by type and UUID. XSLT, TextConverter and Documentation
     content is returned verbatim in 'data'; credentials in cluster documents are redacted.
     """
-    resource = _RESOURCES.get(type)
-    if resource is None:
+    if type not in RESOURCES:
         raise ToolError(f"Documents of type '{type}' cannot be read with this tool")
-    doc = await gateway_from(ctx).get(f'/{resource}/{uuid}')
+    doc = await gateway_from(ctx).get_doc(type, uuid)
     return _redact(doc)
 
 

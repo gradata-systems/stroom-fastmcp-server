@@ -34,6 +34,16 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Schema selection | Stroom's XMLSchema docs carry a `systemId` equal to what Events name in `xsi:schemaLocation`; lxml loads Stroom's XSD directly. On live a Keycloak record validated against v3.5.2 picked this way. | `validate_events` needs no version configuration in the normal case. |
 | Content search | Live `findInContent` answered "content is currently being indexed (17% complete)" on first use. | Pass the message through; the agent retries. |
 
+## Phase 2 additions (`dev/e2e_phase2.py`)
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| Exit test | CSV, JSON, XML and syslog samples each went from sample to valid Events with documentation; a field fix changed only its field (`compare_outputs`), was saved, reprocessed (one Events stream per raw stream), promoted, and an in-place fix was written back through a working copy. | Phase 2 tools work end to end on the local stack. |
+| JSONParser namespace | Its output is in `http://www.w3.org/2013/XSL/json`, not `xpath-functions` (that is `json-to-xml()`'s). With the wrong namespace no template matched, stepping reported no error, and processing wrote no Events and no Error stream. | Guides corrected; stepping now flags output without XML elements as blocking; discovery XSLT maps namespaces. |
+| Search index lag | Newly created docs are missing from `explorer/v2/find` for a moment: `upload_sample` could not find its new feed, and a promotion plan changed between the two approval calls. | Use `feed/v1/getDocRefForName` and read build folders from the explorer tree, never the search index, for anything just created. |
+| Promotion | Moved docs kept the `mcp-managed` tag, so the guard still let the agent change production content. | Promotion removes the agent's tags; later changes need a working copy. |
+| Consent | Approvals bound to the exact details caught the promotion plan changing between calls. | Build plans in a stable order. |
+
 ## Not yet tested
 
 - Elastic indexing: the local stack uses Lucene instead; Elasticsearch is exercised against the live instance later. Dashboard search is proven on Lucene.
