@@ -93,7 +93,7 @@ Triggered by a request to index more fields or change how fields are mapped. In-
 3. **Copy and bump.** `copy_pipeline` copies the pipeline and the XSLT it owns into the workspace under the new version and sets the `ElasticIndexingFilter` `indexName` to the v2 name; `create_index_doc` adds a v2 Elastic Index doc. Any inherited parent template is kept.
 4. **Revise the XSLT and template.** The template draft starts from the v1 template, renamed and with `index_patterns` bumped to v2, then applies the requested field changes under the selected field convention.
 5. **Step and compare.** `compare_outputs` steps the same Events records through v1 and v2 and diffs the documents. Only the added or changed fields may differ, and each must match the v2 template.
-6. **Apply with approval.** The user writes the v2 template and confirms it, with the v2 index name, before the v2 indexing filter starts on new Events from a create time; backfilling older streams is the user's. Then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are the user's (see Design decisions).
+6. **Hand over.** The agent proposes the v2 template (`propose_index_template`) and checks any changes the user sends back (`check_index_template`). Once the user has committed it, the v2 indexing filter is pre-created disabled, on new Events from a create time, with the pipeline link for the user to review and enable it; backfilling older streams is the user's. Then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are the user's (see Design decisions).
 **Create a discovery index**
 
 A discovery index lets people explore raw structured data, such as JSON, before or instead of writing a translation. A simple indexing pipeline reads the Raw Events stream, parses it to JSON XML and indexes it as it is, with no event-logging step.
@@ -102,7 +102,7 @@ A discovery index lets people explore raw structured data, such as JSON, before 
 2. **Choose a template.** Look for a discovery-stage template pipeline as in step 7 (`pipeline_templates.discovery`); in the reference environment that is `Raw to Elasticsearch`; the fallback is a minimal chain: `JSONParser`, `XSLTFilter`, `ElasticIndexingFilter`.
 3. **Draft the XSLT.** `JSONParser` emits JSON XML in the `http://www.w3.org/2013/XSL/json` namespace, while the indexing filter reads the `xpath-functions` namespace, so the XSLT starts as a copy that moves elements into that namespace: it adds `StreamId`, `EventId` and `@timestamp` (from a timestamp field the user confirms) and keeps source field names. It may also do light processing the agent proposes from the sample profile: unpack JSON held as a string in a field such as `message` into a nested map with `json-to-xml()`; decorate each document from stream meta, e.g. `stroom:meta('MyHost')`, choosing from the attributes the raw streams actually carry (`get_stream_attributes`); and drop or rename a few noisy or conflicting fields. XML or CSV sources need a small mapping XSLT instead. Anything beyond this, such as a full event-logging translation, belongs in `onboard_data_source`.
 4. **Draft a permissive template.** Field names stay as in the source, so no field convention applies. The template uses dynamic mapping with guardrails from config (`discovery_template`): strings as `keyword`, a total-fields limit, `ignore_malformed`, and explicit types only for `@timestamp`, `StreamId` and `EventId`.
-5. **Confirm, step and apply.** Cluster, destination name (e.g. `stroom-discovery-<source>-v1`), template pipeline, timestamp field and the proposed enrichments are confirmed in one prompt. The agent steps every sample record, gives the user the template to write, and once they confirm it is written for the destination index, creates the processor filter on the Raw Events feed with approval.
+5. **Confirm, step and apply.** Cluster, destination name (e.g. `stroom-discovery-<source>-v1`), template pipeline, timestamp field and the proposed enrichments are confirmed in one prompt. The agent steps every sample record and proposes the template (checking any changes the user sends back); once the user has committed it, the processor filter on the Raw Events feed is pre-created disabled, with the pipeline link for the user to review and enable it.
 6. **Verify the Stroom way.** Triage and verify as in steps 10 and 11. The discovered field list, read through the Elastic Index doc, can seed the sample profile when the source is later onboarded with a full translation. The discovery pipeline is documented like any other.
 **Evaluate and document an events pipeline**
 
@@ -329,9 +329,9 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (use `reprocess_streams`). An indexing pipeline reading Events must name its source events pipeline, and the filter adds `Pipeline IS_DOC_REF <source>`. For an Elasticsearch indexing pipeline, first confirms the index template for its destination index is written | `processorFilter/v1`, `fetchPipelineLayers` |
+| `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (use `reprocess_streams`). An indexing pipeline reading Events must name its source events pipeline, and the filter adds `Pipeline IS_DOC_REF <source>`. For an Elasticsearch indexing pipeline, once the user confirms the index template for its destination index is committed, pre-creates the filter disabled and returns the pipeline link for the user to enable it | `processorFilter/v1`, `fetchPipelineLayers` |
 | `set_processor_filter_enabled` **W A** | Enable or disable a filter the agent created | `processorFilter/v1/{id}/enabled` |
-| `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. Same template confirmation for Elasticsearch | `processorFilter/v1` |
+| `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. For Elasticsearch, the same hand-over: pre-created disabled for the user to enable | `processorFilter/v1` |
 | `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
 | `wait_for_processing` | Poll `processing_status` with backoff until all tasks are complete or failed, or a timeout; then reports, per input stream, the child Events stream id and record count, flagging inputs with none or more than one; can count only one filter's outputs | as above |
 
@@ -439,7 +439,7 @@ All work happens in the workspace; promotion is the approval-gated step that put
 
 **Approval gates (A tools)**
 
-The tool returns `needs_approval` with a plain-language summary and an `approval_id` instead of acting. The client shows the summary; the call is repeated with `approval_id` once the user agrees. OpenWebUI shows it as a chat turn; LangGraph uses `interrupt()`. Gated actions: enabling any processor filter (for Elasticsearch indexing, after the user confirms the index template for the destination index is written), putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
+The tool returns `needs_approval` with a plain-language summary and an `approval_id` instead of acting. The client shows the summary; the call is repeated with `approval_id` once the user agrees. OpenWebUI shows it as a chat turn; LangGraph uses `interrupt()`. Gated actions: enabling any processor filter (an Elasticsearch indexing filter is instead pre-created disabled once the user confirms the index template is committed, and the user enables it), putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
 
 **Confirmations**
 
@@ -467,7 +467,6 @@ The stage 2 details come in one prompt because they depend on each other: the te
 - A plain filter is refused for any stream the pipeline has already processed (it has an output from that pipeline, or one of the pipeline's filters already selects it); those go through `reprocess_streams`, which takes at most `max_reprocess_streams` (default 10) per call with `maxProcessingTasks` of `reprocess_max_tasks` (default 1). When a pipeline processes a stream again, Stroom marks that pipeline's earlier outputs for it deleted (superseded), so each raw stream keeps one Events stream.
 - All processing tools act only on workspace pipelines this server built, so reprocessing never touches production pipelines.
 - Every indexing filter over Events carries `Pipeline IS_DOC_REF <events pipeline>` for the events pipeline this server built for the source (`source_pipeline_uuid`), in addition to the stream ids or feed. Stream ids are checked first: each must be an Events stream that pipeline produced. Indexing never picks up Events streams from another pipeline, even on a shared feed. Stroom rejects `EQUALS` on the `Pipeline` field; `IS_DOC_REF` matches by UUID.
-- A call that needs both a confirmation and an approval keeps the confirmation id valid until the whole call succeeds, so repeating the call for the approval does not use it up.
 
 **Local validation before Stroom**
 
@@ -569,7 +568,7 @@ class BuildState(TypedDict):
 - `last_findings` is the only error context carried into the next draft, deduplicated and capped at 20 items, so the context stays small across iterations.
 - After the attempt limit, the graph interrupts with the findings and asks the user to fix, hint or stop.
 
-**Human in the loop**: `approve_processing` calls `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. For Elasticsearch, `review_template`, `flag_pipeline_changes` and `await_enable` interrupt with the proposed template, the pipeline changes a user's template needs, and the ready-to-enable link. One tool call can raise several interrupts in turn (template confirmation, then approval), and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
+**Human in the loop**: `approve_processing` calls `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. For Elasticsearch, `review_template`, `flag_pipeline_changes` and `await_enable` interrupt with the proposed template, the pipeline changes a user's template needs, and the ready-to-enable link. One tool call can raise more than one interrupt in turn, and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
 
 **Convention guidance**: `research_conventions` interrupts when no convention profile is selected, asking the user to choose a profile, name reference templates or describe the convention. It never picks one itself.
 
@@ -611,6 +610,10 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
 - [ ] Is token authentication enabled on the live `/stroom/datafeed` receiver? Uploads need it now that they use the user's token.
+- [ ] Sample-scoped filters have no task limit (`maxProcessingTasks` 0); should they use 1, like reprocessing?
+- [ ] `promote_build` does not yet widen sample filters to the whole feed, and a promoted pipeline is no longer the agent's to process. Should promotion create the feed-wide filter (from the promotion time) under the same approval?
+- [ ] Should translation pipelines only process streams from feeds in the build (their Events output lands in the input's feed), with production records copied into a test feed first?
+- [ ] Indexing an existing production Events feed (`index_event_data`) conflicts with indexing only Events from an events pipeline the agent built: allow a confirmed exception, or bring that pipeline into a build first?
 
 **Risks**
 
