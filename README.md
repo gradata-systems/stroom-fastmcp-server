@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 54 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 55 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -18,6 +18,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 54 tool
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
+| Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
 | Elasticsearch | `find_elastic_clusters`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |

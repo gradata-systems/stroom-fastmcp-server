@@ -61,8 +61,10 @@ Stage 1, events:
 2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
-4. Draft the text converter (if the template needs one) and the XSLT (stroom://guide/xslt, stroom://guide/event-logging).
-   check_xslt, then step_sample with draft_code until the verdict is clean; step_pipeline on single records to debug.
+4. Draft the text converter (if the template needs one). Build the XSLT with build_translation_xslt from a mapping:
+   which input field or constant goes to which event-logging path, one rule per kind of event, time patterns from
+   profile_sample. Fix reported problems in the mapping and regenerate; hand-edit only what a mapping cannot express.
+   step_sample with draft_code until the verdict is clean; step_pipeline on single records to debug.
 5. create_text_converter / create_xslt, create_pipeline from the template, step_sample again.
 6. create_processor_filter on the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
    validate_events and check_event_quality on the output.

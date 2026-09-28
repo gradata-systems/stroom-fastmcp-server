@@ -26,6 +26,34 @@ record at a time.
 | `json-to-xml(string)` | Parse JSON held in a string field into `map`/`array` elements. |
 | `stroom:log('ERROR', 'message')` | Raise your own marker, e.g. for an unexpected event type. |
 
+## Generating instead of writing
+
+`build_translation_xslt` writes the translation from a mapping, so the XSLT itself need not be written by hand:
+
+```json
+{"input": "data_splitter",
+ "common": [{"path": "EventTime/TimeCreated", "field": "time", "time_format": "yyyy-MM-dd'T'HH:mm:ss"},
+            {"path": "EventSource/System/Name", "value": "Acme VPN"},
+            {"path": "EventSource/System/Environment", "value": "Prod"},
+            {"path": "EventSource/Generator", "value": "vpnd"},
+            {"path": "EventSource/Device/HostName", "field": "host"},
+            {"path": "EventSource/User/Id", "field": "user"}],
+ "events": [{"name": "logon", "when": [{"field": "action", "equals": "login"}],
+             "fields": [{"path": "EventDetail/TypeId", "value": "VPN-Login"},
+                        {"path": "EventDetail/Authenticate/Action", "value": "Logon"},
+                        {"path": "EventDetail/Authenticate/User/Id", "field": "user"},
+                        {"path": "EventDetail/Authenticate/Outcome/Success", "field": "result",
+                         "map": {"ok": "true", "fail": "false"}},
+                        {"path": "EventDetail/Authenticate/Data", "data_name": "session", "field": "sid"}]}]}
+```
+
+Fields are Data Splitter names, JSON keys (`user.name` for nested keys) or XML paths relative to the record.
+The tool puts elements in schema order, converts times with `stroom:format-date`, leaves elements out when
+their input is empty (or writes `default`), and logs records no rule matches. Unknown paths, constants the
+schema does not allow, alternatives used together and missing required elements come back as problems to fix
+in the mapping. Use `xpath` for a computed value, and write XSLT by hand only for what a mapping cannot
+express, such as unpacking embedded JSON or reference lookups.
+
 ## Reuse
 
 Existing pipelines `xsl:import` shared XSLTs by document name (e.g. `IP Lookup`) and keep field

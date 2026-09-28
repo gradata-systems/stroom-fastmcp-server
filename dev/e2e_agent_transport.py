@@ -35,7 +35,7 @@ class S(TypedDict, total=False):
 async def run(client: Client):
     tools = {t.name: t for t in await load_tools(client)}
     print(f'{len(tools)} tools over MCP')
-    assert len(tools) == 54, sorted(tools)
+    assert len(tools) == 55, sorted(tools)
     templates = parse(await tools['find_pipeline_templates'].ainvoke({'stage': 'translation'}))
     print('translation templates:', [c['name'] for c in templates['candidates']])
     stamp = time.strftime('%H%M%S')

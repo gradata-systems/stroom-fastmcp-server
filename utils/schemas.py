@@ -21,6 +21,7 @@ class SchemaCache:
         self._stroom = stroom
         self._index: dict[str, str] | None = None  # system id -> doc uuid
         self._compiled: dict[str, etree.XMLSchema] = {}
+        self._sources: dict[str, str] = {}
 
     async def _load_index(self) -> dict[str, str]:
         if self._index is None:
@@ -38,14 +39,19 @@ class SchemaCache:
     async def system_ids(self) -> list[str]:
         return sorted(await self._load_index())
 
-    async def get(self, system_id: str) -> etree.XMLSchema:
-        if system_id not in self._compiled:
+    async def source(self, system_id: str) -> str:
+        """The XSD text itself."""
+        if system_id not in self._sources:
             index = await self._load_index()
             if system_id not in index:
                 known = ', '.join(s for s in sorted(index) if 'event-logging' in s) or 'none'
                 raise ToolError(f"Stroom has no XML schema '{system_id}'. Event-logging schemas available: {known}")
-            doc = await self._stroom.get(f'/xmlSchema/v1/{index[system_id]}')
-            self._compiled[system_id] = etree.XMLSchema(etree.fromstring(doc['data'].encode()))
+            self._sources[system_id] = (await self._stroom.get(f'/xmlSchema/v1/{index[system_id]}'))['data']
+        return self._sources[system_id]
+
+    async def get(self, system_id: str) -> etree.XMLSchema:
+        if system_id not in self._compiled:
+            self._compiled[system_id] = etree.XMLSchema(etree.fromstring((await self.source(system_id)).encode()))
         return self._compiled[system_id]
 
 

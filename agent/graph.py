@@ -33,11 +33,14 @@ NODES: dict[str, tuple[str, list[str]]] = {
                      ['find_documents', 'create_feed', 'upload_sample']),
     'draft_translation': ("Choose the translation template (find_pipeline_templates stage=translation, "
                           "list_template_children, describe_template_contract). Draft the text converter if the "
-                          "template needs one, and the XSLT (read stroom://guide/xslt and event-logging if needed). "
-                          "Use step_sample with draft_code until clean, then save with create_text_converter / "
+                          "template needs one. Do not write the XSLT by hand: give build_translation_xslt a mapping "
+                          "(input fields or constants to event-logging paths, one rule per kind of event, time patterns "
+                          "from profile_sample) and fix any problems it reports in the mapping. Hand-edit XSLT only for "
+                          "what a mapping cannot express. Use step_sample with draft_code until clean, then save with create_text_converter / "
                           "create_xslt (or update_xslt) and create_pipeline once. Previous findings to fix: {findings}",
                           ['find_pipeline_templates', 'list_template_children', 'describe_template_contract',
-                           'find_similar_translations', 'get_document', 'check_xslt', 'step_sample', 'step_pipeline',
+                           'find_similar_translations', 'get_document', 'build_translation_xslt', 'check_xslt',
+                           'step_sample', 'step_pipeline', 'profile_sample',
                            'create_text_converter', 'update_text_converter', 'create_xslt', 'update_xslt',
                            'create_pipeline', 'read_stream', 'get_stream_attributes']),
     'step_and_validate': ("Run step_sample on the translation pipeline {translation_pipeline} over streams "
