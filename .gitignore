@@ -1,1 +1,6 @@
 /.ai/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+/spike/out/

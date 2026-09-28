@@ -11,7 +11,7 @@ The Stroom MCP server lets a chat agent (OpenWebUI, later a LangGraph agent) tak
 
 - Accept a pasted or uploaded sample in XML, JSON, CSV or Syslog and land it in a Stroom feed.
 - Build a translation pipeline (text converter + XSLT) iteratively on a suitable template pipeline, validated against the event-logging schema by stepping every sample record.
-- Process the sample into Events, then build a lightweight Elasticsearch indexing pipeline and draft an index template that follows the environment's chosen field convention.
+- Process the sample into Events, then build a lightweight indexing pipeline, on Stroom's Lucene index or Elasticsearch, and draft its index mapping that follows the environment's chosen field convention.
 - Triage Error streams from pipelines that act on cooked Events, and fix what the agent's own content caused.
 - Maintain existing content: update a translation with new samples or a field fix, and create a new versioned indexing pipeline beside the one in production; index raw structured data directly into a discovery index for exploration; and evaluate and document existing events pipelines against the event-logging schema.
 
@@ -85,7 +85,7 @@ Triggered by a request to index more fields or change how fields are mapped. In-
 
 1. **Locate the baseline.** Find the indexing pipeline, its Elastic Index doc, the index or data stream it writes to, and its index template.
 2. **Work out the next version.** With the convention `stroom-windows-events-v1`, the candidate is `stroom-windows-events-v2`. The pattern is configurable (`index_versioning.pattern: '{base}-v{n}'`); if the current name does not match it, the agent asks. The v2 name and the cluster are confirmed like any stage 2 destination.
-3. **Copy and bump.** `copy_pipeline` copies the pipeline and the XSLT it owns into the workspace under the new version and sets the `ElasticIndexingFilter` `indexName` to the v2 name; `create_elastic_index` adds a v2 Elastic Index doc. Any inherited parent template is kept.
+3. **Copy and bump.** `copy_pipeline` copies the pipeline and the XSLT it owns into the workspace under the new version and sets the `ElasticIndexingFilter` `indexName` to the v2 name; `create_index_doc` adds a v2 Elastic Index doc. Any inherited parent template is kept.
 4. **Revise the XSLT and template.** The template draft starts from the v1 template, renamed and with `index_patterns` bumped to v2, then applies the requested field changes under the selected field convention.
 5. **Step and compare.** `compare_outputs` steps the same Events records through v1 and v2 and diffs the documents. Only the added or changed fields may differ, and each must match the v2 template.
 6. **Apply with approval.** Put the v2 template and enable the v2 indexing filter on Events, optionally from a create time for backfill, then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are left to people.
@@ -149,6 +149,18 @@ flowchart TB
 **Elasticsearch.** Only template reads and writes go direct to ES; indexed documents are verified through Stroom searches, through a copy of the ES server's `ElasticsearchGateway` (run-as). Documents reach ES through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
 
 **Stroom API details.** Explorer calls (`fetchExplorerNodes`, `find`) must send `filter.requiredPermissions: ["VIEW"]`, as the Stroom UI does, and `find` needs a name filter (`*` or `type:Pipeline`); without them Stroom returns nothing below System. Docs are matched by UUID, because names held in inherited references go stale when a doc is renamed.
+
+**Indexing backends.** Stage 2 is the same flow on Stroom's built-in Lucene index and on Elasticsearch: a field plan, an index doc, an indexing pipeline from a template, stepping, processing, then a verification dashboard and test searches. Only the pieces below differ, so tools take the backend from the build rather than assuming one. The backend is chosen per build from where sibling sources index and which indexing template is picked, and confirmed with the other stage 2 details. The local development stack uses Lucene; the live instance uses Elasticsearch.
+
+| Aspect | Lucene (Stroom Index) | Elasticsearch |
+| --- | --- | --- |
+| Index doc | `Index`, in a volume group; `index/v2` | `ElasticIndex`, on an Elastic Cluster doc; `elasticIndex/v1` |
+| Field definitions | On the index doc, via `index/v2/addField` | An index template in Elasticsearch; the doc reads fields from the mapping |
+| Indexing template | `Indexing` (`IndexingFilter`, property `index`) | e.g. `Events to Elasticsearch` (`ElasticIndexingFilter`, `cluster`, `indexName`) |
+| XSLT output | `records:2`: `<data name="..." value="..."/>` | `xpath-functions` JSON XML `map` |
+| Keyword field | `TEXT` with the `KEYWORD` analyzer (`KEYWORD` itself indexes nothing) | `keyword` |
+| IDs and time | `ID` for `StreamId`/`EventId`, `DATE` for the time field | `long`, `date` |
+| Verification | Dashboard on the index doc, `dashboard/v1/search` | Same |
 
 **Project layout**
 
@@ -239,7 +251,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-52 tools in 9 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+53 tools in 9 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -322,20 +334,21 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 | `compare_outputs` | Step the same records through two pipelines, or one pipeline with current and draft code, and diff each record's output (event XML or index document); reports fields added, removed and changed | `stepping/v1/step` |
 | `end_stepping` | Release the stepping session | `stepping/v1/terminateStepping` |
 
-**Indexing and Elasticsearch** (`tools/indexing.py`)
+**Indexing** (`tools/indexing.py`; Lucene or Elasticsearch per build)
 
 | Tool | Purpose | Backend |
 | --- | --- | --- |
-| `list_index_templates` | Index and component templates matching a pattern, with index patterns and priorities | ES `_index_template`, `_component_template` |
-| `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference templates; returns `needs_guidance` when none is selected | ES templates |
-| `draft_index_template` | Local: propose a template from stepped documents and conventions, or from a baseline template with the version bumped; flags conflicts | none |
-| `simulate_index_template` | Show the effective mapping for an index name | ES `_index_template/_simulate_index` |
-| `put_index_template` **W A** | Create or update a template in the allowed name pattern | ES `_index_template` |
-| `find_elastic_clusters` | Elastic Cluster docs with their connection URLs (never credentials), the Elastic Index docs and indexing pipelines that use each, and those index docs' settings; optional connection test | `explorer/v2/find`, `elasticCluster/v1`, `elasticIndex/v1`, `elasticCluster/v1/testCluster` |
-| `create_elastic_index` **W** | Stroom Elastic Index doc on an existing Elastic Cluster doc for an index or data stream, with settings copied from sibling index docs; fields load from the mapping | `explorer/v2/create`, `elasticIndex/v1`, `dataSource/v1/findFields` |
-| `create_indexing_pipeline` **W** | Child of the chosen indexing template (fallback Indexing (Elasticsearch)) with XSLT and any open `ElasticIndexingFilter` properties, including the cluster | as `create_pipeline` |
-| `test_elastic_index` | Stroom's own connection and index test | `elasticIndex/v1/testIndex` |
-| `create_verification_dashboard` **W** | Workspace dashboard with a query on the Elastic Index doc and a table of a minimal field set (`StreamId`, `EventId`, time field, key fields); built from a fetched dashboard's JSON, never from scratch | `explorer/v2/create`, `dashboard/v1/{uuid}` |
+| `list_index_templates` | Elasticsearch: index and component templates matching a pattern, with index patterns and priorities | ES `_index_template`, `_component_template` |
+| `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference templates or index docs; returns `needs_guidance` when none is selected | ES templates, `index/v2/findFields` |
+| `draft_index_mapping` | Local: turn stepped documents and the field convention into a field plan (name, logical type), rendered for the build's backend as an Elasticsearch index template or a Lucene field list; can start from a baseline with the version bumped; flags conflicts | none |
+| `simulate_index_template` | Elasticsearch: show the effective mapping for an index name | ES `_index_template/_simulate_index` |
+| `put_index_template` **W A** | Elasticsearch: create or update a template in the allowed name pattern | ES `_index_template` |
+| `set_index_fields` **W** | Lucene: set a Lucene index doc's fields from the field plan (a keyword becomes `TEXT` with the `KEYWORD` analyzer) | `index/v2/addField`, `updateField`, `findFields` |
+| `find_elastic_clusters` | Elasticsearch: cluster docs with their connection URLs (never credentials), the index docs and pipelines that use each, and their settings; optional connection test | `explorer/v2/find`, `elasticCluster/v1`, `elasticIndex/v1`, `elasticCluster/v1/testCluster` |
+| `create_index_doc` **W** | The build's index doc: an Elastic Index doc on an existing Elastic Cluster, or a Lucene Index doc in a volume group, with settings copied from sibling index docs | `explorer/v2/create`, `elasticIndex/v1` or `index/v2`, `dataSource/v1/findFields` |
+| `create_indexing_pipeline` **W** | Child of the chosen indexing template (e.g. `Events to Elasticsearch`, or `Indexing` for Lucene) with its XSLT and index property | as `create_pipeline` |
+| `test_elastic_index` | Elasticsearch: Stroom's own connection and index test | `elasticIndex/v1/testIndex` |
+| `create_verification_dashboard` **W** | Workspace dashboard with a query on the index doc and a table of a minimal field set (`StreamId`, `EventId`, time field, key fields); same on either backend | `explorer/v2/create`, `dashboard/v1/{uuid}` |
 | `run_test_searches` | Run test searches through the dashboard (stream id count, exact match per key field, time range) and poll to completion; per search, pass or fail with expected and returned rows | `dashboard/v1/search` |
 
 Every tool returns `{ok, ..., hints[]}`. Stroom errors are mapped to short reasons (not found, permission, validation, version conflict) with a hint naming the tool that fixes it. Output is cut to `max_response_chars` with `truncated: true`, as in the ES server.
@@ -397,7 +410,7 @@ The tool returns `needs_approval` with a plain-language summary and an `approval
 
 **Confirmations**
 
-Approvals guard actions; confirmations fix the key details those actions use. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. Confirmed values are stored in the build state and passed to tools as a `confirmation_id`: `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_elastic_index` and `put_index_template` refuse to run without one covering the values they set.
+Approvals guard actions; confirmations fix the key details those actions use. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. Confirmed values are stored in the build state and passed to tools as a `confirmation_id`: `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_index_doc` and `put_index_template` refuse to run without one covering the values they set.
 
 | Detail | Confirmed at | Proposed from |
 | --- | --- | --- |
@@ -409,6 +422,7 @@ Approvals guard actions; confirmations fix the key details those actions use. Th
 | Destination index or data stream name, with version | Start of stage 2, one prompt | Versioned naming convention, e.g. `stroom-windows-events-v1`, or the next version of a baseline |
 | Events pipeline update: new version or in place, and the pipeline and translation names | `update_events_pipeline`, before saving | The baseline's versioning convention, e.g. V1.2 to V1.3 |
 | Destination folders for promotion | Before promotion (step 13) | Where sibling sources' feeds, pipelines and indices live |
+| Index backend (Lucene or Elasticsearch) and, for Lucene, the volume group | Start of stage 2, one prompt | Where sibling sources index and the chosen indexing template |
 
 The stage 2 details come in one prompt because they depend on each other: the template's `index_patterns`, the Elastic Index doc and the indexing filter all use the same cluster and destination name.
 
@@ -426,7 +440,7 @@ The stage 2 details come in one prompt because they depend on each other: the te
 | Stepped output valid against event-logging XSD | `validate_events` after each `step_pipeline` | no, returned as errors |
 | Event quality rules | `check_event_quality` | no, warnings |
 | Indexing output has `StreamId`, `EventId`, `@timestamp` | `step_sample` on indexing pipelines | yes, before filter creation |
-| Document fields match the draft template's types | `draft_index_template` conflict report | yes, before `put_index_template` |
+| Document fields match the draft template's types | `draft_index_mapping` conflict report | yes, before `put_index_template` |
 
 **Error triage**
 
@@ -562,7 +576,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | 0. Spike | Auth path, datafeed upload, pipeline JSON round-trip, one stepping call, against a local Stroom 7.13 Docker stack | Script takes one CSV sample to a valid Events stream |
 | 1. Read and validate | Explorer, template discovery, streams, errors, stepping (read-only), pipeline evaluation, validation tools, resources | Agent can explain errors in an existing broken pipeline and produce an evaluation report for a working one |
 | 2. Stage 1 writes | Feeds, translation, pipelines, processing, write guard and approvals, translation updates with backups and output diffs, pipeline documentation, workspace promotion | CSV, JSON, XML and Syslog samples each reach valid Events; a reported field fix lands with a diff limited to that field |
-| 3. Stage 2 | ES template tools, convention profiles, indexing pipeline, stepping checks, versioned indexing copies, discovery indices | Sample events indexed and found by the verification searches, mapping matches the selected convention; a v2 copy indexes an added field beside v1 |
+| 3. Stage 2 | Indexing on both backends (Lucene locally, Elasticsearch live), ES template tools, convention profiles, indexing pipeline, stepping checks, versioned indexing copies, discovery indices | Sample events indexed and found by the verification searches, mapping matches the selected convention; a v2 copy indexes an added field beside v1 |
 | 4. LangGraph agent | State graph, checkpointer, interrupts, evaluation set of 10 samples | 8 of 10 samples reach indexed events with at most one human hint |
 
 Sources: [Stroom 7.13 OpenAPI spec](https://gchq.github.io/stroom/v7.13/stroom.json), [Stroom API docs](https://gchq.github.io/stroom-docs/docs/user-guide/api/), [Elasticsearch indexing in Stroom](https://gchq.github.io/stroom-docs/docs/user-guide/indexing/elasticsearch/indexing/), [event-logging-schema](https://github.com/gchq/event-logging-schema).

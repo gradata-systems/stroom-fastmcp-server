@@ -1,0 +1,61 @@
+# Local Stroom for development and the Phase 0 spike. Destructive tests run here, never
+# against a shared instance. Everything binds to 127.0.0.1.
+#
+#   cd dev/stroom && ./init-env.sh && docker compose up -d
+#   API:   http://localhost:18080/api      UI login: admin / admin
+#   Reset: docker compose down -v
+#
+# Authentication for scripts uses Stroom's insecure test credential: requests bearing
+# STROOM_TEST_CREDENTIAL (from .env) authenticate as the processing user. Local use only.
+name: stroom-mcp-dev
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: dev-root-password
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/01-stroom.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdev-root-password"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  stroom:
+    image: gchq/stroom:v7.13-beta.17
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      STROOM_JDBC_DRIVER_URL: "jdbc:mysql://mysql:3306/stroom?useUnicode=yes&characterEncoding=UTF-8"
+      STROOM_JDBC_DRIVER_USERNAME: stroomuser
+      STROOM_JDBC_DRIVER_PASSWORD: stroompassword1
+      STROOM_STATISTICS_JDBC_DRIVER_URL: "jdbc:mysql://mysql:3306/stats?useUnicode=yes&characterEncoding=UTF-8"
+      STROOM_STATISTICS_JDBC_DRIVER_USERNAME: statsuser
+      STROOM_STATISTICS_JDBC_DRIVER_PASSWORD: stroompassword1
+      # Standard content: template pipelines, event-logging schemas, standard pipelines.
+      STROOM_CONTENT_PACK_IMPORT_ENABLED: "true"
+      # Processing jobs must run for processor filters to produce Events streams.
+      STROOM_ENABLE_JOBS_ON_BOOTSTRAP: "true"
+      # The internal IdP cannot authenticate tokens on /datafeed, so receipt is open locally.
+      RECEIVE_AUTH_REQUIRED: "false"
+      AUTO_CREATE_ADMIN_ACCOUNT: "true"
+      FORCE_PASSWORD_CHANGE_ON_FIRST_LOGIN: "false"
+      STROOM_ALLOW_INSECURE_TEST_CREDENTIALS: "true"
+      STROOM_INSECURE_TEST_CREDENTIAL: "${STROOM_TEST_CREDENTIAL:?run ./init-env.sh first}"
+      STROOM_HOST: stroom
+      API_GATEWAY_HOST: localhost
+      API_GATEWAY_PORT: "18080"
+      JAVA_OPTS: "-Xms256m -Xmx2g"
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18081:8081"
+    volumes:
+      - stroom_volumes:/stroom/volumes
+
+volumes:
+  mysql_data:
+  stroom_volumes:

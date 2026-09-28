@@ -1,16 +1,54 @@
-# This is a sample Python script.
+import logging
+from contextlib import asynccontextmanager
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+from fastmcp import FastMCP
+from fastmcp.server.auth.providers.keycloak import KeycloakAuthProvider
+
+from config import Settings
+from security.audit import AuditMiddleware, configure_audit_log
+from tools import explorer, pipelines
+from utils.stroom import StroomGateway
+
+logger = logging.getLogger(__name__)
+
+settings = Settings()
+configure_audit_log(settings.audit_log_file)
 
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+@asynccontextmanager
+async def lifespan(server: FastMCP):
+    stroom = StroomGateway(settings)
+    try:
+        yield {'stroom': stroom}
+    finally:
+        await stroom.close()
 
 
-# Press the green button in the gutter to run the script.
+mcp = FastMCP(
+    "stroom",
+    lifespan=lifespan,
+    auth=KeycloakAuthProvider(
+        realm_url=settings.keycloak_realm_url,
+        base_url=settings.public_base_url,
+        audience=settings.keycloak_audience,
+    ),
+    middleware=[AuditMiddleware()],
+)
+
+for tool in explorer.ALL_TOOLS + pipelines.ALL_TOOLS:
+    mcp.tool(tool)
+
+
 if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    logging.basicConfig(level=logging.INFO)
+    uvicorn_config = {}
+    if settings.tls_certfile and settings.tls_keyfile:
+        uvicorn_config = {'ssl_certfile': str(settings.tls_certfile), 'ssl_keyfile': str(settings.tls_keyfile)}
+    else:
+        logger.warning("TLS not configured; only run like this behind a TLS-terminating proxy")
+    mcp.run(
+        transport='http',
+        host=settings.host,
+        port=settings.port,
+        uvicorn_config=uvicorn_config,
+    )
