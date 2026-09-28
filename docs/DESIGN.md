@@ -59,7 +59,12 @@ flowchart TD
 6. **Draft the index template.** Read existing index and component templates from Elasticsearch, apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference templates, and draft a new template.
 7. **Choose a template, build the indexing pipeline.** Search for indexing-stage templates the same way; a local one may already set the Elastic cluster, batch size and shared enrichment. Inherit from it (fallback: Indexing (Elasticsearch)). The indexing filter's `cluster` property must point at an existing Elastic Cluster doc: the agent takes the one that existing Elastic Index docs and indexing pipelines for similar data already use (`find_elastic_clusters`) and checks it with `elasticCluster/v1/testCluster`. It never creates a cluster doc, since that holds credentials; if none fits, it asks. The cluster, the indexing template, the field convention and the destination index or data stream name (with its version) are proposed together at the start of stage 2, and the user confirms or corrects them before anything is drafted or created. The child's XSLT emits the `xpath-functions` JSON-XML `array`/`map` form with `StreamId`, `EventId` and `@timestamp`.
 8. **Step Events through it.** Step the cooked Events and compare each stepped document's fields and value shapes with the draft template. Fix the XSLT or the template on a mismatch.
-9. **Confirm the template, enable indexing.** The agent gives the user the drafted index template and the destination index name, and the user writes the template (`put_index_template` does it only when the user asks and the server has Elasticsearch access). Events reach Elasticsearch only through the Stroom indexing pipeline. Before `create_processor_filter` starts an Elasticsearch indexing pipeline, it asks the user to confirm that the index template for the destination index has been written, naming the index and cluster taken from the pipeline's `ElasticIndexingFilter` (with what the server can see of a matching template, when it has Elasticsearch access). Only then does it ask for approval to process the `Events` streams.
+9. **Agree the template, then hand over the filter.**
+   - The agent suggests the index template once the indexing pipeline steps clean (`propose_index_template`). It is rendered from the field plan for the pipeline's own destination index, as a Kibana Dev Tools request, and already checked against the documents the pipeline writes.
+   - If the user sends back a changed template, `check_index_template` steps the candidate indexing pipeline and checks every document field against it. It checks that `index_patterns` cover the pipeline's index and that values fit the mapped types, including date formats and IPs. It also checks the `dynamic` setting for unmapped fields, fields mapped as values that the pipeline writes as objects (or the reverse), `@timestamp` for data streams, and fields the template renamed or added.
+   - When the template does not fit, the agent lists the pipeline changes it needs (e.g. rename `user.name` to `user.id` in the indexing XSLT) and asks whether to make them or change the template instead.
+   - The user commits the template; `put_index_template` is used only if they ask and the server has Elasticsearch access. Events reach Elasticsearch only through the Stroom indexing pipeline.
+   - When the user confirms they have committed the template for the named index and cluster, `create_processor_filter` pre-creates the indexing filter **disabled**. The agent tells the user it is ready to enable and gives a direct link to the pipeline (`<stroom>/?action=open-doc&docType=Pipeline&docUuid=<uuid>`, the form Stroom's "Copy Link to Clipboard" uses) so they can review it and enable the filter on its Processors tab. It continues once they have, or enables it on request with approval.
 10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
 11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace: a query on that index and a table with a minimal field set (`StreamId`, `EventId`, the time field and a few key fields from the template). Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; and a time-range search around the sample timestamps. Each must return the expected records, which checks the mapping and the way people will actually search it. A failed search sends the agent back to step 7.
 12. **Document.** Write Stroom Documentation docs for the events and indexing pipelines (`write_documentation`) from what stages 1 and 2 measured: the field mapping, event types from the processed sample, the index template and version, and the verification results. The same summary is returned in the chat.
@@ -260,7 +265,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-55 tools in 11 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+57 tools in 11 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -367,6 +372,8 @@ Stepping holds no session between calls: each step is a fresh request from the l
 | `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference templates or index docs; returns `needs_guidance` when none is selected | ES templates, `index/v2/findFields` |
 | `draft_index_mapping` | Local: turn stepped documents and the field convention into a field plan (name, logical type), rendered for the build's backend as an Elasticsearch index template or a Lucene field list; can start from a baseline with the version bumped; flags conflicts | none |
 | `simulate_index_template` | Elasticsearch: show the effective mapping for an index name | ES `_index_template/_simulate_index` |
+| `propose_index_template` | Elasticsearch: the template to suggest to the user for the candidate indexing pipeline's own index, as JSON and a Dev Tools request, self-checked against the pipeline's documents, with a link to the pipeline | `fetchPipelineLayers`, `stepping/v1/step` |
+| `check_index_template` | Elasticsearch: check a user's changed template against the documents the candidate indexing pipeline writes; returns compatible or not, blocking issues, and each pipeline change needed | `stepping/v1/step`, ES `_component_template` when configured |
 | `put_index_template` **W A** | Elasticsearch: create or update a template in the allowed name pattern, only when the user asks (normally the user writes it) | ES `_index_template` |
 | `set_index_fields` **W** | Lucene: set a Lucene index doc's fields from the field plan (a keyword becomes `TEXT` with the `KEYWORD` analyzer) | `index/v2/addField`, `updateField`, `findFields` |
 | `find_elastic_clusters` | Elasticsearch: cluster docs with their connection URLs (never credentials), the index docs and pipelines that use each, and their settings; optional connection test | `explorer/v2/find`, `elasticCluster/v1`, `elasticIndex/v1`, `elasticCluster/v1/testCluster` |
@@ -448,7 +455,7 @@ Approvals guard actions; confirmations fix the key details those actions use. Bo
 | Destination index or data stream name, with version | Start of stage 2, one prompt | Versioned naming convention, e.g. `stroom-windows-events-v1`, or the next version of a baseline |
 | Events pipeline update: new version or in place, and the pipeline and translation names | `update_events_pipeline`, before saving | The baseline's versioning convention, e.g. V1.2 to V1.3 |
 | Destination folders for promotion | Before promotion (step 13) | Where sibling sources' feeds, pipelines and indices live |
-| Index template written, for the destination index and cluster | Before Elasticsearch indexing starts (step 9) | The index name and cluster set on the indexing pipeline |
+| Index template committed, for the destination index and cluster | Before the Elasticsearch indexing filter is pre-created, disabled (step 9) | The index name and cluster set on the indexing pipeline |
 | Index backend (Lucene or Elasticsearch) and, for Lucene, the volume group | Start of stage 2, one prompt | Where sibling sources index and the chosen indexing template |
 
 The stage 2 details come in one prompt because they depend on each other: the template's `index_patterns`, the Elastic Index doc and the indexing filter all use the same cluster and destination name.
@@ -514,8 +521,16 @@ flowchart TD
     select_indexing_template --> draft_indexing[draft_indexing<br/>draft template, indexing pipeline]
     draft_indexing --> step_indexing[step_indexing<br/>step_sample on Events]
     step_indexing -- mismatch --> draft_indexing
-    step_indexing --> approve_apply{{approve_apply<br/>interrupt: template written for index X?<br/>then approve the indexing filter}}
-    approve_apply --> run_and_triage[run_and_triage<br/>summarise_errors, error_context]
+    step_indexing --> propose_template[propose_template<br/>propose_index_template]
+    propose_template --> review_template{{review_template<br/>interrupt: accept, or send a changed template}}
+    review_template -- changed --> check_template[check_template<br/>check_index_template]
+    check_template -- not compatible --> flag_changes{{flag_pipeline_changes<br/>interrupt: change the pipeline?}}
+    flag_changes -- yes --> draft_indexing
+    flag_changes -- no --> review_template
+    check_template -- compatible --> index_sample
+    review_template -- accepted --> index_sample[index_sample<br/>template committed? filter pre-created disabled]
+    index_sample --> await_enable{{await_enable<br/>interrupt: ready to enable, pipeline link}}
+    await_enable --> run_and_triage[run_and_triage<br/>summarise_errors, error_context]
     run_and_triage -- blocking errors --> draft_indexing
     run_and_triage --> verify_indexed[verify_indexed<br/>verification dashboard, test searches]
     verify_indexed --> document[document<br/>write_documentation]
@@ -554,7 +569,7 @@ class BuildState(TypedDict):
 - `last_findings` is the only error context carried into the next draft, deduplicated and capped at 20 items, so the context stays small across iterations.
 - After the attempt limit, the graph interrupts with the findings and asks the user to fix, hint or stop.
 
-**Human in the loop**: `approve_processing` and `approve_apply` call `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. One tool call can raise several interrupts in turn (template confirmation, then approval), and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
+**Human in the loop**: `approve_processing` calls `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. For Elasticsearch, `review_template`, `flag_pipeline_changes` and `await_enable` interrupt with the proposed template, the pipeline changes a user's template needs, and the ready-to-enable link. One tool call can raise several interrupts in turn (template confirmation, then approval), and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
 
 **Convention guidance**: `research_conventions` interrupts when no convention profile is selected, asking the user to choose a profile, name reference templates or describe the convention. It never picks one itself.
 
@@ -585,7 +600,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Reprocessing** is part of developing a pipeline in the workspace: up to 10 streams per call, with a processor filter task limit of 1. Reprocessing with production pipelines is the user's; the write guard refuses it.
 - **Superseded outputs** need no tool: Stroom marks a pipeline's earlier outputs for a stream deleted when it processes that stream again (verified locally). The server itself deletes no streams.
 - **Moving from v1 to v2** of an index (aliases, data views, disabling or retiring v1) is the user's.
-- **Elasticsearch indexing** runs only through the Stroom indexing pipeline, and only after the user confirms the index template for the destination index has been written.
+- **Elasticsearch indexing** runs only through the Stroom indexing pipeline. The agent suggests the index template and checks the user's changes against the pipeline; once the user confirms they have committed it, the indexing filter is pre-created disabled and the user enables it after reviewing the pipeline through a direct link.
 - **Indexing input**: indexing filters select only Events produced by the events pipeline this server built for the source (a `Pipeline` condition), never Events from elsewhere. `index_event_data` on an existing production Events feed therefore needs that pipeline brought into a build first.
 
 **Open questions**

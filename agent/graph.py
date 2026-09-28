@@ -55,24 +55,41 @@ NODES: dict[str, tuple[str, list[str]]] = {
     'plan_indexing': ("Choose the indexing template (find_pipeline_templates stage=indexing gives the backend), the "
                       "field convention (get_field_conventions; ask the user if none is set), and for Elasticsearch "
                       "the cluster (find_elastic_clusters). Draft the mapping with draft_index_mapping over Events "
-                      "streams {events_stream_ids}, then create_index_doc and set_index_fields (Lucene). For Elasticsearch, "
-                      "give the user the drafted index template and the destination index name to write; use "
-                      "put_index_template only if they ask you to. Then create_xslt with the drafted indexing XSLT, and "
-                      "create_indexing_pipeline. Previous findings to fix: {findings}",
+                      "streams {events_stream_ids}, then create_index_doc and set_index_fields (Lucene). For Elasticsearch the "
+                      "index template is proposed to the user after stepping; do not write it. Then create_xslt with the "
+                      "drafted indexing XSLT, and create_indexing_pipeline. If the pipeline already exists, change its "
+                      "XSLT with update_xslt instead. The user's own template, if they sent one (the XSLT must suit "
+                      "it): {user_template}. Changes to make or previous findings: {findings}",
                       ['find_pipeline_templates', 'get_field_conventions', 'find_elastic_clusters', 'draft_index_mapping',
-                       'create_index_doc', 'set_index_fields', 'put_index_template', 'create_xslt', 'update_xslt',
+                       'create_index_doc', 'set_index_fields', 'create_xslt', 'update_xslt', 'get_document',
                        'create_indexing_pipeline', 'list_index_templates', 'simulate_index_template']),
+    'propose_template': ("Propose the index template: call propose_index_template for indexing pipeline "
+                         "{indexing_pipeline} with this field plan and Events streams {events_stream_ids}. "
+                         "Field plan: {field_plan}. Then say in one or two lines what the template maps.",
+                         ['propose_index_template']),
+    'check_template': ("The user changed the index template. Call check_index_template for indexing pipeline "
+                       "{indexing_pipeline} over Events streams {events_stream_ids} with exactly this template:\n"
+                       "{user_template}\nThen summarise: compatible or not, and each change the pipeline needs.",
+                       ['check_index_template']),
     'step_indexing': ("Run step_sample on indexing pipeline {indexing_pipeline} over Events streams {events_stream_ids}.",
                       ['step_sample', 'step_pipeline']),
-    'index_sample': ("create_processor_filter on indexing pipeline {indexing_pipeline} with stream_ids "
-                     "{events_stream_ids} and source_pipeline_uuid {translation_pipeline} (for Elasticsearch the user first confirms the index template is written; "
-                     "streams already indexed by it go through reprocess_streams), wait_for_processing with "
-                     "expect_events=false (and the filter_id after a reprocess), then "
-                     "create_verification_dashboard and run_test_searches (stream ids, an exact match on key fields "
-                     "using values from stepped documents, and a time range).",
+    'index_sample': ("create_processor_filter on indexing pipeline {indexing_pipeline} ({backend}) with stream_ids "
+                     "{events_stream_ids} and source_pipeline_uuid {translation_pipeline} (streams already indexed by it "
+                     "go through reprocess_streams). For Elasticsearch the user confirms the template is committed and "
+                     "the filter is created disabled: stop there, the user enables it. Otherwise wait_for_processing "
+                     "with expect_events=false (and the filter_id after a reprocess), then create_verification_dashboard "
+                     "and run_test_searches (stream ids, an exact match on key fields using values from stepped "
+                     "documents, and a time range).",
                      ['create_processor_filter', 'reprocess_streams', 'wait_for_processing',
                       'create_verification_dashboard',
                       'run_test_searches', 'summarise_errors', 'step_pipeline']),
+    'verify_index': ("The indexing filter {filter_id} on pipeline {indexing_pipeline} is now the user's to enable. "
+                     "If they asked you to enable it, call set_processor_filter_enabled. Then wait_for_processing with "
+                     "expect_events=false over Events streams {events_stream_ids}, create_verification_dashboard and "
+                     "run_test_searches (stream ids, an exact match on key fields using values from stepped documents, "
+                     "and a time range). If processing has not started, say the filter still looks disabled.",
+                     ['set_processor_filter_enabled', 'processing_status', 'wait_for_processing',
+                      'create_verification_dashboard', 'run_test_searches', 'summarise_errors', 'step_pipeline']),
     'document': ("Write documentation for pipelines {translation_pipeline} and {indexing_pipeline} with "
                  "write_documentation (describe_translation and summarise_events help), then summarise for the user.",
                  ['write_documentation', 'describe_translation', 'summarise_events', 'describe_pipeline']),
@@ -112,6 +129,9 @@ def _prompt(name: str, state: BuildState) -> str:
     values = {k: state.get(k) for k in ('translation_pipeline', 'indexing_pipeline', 'raw_stream_ids',
                                         'events_stream_ids', 'build')}
     fix = state.get('fix') or {}
+    values.update(backend=state.get('backend') or 'unknown', field_plan=json.dumps(state.get('field_plan')),
+                  user_template=state.get('user_template') or 'none',
+                  filter_id=(state.get('filter_ready') or {}).get('filter_id'))
     return text.format(findings=findings_text(state), issue_location=json.dumps(state.get('issue_location'), default=str),
                        fix_problems=fix.get('problems') or 'none', fix_pipeline=(fix.get('pipeline') or {}).get('name'),
                        fix_element=fix.get('element'), fix_doc=(fix.get('doc') or {}).get('name'),
@@ -170,6 +190,50 @@ def explain_fix(state: BuildState) -> dict[str, Any]:
     return {'notes': (state.get('notes') or []) + [f"To apply the fix yourself:\n{steps}\n\n{fix.get('diff', '')}"]}
 
 
+def review_template(state: BuildState) -> dict[str, Any]:
+    """Show the proposed template; the person accepts it or sends back their own version."""
+    proposed = state.get('proposed_template') or {}
+    answer = interrupt({'kind': 'template',
+                        'summary': f"Proposed index template for index '{proposed.get('index')}'. Reply yes if it is "
+                                   f"right (you will be asked to confirm once you have committed it), or send back "
+                                   f"your changed template to check against the pipeline.",
+                        'details': {'template name': proposed.get('template_name'), 'cluster': proposed.get('cluster'),
+                                    'pipeline': proposed.get('pipeline_link'),
+                                    'notes': proposed.get('self_check_notes'), 'dev_tools': proposed.get('dev_tools')}})
+    changed = answer.get('template') or answer.get('note') if isinstance(answer, dict) else None
+    if changed and '{' in changed:
+        return {'template_choice': 'changed', 'user_template': changed}
+    return {'template_choice': 'accept'}
+
+
+def flag_pipeline_changes(state: BuildState) -> dict[str, Any]:
+    """The user's template does not fit the pipeline: show what would have to change, and let them choose."""
+    check = state.get('template_check') or {}
+    answer = interrupt({'kind': 'choice',
+                        'summary': "Your template does not fit the candidate indexing pipeline. Change the pipeline as "
+                                   "listed? (No: send a different template instead.)",
+                        'details': {'blocking': check.get('blocking'), 'pipeline changes': check.get('pipeline_changes'),
+                                    'notes': check.get('notes'), 'pipeline': check.get('pipeline_link')}})
+    if agreed(answer):
+        return {'template_choice': 'change_pipeline', 'attempts': {**(state.get('attempts') or {}), 'plan_indexing': 0},
+                'last_findings': [c for c in check.get('pipeline_changes') or []]}
+    return {'template_choice': 'change_template'}
+
+
+def await_enable(state: BuildState) -> dict[str, Any]:
+    """The filter exists, disabled: the person reviews the pipeline and enables it."""
+    ready = state.get('filter_ready') or {}
+    answer = interrupt({'kind': 'enable',
+                        'summary': f"The indexing filter {ready.get('filter_id')} is ready to enable. Review the pipeline "
+                                   f"and enable the filter on its Processors tab, then reply yes (or reply 'enable' "
+                                   f"for the agent to enable it).",
+                        'details': {'pipeline': ready.get('pipeline_link'), 'destination': ready.get('destination')}})
+    note = answer.get('note') if isinstance(answer, dict) else str(answer)
+    if note:
+        return {'request': f"{state.get('request', '')}\n\nUser on the indexing filter: {note}"}
+    return {}
+
+
 # Routing: code, not model choices.
 def start(state: BuildState) -> str:
     return 'locate_issue' if state.get('mode') == 'fix_pipeline_issue' else 'intake'
@@ -204,11 +268,30 @@ def after_processing(state: BuildState) -> str:
 
 def after_step_indexing(state: BuildState) -> str:
     if state.get('step_verdict') == 'clean':
-        return 'index_sample'
+        if state.get('backend') != 'elasticsearch':
+            return 'index_sample'
+        return 'check_template' if state.get('user_template') else 'propose_template'
     return 'plan_indexing' if (state.get('attempts') or {}).get('plan_indexing', 0) < MAX_ATTEMPTS else 'ask_for_help'
 
 
+def after_review(state: BuildState) -> str:
+    return 'check_template' if state.get('template_choice') == 'changed' else 'index_sample'
+
+
+def after_check_template(state: BuildState) -> str:
+    check = state.get('template_check')
+    if check is None:
+        return 'ask_for_help'
+    return 'index_sample' if check.get('compatible') else 'flag_pipeline_changes'
+
+
+def after_flag(state: BuildState) -> str:
+    return 'plan_indexing' if state.get('template_choice') == 'change_pipeline' else 'review_template'
+
+
 def after_index_sample(state: BuildState) -> str:
+    if state.get('filter_ready'):
+        return 'await_enable'
     if state.get('processing_gate') == 'pass' and state.get('searches_passed'):
         return 'document'
     return 'plan_indexing' if (state.get('attempts') or {}).get('plan_indexing', 0) < MAX_ATTEMPTS else 'ask_for_help'
@@ -217,7 +300,8 @@ def after_index_sample(state: BuildState) -> str:
 RESUME_AT = {'intake': 'draft_translation', 'onboard_feed': 'draft_translation', 'draft_translation': 'draft_translation',
              'step_and_validate': 'draft_translation', 'process_sample': 'process_sample',
              'plan_indexing': 'plan_indexing', 'step_indexing': 'plan_indexing', 'index_sample': 'plan_indexing',
-             'locate_issue': 'locate_issue', 'draft_fix': 'draft_fix'}
+             'locate_issue': 'locate_issue', 'draft_fix': 'draft_fix', 'propose_template': 'plan_indexing',
+             'check_template': 'plan_indexing', 'verify_index': 'plan_indexing'}
 
 
 def after_help(state: BuildState) -> str:
@@ -233,6 +317,9 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_node('ask_for_help', ask_for_help)
     graph.add_node('offer_fix', offer_fix)
     graph.add_node('explain_fix', explain_fix)
+    graph.add_node('review_template', review_template)
+    graph.add_node('flag_pipeline_changes', flag_pipeline_changes)
+    graph.add_node('await_enable', await_enable)
     graph.add_conditional_edges(START, start, ['intake', 'locate_issue'])
     graph.add_edge('intake', 'onboard_feed')
     graph.add_edge('onboard_feed', 'draft_translation')
@@ -240,8 +327,18 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_conditional_edges('step_and_validate', after_step, ['process_sample', 'draft_translation', 'ask_for_help'])
     graph.add_conditional_edges('process_sample', after_processing, ['plan_indexing', 'ask_for_help'])
     graph.add_edge('plan_indexing', 'step_indexing')
-    graph.add_conditional_edges('step_indexing', after_step_indexing, ['index_sample', 'plan_indexing', 'ask_for_help'])
-    graph.add_conditional_edges('index_sample', after_index_sample, ['document', 'plan_indexing', 'ask_for_help'])
+    graph.add_conditional_edges('step_indexing', after_step_indexing, ['index_sample', 'propose_template', 'check_template',
+                                                                       'plan_indexing', 'ask_for_help'])
+    graph.add_edge('propose_template', 'review_template')
+    graph.add_conditional_edges('review_template', after_review, ['check_template', 'index_sample'])
+    graph.add_conditional_edges('check_template', after_check_template, ['index_sample', 'flag_pipeline_changes',
+                                                                         'ask_for_help'])
+    graph.add_conditional_edges('flag_pipeline_changes', after_flag, ['plan_indexing', 'review_template'])
+    graph.add_conditional_edges('index_sample', after_index_sample, ['await_enable', 'document', 'plan_indexing',
+                                                                     'ask_for_help'])
+    graph.add_edge('await_enable', 'verify_index')
+    graph.add_conditional_edges('verify_index', after_index_sample, ['await_enable', 'document', 'plan_indexing',
+                                                                     'ask_for_help'])
     graph.add_conditional_edges('ask_for_help', after_help, ['draft_translation', 'process_sample', 'plan_indexing',
                                                              'locate_issue', 'draft_fix'])
     graph.add_conditional_edges('locate_issue', after_locate, ['draft_fix', 'ask_for_help'])

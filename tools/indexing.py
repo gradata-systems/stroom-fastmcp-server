@@ -1,5 +1,6 @@
 """Indexing tools for either backend: Stroom's Lucene index or Elasticsearch."""
 import asyncio
+import json
 import time
 import uuid as uuidlib
 from pathlib import Path
@@ -13,12 +14,15 @@ from pydantic import Field
 from security.guard import guard_from
 from tools.explorer import _redact
 from tools.pipeline_writes import PropertyValue, create_pipeline
+from tools.processing_writes import elastic_destination
+from tools.stepping import _outputs, _Pipeline
 from tools.streams import summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
 from utils.elastic import ElasticTemplates, flatten_mapping
 from utils.fieldplan import Backend, FieldPlan, PlannedField
-from utils.stroom import gateway_from
+from utils.stroom import doc_link, gateway_from
+from utils.templatecheck import compare, json_xml_documents, parse_template
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 INDEX_TYPE = {'lucene': 'Index', 'elasticsearch': 'ElasticIndex'}
@@ -421,6 +425,99 @@ async def run_test_searches(
     return {'passed': all(c['pass'] for c in checks), 'checks': checks}
 
 
+async def _destination(ctx: Context, pipeline_uuid: str) -> dict[str, Any]:
+    destination = await elastic_destination(gateway_from(ctx), pipeline_uuid)
+    if not destination or not destination.get('index name'):
+        raise ToolError("That is not an Elasticsearch indexing pipeline with an indexName set")
+    return destination
+
+
+async def _documents(ctx: Context, pipeline_uuid: str, stream_ids: list[int], cap: int) -> list[dict[str, Any]]:
+    """The documents the indexing pipeline would send to Elasticsearch, by stepping its XSLT over Events."""
+    stroom = gateway_from(ctx)
+    pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    outputs = await _outputs(stroom, pipeline, stream_ids, pipeline.default_outputs()[-1], None, cap)
+    docs = [d for xml in outputs.values() for d in json_xml_documents(xml)]
+    if not docs:
+        raise ToolError("Stepping the indexing pipeline gave no documents; step_sample it first and fix its XSLT")
+    return docs
+
+
+async def _component_mappings(ctx: Context, body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    names = body.get('composed_of') or []
+    if not names:
+        return [], []
+    elastic = _es(ctx)
+    if not (elastic and elastic.configured):
+        return [], [f"composed_of {names} not checked: this server has no Elasticsearch access"]
+    found = {c['name']: c for n in names for c in await elastic.component_templates(n)}
+    missing = [n for n in names if n not in found]
+    return ([((found[n].get('component_template') or {}).get('template') or {}).get('mappings') or {}
+             for n in names if n in found],
+            [f"component templates {missing} do not exist in Elasticsearch"] if missing else [])
+
+
+async def propose_index_template(
+        ctx: Context,
+        pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
+        plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
+        events_stream_ids: Annotated[list[int], Field(description="Events streams to check the template against.")],
+        template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
+        priority: Annotated[int, Field(ge=0)] = 200,
+) -> dict[str, Any]:
+    """
+    Suggest the index template for the user to commit, when the indexing pipeline is ready: rendered from the
+    field plan for the pipeline's own destination index, as JSON and as a Kibana Dev Tools request, already
+    checked against the documents the pipeline writes. Show it to the user and ask them to commit it, or to
+    send back their changed version (check that with check_index_template). Writes nothing.
+    """
+    if plan.backend != 'elasticsearch':
+        raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with set_index_fields")
+    destination = await _destination(ctx, pipeline_uuid)
+    index = destination['index name']
+    name = template_name or index
+    body = plan.model_copy(update={'index_name': index}).elastic_template(name, priority)['body']
+    stroom = gateway_from(ctx)
+    check = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
+    text = json.dumps(body, indent=2)
+    return {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
+            'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
+            'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
+            'hint': ("Show the user dev_tools and ask them to commit it to Elasticsearch, or to send back their "
+                     "changed template; check changes with check_index_template before going on.")}
+
+
+async def check_index_template(
+        ctx: Context,
+        pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
+        template: Annotated[str, Field(description="The template as the user gave it: a Dev Tools request "
+                                                   "(PUT _index_template/name {...}), the JSON body, or GET output.")],
+        events_stream_ids: Annotated[list[int], Field(description="Events streams to step the pipeline over.")],
+        max_records: Annotated[int, Field(ge=1, le=500)] = 50,
+) -> dict[str, Any]:
+    """
+    Check a user's (possibly changed) index template against the candidate indexing pipeline: does it
+    apply to the pipeline's index, and can it take every field the pipeline writes (types, date formats,
+    dynamic setting, object clashes, renamed or dropped fields)? Returns whether it is compatible and each
+    change needed, mostly to the indexing XSLT, to flag to the user before anything is changed.
+    """
+    try:
+        name, body = parse_template(template)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    destination = await _destination(ctx, pipeline_uuid)
+    components, notes = await _component_mappings(ctx, body)
+    result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
+                     destination['index name'], components)
+    result['notes'] = notes + result['notes']
+    result.update({'template_name': name, 'index': destination['index name'], 'cluster': destination['cluster'],
+                   'pipeline_link': doc_link(gateway_from(ctx).settings, 'Pipeline', pipeline_uuid),
+                   'hint': ("Compatible: ask the user to commit it, then create_processor_filter." if result['compatible']
+                            else "Show the user pipeline_changes and ask whether to make them (update the indexing "
+                                 "XSLT, step again) or to change the template instead. Nothing has been changed.")})
+    return result
+
+
 ALL_TOOLS = [get_field_conventions, draft_index_mapping, list_index_templates, simulate_index_template,
-             put_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
+             propose_index_template, check_index_template, put_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
              test_elastic_index, create_verification_dashboard, run_test_searches]

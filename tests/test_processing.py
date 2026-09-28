@@ -95,15 +95,18 @@ async def test_translation_pipeline_needs_only_approval(ctx):
 
 
 @respx.mock
-async def test_elasticsearch_indexing_waits_for_the_user_to_confirm_the_template_for_the_index(ctx):
+async def test_elasticsearch_indexing_filter_is_precreated_disabled_once_the_template_is_committed(ctx):
     create = mock_stroom(elastic=True)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    confirm, approve = gates
-    assert confirm['status'] == 'needs_confirmation' and "index 'ecs-acme-v2'" in confirm['summary']
+    [confirm] = gates
+    assert confirm['status'] == 'needs_confirmation' and "committed the index template for Elasticsearch index " \
+        "'ecs-acme-v2' (cluster ES_DEV)" in confirm['summary']
     assert confirm['details'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'}
-    assert approve['status'] == 'needs_approval' and "into index 'ecs-acme-v2'" in approve['summary']
-    assert result['destination'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'} and create.call_count == 1
+    assert json.loads(create.calls.last.request.content)['enabled'] is False and create.call_count == 1
+    assert result['enabled'] is False and result['destination'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'}
+    assert result['pipeline_link'] == 'https://stroom.example/?action=open-doc&docType=Pipeline&docUuid=p1'
+    assert 'ready to enable' in result['next'] and result['pipeline_link'] in result['next']
 
 
 async def reprocessed(ctx, **kwargs):
@@ -141,8 +144,9 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_first(ctx):
     create = mock_stroom(elastic=True, filtered=[5])
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
-    assert [g['status'] for g in gates] == ['needs_confirmation', 'needs_approval']
-    assert "index 'ecs-acme-v2'" in gates[0]['summary'] and 'indexed again' in gates[1]['details']['note']
+    assert [g['status'] for g in gates] == ['needs_confirmation']
+    assert "index 'ecs-acme-v2'" in gates[0]['summary'] and 'indexed again' in result['note']
+    assert json.loads(create.calls.last.request.content)['enabled'] is False and 'pipeline_link' in result
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
 
@@ -177,7 +181,7 @@ async def test_indexing_filter_only_selects_events_from_the_source_events_pipeli
             {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '6'},
             {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '7'}]},
         PIPELINE_TERM]}
-    assert "only Events from pipeline 'Acme-Events'" in gates[-1]['details']['scope']
+    assert "only Events from pipeline 'Acme-Events'" in result['scope']
     assert result['events_from_pipeline'] == 'Acme-Events'
     # the source is checked to be one this server built, like the indexing pipeline itself
     assert {c.args[0]['uuid'] for c in guard.return_value.check_managed.call_args_list} == {'p1', 'ev'}

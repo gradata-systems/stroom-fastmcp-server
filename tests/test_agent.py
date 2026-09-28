@@ -175,3 +175,71 @@ def test_offer_fix_asks_and_manual_path_gives_the_steps():
     assert question['kind'] == 'choice' and question['details']['diff'] == '-a\n+b\n'
     final = app.invoke(Command(resume={'approved': False}), config)
     assert final['fix_choice'] == 'manual' and '1. Open it.' in final['notes'][-1] and '+b' in final['notes'][-1]
+
+
+def test_template_review_routing():
+    es = {'backend': 'elasticsearch', 'step_verdict': 'clean'}
+    assert g.after_step_indexing(es) == 'propose_template'
+    assert g.after_step_indexing({**es, 'user_template': '{...}'}) == 'check_template'
+    assert g.after_step_indexing({'backend': 'lucene', 'step_verdict': 'clean'}) == 'index_sample'
+    assert g.after_review({'template_choice': 'changed'}) == 'check_template'
+    assert g.after_review({'template_choice': 'accept'}) == 'index_sample'
+    assert g.after_check_template({'template_check': {'compatible': True}}) == 'index_sample'
+    assert g.after_check_template({'template_check': {'compatible': False}}) == 'flag_pipeline_changes'
+    assert g.after_flag({'template_choice': 'change_pipeline'}) == 'plan_indexing'
+    assert g.after_flag({'template_choice': 'change_template'}) == 'review_template'
+    # a disabled Elasticsearch filter waits for the user before verification
+    assert g.after_index_sample({'filter_ready': {'filter_id': 9}}) == 'await_enable'
+    assert g.after_index_sample({'processing_gate': 'pass', 'searches_passed': True}) == 'document'
+
+
+def test_harvest_picks_up_the_template_and_the_disabled_filter():
+    update = harvest([
+        tool_message('create_indexing_pipeline', {'uuid': 'ip', 'backend': 'elasticsearch'}),
+        tool_message('propose_index_template', {'template_name': 't', 'index': 'ecs-acme-v2', 'dev_tools': 'PUT ...',
+                                                'pipeline_link': 'L', 'self_check': {'notes': ['n']}}),
+        tool_message('check_index_template', {'compatible': False, 'pipeline_changes': [{'field': 'user.name'}]}),
+        tool_message('create_processor_filter', {'filter_id': 9, 'enabled': False, 'pipeline_link': 'L'}),
+    ])
+    assert update['backend'] == 'elasticsearch' and update['indexing_pipeline'] == 'ip'
+    assert update['proposed_template']['dev_tools'] == 'PUT ...' and update['proposed_template']['self_check_notes'] == ['n']
+    assert update['template_check']['compatible'] is False and update['filter_ready']['filter_id'] == 9
+
+
+def review_graph():
+    graph = StateGraph(g.BuildState)
+    graph.add_node('review_template', g.review_template)
+    graph.add_edge(START, 'review_template')
+    graph.add_edge('review_template', END)
+    return graph.compile(checkpointer=MemorySaver())
+
+
+@pytest.mark.parametrize('answer, choice', [({'approved': True}, 'accept'),
+                                            ({'approved': False, 'template': 'PUT _index_template/x\n{"index_patterns": []}'},
+                                             'changed')])
+def test_review_shows_the_template_and_takes_back_changes(answer, choice):
+    app = review_graph()
+    config = {'configurable': {'thread_id': choice}}
+    first = app.invoke({'proposed_template': {'index': 'ecs-acme-v2', 'dev_tools': 'PUT _index_template/ecs-acme-v2\n{}'}},
+                       config)
+    question = first['__interrupt__'][0].value
+    assert question['kind'] == 'template' and question['details']['dev_tools'].startswith('PUT _index_template/ecs-acme-v2')
+    final = app.invoke(Command(resume=answer), config)
+    assert final['template_choice'] == choice
+    assert final.get('user_template') == answer.get('template')
+
+
+def test_await_enable_shows_the_pipeline_link():
+    graph = StateGraph(g.BuildState)
+    graph.add_node('await_enable', g.await_enable)
+    graph.add_edge(START, 'await_enable')
+    graph.add_edge('await_enable', END)
+    app = graph.compile(checkpointer=MemorySaver())
+    config = {'configurable': {'thread_id': 'enable'}}
+    first = app.invoke({'filter_ready': {'filter_id': 9, 'pipeline_link': 'https://s/?action=open-doc&docType=Pipeline&docUuid=p'},
+                        'request': 'r'}, config)
+    question = first['__interrupt__'][0].value
+    assert question['kind'] == 'enable' and 'filter 9 is ready to enable' in question['summary']
+    assert question['details']['pipeline'].endswith('docUuid=p')
+    final = app.invoke(Command(resume={'approved': True, 'note': 'enable it for me'}), config)
+    assert 'User on the indexing filter: enable it for me' in final['request']

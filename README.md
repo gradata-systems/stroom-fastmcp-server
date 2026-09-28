@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 55 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 57 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -20,7 +20,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 55 tool
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
-| Elasticsearch | `find_elastic_clusters`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
+| Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval: asked through MCP elicitation where the client supports it,
@@ -36,6 +36,10 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   version to the next.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.
+- The agent proposes the index template (a Dev Tools request) and checks any changes the user sends back
+  against the candidate indexing pipeline, listing the pipeline changes an incompatible template needs. Once the
+  user has committed it, the indexing filter is created disabled and the user gets a link to the pipeline
+  (`<stroom>/?action=open-doc&docType=Pipeline&docUuid=...`) to review it and enable the filter.
 - Indexing filters over Events also carry `Pipeline IS_DOC_REF <events pipeline>`, where the events pipeline is the
   one this server built for the source (`source_pipeline_uuid`), so no Events from elsewhere are picked up.
 

@@ -74,12 +74,16 @@ Stage 2, indexing:
    ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
 8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
    (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping; set_index_fields (Lucene), or for Elasticsearch give the user the drafted index template
-   and destination index name to write (put_index_template only if they ask); create_xslt with the drafted
-   indexing XSLT; create_indexing_pipeline; step_sample on the Events streams.
-10. create_processor_filter on the Events stream ids with source_pipeline_uuid = the events pipeline from stage 1
-    (the filter then only selects Events from that pipeline; Elasticsearch: the user confirms the template is written),
-    wait_for_processing expect_events=false, create_verification_dashboard and run_test_searches.
+9. draft_index_mapping; set_index_fields (Lucene); create_xslt with the drafted indexing XSLT;
+   create_indexing_pipeline; step_sample on the Events streams.
+10. Elasticsearch: propose_index_template and show the user its dev_tools request. If they send back a changed
+    template, check_index_template; if it is not compatible, show the pipeline changes it needs and ask whether to
+    make them (update the indexing XSLT, step again, check again) or to change the template instead.
+11. create_processor_filter on the Events stream ids with source_pipeline_uuid = the events pipeline from stage 1
+    (the filter then only selects Events from that pipeline). Elasticsearch: the user confirms they have committed
+    the template, the filter is created disabled, and you give them pipeline_link and say it is ready to enable;
+    once they have enabled it, continue. Then wait_for_processing expect_events=false, create_verification_dashboard
+    and run_test_searches.
 
 Finish: write_documentation for both pipelines, then promote_build to the folders sibling sources use.
 
@@ -114,7 +118,8 @@ Samples:
 1. describe_pipeline to find its XSLT, index doc and index name; work out the next version from the naming
    convention (e.g. -v1 to -v2) and confirm it and the cluster or volume group with the user.
 2. draft_index_mapping with the requested fields as extra_fields; create_index_doc for v2; set_index_fields, or
-   give the user the v2 index template to write; create_xslt with the new indexing XSLT.
+   propose_index_template for v2 (check the user's changes with check_index_template); create_xslt with the new
+   indexing XSLT.
 3. copy_pipeline with set_properties for the new XSLT and index; compare_outputs against v1 on recent Events
    streams: only the requested fields may differ.
 4. Process sample Events, wait_for_processing expect_events=false, verification dashboard and run_test_searches.
@@ -142,7 +147,9 @@ indexed as it is, for exploration, without an event-logging translation.
    enrichments with the user in one message.
 3. The XSLT copies the parser's JSON XML (namespace http://www.w3.org/2013/XSL/json) into the xpath-functions
    namespace the indexing filter reads, adding StreamId, EventId and @timestamp and the enrichments.
-4. Step every sample record, process with approval, verify with a dashboard and test searches, document, promote.
+4. Step every sample record, propose the index template (propose_index_template; check_index_template for the
+   user's changes), pre-create the filter disabled once they have committed it and give them the pipeline link, then
+   verify with a dashboard and test searches once they have enabled it; document, promote.
 
 {_RULES}{f'''
 

@@ -24,6 +24,12 @@ RESOURCES = {
 }
 
 
+def doc_link(settings: Settings, doc_type: str, uuid: str) -> str:
+    """A URL that opens the document in the Stroom UI, as the explorer's 'Copy Link to Clipboard' makes."""
+    base = (settings.stroom_ui_url or settings.stroom_url).rstrip('/')
+    return f"{base}/?action=open-doc&docType={doc_type}&docUuid={uuid}"
+
+
 def gateway_from(ctx: Context) -> 'StroomGateway':
     return ctx.lifespan_context['stroom']
 

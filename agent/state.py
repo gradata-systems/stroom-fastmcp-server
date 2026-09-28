@@ -27,6 +27,13 @@ class BuildState(TypedDict, total=False):
     fix: dict[str, Any]               # the last summarise_fix result, including the draft
     fix_attempt: int                  # draft_fix attempt that produced `fix`
     fix_choice: str                   # apply | manual
+    backend: str                      # lucene | elasticsearch, from create_indexing_pipeline
+    field_plan: dict[str, Any]        # the last draft_index_mapping plan
+    proposed_template: dict[str, Any] # propose_index_template: name, index, dev_tools, link
+    user_template: str                # the template as the user sent it back, if they changed it
+    template_check: dict[str, Any]    # the last check_index_template result
+    template_choice: str              # accept | changed | change_pipeline | change_template
+    filter_ready: dict[str, Any]      # an Elasticsearch indexing filter created disabled: id, link
     attempts: dict[str, int]
     notes: list[str]                  # short progress notes shown to the user
     last_node: str
@@ -47,10 +54,25 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
             update['build'] = data.get('build')
         elif name == 'upload_sample' and data.get('stream_id'):
             update.setdefault('raw_stream_ids', []).append(data['stream_id'])
+        elif name == 'draft_index_mapping' and data.get('plan'):
+            update['field_plan'] = data['plan']
+        elif name == 'propose_index_template' and data.get('dev_tools'):
+            update['proposed_template'] = {k: data.get(k) for k in ('template_name', 'index', 'cluster', 'dev_tools',
+                                                                    'pipeline_link')}
+            update['proposed_template']['self_check_notes'] = (data.get('self_check') or {}).get('notes')
+        elif name == 'check_index_template' and 'compatible' in data:
+            update['template_check'] = {k: data.get(k) for k in ('compatible', 'blocking', 'pipeline_changes', 'notes',
+                                                                 'template_name', 'pipeline_link')}
+        elif name in ('create_processor_filter', 'reprocess_streams') and data.get('enabled') is False:
+            update['filter_ready'] = {k: data.get(k) for k in ('filter_id', 'pipeline_link', 'destination')}
+        elif name == 'set_processor_filter_enabled' and data.get('enabled'):
+            update['filter_ready'] = None
         elif name == 'create_pipeline' and data.get('uuid'):
             update['translation_pipeline'] = data['uuid']
         elif name in ('create_indexing_pipeline', 'copy_pipeline') and data.get('uuid'):
             update['indexing_pipeline' if name == 'create_indexing_pipeline' else 'translation_pipeline'] = data['uuid']
+            if data.get('backend'):
+                update['backend'] = data['backend']
         elif name == 'step_sample' and 'verdict' in data:
             update['step_verdict'] = data['verdict']
             update['last_findings'] = [

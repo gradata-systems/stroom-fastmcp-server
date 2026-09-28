@@ -48,6 +48,18 @@ def ask(payload: dict) -> dict:
         print(diff)
     if payload.get('kind') == 'help':
         return {'note': input('Hint for the agent: ')}
+    if payload.get('kind') == 'template':
+        print(details.get('dev_tools') or '')
+        first = input('Right as it is? [y], or paste your changed template and end with a line holding only END: ')
+        if first.strip().lower() in ('y', 'yes', ''):
+            return {'approved': True}
+        lines = [first]
+        while (line := input()) != 'END':
+            lines.append(line)
+        return {'approved': False, 'template': '\n'.join(lines)}
+    if payload.get('kind') == 'enable':
+        answer = input("Reply yes once enabled, or 'enable' for the agent to do it: ").strip()
+        return {'approved': True, 'note': 'enable it for me' if answer.lower() == 'enable' else None}
     answer = input('Agree? [y/N, or type a correction] ').strip()
     return {'approved': answer.lower() in ('y', 'yes')} if answer.lower() in ('y', 'yes', 'n', 'no', '') \
         else {'approved': False, 'note': answer}

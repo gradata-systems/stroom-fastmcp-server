@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     # development with dev_no_auth (or tools run directly), where there is no caller token.
     stroom_url: str
     stroom_audience: str = 'stroom'
+    # Base URL of the Stroom UI for links shown to users (defaults to stroom_url).
+    stroom_ui_url: str | None = None
     stroom_api_key: SecretStr | None = None
     stroom_ca_certs: Path | None = None
     stroom_request_timeout: float = 60.0
