@@ -40,9 +40,9 @@ flowchart TD
         F[6. Draft index template<br/>per selected convention] --> G[7. Pick template, build<br/>indexing child pipeline]
         G --> H[8. Step Events<br/>check docs vs template]
         H -- mismatch --> G
-        H -- matches --> I[9. Apply template<br/>enable indexing filter]
+        H -- matches --> I[9. User writes template, confirms it<br/>enable indexing filter]
         I --> J[10. Triage outputs<br/>Error streams, ES rejects]
-        J -- blocking: fix, reprocess --> G
+        J -- blocking: fix; user reprocesses --> G
         J -- clean --> K[11. Verify in Stroom<br/>dashboard test searches]
         K -- passes --> L[12. Document<br/>Documentation docs]
         L --> M[13. Promote on approval<br/>workspace to source folders]
@@ -55,19 +55,19 @@ flowchart TD
 2. **Create the feed and upload.** Create a `Feed` doc (stream type `Raw Events`, encoding) once the user confirms the proposed feed name and encoding, then POST the sample to `/stroom/datafeed` with a `Feed` header. The new stream's meta id is found with `/api/meta/v1/find`.
 3. **Choose a template, draft the translation pipeline.** Search for translation-stage template pipelines (`find_pipeline_templates`), see how existing children specialise them, and learn what shared elements such as user decoration expect. Create a child of the chosen template, supplying only the source-specific `TextConverter` (Data Splitter or XML Fragment) and `XSLT`. Stroom's standard Event Data (Text) or Event Data (XML) pipelines are the fallback. The user confirms the chosen template before the child is created. Field mappings and event types follow the field dictionary and event catalogue when there are source notes.
 4. **Step every sample record to completion.** `/api/stepping/v1/step` accepts a `code` map that overrides element code for the session, so the agent tries XSLT revisions without saving them. It steps every record of the sample, not a subset; each step returns per-element input, output and error indicators, and any blocking error sends it back to step 3. Stepping errors are triaged with the same rules as Error streams, so benign decoration warnings do not hold it up.
-5. **Save and process the sample.** When every record steps clean, save the docs and create a processor filter on the sample stream ids. This run only produces the `Events` stream that stage 2 needs; before stage 2 the agent checks that every raw sample stream has exactly one child Events stream, with records, and that the counts match the stepped records. More than one means the raw stream was processed twice (overlapping filters or a stray reprocess), which would give the indexing stage duplicate events, so the agent reports it and asks which to keep. A raw stream with no Events means processing failed despite clean stepping (a failed task, a fatal error, a filter that missed the stream), so the agent reads that stream's task status and Error stream, fixes the cause and reprocesses, or asks the user. Beyond this gate, stage 1 Error streams are not iterated on.
+5. **Save and process the sample.** When every record steps clean, save the docs and create a processor filter on the sample stream ids. This run only produces the `Events` stream that stage 2 needs; before stage 2 the agent checks that every raw sample stream has exactly one child Events stream, with records, and that the counts match the stepped records. More than one means the raw stream was processed twice (overlapping filters or a stray reprocess), which would give the indexing stage duplicate events, so the agent reports it and asks which to keep. A raw stream with no Events means processing failed despite clean stepping (a failed task, a fatal error, a filter that missed the stream), so the agent reads that stream's task status and Error stream, fixes the cause, and asks the user to reprocess it (reprocessing is the user's; see Design decisions). Beyond this gate, stage 1 Error streams are not iterated on.
 6. **Draft the index template.** Read existing index and component templates from Elasticsearch, apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference templates, and draft a new template.
 7. **Choose a template, build the indexing pipeline.** Search for indexing-stage templates the same way; a local one may already set the Elastic cluster, batch size and shared enrichment. Inherit from it (fallback: Indexing (Elasticsearch)). The indexing filter's `cluster` property must point at an existing Elastic Cluster doc: the agent takes the one that existing Elastic Index docs and indexing pipelines for similar data already use (`find_elastic_clusters`) and checks it with `elasticCluster/v1/testCluster`. It never creates a cluster doc, since that holds credentials; if none fits, it asks. The cluster, the indexing template, the field convention and the destination index or data stream name (with its version) are proposed together at the start of stage 2, and the user confirms or corrects them before anything is drafted or created. The child's XSLT emits the `xpath-functions` JSON-XML `array`/`map` form with `StreamId`, `EventId` and `@timestamp`.
 8. **Step Events through it.** Step the cooked Events and compare each stepped document's fields and value shapes with the draft template. Fix the XSLT or the template on a mismatch.
-9. **Apply the template, enable indexing.** With user approval, PUT the template and create the indexing processor filter on the `Events` stream.
-10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
+9. **Confirm the template, enable indexing.** The agent gives the user the drafted index template and the destination index name, and the user writes the template (`put_index_template` does it only when the user asks and the server has Elasticsearch access). Events reach Elasticsearch only through the Stroom indexing pipeline. Before `create_processor_filter` starts an Elasticsearch indexing pipeline, it asks the user to confirm that the index template for the destination index has been written, naming the index and cluster taken from the pipeline's `ElasticIndexingFilter` (with what the server can see of a matching template, when it has Elasticsearch access). Only then does it ask for approval to process the `Events` streams.
+10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template on blocking errors and asks the user to reprocess the affected streams, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
 11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace: a query on that index and a table with a minimal field set (`StreamId`, `EventId`, the time field and a few key fields from the template). Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; and a time-range search around the sample timestamps. Each must return the expected records, which checks the mapping and the way people will actually search it. A failed search sends the agent back to step 7.
 12. **Document.** Write Stroom Documentation docs for the events and indexing pipelines (`write_documentation`) from what stages 1 and 2 measured: the field mapping, event types from the processed sample, the index template and version, and the verification results. The same summary is returned in the chat.
-13. **Promote on approval.** Everything so far lives in the workspace. `promote_build` proposes destination folders from where sibling sources live; the user confirms them and approves, the docs are moved into place, and the processor filters are widened from the sample to the whole feed as part of the same approval.
+13. **Promote on approval.** Everything so far lives in the workspace. `promote_build` proposes destination folders from where sibling sources live; the user confirms them and approves, the docs are moved into place, and the processor filters are widened from the sample to the whole feed (new data only, from a create time) as part of the same approval.
 
 ## Further use cases
 
-Four further jobs. The evaluation is read-only. The two updates start from existing production content rather than a new source: both work on draft code or copies until a person approves, and both compare new output with current output record by record, so the only differences are the intended ones.
+Five further jobs. The evaluation is read-only. The two updates start from existing production content rather than a new source: both work on draft code or copies until a person approves, and both compare new output with current output record by record, so the only differences are the intended ones.
 
 **Update an events pipeline**
 
@@ -77,7 +77,7 @@ Triggered by new samples the current XSLT does not handle, or a reported issue s
 2. **Gather test records.** New samples go to a workspace test feed with the production feed's settings (`<FEED>-MCP-TEST`), never to the production feed, where live processor filters would pick them up. For a reported issue, the agent finds example records in the production feed's recent Raw Events (`find_streams`, `read_stream`), or uses stream and record ids the user gives.
 3. **Revise with draft code.** Stepping accepts draft XSLT through the `code` map, so the existing pipeline is stepped over the test records and a regression set of recent production records without saving anything.
 4. **Compare outputs.** `compare_outputs` steps the same records through the current and draft code and diffs each event. There must be no blocking errors, and differences must be limited to the fields the change targets; anything else goes to the user.
-5. **Confirm how to save, then save.** The agent asks whether to create a new version or change the current pipeline in place, and proposes names from the baseline's versioning convention, e.g. `Keycloak-V1.2-Events` becomes pipeline and XSLT `Keycloak-V1.3-Events`. The user confirms the choice and the pipeline and translation names, or edits them. A new version is made in the workspace with `copy_pipeline` (pipeline, XSLT and text converter) plus the draft code; an in-place change is saved to a working copy of the XSLT in the workspace. Nothing in production changes until the user approves promotion: a new version is then moved into place and gets its processor filter, with the current version left running until the user retires it; an in-place change is written into the production XSLT after a backup. Reprocessing historical data is the user's decision; the agent can propose the filter but does not create it unasked. The Documentation doc is created for a new version, noting what changed, or updated with a change-log entry for an in-place change.
+5. **Confirm how to save, then save.** The agent asks whether to create a new version or change the current pipeline in place, and proposes names from the baseline's versioning convention, e.g. `Keycloak-V1.2-Events` becomes pipeline and XSLT `Keycloak-V1.3-Events`. The user confirms the choice and the pipeline and translation names, or edits them. A new version is made in the workspace with `copy_pipeline` (pipeline, XSLT and text converter) plus the draft code; an in-place change is saved to a working copy of the XSLT in the workspace. Nothing in production changes until the user approves promotion: a new version is then moved into place and gets its processor filter, with the current version left running until the user retires it; an in-place change is written into the production XSLT after a backup. Reprocessing historical data is the user's to do (see Design decisions); the agent lists the streams the change would affect. The Documentation doc is created for a new version, noting what changed, or updated with a change-log entry for an in-place change.
 
 **Update an indexing pipeline (as a new version)**
 
@@ -88,7 +88,7 @@ Triggered by a request to index more fields or change how fields are mapped. In-
 3. **Copy and bump.** `copy_pipeline` copies the pipeline and the XSLT it owns into the workspace under the new version and sets the `ElasticIndexingFilter` `indexName` to the v2 name; `create_index_doc` adds a v2 Elastic Index doc. Any inherited parent template is kept.
 4. **Revise the XSLT and template.** The template draft starts from the v1 template, renamed and with `index_patterns` bumped to v2, then applies the requested field changes under the selected field convention.
 5. **Step and compare.** `compare_outputs` steps the same Events records through v1 and v2 and diffs the documents. Only the added or changed fields may differ, and each must match the v2 template.
-6. **Apply with approval.** Put the v2 template and enable the v2 indexing filter on Events, optionally from a create time for backfill, then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are left to people.
+6. **Apply with approval.** The user writes the v2 template and confirms it, with the v2 index name, before the v2 indexing filter starts on new Events from a create time; backfilling older streams is the user's. Then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are the user's (see Design decisions).
 **Create a discovery index**
 
 A discovery index lets people explore raw structured data, such as JSON, before or instead of writing a translation. A simple indexing pipeline reads the Raw Events stream, parses it to JSON XML and indexes it as it is, with no event-logging step.
@@ -97,7 +97,7 @@ A discovery index lets people explore raw structured data, such as JSON, before 
 2. **Choose a template.** Look for a discovery-stage template pipeline as in step 7 (`pipeline_templates.discovery`); in the reference environment that is `Raw to Elasticsearch`; the fallback is a minimal chain: `JSONParser`, `XSLTFilter`, `ElasticIndexingFilter`.
 3. **Draft the XSLT.** `JSONParser` emits JSON XML in the `http://www.w3.org/2013/XSL/json` namespace, while the indexing filter reads the `xpath-functions` namespace, so the XSLT starts as a copy that moves elements into that namespace: it adds `StreamId`, `EventId` and `@timestamp` (from a timestamp field the user confirms) and keeps source field names. It may also do light processing the agent proposes from the sample profile: unpack JSON held as a string in a field such as `message` into a nested map with `json-to-xml()`; decorate each document from stream meta, e.g. `stroom:meta('MyHost')`, choosing from the attributes the raw streams actually carry (`get_stream_attributes`); and drop or rename a few noisy or conflicting fields. XML or CSV sources need a small mapping XSLT instead. Anything beyond this, such as a full event-logging translation, belongs in `onboard_data_source`.
 4. **Draft a permissive template.** Field names stay as in the source, so no field convention applies. The template uses dynamic mapping with guardrails from config (`discovery_template`): strings as `keyword`, a total-fields limit, `ignore_malformed`, and explicit types only for `@timestamp`, `StreamId` and `EventId`.
-5. **Confirm, step and apply.** Cluster, destination name (e.g. `stroom-discovery-<source>-v1`), template pipeline, timestamp field and the proposed enrichments are confirmed in one prompt. The agent steps every sample record, then, with approval, puts the template and creates the processor filter on the Raw Events feed.
+5. **Confirm, step and apply.** Cluster, destination name (e.g. `stroom-discovery-<source>-v1`), template pipeline, timestamp field and the proposed enrichments are confirmed in one prompt. The agent steps every sample record, gives the user the template to write, and once they confirm it is written for the destination index, creates the processor filter on the Raw Events feed with approval.
 6. **Verify the Stroom way.** Triage and verify as in steps 10 and 11. The discovered field list, read through the Elastic Index doc, can seed the sample profile when the source is later onboarded with a full translation. The discovery pipeline is documented like any other.
 **Evaluate and document an events pipeline**
 
@@ -121,30 +121,39 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 | Schema conformance | Validation and quality pass rates, schema version gap, recent error groups |
 | Suggestions | Prioritised changes with rationale and draft XSLT |
 
+**Fix a reported pipeline issue**
+
+A user reports that something came out wrong, often one event type that is not translated properly, and gives a Stream ID and optionally an Event ID (as a dashboard shows them). The agent finds where it came from, confirms the problem, proves a fix and offers it. Nothing changes unless the user asks for the fix to be applied.
+
+1. **Locate.** `locate_event` accepts an Events, Error or Raw Events stream id. An output stream leads to its parent raw stream and the pipeline that produced it; a raw stream leads to its Events child. With an Event ID, the agent steps the raw stream record by record, counting the events each record produces, until it reaches that event. It returns the raw part and record, the record's input, the stored event, the event stepping gives now, and the XSLTs and text converters the pipeline runs (marking any inherited from a template). This works on multi-part streams: Stroom numbers records within each raw part, while the Events stream's events run on across parts, and a record can produce no events or several.
+2. **Plan the validation.** In a few lines the agent says what output the record should give (from the user's words, the schema and any source notes), which field paths are wrong now, and which other records it will check: recent raw streams on the same feed and the same event type (`find_streams`, `summarise_events`).
+3. **Confirm the issue.** `step_pipeline` on the located part and record, `validate_events` and `check_event_quality`. If the problem does not reproduce, the agent says what it found and asks the user rather than guessing a fix.
+4. **Draft and prove the fix.** The fix goes in the pipeline's own XSLT or text converter, tried with draft code. `summarise_fix` steps every record of the reported stream and a few recent ones with the draft, and diffs the output against the saved code. The fix is ready when it changes the reported output, only the expected field paths change, and stepping has no blocking errors. It also returns the code diff and manual steps, and warns when the code belongs to a template shared by other pipelines.
+5. **Offer it.** The agent shows the diff, the fields that change and on how many records, and asks whether to apply it. **Apply** follows `update_events_pipeline`: the user chooses a new version or an in-place change and confirms the names, then the agent copies, updates, compares against the original, documents and promotes on approval. **Manual** returns the steps to apply it in Stroom with the diff. In both cases reprocessing existing data is the user's.
+
 ## Architecture
 
 The server copies the ES MCP server's shape: FastMCP over streamable HTTP, Keycloak auth, audit middleware, a lifespan-managed gateway per backend, and tools that return compact, budgeted JSON with hints the model can act on. The one new idea is a **write guard**, because this server creates and changes content.
 
 ```mermaid
 flowchart TB
-    client[Chat client or agent<br/>OpenWebUI: auth code + PKCE<br/>LangGraph: client credentials]
-    kc[Keycloak<br/>issues aud=stroom-mcp tokens<br/>token exchange to aud=stroom]
+    client[Chat client or agent<br/>OpenWebUI: auth code + PKCE<br/>LangGraph: device sign-in as the user]
+    kc[Keycloak<br/>issues user tokens with<br/>aud = stroom-mcp and stroom]
     subgraph server[Stroom FastMCP server, standalone]
         mw[Middleware<br/>KeycloakAuthProvider<br/>AuditMiddleware<br/>WriteGuard: workspace folder, approvals]
         tools[Tools and resources<br/>feeds, pipelines, XSLT<br/>processing, streams, errors<br/>stepping, validation<br/>ES templates, schema resources]
-        gw[Gateways<br/>StroomGateway: exchanged user token<br/>ElasticsearchGateway: run-as, templates only]
+        gw[Gateways<br/>StroomGateway: the caller's own token<br/>ElasticsearchGateway: templates only, optional]
     end
     stroom[Stroom v7.13<br/>/api REST incl. dashboard search, /stroom/datafeed]
     es[Elasticsearch<br/>index and component templates<br/>event indices, verified via Stroom dashboard searches]
     kc -- access token --> client
     client -- MCP over HTTP, bearer token --> server
-    server -- exchange --> kc
     server -- as the user --> stroom
     server -- run-as the user --> es
     stroom -- indexes --> es
 ```
 
-**Identity.** Stroom 7.x accepts tokens from an external OIDC provider, so if Stroom trusts the same Keycloak realm, the server exchanges the caller's `aud=stroom-mcp` token for an `aud=stroom` token (Keycloak standard token exchange) and calls Stroom with it. Stroom then applies that user's own document permissions, as the ES server's run-as does. Fallback when exchange is unavailable: a Stroom API key per agent service account, stored as a secret and mapped from `azp`.
+**Identity.** The server acts as the user who asked. Stroom 7.x trusts the same Keycloak realm, and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, through a Keycloak audience mapper), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without `stroom` in `aud` is refused with a message naming the missing mapper, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. The LangGraph agent signs the person in with the device authorization grant and refreshes the token for the length of a run. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
 
 **Elasticsearch.** Only template reads and writes go direct to ES; indexed documents are verified through Stroom searches, through a copy of the ES server's `ElasticsearchGateway` (run-as). Documents reach ES through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
 
@@ -176,7 +185,7 @@ stroom-fastmcp-server/
     policy.py             # WritePolicy: where the agent may create/change docs
     guard.py              # WriteGuardMiddleware, approval tokens
   utils/
-    stroom.py             # StroomGateway: httpx.AsyncClient, token exchange, error mapping
+    stroom.py             # StroomGateway: httpx.AsyncClient, forwards the caller's token, error mapping
     elasticsearch.py      # ES gateway subset: templates and mappings
     expressions.py        # builders for Stroom ExpressionOperator trees
   tools/
@@ -251,7 +260,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-52 tools in 9 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+53 tools in 10 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -307,11 +316,17 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_processor_filter` **W A** | Filter for pipeline on feed + stream type, optional min create time; disabled unless approved | `processorFilter/v1` |
+| `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (reprocessing is the user's). For an Elasticsearch indexing pipeline, first confirms the index template for its destination index is written | `processorFilter/v1`, `fetchPipelineLayers` |
 | `set_processor_filter_enabled` **W A** | Enable or disable a filter the agent created | `processorFilter/v1/{id}/enabled` |
-| `reprocess_streams` **W** | Reprocess given raw stream ids through the pipeline after a fix | `processorFilter/v1/reprocess` |
 | `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
 | `wait_for_processing` | Poll `processing_status` with backoff until all tasks are complete or failed, or a timeout; then reports, per input stream, the child Events stream id and record count, flagging inputs with none or more than one | as above |
+
+**Diagnosis** (`tools/diagnosis.py`, read-only)
+
+| Tool | Purpose | Stroom API |
+| --- | --- | --- |
+| `locate_event` | From a reported Events, Error or Raw Events stream id and optional Event ID: the raw stream, part and record, the pipeline and its code docs, the record's input, the stored event and the event stepping gives now | `meta/v1/find`, `data/v1/fetch`, `stepping/v1/step` |
+| `summarise_fix` | Prove a drafted XSLT or text converter fix on real records: output diff against the saved code (only expected paths may change), stepping verdict, code diff, readiness, and manual steps for applying it by hand | `stepping/v1/step`, doc reads |
 
 **Streams and errors** (`tools/streams.py`)
 
@@ -343,7 +358,7 @@ Stepping holds no session between calls: each step is a fresh request from the l
 | `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference templates or index docs; returns `needs_guidance` when none is selected | ES templates, `index/v2/findFields` |
 | `draft_index_mapping` | Local: turn stepped documents and the field convention into a field plan (name, logical type), rendered for the build's backend as an Elasticsearch index template or a Lucene field list; can start from a baseline with the version bumped; flags conflicts | none |
 | `simulate_index_template` | Elasticsearch: show the effective mapping for an index name | ES `_index_template/_simulate_index` |
-| `put_index_template` **W A** | Elasticsearch: create or update a template in the allowed name pattern | ES `_index_template` |
+| `put_index_template` **W A** | Elasticsearch: create or update a template in the allowed name pattern, only when the user asks (normally the user writes it) | ES `_index_template` |
 | `set_index_fields` **W** | Lucene: set a Lucene index doc's fields from the field plan (a keyword becomes `TEXT` with the `KEYWORD` analyzer) | `index/v2/addField`, `updateField`, `findFields` |
 | `find_elastic_clusters` | Elasticsearch: cluster docs with their connection URLs (never credentials), the index docs and pipelines that use each, and their settings; optional connection test | `explorer/v2/find`, `elasticCluster/v1`, `elasticIndex/v1`, `elasticCluster/v1/testCluster` |
 | `create_index_doc` **W** | The build's index doc: an Elastic Index doc on an existing Elastic Cluster, or a Lucene Index doc in a volume group, with settings copied from sibling index docs | `explorer/v2/create`, `elasticIndex/v1` or `index/v2`, `dataSource/v1/findFields` |
@@ -382,6 +397,7 @@ Resources carry the reference knowledge the model needs but should not have to d
 | `index_event_data` | `events_feed`, `index_pattern` | Stage 2 only, against an existing Events feed |
 | `create_discovery_index` | `feed?`, `sample?`, `timestamp_field?` | Index raw structured data directly for exploration, without an event-logging translation |
 | `evaluate_events_pipeline` | `pipeline`, `sample_size?`, `source_docs?` | Report on what a pipeline does, its data and event types, schema conformance and suggested fixes, returned in the chat and saved as its Documentation doc |
+| `fix_pipeline_issue` | `stream_id`, `issue`, `event_id?` | Locate a reported event, confirm the problem, prove a fix, then apply it or give the manual steps, as the user chooses |
 
 **Where the knowledge comes from.** The XSD and examples are vendored into `knowledge/` from the [event-logging-schema](https://github.com/gchq/event-logging-schema) repo at a pinned tag. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/), each under about 4,000 tokens, with links to the full page.
 
@@ -407,7 +423,7 @@ All work happens in the workspace; promotion is the approval-gated step that put
 
 **Approval gates (A tools)**
 
-The tool returns `needs_approval` with a plain-language summary and an `approval_id` instead of acting. The client shows the summary; the call is repeated with `approval_id` once the user agrees. OpenWebUI shows it as a chat turn; LangGraph uses `interrupt()`. Gated actions: enabling any processor filter, creating a filter without a create-time bound, putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
+The tool returns `needs_approval` with a plain-language summary and an `approval_id` instead of acting. The client shows the summary; the call is repeated with `approval_id` once the user agrees. OpenWebUI shows it as a chat turn; LangGraph uses `interrupt()`. Gated actions: enabling any processor filter (for Elasticsearch indexing, after the user confirms the index template for the destination index is written), putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
 
 **Confirmations**
 
@@ -423,6 +439,7 @@ Approvals guard actions; confirmations fix the key details those actions use. Bo
 | Destination index or data stream name, with version | Start of stage 2, one prompt | Versioned naming convention, e.g. `stroom-windows-events-v1`, or the next version of a baseline |
 | Events pipeline update: new version or in place, and the pipeline and translation names | `update_events_pipeline`, before saving | The baseline's versioning convention, e.g. V1.2 to V1.3 |
 | Destination folders for promotion | Before promotion (step 13) | Where sibling sources' feeds, pipelines and indices live |
+| Index template written, for the destination index and cluster | Before Elasticsearch indexing starts (step 9) | The index name and cluster set on the indexing pipeline |
 | Index backend (Lucene or Elasticsearch) and, for Lucene, the volume group | Start of stage 2, one prompt | Where sibling sources index and the chosen indexing template |
 
 The stage 2 details come in one prompt because they depend on each other: the template's `index_patterns`, the Elastic Index doc and the indexing filter all use the same cluster and destination name.
@@ -431,7 +448,8 @@ The stage 2 details come in one prompt because they depend on each other: the te
 
 - Filters default to the sample stream ids only (`Meta Id IN (...)`), so the first runs never touch other data.
 - A feed-wide filter needs approval and gets `maxProcessingTasks` from config (default 2) and a `minMetaCreateTimeMs`.
-- `reprocess_streams` accepts at most `max_reprocess_streams` ids (default 20).
+- No reprocessing: a filter is refused for any stream the pipeline has already processed (it has an output from that pipeline, or one of the pipeline's filters already selects it). The agent gives the user the pipeline and stream ids instead.
+- A call that needs both a confirmation and an approval keeps the confirmation id valid until the whole call succeeds, so repeating the call for the approval does not use it up.
 
 **Local validation before Stroom**
 
@@ -449,7 +467,7 @@ Triage applies to stepping indicators in every stage, and to Error streams from 
 
 | Class | Typical markers | Agent action |
 | --- | --- | --- |
-| Blocking | ERROR or FATAL from the text converter, parser or the agent's XSLT (`CODE`, `INPUT` errors); any `SchemaFilter` validation failure; Elasticsearch mapping conflicts or bulk rejections; indexing output missing `StreamId`, `EventId` or `@timestamp` | Fix and reprocess; the stage cannot pass |
+| Blocking | ERROR or FATAL from the text converter, parser or the agent's XSLT (`CODE`, `INPUT` errors); any `SchemaFilter` validation failure; Elasticsearch mapping conflicts or bulk rejections; indexing output missing `StreamId`, `EventId` or `@timestamp` | Fix, then the user reprocesses; the stage cannot pass |
 | Review | Any ERROR from an inherited element; a WARN that hits every record; a decoration lookup that fails for all records when the key comes from a field the agent's XSLT sets | Check whether the translation causes it, e.g. a user id in the wrong format for the lookup; fix, or ask the user |
 | Benign | INFO or WARN from inherited elements on some records, e.g. a failed user decoration lookup for an unknown account | Report counts and examples in the stage summary; no change |
 
@@ -469,7 +487,7 @@ Names follow the environment's versioned conventions, learned from sibling conte
 
 ## LangGraph agent design
 
-The agent is a `StateGraph` whose nodes map one-to-one to the workflow steps and whose edges are the loops. It needs only this server, reached through `fastmcp.Client` with a client-credentials token (`langchain-mcp-adapters` pins `mcp<2`, so the agent wraps the tools itself), so it runs under its own service account.
+The agent is a `StateGraph` whose nodes map one-to-one to the workflow steps and whose edges are the loops. It needs only this server, reached through `fastmcp.Client` (`langchain-mcp-adapters` pins `mcp<2`, so the agent wraps the tools itself). It runs as the person using it: a terminal run signs them in with Keycloak's device grant and refreshes the token, so every Stroom change is theirs.
 
 ```mermaid
 flowchart TD
@@ -485,7 +503,7 @@ flowchart TD
     select_indexing_template --> draft_indexing[draft_indexing<br/>draft template, indexing pipeline]
     draft_indexing --> step_indexing[step_indexing<br/>step_sample on Events]
     step_indexing -- mismatch --> draft_indexing
-    step_indexing --> approve_apply{{approve_apply<br/>interrupt: put_index_template, enable filter}}
+    step_indexing --> approve_apply{{approve_apply<br/>interrupt: template written for index X?<br/>then approve the indexing filter}}
     approve_apply --> run_and_triage[run_and_triage<br/>summarise_errors, error_context]
     run_and_triage -- blocking errors --> draft_indexing
     run_and_triage --> verify_indexed[verify_indexed<br/>verification dashboard, test searches]
@@ -525,13 +543,15 @@ class BuildState(TypedDict):
 - `last_findings` is the only error context carried into the next draft, deduplicated and capped at 20 items, so the context stays small across iterations.
 - After the attempt limit, the graph interrupts with the findings and asks the user to fix, hint or stop.
 
-**Human in the loop**: `approve_processing` and `approve_apply` call `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
+**Human in the loop**: `approve_processing` and `approve_apply` call `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. One tool call can raise several interrupts in turn (template confirmation, then approval), and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
 
 **Convention guidance**: `research_conventions` interrupts when no convention profile is selected, asking the user to choose a profile, name reference templates or describe the convention. It never picks one itself.
 
 **Entry modes**: `intake` routes the request to one of five modes. `onboard` is the graph above. `update_events_pipeline` loads the baseline, uploads samples to a test feed or finds issue records, then enters at `draft_translation`; `step_and_validate` adds `compare_outputs` against the current code, and `approve_processing` becomes `approve_update`, which confirms new version or in place and the names, then copies to the new version or saves in place after a backup. `update_indexing_pipeline` loads the baseline, runs `copy_pipeline` with the version bump, then enters at `draft_indexing`; `step_indexing` adds `compare_outputs` against v1.
 
 `create_discovery_index` runs `onboard_feed` or takes an existing feed, skips stage 1 and `research_conventions`, and enters at `select_indexing_template` with discovery-stage templates; `draft_indexing` drafts the near-identity XSLT and the permissive template, and the rest of stage 2 runs unchanged.
+
+`fix_pipeline_issue` runs `locate_issue` (locate the event, plan and confirm the problem), then `draft_fix`, which loops until `summarise_fix` says the fix is ready. A `draft_fix` attempt that proposes no fix means the issue did not reproduce, so the graph asks the user instead of looping. `offer_fix` interrupts with the diff and asks whether to apply it: yes runs `apply_fix` (copy, update, compare, document, promote, as in `update_events_pipeline`); no runs `explain_fix`, which returns the manual steps and the diff.
 
 `evaluate_events_pipeline` is a read-only chain: load the baseline, sample, map the translation, inventory events, measure conformance, report. Its only write is the Documentation doc, promoted on approval like any other change; its suggestions can seed an `update_events_pipeline` run.
 
@@ -547,18 +567,23 @@ class BuildState(TypedDict):
 
 The riskiest parts are driving stepping and pipeline JSON through REST APIs built for the Stroom UI, so a spike against a real 7.13 instance comes first.
 
+**Design decisions** (can be revisited)
+
+- **Identity**: the server acts as the user who asked, forwarding their token; Keycloak adds `stroom` to the token's `aud`. No token exchange, and no API key outside local development.
+- **Uploads**: `/stroom/datafeed` is called with the user's token, not an API key.
+- **Reprocessing** is left to the user for now: the server has no reprocess tool and refuses a processor filter for streams a pipeline already processed. The agent tells the user which streams to reprocess.
+- **Superseded outputs**: the same way, Events and Error streams left by reprocessing are the user's to manage; the server does not delete streams.
+- **Moving from v1 to v2** of an index (aliases, data views, disabling or retiring v1) is the user's.
+- **Elasticsearch indexing** runs only through the Stroom indexing pipeline, and only after the user confirms the index template for the destination index has been written.
+
 **Open questions**
 
-- [ ] Does our Stroom trust the same Keycloak realm, and is token exchange enabled? If not, we fall back to per-agent API keys.
 - [x] Field naming for indexed events: decided, this is environment-specific. The agent uses a configured convention profile or the user's guidance, and asks when it has neither (see Field conventions under Architecture).
 - [x] Template pipelines: decided. They live in `System/Template Pipelines`, with local templates in subfolders such as `Elasticsearch`; discovery is configured by folder and name.
-- [ ] After a translation update, should the agent ever create the reprocessing filter for historical data, or only propose it?
-- [ ] Is moving readers from v1 to v2 (aliases, Kibana data views, disabling the v1 filter) always manual, or should the agent prepare the steps?
 - [x] Evaluation reports: decided. They are returned in the chat and saved as Stroom Documentation docs beside the pipeline, and every pipeline the agent creates or changes is documented the same way.
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
-- [ ] Does `/stroom/datafeed` accept OIDC tokens in our deployment, or only certificates or API keys?
-- [ ] Superseded outputs: reprocessing leaves older Events and Error streams. Mark them deleted through `meta/v1/update/status` (a new W tool), or leave them and filter by latest?
+- [ ] Is token authentication enabled on the live `/stroom/datafeed` receiver? Uploads need it now that they use the user's token.
 
 **Risks**
 

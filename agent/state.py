@@ -7,7 +7,7 @@ from langchain_core.messages import BaseMessage, ToolMessage
 from agent.gating import parse
 
 Mode = Literal['onboard', 'update_events_pipeline', 'update_indexing_pipeline', 'create_discovery_index',
-               'evaluate_events_pipeline']
+               'evaluate_events_pipeline', 'fix_pipeline_issue']
 
 
 class BuildState(TypedDict, total=False):
@@ -23,6 +23,10 @@ class BuildState(TypedDict, total=False):
     processing_gate: str              # pass | fail, from the last wait_for_processing
     searches_passed: bool
     promoted: bool
+    issue_location: dict[str, Any]    # fix_pipeline_issue: locate_event's answer (raw stream, part, record, docs)
+    fix: dict[str, Any]               # the last summarise_fix result, including the draft
+    fix_attempt: int                  # draft_fix attempt that produced `fix`
+    fix_choice: str                   # apply | manual
     attempts: dict[str, int]
     notes: list[str]                  # short progress notes shown to the user
     last_node: str
@@ -59,6 +63,14 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
                 update['events_stream_ids'] = events
         elif name == 'run_test_searches' and 'passed' in data:
             update['searches_passed'] = data['passed']
+        elif name == 'locate_event' and data.get('raw_stream'):
+            update['issue_location'] = {k: data.get(k) for k in (
+                'reported', 'raw_stream', 'feed', 'raw_parts', 'events_stream', 'location', 'pipeline',
+                'translation_docs', 'same_as_stored')}
+            update['translation_pipeline'] = (data.get('pipeline') or {}).get('uuid')
+            update['raw_stream_ids'] = [data['raw_stream']]
+        elif name == 'summarise_fix' and 'ready' in data:
+            update['fix'] = data
         elif name == 'promote_build' and data.get('promoted'):
             update['promoted'] = True
     return update

@@ -61,9 +61,20 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Transport | All 52 tools load over streamable HTTP. A gated `create_feed` inside a LangGraph graph interrupts on `needs_confirmation`, then resumes and creates the feed with the id. | Consent works end to end through the agent. |
 | Graph | Unit tests with a fake model: the gate goes both ways (a decline passes the user's note back to the model), facts are harvested from tool results, routing is bounded, and every node compiles. | Routing never depends on the model's prose. |
 
+## Decisions and fix use case (`tests/test_processing.py`, `tests/test_diagnosis.py`)
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| Multi-part streams | A two-entry zip upload made one Raw Events stream with 2 parts: raw data is non-segmented, so each part is one item (`totalItemCount` = parts). Processing it made one Events stream with a single part whose 4 events run on across both raw parts. Stepping reports `(partIndex, recordIndex)`, with record numbers restarting in each part. | An Event ID maps to a raw part and record by stepping and counting output events. Stepping keys records as `stream:part:record` past part 0, and `step_pipeline` takes `part`. |
+| Locate (local) | `locate_event` on that stream: event 3 went to part 1 record 0, event 4 to part 1 record 1, and every stored event matched a fresh step. | Works across parts. |
+| Locate (live, read-only) | On a `Keycloak-V1.2` Events stream from a 4-part raw stream, event 3 went to part 0 record 3: one earlier record produced no event, and counting handled it. The stored event matched a fresh step, and the pipeline's only code is its own XSLT. | Works on production data. For JSON sources, the record input shown is the XSLT's input (the parser's JSON XML). |
+| summarise_fix (local) | A one-line Description change: ready, 4 of 4 records changed only `Event/EventDetail/Description`, stepping clean, a readable unified diff and manual steps. The same draft with the wrong `expected_paths` came back not ready, naming the unexpected field. | Proven before it is offered. |
+| Two gates in one call | Consent ids are single use, so after the template confirmation the repeated call for approval found its confirmation id already used up. | An earlier gate's id now survives the call being repeated for a later gate, and is discarded once the action completes. The agent collects ids across repeated interrupts. |
+| Reprocessing refused | The Phase 2 field fix now checks that processing the sample again is refused, with the pipeline and stream ids for the user. | Phase 2 and 3 exit tests pass again with this. |
+
 ## Not yet tested
 
 - Writing to Elasticsearch (index templates, ES indexing pipelines processing into a live index): no ES credentials, and the live instance stays read-only. Covered by mocked tests and the XSLT/XSD check.
 - Agent runs with a real model, and the evaluation set of 10 samples (the Phase 4 exit criterion).
-- Keycloak token exchange (the agent's client credentials included), and whether live `/stroom/datafeed` accepts OIDC tokens.
+- Forwarding a real user's Keycloak token (with `stroom` in `aud`) to Stroom, the agent's device sign-in, and whether live `/stroom/datafeed` accepts OIDC tokens.
 - Stepping a pipeline with an empty XSLTFilter (the question of what Stroom does with a template's unset `decorationFilter`).

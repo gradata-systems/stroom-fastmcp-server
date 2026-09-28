@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 52 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 53 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -15,7 +15,8 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 52 tool
 | Pipelines | `create_pipeline`*, `copy_pipeline`*, `set_pipeline_property` |
 | Streams and errors | `find_streams`, `get_stream_children`, `read_stream`, `get_stream_attributes`, `summarise_errors`, `summarise_events` |
 | Stepping | `step_pipeline`, `step_sample`, `compare_outputs` (with unsaved draft code) |
-| Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
+| Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `wait_for_processing` |
+| Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
 | Elasticsearch | `find_elastic_clusters`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
@@ -25,8 +26,17 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 52 tool
 otherwise returned as an id to pass back. Everything is written under `MCP Workspace/<build>` and tagged
 `mcp-managed`; only tagged docs can be changed, and promotion moves them into place.
 
+Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
+- Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards their Keycloak
+  token, whose `aud` must include `stroom` as well as the MCP audience. There is no shared API key.
+- Reprocessing is the user's. A processor filter is refused for streams the pipeline already processed, and the
+  agent tells the user which streams to reprocess. Moving readers from one index version to the next is also theirs.
+- Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
+  template for the destination index (named in the question) has been written.
+
 Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts: `onboard_data_source`,
-`update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`.
+`update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`,
+`fix_pipeline_issue`.
 Field conventions: `conventions/*.yaml`. Elasticsearch (templates only) is optional: `STROOM_MCP_ES_URL`.
 Error triage rules: `error_rules.yaml`. Template sources: `access_policy.yaml`.
 
@@ -63,10 +73,18 @@ cd dev/stroom && ./init-env.sh && docker compose up -d
 - `graph.py`: one node per workflow step. Each node is a small tool-calling agent with its own tool subset. Routing between nodes is code, not the model: step verdicts, processing gates and search results decide the next node. Retry loops are capped at 5 attempts, after which the agent asks the user for help.
 - `gating.py`: when a tool replies `needs_confirmation`/`needs_approval`/`needs_guidance`, the agent raises a LangGraph `interrupt`. If the user agrees, the tool is re-called with the id; a decline returns the user's note to the model.
 - `mcp_tools.py`: loads the tools with `fastmcp.Client`. It does not use `langchain-mcp-adapters`, which pins `mcp<2`.
-- `run.py`: a terminal runner. It needs `AGENT_MCP_URL`, a Keycloak client-credentials token (or `AGENT_BEARER`) and `AGENT_MODEL`:
+- `auth.py`: signs the person in with Keycloak's device grant and refreshes their token, so the agent acts as them.
+- `run.py`: a terminal runner. It needs `AGENT_MCP_URL`, `AGENT_REALM_URL` and `AGENT_CLIENT_ID` (or `AGENT_BEARER`),
+  and `AGENT_MODEL`:
 
 ```
 uv run --extra agent python -m agent.run --sample sample.csv "Onboard Acme VPN logs"
+uv run --extra agent python -m agent.run --mode fix_pipeline_issue "Stream 15768876 event 3: the user id is missing"
 ```
 
-For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak. The server refuses to start that way unless it is bound to localhost.
+In `fix_pipeline_issue` mode the agent locates the event, confirms the problem, proves a fix, and asks whether
+to apply it or give you the manual steps.
+
+For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak and calls Stroom with
+`STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
+API key when authentication is on.

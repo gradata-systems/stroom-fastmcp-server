@@ -58,7 +58,7 @@ async def main(argv: list[str]):
         url, key = secrets['STROOM_URL'], secrets['STROOM_API_KEY']
     else:
         url, key = 'http://127.0.0.1:18080', env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
-    settings = Settings(_env_file=None, stroom_url=url, stroom_api_key=key, keycloak_realm_url='-',
+    settings = Settings(_env_file=None, stroom_url=url, dev_no_auth=True, stroom_api_key=key, keycloak_realm_url='-',
                         keycloak_audience='-', public_base_url='-')
     gateway = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={

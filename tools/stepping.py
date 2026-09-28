@@ -35,6 +35,12 @@ class _Pipeline:
         return own_xslt or [e for e, t in self.types.items() if t == 'XSLTFilter'][-1:]
 
 
+def record_key(stream_id: int, location: dict[str, Any]) -> str:
+    """'stream:record', or 'stream:part:record' past the first part (record numbers restart in each part)."""
+    part = location.get('partIndex') or 0
+    return f"{stream_id}:{part}:{location['recordIndex']}" if part else f"{stream_id}:{location['recordIndex']}"
+
+
 def _criteria(stream_id: int) -> dict[str, Any]:
     return {'expression': {'type': 'operator', 'op': 'AND', 'children': [
         {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(stream_id)}]}}
@@ -86,7 +92,8 @@ async def step_pipeline(
         pipeline_uuid: PipelineUuid,
         stream_id: Annotated[int, Field(description="Stream to step through, e.g. a Raw Events sample.")],
         record: Annotated[int | Literal['first', 'last'], Field(
-            description="Zero-based record index, or 'first' / 'last'.")] = 'first',
+            description="Zero-based record index within the part, or 'first' / 'last'.")] = 'first',
+        part: Annotated[int, Field(ge=0, description="Zero-based part of a multi-part stream (locate_event gives it).")] = 0,
         draft_code: DraftCode = None,
         show: Annotated[list[str] | None, Field(
             description="Element ids whose input and output to return. Defaults to the pipeline's own "
@@ -101,7 +108,7 @@ async def step_pipeline(
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     if isinstance(record, int):
         result = await _step(stroom, pipeline, stream_id, 'REFRESH',
-                             {'metaId': stream_id, 'partIndex': 0, 'recordIndex': record}, draft_code)
+                             {'metaId': stream_id, 'partIndex': part, 'recordIndex': record}, draft_code)
     else:
         result = await _step(stroom, pipeline, stream_id, record.upper(), None, draft_code)
     if not result.get('foundRecord'):
@@ -115,7 +122,7 @@ async def step_pipeline(
                for e in wanted if e in elements}
     location = result.get('foundLocation') or {}
     return {'pipeline': pipeline.doc.get('name'), 'stream_id': stream_id,
-            'record': location.get('recordIndex'), 'draft_code_used': sorted(draft_code or {}),
+            'part': location.get('partIndex'), 'record': location.get('recordIndex'), 'draft_code_used': sorted(draft_code or {}),
             'elements': outputs, **triage(_markers(result, location.get('recordIndex'))
                                           + _empty_output(result, pipeline.default_outputs()[-1], location.get('recordIndex')),
                                           ctx.lifespan_context['rules'], pipeline.own)}
@@ -144,7 +151,7 @@ async def step_sample(
         result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
         while result.get('foundRecord') and len(records) < cap:
             location = result['foundLocation']
-            key = f"{stream_id}:{location['recordIndex']}"
+            key = record_key(stream_id, location)
             found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
             markers += found
             records.append({'record': key, 'errors': len(found)})
@@ -208,7 +215,7 @@ async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[
         while result.get('foundRecord') and len(outputs) < cap:
             location = result['foundLocation']
             elements = (result.get('stepData') or {}).get('elementMap') or {}
-            outputs[f"{stream_id}:{location['recordIndex']}"] = (elements.get(element) or {}).get('output', '')
+            outputs[record_key(stream_id, location)] = (elements.get(element) or {}).get('output', '')
             result = await _step(stroom, pipeline, stream_id, 'FORWARD', location, code)
     return outputs
 

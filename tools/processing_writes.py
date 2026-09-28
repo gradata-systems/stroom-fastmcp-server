@@ -1,4 +1,8 @@
-"""Tools that start processing: processor filters, reprocessing, and waiting for the result."""
+"""Tools that start processing: processor filters, and waiting for the result.
+
+Reprocessing is left to the user for now (a design decision to revisit): a filter is refused for any
+stream the pipeline has already processed, and the agent hands the user the stream ids instead.
+"""
 import asyncio
 import time
 from datetime import datetime
@@ -9,6 +13,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import guard_from
+from tools.pipelines import merge_layers
 from tools.processing import processing_status
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
@@ -36,6 +41,49 @@ async def _create_filter(stroom: StroomGateway, pipeline: dict[str, Any], expres
         'queryData': {'dataSource': STREAM_STORE, 'expression': expression}})
 
 
+def _selected_ids(expression: dict[str, Any] | None) -> set[int]:
+    ids = set()
+    for child in (expression or {}).get('children') or []:
+        if child.get('type') == 'operator':
+            ids |= _selected_ids(child)
+        elif child.get('field') == 'Id' and child.get('condition') == 'EQUALS' and str(child.get('value')).isdigit():
+            ids.add(int(child['value']))
+    return ids
+
+
+async def _already_processed(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[int]:
+    """Streams this pipeline has output for, or that one of its filters already selects."""
+    rows = await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})
+    selected = set()
+    for row in rows.get('values') or []:
+        f = row.get('processorFilter') or {}
+        if f.get('pipelineUuid') == pipeline_uuid and not f.get('deleted'):
+            selected |= _selected_ids((f.get('queryData') or {}).get('expression'))
+    return [i for i in stream_ids if i in selected or await _outputs(stroom, i, pipeline_uuid)]
+
+
+async def elastic_destination(stroom: StroomGateway, pipeline_uuid: str) -> dict[str, Any] | None:
+    """Cluster and index name an Elasticsearch indexing pipeline writes to; None for other pipelines."""
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    elements = {e['id'] for e in merged['elements'] if e['type'] == 'ElasticIndexingFilter'}
+    if not elements:
+        return None
+    props = {p['name']: p['value'] for p in merged['properties'] if p['element'] in elements}
+    return {'index name': props.get('indexName'), 'cluster': (props.get('cluster') or {}).get('name')}
+
+
+async def _template_check(ctx: Context, index_name: str) -> str | None:
+    """What this server can see of the index template, when it has Elasticsearch access."""
+    elastic = ctx.lifespan_context.get('elastic')
+    if not (elastic and elastic.configured):
+        return None
+    try:
+        matched = await elastic.simulate(index_name)
+    except ToolError as e:
+        return f"could not check: {e}"
+    return "a template matches this index" if matched else "NO template matches this index yet"
+
+
 async def create_processor_filter(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
@@ -46,12 +94,16 @@ async def create_processor_filter(
         created_after: Annotated[str | None, Field(
             description="With a feed scope: only streams created after this ISO time. Required for a feed scope.")] = None,
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
+        confirmation_id: Annotated[str | None, Field(
+            description="From an earlier needs_confirmation reply (Elasticsearch: the index template is written).")] = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
     Create and enable a processor filter so Stroom processes streams through the pipeline. Scope it to the
     sample stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task
-    count. Enabling processing always needs the user's approval.
+    count. Streams the pipeline already processed are refused: reprocessing is for the user to do.
+    For an Elasticsearch indexing pipeline the user first confirms that the index template for the
+    destination index has been written. Enabling processing always needs the user's approval.
     """
     stroom = gateway_from(ctx)
     pipeline = await _managed_pipeline(ctx, pipeline_uuid)
@@ -59,6 +111,11 @@ async def create_processor_filter(
         raise ToolError("Give either stream_ids (the sample) or feed, not both")
     min_ms = None
     if stream_ids:
+        done = await _already_processed(stroom, pipeline_uuid, stream_ids)
+        if done:
+            raise ToolError(f"Pipeline '{pipeline['name']}' has already processed stream(s) {done}. Reprocessing is "
+                            f"left to the user: give them the pipeline name and these stream ids, and continue "
+                            f"once they say it is done (wait_for_processing).")
         expression = {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in stream_ids]}
         scope, max_tasks = f"streams {stream_ids}", 0
     else:
@@ -68,12 +125,32 @@ async def create_processor_filter(
         expression = {'type': 'operator', 'op': 'AND', 'children': [_term('Feed', feed), _term('Type', stream_type)]}
         scope, max_tasks = f"feed {feed} ({stream_type}) created after {created_after}", stroom.settings.max_feed_filter_tasks
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
+
+    destination = await elastic_destination(stroom, pipeline_uuid)
+    if destination:
+        index = destination['index name']
+        if not index:
+            raise ToolError("This Elasticsearch indexing pipeline has no indexName set")
+        details.update(destination)
+        written = {**destination, 'seen from this server': await _template_check(ctx, index)}
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', 'create_processor_filter:index_template',
+            f"Has the index template for Elasticsearch index '{index}' (cluster {destination['cluster']}) been "
+            f"written? Indexing only starts once it has.",
+            {k: v for k, v in written.items() if v is not None}, confirmation_id, keep=True)
+        if gate:
+            return gate
+
     gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter',
-                                           f"Start processing {scope} with pipeline '{pipeline['name']}'", details, approval_id)
+                                           f"Start processing {scope} with pipeline '{pipeline['name']}'"
+                                           + (f" into index '{destination['index name']}'" if destination else ''),
+                                           details, approval_id)
     if gate:
         return gate
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
-    return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled')}
+    consent_from(ctx).discard(confirmation_id)
+    return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
+            **({'destination': destination} if destination else {})}
 
 
 async def set_processor_filter_enabled(
@@ -100,36 +177,6 @@ async def _outputs(stroom: StroomGateway, raw_id: int, pipeline_uuid: str) -> li
     rows = (await stroom.find_meta([_term('Parent Id', raw_id)], 100)).get('values') or []
     return [r['meta'] for r in rows
             if r['meta'].get('pipelineUuid') == pipeline_uuid and r['meta'].get('status') != 'DELETED']
-
-
-async def reprocess_streams(
-        ctx: Context,
-        pipeline_uuid: Annotated[str, Field(description="A pipeline this server created, after its content changed.")],
-        stream_ids: Annotated[list[int], Field(description="Raw sample streams to process again.")],
-        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
-) -> dict[str, Any]:
-    """
-    Process sample streams again after a fix. The outputs this pipeline produced from them before are
-    marked deleted first, so each raw stream ends up with exactly one Events stream. Needs approval.
-    """
-    stroom = gateway_from(ctx)
-    pipeline = await _managed_pipeline(ctx, pipeline_uuid)
-    if len(stream_ids) > stroom.settings.max_reprocess_streams:
-        raise ToolError(f"At most {stroom.settings.max_reprocess_streams} streams per call")
-    superseded = [m['id'] for raw in stream_ids for m in await _outputs(stroom, raw, pipeline_uuid)]
-    details = {'pipeline': pipeline['name'], 'streams': stream_ids, 'superseded outputs marked deleted': superseded}
-    gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
-                                           f"Reprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'",
-                                           details, approval_id)
-    if gate:
-        return gate
-    if superseded:
-        await stroom.request('PUT', '/meta/v1/update/status', {
-            'criteria': {'expression': {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in superseded]}},
-            'currentStatus': 'UNLOCKED', 'newStatus': 'DELETED'})
-    expression = {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in stream_ids]}
-    created = await _create_filter(stroom, pipeline, expression, 10, 0, None)
-    return {'filter_id': created['id'], 'superseded_outputs_deleted': superseded, 'streams': stream_ids}
 
 
 async def wait_for_processing(
@@ -169,10 +216,10 @@ async def wait_for_processing(
                             f"{raw} (failed task, fatal error, or a filter that missed it)")
         elif len(events) > 1:
             problems.append(f"Stream {raw} produced {len(events)} Events streams: it was processed more than once "
-                            "(overlapping filters or a reprocess); ask the user which to keep")
+                            "(overlapping filters, or the user reprocessed it); ask the user which to keep")
     return {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
             'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
             'hint': None if finished else "Tasks were still running at the timeout; call again."}
 
 
-ALL_TOOLS = [create_processor_filter, set_processor_filter_enabled, reprocess_streams, wait_for_processing]
+ALL_TOOLS = [create_processor_filter, set_processor_filter_enabled, wait_for_processing]

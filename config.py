@@ -9,10 +9,12 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix='STROOM_MCP_', env_file='.env', extra='ignore')
 
-    # Stroom. Until Keycloak token exchange is in place, the server calls Stroom with one API key;
-    # Stroom then applies that key's owner's permissions to every caller.
+    # Stroom. Every call acts as the user who asked: the caller's Keycloak access token is forwarded, so
+    # its aud claim must include stroom_audience as well as keycloak_audience. The API key is only for
+    # development with dev_no_auth (or tools run directly), where there is no caller token.
     stroom_url: str
-    stroom_api_key: SecretStr
+    stroom_audience: str = 'stroom'
+    stroom_api_key: SecretStr | None = None
     stroom_ca_certs: Path | None = None
     stroom_request_timeout: float = 60.0
     # Path of the data receiver, relative to stroom_url.
@@ -23,8 +25,6 @@ class Settings(BaseSettings):
     event_logging_version: str = '3.5.2'
     # Ask the user through MCP elicitation when the client supports it.
     use_elicitation: bool = True
-    # Most raw streams reprocess_streams will take in one call.
-    max_reprocess_streams: int = 20
     # Task limit on feed-wide processor filters.
     max_feed_filter_tasks: int = 2
 
@@ -54,7 +54,8 @@ class Settings(BaseSettings):
     keycloak_realm_url: str = ''
     keycloak_audience: str = ''
     public_base_url: str = ''
-    # Development only: no authentication. Refused unless the server listens on localhost.
+    # Development only: no authentication, and Stroom is called with stroom_api_key. Refused unless the
+    # server listens on localhost.
     dev_no_auth: bool = False
 
     # HTTP listener. Leave TLS unset only when TLS is terminated in front of the server.

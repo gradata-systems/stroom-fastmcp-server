@@ -37,11 +37,16 @@ async def lifespan(server: FastMCP):
 if settings.dev_no_auth:
     if settings.host not in ('127.0.0.1', 'localhost', '::1'):
         raise SystemExit("dev_no_auth is only allowed when the server listens on localhost")
+    if not settings.stroom_api_key:
+        raise SystemExit("dev_no_auth needs STROOM_MCP_STROOM_API_KEY to call Stroom")
     logger.warning("Authentication is disabled (dev_no_auth); for local development only")
     auth = None
 else:
     if not (settings.keycloak_realm_url and settings.keycloak_audience and settings.public_base_url):
         raise SystemExit("Set STROOM_MCP_KEYCLOAK_REALM_URL, _KEYCLOAK_AUDIENCE and _PUBLIC_BASE_URL")
+    if settings.stroom_api_key:
+        # Every call acts as the signed-in user; a shared key would hand its owner's rights to every caller.
+        raise SystemExit("STROOM_MCP_STROOM_API_KEY is for dev_no_auth only; Stroom calls use the caller's token")
     auth = KeycloakAuthProvider(
         realm_url=settings.keycloak_realm_url,
         base_url=settings.public_base_url,

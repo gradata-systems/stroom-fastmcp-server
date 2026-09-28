@@ -109,3 +109,69 @@ async def test_node_runs_its_tools_and_harvests_the_verdict():
 def test_full_graph_compiles_with_every_node():
     app = g.build_graph(ToolCallingFake(messages=iter([])), [])
     assert set(g.NODES) | {'ask_for_help'} <= set(app.get_graph().nodes)
+
+
+async def test_a_call_can_pass_two_gates_in_turn():
+    calls = []
+
+    async def index(name: str, confirmation_id: str | None = None, approval_id: str | None = None) -> str:
+        calls.append((confirmation_id, approval_id))
+        if not confirmation_id:
+            return json.dumps({'status': 'needs_confirmation', 'confirmation_id': 'c', 'summary': 'Template written?'})
+        if not approval_id:
+            return json.dumps({'status': 'needs_approval', 'approval_id': 'a', 'summary': 'Start indexing?'})
+        return json.dumps({'filter_id': 9})
+    app = one_node_graph(gated(StructuredTool.from_function(coroutine=index, name='index', description='Index.')))
+    config = {'configurable': {'thread_id': 'two'}}
+    first = await app.ainvoke({}, config)
+    assert first['__interrupt__'][0].value['kind'] == 'confirmation'
+    second = await app.ainvoke(Command(resume={'approved': True}), config)
+    assert second['__interrupt__'][0].value['kind'] == 'approval'
+    final = await app.ainvoke(Command(resume={'approved': True}), config)
+    assert json.loads(final['result']) == {'filter_id': 9} and calls[-1] == ('c', 'a')
+
+
+async def test_user_session_refreshes_the_token_before_it_expires():
+    import httpx
+    import respx
+    from agent.auth import UserSession
+    session = UserSession('https://kc/realms/r', 'agent', {'access_token': 'old', 'refresh_token': 'r1', 'expires_in': 10})
+    with respx.mock:
+        route = respx.post('https://kc/realms/r/protocol/openid-connect/token').mock(
+            return_value=httpx.Response(200, json={'access_token': 'new', 'refresh_token': 'r2', 'expires_in': 300}))
+        assert await session._fresh() == 'new'
+        assert await session._fresh() == 'new' and route.call_count == 1
+    assert b'refresh_token=r1' in route.calls.last.request.content
+
+
+def test_fix_flow_routing():
+    assert g.start({'mode': 'fix_pipeline_issue'}) == 'locate_issue' and g.start({'mode': 'onboard'}) == 'intake'
+    assert g.after_locate({}) == 'ask_for_help' and g.after_locate({'issue_location': {'raw_stream': 38}}) == 'draft_fix'
+    ready = {'fix': {'ready': True}, 'fix_attempt': 1, 'attempts': {'draft_fix': 1}}
+    assert g.after_draft_fix(ready) == 'offer_fix'
+    assert g.after_draft_fix({**ready, 'fix': {'ready': False}}) == 'draft_fix'
+    assert g.after_draft_fix({**ready, 'fix': {'ready': False}, 'fix_attempt': 5, 'attempts': {'draft_fix': 5}}) == 'ask_for_help'
+    # no summarise_fix in the latest attempt: could not reproduce, so ask rather than loop
+    assert g.after_draft_fix({**ready, 'attempts': {'draft_fix': 2}}) == 'ask_for_help'
+    assert g.after_offer({'fix_choice': 'apply'}) == 'apply_fix' and g.after_offer({'fix_choice': 'manual'}) == 'explain_fix'
+
+
+def test_offer_fix_asks_and_manual_path_gives_the_steps():
+    fix = {'ready': True, 'pipeline': {'name': 'Acme'}, 'doc': {'name': 'Acme XSLT'}, 'diff': '-a\n+b\n',
+           'fields_changed': [{'path': 'Event/EventDetail/Description'}], 'records_changed': 4, 'records_compared': 4,
+           'manual_steps': ['Open it.', 'Save it.']}
+    graph = StateGraph(g.BuildState)
+    graph.add_node('offer_fix', g.offer_fix)
+    graph.add_node('explain_fix', g.explain_fix)
+    graph.add_node('apply_fix', lambda s: {'notes': ['applied']})
+    graph.add_edge(START, 'offer_fix')
+    graph.add_conditional_edges('offer_fix', g.after_offer, ['apply_fix', 'explain_fix'])
+    graph.add_edge('explain_fix', END)
+    graph.add_edge('apply_fix', END)
+    app = graph.compile(checkpointer=MemorySaver())
+    config = {'configurable': {'thread_id': 'fix'}}
+    first = app.invoke({'fix': fix, 'request': 'r'}, config)
+    question = first['__interrupt__'][0].value
+    assert question['kind'] == 'choice' and question['details']['diff'] == '-a\n+b\n'
+    final = app.invoke(Command(resume={'approved': False}), config)
+    assert final['fix_choice'] == 'manual' and '1. Open it.' in final['notes'][-1] and '+b' in final['notes'][-1]

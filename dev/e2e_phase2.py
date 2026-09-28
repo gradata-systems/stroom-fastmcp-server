@@ -5,7 +5,8 @@
 1. CSV, JSON, XML and syslog samples each go from sample to valid Events: feed, upload, template,
    converter and XSLT, pipeline, stepping, processing (exactly one Events stream per raw stream),
    validation and documentation.
-2. A reported field fix: draft change, compare_outputs shows only that field changing, save, reprocess.
+2. A reported field fix: draft change, compare_outputs shows only that field changing, save; processing the
+   sample again is refused, since reprocessing is left to the user.
 3. Promotion of the CSV build, then an in-place fix through a working copy written back on promotion.
 
 Confirmations and approvals are granted here the way a user would, by passing the returned id back.
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config import Settings  # noqa: E402
+from fastmcp.exceptions import ToolError  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from tools import (builds, feeds, pipeline_writes, processing_writes, stepping, streams, templates,  # noqa: E402
                    translation, validation)
@@ -143,12 +145,14 @@ def check(condition: bool, message: str):
 
 async def agreed(call, **kwargs):
     """Call a gated tool, then call again with the id it returned, as a user agreeing would."""
-    first = await call(**kwargs)
-    if isinstance(first, dict) and str(first.get('status', '')).startswith('needs_'):
-        key = 'confirmation_id' if first['status'] == 'needs_confirmation' else 'approval_id'
-        print(f"    {first['status']}: {first['summary']}")
-        return await call(**kwargs, **{key: first[key]})
-    return first
+    ids = {}
+    while True:
+        result = await call(**kwargs, **ids)
+        if not (isinstance(result, dict) and str(result.get('status', '')).startswith('needs_')):
+            return result
+        key = 'confirmation_id' if result['status'] == 'needs_confirmation' else 'approval_id'
+        print(f"    {result['status']}: {result['summary']}")
+        ids[key] = result[key]
 
 
 async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
@@ -207,9 +211,13 @@ async def field_fix(ctx, csv: dict):
     step = await stepping.step_sample(ctx, csv['pipeline']['uuid'], [csv['raw']], draft_code={'translationFilter': draft})
     check(step['verdict'] == 'clean', 'draft steps clean')
     await translation.update_xslt(ctx, csv['xslt']['uuid'], draft)
-    await agreed(processing_writes.reprocess_streams, ctx=ctx, pipeline_uuid=csv['pipeline']['uuid'], stream_ids=[csv['raw']])
-    gate = await processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']])
-    check(gate['gate'] == 'pass', f"after reprocess still exactly one Events stream: {gate['streams']}")
+    try:
+        await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=csv['pipeline']['uuid'],
+                     stream_ids=[csv['raw']])
+        refused = ''
+    except ToolError as e:
+        refused = str(e)
+    check('left to the user' in refused, f"processing the sample again is refused (reprocessing is the user's): {refused}")
 
 
 async def promotion(ctx, csv: dict, stamp: str):
@@ -252,7 +260,7 @@ async def promotion(ctx, csv: dict, stamp: str):
 
 async def main():
     local = env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', stroom_api_key=local['STROOM_ADMIN_API_KEY'],
+    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True, stroom_api_key=local['STROOM_ADMIN_API_KEY'],
                         keycloak_realm_url='-', keycloak_audience='-', public_base_url='-', event_logging_version=VERSION)
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={

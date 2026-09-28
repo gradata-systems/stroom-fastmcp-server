@@ -65,7 +65,7 @@ def test_plan_reports_missing_required_fields():
                                     "Elasticsearch data streams need '@timestamp'"}
 
 
-ES_SETTINGS = Settings(_env_file=None, stroom_url='https://s', stroom_api_key='k', keycloak_realm_url='https://kc/r',
+ES_SETTINGS = Settings(_env_file=None, stroom_url='https://s', dev_no_auth=True, stroom_api_key='k', keycloak_realm_url='https://kc/r',
                        keycloak_audience='a', public_base_url='https://m', es_url='https://es:9200', es_api_key='esk')
 
 
@@ -88,7 +88,7 @@ async def test_elastic_templates_reads_and_guards_writes():
 
 async def test_template_tools_explain_when_elasticsearch_is_not_configured():
     ctx = SimpleNamespace(lifespan_context={'elastic': ElasticTemplates(Settings(
-        _env_file=None, stroom_url='https://s', stroom_api_key='k', keycloak_realm_url='https://kc/r',
+        _env_file=None, stroom_url='https://s', dev_no_auth=True, stroom_api_key='k', keycloak_realm_url='https://kc/r',
         keycloak_audience='a', public_base_url='https://m'))})
     with pytest.raises(ToolError, match='not configured'):
         await indexing.list_index_templates(ctx, '*')

@@ -30,6 +30,7 @@ class _Pending:
     digest: str
     user: str | None
     expires: float
+    granted: bool = False
 
 
 def _user() -> str | None:
@@ -47,19 +48,23 @@ class ConsentStore:
         self._pending: dict[str, _Pending] = {}
 
     async def require(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
-                      token: str | None) -> dict[str, Any] | None:
+                      token: str | None, keep: bool = False) -> dict[str, Any] | None:
         """None when the user has agreed; otherwise the response the tool should return.
 
-        Raises ToolError when the user declines or the id does not match this exact request.
+        Raises ToolError when the user declines or the id does not match this exact request. Ids are single
+        use. When a later gate in the same call may still stop it, pass keep=True so the id survives the
+        call being repeated for that gate, and discard() it once the action is done.
         """
         digest = _digest(action, details)
         if token:
-            pending = self._pending.pop(token, None)
+            pending = self._pending.get(token) if keep else self._pending.pop(token, None)
             if pending is None or pending.expires < time.time():
                 raise ToolError(f"Unknown or expired {kind} id; request the {kind} again")
             if (pending.kind, pending.action, pending.digest, pending.user) != (kind, action, digest, _user()):
                 raise ToolError(f"This {kind} id was issued for a different request; request the {kind} again")
-            audit(kind, action=action, details=details, outcome='granted', via='id')
+            if not keep or pending.granted is False:
+                audit(kind, action=action, details=details, outcome='granted', via='id')
+            pending.granted = True
             return None
 
         if self.use_elicitation and hasattr(ctx, 'elicit'):
@@ -81,6 +86,11 @@ class ConsentStore:
                 'hint': f"Show the summary and details to the user. If they agree, call {action} again with the "
                         f"same arguments plus {kind}_id='{pending_id}'. If they change a detail, call again with "
                         f"the new values and no id to get a fresh {kind}."}
+
+
+    def discard(self, token: str | None) -> None:
+        if token:
+            self._pending.pop(token, None)
 
 
 def _format(details: dict[str, Any]) -> str:

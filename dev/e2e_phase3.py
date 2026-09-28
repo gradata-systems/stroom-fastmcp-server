@@ -100,7 +100,7 @@ async def version_two(ctx, csv: dict, v1: dict, stamp: str):
 
 async def main():
     local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = p2.Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', stroom_api_key=local['STROOM_ADMIN_API_KEY'],
+    settings = p2.Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True, stroom_api_key=local['STROOM_ADMIN_API_KEY'],
                            keycloak_realm_url='-', keycloak_audience='-', public_base_url='-',
                            event_logging_version=p2.VERSION, conventions_dir=ROOT / 'conventions')
     stroom = p2.StroomGateway(settings)

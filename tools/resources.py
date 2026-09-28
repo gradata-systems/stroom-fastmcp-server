@@ -15,7 +15,11 @@ _RULES = """Rules for every run:
   from, and let the user confirm or correct it.
 - Step every sample record (step_sample) before processing; fix blocking groups and treat review groups as
   questions to resolve. Draft code is tried with draft_code before anything is saved.
-- Document what you build (write_documentation) and use the user's source notes for field meanings."""
+- Document what you build (write_documentation) and use the user's source notes for field meanings.
+- Reprocessing is the user's job: if a stream was already processed by a pipeline, give the user the pipeline
+  and stream ids and wait for them. Switching readers from one index version to the next is also theirs.
+- Elasticsearch indexing runs only through the Stroom indexing pipeline, and only after the user confirms that
+  the index template for the destination index has been written."""
 
 
 def _docs(source_docs: str) -> str:
@@ -67,10 +71,11 @@ Stage 2, indexing:
    ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
 8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
    (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping; set_index_fields (Lucene) or put_index_template (Elasticsearch); create_xslt with the
-   drafted indexing XSLT; create_indexing_pipeline; step_sample on the Events streams.
-10. create_processor_filter on the Events stream ids, wait_for_processing expect_events=false,
-    create_verification_dashboard and run_test_searches.
+9. draft_index_mapping; set_index_fields (Lucene), or for Elasticsearch give the user the drafted index template
+   and destination index name to write (put_index_template only if they ask); create_xslt with the drafted
+   indexing XSLT; create_indexing_pipeline; step_sample on the Events streams.
+10. create_processor_filter on the Events stream ids (Elasticsearch: the user confirms the template is written),
+    wait_for_processing expect_events=false, create_verification_dashboard and run_test_searches.
 
 Finish: write_documentation for both pipelines, then promote_build to the folders sibling sources use.
 
@@ -104,12 +109,12 @@ Samples:
 
 1. describe_pipeline to find its XSLT, index doc and index name; work out the next version from the naming
    convention (e.g. -v1 to -v2) and confirm it and the cluster or volume group with the user.
-2. draft_index_mapping with the requested fields as extra_fields; create_index_doc for v2; set_index_fields or
-   put_index_template; create_xslt with the new indexing XSLT.
+2. draft_index_mapping with the requested fields as extra_fields; create_index_doc for v2; set_index_fields, or
+   give the user the v2 index template to write; create_xslt with the new indexing XSLT.
 3. copy_pipeline with set_properties for the new XSLT and index; compare_outputs against v1 on recent Events
    streams: only the requested fields may differ.
 4. Process sample Events, wait_for_processing expect_events=false, verification dashboard and run_test_searches.
-5. write_documentation, promote_build. v1 stays running; switching readers to v2 is for people to do.
+5. write_documentation, promote_build. v1 stays running; switching readers to v2, and retiring v1, is the user's.
 
 {_RULES}"""
 
@@ -161,3 +166,29 @@ Sample:
 Report sections: Purpose and data; Processing; Field mapping; Event types; Schema conformance; Suggestions.
 Return it in the chat and save it with write_documentation in a build, then promote_build beside the
 pipeline once the user approves.{_docs(source_docs)}"""
+
+    @mcp.prompt(description="Diagnose a reported problem in an events pipeline and propose a fix.")
+    def fix_pipeline_issue(stream_id: int, issue: str, event_id: int | None = None) -> str:
+        where = f"event {event_id} of stream {stream_id}" if event_id else f"stream {stream_id}"
+        return f"""The user reports a problem with {where}: {issue}
+
+1. Locate it: locate_event(stream_id={stream_id}{f', event_id={event_id}' if event_id else ''}) gives the raw
+   stream, part and record, the pipeline, and its XSLTs and text converters (some may be inherited from a template).
+   Without an event id, use summarise_events on the Events stream to find the event type the user means,
+   then step_pipeline on raw records until you find an example.
+2. Plan the validation, and say it to the user in two or three lines: what output the record should give
+   (from the user's words, the event-logging schema and any source docs), which field paths are wrong now, and
+   which other records to check (recent raw streams on the same feed, find_streams; the same event type).
+3. Confirm the issue: step_pipeline on the located record (with part), validate_events and check_event_quality
+   on the output. If you cannot reproduce it, say what you found and ask the user; do not guess a fix.
+4. Draft the fix in the pipeline's own XSLT or text converter and try it with step_pipeline draft_code. Then
+   summarise_fix with the reported raw stream plus a few recent ones and expected_paths set to the fields the fix
+   should change. Revise until ready is true.
+5. Present the fix: the diff, the fields that change and how many records, and any template warning. Ask whether
+   to apply it to the pipeline, or to give them the manual steps.
+   - Apply: follow update_events_pipeline (ask new version or in place, confirm names, copy_pipeline, update_xslt
+     or update_text_converter with the draft, compare_outputs, write_documentation, promote_build).
+   - Manual: give summarise_fix's manual_steps and diff.
+   Either way, reprocessing existing data is the user's to do.
+
+{_RULES}"""

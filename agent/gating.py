@@ -35,9 +35,13 @@ def agreed(answer: Any) -> bool:
 
 def gated(tool: BaseTool) -> BaseTool:
     async def call(**kwargs: Any) -> Any:
-        result = await tool.ainvoke(kwargs)
-        data = parse(result)
-        if isinstance(data, dict) and data.get('status') in GATES:
+        ids: dict[str, str] = {}
+        # A call can pass more than one gate, e.g. confirm the index template is written, then approve processing.
+        for _ in range(len(GATES) + 1):
+            result = await tool.ainvoke({**kwargs, **ids})
+            data = parse(result)
+            if not (isinstance(data, dict) and data.get('status') in GATES):
+                return result
             key = GATES[data['status']]
             answer = interrupt({'tool': tool.name, 'kind': data['status'].removeprefix('needs_'),
                                 'summary': data.get('summary'), 'details': data.get('details')})
@@ -45,7 +49,7 @@ def gated(tool: BaseTool) -> BaseTool:
                 note = answer.get('note') if isinstance(answer, dict) else None
                 return json.dumps({'status': 'declined', 'summary': data.get('summary'),
                                    'user_note': note or 'The user did not agree. Ask what they want instead.'})
-            return await tool.ainvoke({**kwargs, key: data[key]})
+            ids[key] = data[key]
         return result
 
     return StructuredTool.from_function(coroutine=call, name=tool.name, description=tool.description,

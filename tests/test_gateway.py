@@ -13,7 +13,7 @@ from utils.stroom import StroomGateway
 SETTINGS = Settings(
     _env_file=None,
     stroom_url='https://stroom.example/',
-    stroom_api_key='sak_test',
+    dev_no_auth=True, stroom_api_key='sak_test',
     keycloak_realm_url='https://kc.example/realms/r',
     keycloak_audience='stroom-mcp',
     public_base_url='https://mcp.example',
@@ -88,3 +88,35 @@ async def test_find_documents_flattens_results_and_hints_when_truncated(gateway)
     assert result['documents'] == [{'type': 'Pipeline', 'uuid': 'p-1', 'name': 'Keycloak - Indexing',
                                     'path': 'System / Elastic Indices / Keycloak'}]
     assert 'hint' in result
+
+
+USER_SETTINGS = SETTINGS.model_copy(update={'dev_no_auth': False, 'stroom_api_key': None})
+
+
+def _token(aud, expires_at=None):
+    from fastmcp.server.auth import AccessToken
+    return AccessToken(token='user-jwt', client_id='openwebui', scopes=[], expires_at=expires_at,
+                       claims={'aud': aud, 'preferred_username': 'alice'})
+
+
+@respx.mock
+async def test_calls_act_as_the_caller_with_their_own_token(monkeypatch):
+    monkeypatch.setattr('utils.stroom.get_access_token', lambda: _token(['stroom-mcp', 'stroom']))
+    route = respx.get(f'{API}/meta/v1/getTypes').mock(return_value=httpx.Response(200, json=[]))
+    gw = StroomGateway(USER_SETTINGS)
+    await gw.get('/meta/v1/getTypes')
+    await gw.close()
+    assert route.calls.last.request.headers['Authorization'] == 'Bearer user-jwt'
+
+
+@pytest.mark.parametrize('token, message', [
+    (None, 'No caller identity'),
+    (_token('stroom-mcp'), "lacks 'stroom'"),
+    (_token(['stroom', 'stroom-mcp'], expires_at=1), 'expired'),
+])
+async def test_calls_refuse_without_a_token_stroom_accepts(monkeypatch, token, message):
+    monkeypatch.setattr('utils.stroom.get_access_token', lambda: token)
+    gw = StroomGateway(USER_SETTINGS)
+    with pytest.raises(ToolError, match=message):
+        await gw.get('/meta/v1/getTypes')
+    await gw.close()

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_access_token
 
 from config import Settings
 from security.audit import audit
@@ -59,19 +60,17 @@ def _reason(response: httpx.Response) -> str:
 
 
 class StroomGateway:
-    """Calls the Stroom REST API (`/api/...`) on behalf of the MCP caller.
+    """Calls the Stroom REST API (`/api/...`) as the MCP caller.
 
-    Stroom applies the permissions of whichever identity the request carries. For now that is
-    the configured API key's owner; Keycloak token exchange will replace it with the caller's own
-    identity.
+    The caller's Keycloak access token is forwarded, so Stroom applies that user's own permissions
+    and audits them by name. Only with dev_no_auth (no caller token) is the configured API key used.
     """
 
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.settings = settings
         self._client = httpx.AsyncClient(
             base_url=settings.stroom_url.rstrip('/') + '/api',
-            headers={'Authorization': f'Bearer {settings.stroom_api_key.get_secret_value()}',
-                     'Accept': 'application/json'},
+            headers={'Accept': 'application/json'},
             # The OS trust store, so an internal CA the host already trusts works without extra config.
             verify=ssl.create_default_context(cafile=str(settings.stroom_ca_certs) if settings.stroom_ca_certs else None),
             timeout=settings.stroom_request_timeout,
@@ -81,15 +80,33 @@ class StroomGateway:
     async def close(self) -> None:
         await self._client.aclose()
 
+    def _authorization(self) -> dict[str, str]:
+        if self.settings.dev_no_auth:
+            if not self.settings.stroom_api_key:
+                raise ToolError("dev_no_auth needs STROOM_MCP_STROOM_API_KEY to call Stroom")
+            return {'Authorization': f'Bearer {self.settings.stroom_api_key.get_secret_value()}'}
+        token = get_access_token()
+        if token is None:
+            raise ToolError("No caller identity to call Stroom with")
+        audience = (token.claims or {}).get('aud')
+        if self.settings.stroom_audience not in (audience if isinstance(audience, list) else [audience]):
+            raise ToolError(f"Your access token is not valid for Stroom: its aud claim lacks "
+                            f"'{self.settings.stroom_audience}'. Keycloak needs an audience mapper for it on the "
+                            f"client you signed in with.")
+        if token.expires_at and token.expires_at <= time.time():
+            raise ToolError("Your access token expired during this call; sign in again or refresh, then call again")
+        return {'Authorization': f'Bearer {token.token}'}
+
     async def request(self, method: str, path: str, body: Any = None) -> Any:
         """Send one request and return the decoded JSON body (None when empty).
 
         Failures become ToolErrors with Stroom's own reason, so the model can correct itself.
         """
+        headers = self._authorization()
         started = time.perf_counter()
         who = {'method': method, 'path': path}
         try:
-            response = await self._client.request(method, path, json=body)
+            response = await self._client.request(method, path, json=body, headers=headers)
         except httpx.HTTPError as e:
             logger.exception("Stroom %s %s failed", method, path)
             audit('stroom_request', outcome='error', error=str(e), **who)
@@ -142,7 +159,8 @@ class StroomGateway:
         """POST data to Stroom's datafeed receiver, as a sending system would."""
         url = self.settings.stroom_url.rstrip('/') + self.settings.datafeed_path
         try:
-            response = await self._client.post(url, content=data, headers={'Feed': feed, **headers})
+            response = await self._client.post(url, content=data,
+                                               headers={'Feed': feed, **headers, **self._authorization()})
         except httpx.HTTPError as e:
             audit('stroom_request', outcome='error', error=str(e), method='POST', path=self.settings.datafeed_path)
             raise ToolError("Stroom's datafeed is unavailable") from e
