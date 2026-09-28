@@ -10,6 +10,7 @@ from security.policy import AccessPolicy
 from main_tools import TOOL_MODULES
 from tools import resources
 from utils.consent import ConsentStore
+from utils.elastic import ElasticTemplates
 from utils.stroom import StroomGateway
 from utils.triage import ErrorRules
 
@@ -25,10 +26,12 @@ consent = ConsentStore(settings.use_elicitation)
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     stroom = StroomGateway(settings)
+    elastic = ElasticTemplates(settings)
     try:
-        yield {'stroom': stroom, 'rules': rules, 'policy': policy, 'consent': consent}
+        yield {'stroom': stroom, 'elastic': elastic, 'rules': rules, 'policy': policy, 'consent': consent}
     finally:
         await stroom.close()
+        await elastic.close()
 
 
 mcp = FastMCP(

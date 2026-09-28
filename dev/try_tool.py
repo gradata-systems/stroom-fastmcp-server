@@ -21,13 +21,16 @@ from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from main_tools import TOOL_MODULES  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
+from utils.elastic import ElasticTemplates  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
 
 TOOLS = {t.__name__: t for m in TOOL_MODULES for t in m.ALL_TOOLS}
 # Tools that change Stroom; never run against the live instance from here.
 WRITE_TOOLS = {t.__name__ for m in TOOL_MODULES if m.__name__.endswith(('_writes', 'translation', 'builds'))
-               for t in m.ALL_TOOLS} | {'create_feed', 'upload_sample', 'record_source_notes'}
+               for t in m.ALL_TOOLS} | {'create_feed', 'upload_sample', 'record_source_notes', 'put_index_template',
+                                        'set_index_fields', 'create_index_doc', 'create_indexing_pipeline',
+                                        'create_verification_dashboard'}
 
 
 CONSENT = ConsentStore(use_elicitation=False)
@@ -62,7 +65,7 @@ async def main(argv: list[str]):
         'stroom': gateway, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'),
         # No elicitation here: gated tools return an id; pass it back as confirmation_id / approval_id.
-        'consent': CONSENT})
+        'consent': CONSENT, 'elastic': ElasticTemplates(settings)})
     tool = TOOLS[name]
     kwargs = {k: parse(v) for k, v in args.items()}
     if 'ctx' in inspect.signature(tool).parameters:

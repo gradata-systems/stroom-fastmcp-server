@@ -137,6 +137,9 @@ async def wait_for_processing(
         pipeline_uuid: Annotated[str, Field(description="The pipeline that is processing.")],
         stream_ids: Annotated[list[int], Field(description="Input streams to wait for.")],
         timeout_seconds: Annotated[int, Field(ge=5, le=900)] = 180,
+        expect_events: Annotated[bool, Field(
+            description="True for translation pipelines (one Events stream per input); False for indexing "
+                        "pipelines, which write to an index and should produce no Error stream.")] = True,
 ) -> dict[str, Any]:
     """
     Wait until the pipeline's processor tasks finish, then report per input stream the Events and Error
@@ -148,7 +151,7 @@ async def wait_for_processing(
     while True:
         status = await processing_status(ctx, pipeline_uuid)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid) for raw in stream_ids}
-        all_have_output = all(outputs.values())
+        all_have_output = all(outputs.values()) or not expect_events
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
         if (all_have_output and finished) or time.monotonic() > deadline:
             break
@@ -158,7 +161,10 @@ async def wait_for_processing(
         events = [m['id'] for m in metas if m.get('typeName') == 'Events']
         errors = [m['id'] for m in metas if m.get('typeName') == 'Error']
         per_stream.append({'input': raw, 'events': events, 'errors': errors})
-        if len(events) == 0:
+        if not expect_events:
+            if errors:
+                problems.append(f"Stream {raw} produced Error stream(s) {errors}: summarise_errors {raw}")
+        elif len(events) == 0:
             problems.append(f"Stream {raw} produced no Events stream: check processing_status and summarise_errors "
                             f"{raw} (failed task, fatal error, or a filter that missed it)")
         elif len(events) > 1:

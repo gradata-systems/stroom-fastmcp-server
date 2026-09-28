@@ -44,8 +44,17 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Promotion | Moved docs kept the `mcp-managed` tag, so the guard still let the agent change production content. | Promotion removes the agent's tags; later changes need a working copy. |
 | Consent | Approvals bound to the exact details caught the promotion plan changing between calls. | Build plans in a stable order. |
 
+## Phase 3 additions (`dev/e2e_phase3.py`, `dev/check_es_xslt.py`)
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| Lucene exit test | From a CSV build's Events: convention guidance (no default assumed), field plan, index doc and fields, drafted indexing XSLT, pipeline from `Indexing`, stepping, processing with no Error stream, dashboard searches (3 docs, exact matches, time range 2 of 3), documentation; a v2 copy adding one field differed from v1 only by that field, v2 found the failed logon by it, v1 untouched; 16 docs promoted. | Stage 2 works end to end on Lucene. |
+| Elasticsearch XSLT | The drafted ES XSLT, run with Saxon over a real Events record, produced JSON XML that validates against Stroom's `xpath-functions.xsd` (the `JSON` schema group `Events to Elasticsearch` checks). Absent values are left out. | ES rendering proven without writing to Elasticsearch. |
+| Live ES search | `run_test_searches` on the live Keycloak dashboard (read-only) returned Elasticsearch documents with ECS fields plus Stroom's `__stream_id__` and `__event_id__`. A real dashboard's table settings carry fields (`selectionHandlers`, `pageSize`) that the search API rejects as "Unable to process JSON". | Send only TableSettings fields; errors now include Stroom's detail. |
+| Live clusters | `find_elastic_clusters` lists `ES_PROD` (six Elastic Index docs, e.g. Keycloak `ecs-keycloak-v1`) and `ES_DEV` (none), with credentials redacted. | Cluster proposal has real data. |
+
 ## Not yet tested
 
-- Elastic indexing: the local stack uses Lucene instead; Elasticsearch is exercised against the live instance later. Dashboard search is proven on Lucene.
+- Writing to Elasticsearch (index templates, ES indexing pipelines processing into a live index): no ES credentials, and the live instance stays read-only. Covered by mocked tests and the XSLT/XSD check.
 - Keycloak token exchange, and whether live `/stroom/datafeed` accepts OIDC tokens.
 - Stepping a pipeline with an empty XSLTFilter (the question of what Stroom does with a template's unset `decorationFilter`).

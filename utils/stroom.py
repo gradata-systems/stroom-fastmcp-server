@@ -51,7 +51,10 @@ def _reason(response: httpx.Response) -> str:
     except ValueError:
         return response.reason_phrase or f'HTTP {response.status_code}'
     if isinstance(body, dict):
-        return str(body.get('message') or body.get('details') or body.get('error') or body)
+        message, details = body.get('message'), body.get('details')
+        if message and details and details not in message:
+            return f"{message} ({str(details)[:300]})"
+        return str(message or details or body.get('error') or body)
     return str(body)
 
 

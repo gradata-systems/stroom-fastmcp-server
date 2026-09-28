@@ -1,0 +1,16 @@
+# Elastic Common Schema names for common event-logging paths, e.g. for ecs-* indices.
+name: ecs
+description: Elastic Common Schema 8.x field names (subset); extend from the reference templates
+structure: nested
+reference_index_docs: []
+reference_templates: ['ecs-*']
+required_fields: {StreamId: id, EventId: id, '@timestamp': date}
+field_map:
+  EventTime/TimeCreated: {name: '@timestamp', type: date}
+  EventSource/System/Name: {name: observer.product, type: keyword}
+  EventSource/Device/HostName: {name: host.name, type: keyword}
+  EventSource/Device/IPAddress: {name: host.ip, type: ip}
+  EventSource/Client/IPAddress: {name: source.ip, type: ip}
+  EventSource/User/Id: {name: user.name, type: keyword}
+  EventDetail/TypeId: {name: event.code, type: keyword}
+  EventDetail/Description: {name: message, type: text}

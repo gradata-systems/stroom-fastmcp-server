@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 2 (build and fix translations). 40 tools:
+Status: Phase 3 (indexing on Lucene or Elasticsearch). 52 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -17,13 +17,17 @@ Status: Phase 2 (build and fix translations). 40 tools:
 | Stepping | `step_pipeline`, `step_sample`, `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
+| Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
+| Elasticsearch | `find_elastic_clusters`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval: asked through MCP elicitation where the client supports it,
 otherwise returned as an id to pass back. Everything is written under `MCP Workspace/<build>` and tagged
 `mcp-managed`; only tagged docs can be changed, and promotion moves them into place.
 
-Resources: `stroom://guides` and `stroom://guide/{name}`. Prompt: `evaluate_events_pipeline`.
+Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts: `onboard_data_source`,
+`update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`.
+Field conventions: `conventions/*.yaml`. Elasticsearch (templates only) is optional: `STROOM_MCP_ES_URL`.
 Error triage rules: `error_rules.yaml`. Template sources: `access_policy.yaml`.
 
 To call a tool directly during development (no MCP client or Keycloak):
@@ -48,5 +52,5 @@ here, never against a shared instance.
 cd dev/stroom && ./init-env.sh && docker compose up -d
 ```
 
-`dev/e2e_phase2.py` runs the Phase 2 exit test against it. The Phase 0 spike (`spike/phase0.py`) proves the risky Stroom APIs against it; results are in
+`dev/e2e_phase2.py` and `dev/e2e_phase3.py` run the Phase 2 and 3 exit tests against it. The Phase 0 spike (`spike/phase0.py`) proves the risky Stroom APIs against it; results are in
 [spike/FINDINGS.md](spike/FINDINGS.md).

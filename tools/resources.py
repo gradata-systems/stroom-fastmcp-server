@@ -1,10 +1,26 @@
-"""MCP resources (reference guides) and prompts (packaged workflows)."""
+"""MCP resources (reference guides, convention profiles) and prompts (packaged workflows)."""
 from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ResourceError
 
-GUIDES = Path(__file__).resolve().parents[1] / 'knowledge' / 'guides'
+ROOT = Path(__file__).resolve().parents[1]
+GUIDES = ROOT / 'knowledge' / 'guides'
+
+_RULES = """Rules for every run:
+- Build everything in one build (start_build); nothing leaves the workspace until promote_build is approved.
+- Confirm key details with the user when a tool returns needs_confirmation, and ask for approval when it returns
+  needs_approval: show the summary, and only pass the id back once the user has agreed.
+- Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
+  from, and let the user confirm or correct it.
+- Step every sample record (step_sample) before processing; fix blocking groups and treat review groups as
+  questions to resolve. Draft code is tried with draft_code before anything is saved.
+- Document what you build (write_documentation) and use the user's source notes for field meanings."""
+
+
+def _docs(source_docs: str) -> str:
+    return (f"\n\nThe user supplied this source documentation. Record it with record_source_notes and use it for "
+            f"field meanings and event types:\n{source_docs}") if source_docs else ''
 
 
 def register(mcp: FastMCP) -> None:
@@ -24,11 +40,109 @@ def register(mcp: FastMCP) -> None:
             lines.append(f'- `stroom://guide/{path.stem}`: {title}')
         return '\n'.join(lines)
 
-    @mcp.prompt(description="Evaluate and document an existing events pipeline (read-only).")
+    @mcp.resource('stroom://conventions/{name}', mime_type='text/yaml', description="A field convention profile.")
+    def convention(name: str) -> str:
+        path = ROOT / 'conventions' / f'{name}.yaml'
+        if not path.is_file():
+            raise ResourceError(f"No convention '{name}'")
+        return path.read_text(encoding='utf-8')
+
+    @mcp.prompt(description="Onboard a new data source: sample to events, then indexing, then promotion.")
+    def onboard_data_source(sample: str, source_name: str, vendor: str = '', source_docs: str = '') -> str:
+        return f"""Onboard "{source_name}"{f' from {vendor}' if vendor else ''} into Stroom.
+
+Stage 1, events:
+1. profile_sample on the sample below. start_build with a build name for this source.
+2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
+   candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
+3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
+4. Draft the text converter (if the template needs one) and the XSLT (stroom://guide/xslt, stroom://guide/event-logging).
+   check_xslt, then step_sample with draft_code until the verdict is clean; step_pipeline on single records to debug.
+5. create_text_converter / create_xslt, create_pipeline from the template, step_sample again.
+6. create_processor_filter on the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
+   validate_events and check_event_quality on the output.
+
+Stage 2, indexing:
+7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch). get_field_conventions;
+   ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
+8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
+   (following the environment's versioned naming); create_index_doc once confirmed.
+9. draft_index_mapping; set_index_fields (Lucene) or put_index_template (Elasticsearch); create_xslt with the
+   drafted indexing XSLT; create_indexing_pipeline; step_sample on the Events streams.
+10. create_processor_filter on the Events stream ids, wait_for_processing expect_events=false,
+    create_verification_dashboard and run_test_searches.
+
+Finish: write_documentation for both pipelines, then promote_build to the folders sibling sources use.
+
+{_RULES}{_docs(source_docs)}
+
+Sample:
+{sample}"""
+
+    @mcp.prompt(description="Fix or extend an existing events pipeline (new version or in place).")
+    def update_events_pipeline(pipeline: str, samples: str = '', issue: str = '', source_docs: str = '') -> str:
+        return f"""Update the events pipeline "{pipeline}".{f' Reported issue: {issue}' if issue else ''}
+
+1. Find it and describe_pipeline; get_document its XSLT; describe_translation.
+2. Ask the user whether this is a new version (e.g. V1.2 to V1.3) or an in-place change, and confirm the names.
+   New version: copy_pipeline with rename (e.g. {{'V1.2': 'V1.3'}}). In place: copy_pipeline working_copy=true.
+3. Test records: new samples go to a test feed in the build (create_feed, upload_sample), never the production feed;
+   for a reported issue, find example records in the production feed (find_streams, read_stream, step_pipeline).
+4. Draft the change and prove it with compare_outputs (draft_code) on the test records and recent production
+   records: only the targeted fields may change. step_sample must stay clean.
+5. update_xslt on the copy; write_documentation noting the change; promote_build (approval).
+   Reprocessing historical data is the user's decision: propose it, do not do it.
+
+{_RULES}{_docs(source_docs)}{f'''
+
+Samples:
+{samples}''' if samples else ''}"""
+
+    @mcp.prompt(description="Create the next version of an indexing pipeline with field changes.")
+    def update_indexing_pipeline(indexing_pipeline: str, changes: str) -> str:
+        return f"""Create the next version of the indexing pipeline "{indexing_pipeline}" with these changes: {changes}
+
+1. describe_pipeline to find its XSLT, index doc and index name; work out the next version from the naming
+   convention (e.g. -v1 to -v2) and confirm it and the cluster or volume group with the user.
+2. draft_index_mapping with the requested fields as extra_fields; create_index_doc for v2; set_index_fields or
+   put_index_template; create_xslt with the new indexing XSLT.
+3. copy_pipeline with set_properties for the new XSLT and index; compare_outputs against v1 on recent Events
+   streams: only the requested fields may differ.
+4. Process sample Events, wait_for_processing expect_events=false, verification dashboard and run_test_searches.
+5. write_documentation, promote_build. v1 stays running; switching readers to v2 is for people to do.
+
+{_RULES}"""
+
+    @mcp.prompt(description="Index an existing Events feed (stage 2 only).")
+    def index_event_data(events_feed: str, index_pattern: str = '') -> str:
+        return f"""Index the events in feed "{events_feed}"{f' into {index_pattern}' if index_pattern else ''}.
+Find recent Events streams (find_streams feed={events_feed} stream_type=Events) and run stage 2 of
+onboard_data_source on them: backend and convention with the user, index doc, field plan, indexing pipeline,
+stepping, processing, verification searches, documentation, promotion.
+
+{_RULES}"""
+
+    @mcp.prompt(description="Index raw structured data directly into a discovery index.")
+    def create_discovery_index(feed: str = '', sample: str = '', timestamp_field: str = '') -> str:
+        return f"""Create a discovery index for {'feed ' + feed if feed else 'the sample below'}: raw structured data
+indexed as it is, for exploration, without an event-logging translation.
+
+1. find_pipeline_templates stage=discovery. profile_sample (and get_stream_attributes on a raw stream) to propose
+   enrichments: embedded JSON to unpack with json-to-xml(), stream meta to add with stroom:meta().
+2. Confirm cluster, index name, template, timestamp field{f' ({timestamp_field})' if timestamp_field else ''} and
+   enrichments with the user in one message.
+3. The XSLT copies the parser's JSON XML (namespace http://www.w3.org/2013/XSL/json) into the xpath-functions
+   namespace the indexing filter reads, adding StreamId, EventId and @timestamp and the enrichments.
+4. Step every sample record, process with approval, verify with a dashboard and test searches, document, promote.
+
+{_RULES}{f'''
+
+Sample:
+{sample}''' if sample else ''}"""
+
+    @mcp.prompt(description="Evaluate and document an existing events pipeline.")
     def evaluate_events_pipeline(pipeline: str, sample_size: int = 50, source_docs: str = '') -> str:
-        docs = f"\n\nThe user supplied this source documentation; use it for field meanings and event types:\n{source_docs}" \
-            if source_docs else ''
-        return f"""Evaluate the Stroom events pipeline "{pipeline}" and write a report. Change nothing in Stroom.
+        return f"""Evaluate the Stroom events pipeline "{pipeline}" and write a report. Change nothing except the report.
 
 1. Describe the pipeline: find it (find_documents), then describe_pipeline for its template chain,
    elements, what it overrides or removes, and its reference data. get_document its XSLT and text converter.
@@ -45,4 +159,5 @@ def register(mcp: FastMCP) -> None:
    and a draft XSLT change.
 
 Report sections: Purpose and data; Processing; Field mapping; Event types; Schema conformance; Suggestions.
-Read stroom://guide/event-logging and stroom://guide/xslt first if you need them.{docs}"""
+Return it in the chat and save it with write_documentation in a build, then promote_build beside the
+pipeline once the user approves.{_docs(source_docs)}"""

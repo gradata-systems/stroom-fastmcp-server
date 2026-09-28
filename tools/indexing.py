@@ -1,0 +1,426 @@
+"""Indexing tools for either backend: Stroom's Lucene index or Elasticsearch."""
+import asyncio
+import time
+import uuid as uuidlib
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+import yaml
+from fastmcp import Context
+from fastmcp.exceptions import ToolError
+from pydantic import Field
+
+from security.guard import guard_from
+from tools.explorer import _redact
+from tools.pipeline_writes import PropertyValue, create_pipeline
+from tools.streams import summarise_events
+from tools.templates import _shape
+from utils.consent import consent_from
+from utils.elastic import ElasticTemplates, flatten_mapping
+from utils.fieldplan import Backend, FieldPlan, PlannedField
+from utils.stroom import gateway_from
+
+Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
+INDEX_TYPE = {'lucene': 'Index', 'elasticsearch': 'ElasticIndex'}
+
+
+def _es(ctx: Context) -> ElasticTemplates:
+    return ctx.lifespan_context['elastic']
+
+
+def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
+    folder: Path = gateway_from(ctx).settings.conventions_dir
+    out = {}
+    for path in sorted(folder.glob('*.yaml')) if folder.is_dir() else []:
+        profile = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        out[profile.get('name', path.stem)] = profile
+    return out
+
+
+async def get_field_conventions(
+        ctx: Context,
+        name: Annotated[str | None, Field(description="Convention profile to use; omit to list them.")] = None,
+) -> dict[str, Any]:
+    """
+    Field naming conventions for indexes. Without a name (and no configured default) this lists the profiles
+    and returns needs_guidance: the agent must ask the user which convention to follow, point at reference
+    templates or index docs, or describe one. It never picks a convention itself. With a name it returns the
+    profile's field map plus the fields and types of its reference index docs (Lucene) and templates (ES).
+    """
+    profiles = _conventions(ctx)
+    name = name or gateway_from(ctx).settings.default_convention
+    if not name:
+        return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
+                'hint': "Ask the user which convention to use, which existing index docs or templates to follow, "
+                        "or how fields should be named. Do not assume one."}
+    if name not in profiles:
+        raise ToolError(f"No convention profile '{name}'. Profiles: {', '.join(profiles) or 'none'}")
+    profile = profiles[name]
+    stroom = gateway_from(ctx)
+    reference: dict[str, dict[str, str]] = {}
+    for doc_name in profile.get('reference_index_docs') or []:
+        found = await stroom.find_documents(doc_name, ['Index', 'ElasticIndex'], 20)
+        for value in found.get('values') or []:
+            ref = value['docRef']
+            if ref.get('name') == doc_name and ref.get('type') in ('Index', 'ElasticIndex'):
+                fields = await stroom.post('/dataSource/v1/findFields', {
+                    'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
+                reference[f"{ref['type']} {doc_name}"] = {f['fldName']: f['fldType'] for f in fields.get('values') or []}
+    es = _es(ctx)
+    for pattern in profile.get('reference_templates') or []:
+        if not es.configured:
+            reference[f'template {pattern}'] = {'(unavailable)': 'Elasticsearch is not configured'}
+            continue
+        for template in await es.index_templates(pattern):
+            mapping = ((template['index_template'].get('template') or {}).get('mappings') or {}).get('properties')
+            reference[f"template {template['name']}"] = flatten_mapping(mapping)
+    return {'name': name, 'profile': profile, 'reference_fields': reference}
+
+
+async def draft_index_mapping(
+        ctx: Context,
+        backend: Annotated[Backend, Field(description="From the chosen indexing template (find_pipeline_templates).")],
+        index_name: Annotated[str, Field(description="Lucene index doc name, or ES index / data stream name.")],
+        convention: Annotated[str, Field(description="Convention profile the user chose (get_field_conventions).")],
+        events_stream_ids: Annotated[list[int], Field(description="Events streams from stage 1, to see which "
+                                                                  "event-logging paths are actually populated.")],
+        extra_fields: Annotated[list[PlannedField], Field(
+            description="Fields the user asked for beyond the convention's map.")] = [],
+) -> dict[str, Any]:
+    """
+    Draft the index for the build: a field plan (name, type and source path per field) from the chosen
+    convention, limited to paths the sample events actually populate, plus StreamId and EventId. Returns
+    the plan rendered for the backend (Lucene field list or Elasticsearch index template) and a draft
+    indexing XSLT in the output form that backend's indexing filter reads. Nothing is saved.
+    """
+    profiles = _conventions(ctx)
+    if convention not in profiles:
+        raise ToolError(f"No convention profile '{convention}'; ask the user and use get_field_conventions")
+    profile = profiles[convention]
+    events = await summarise_events(ctx, events_stream_ids, 200)
+    populated = events['path_population']
+    fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
+              PlannedField(name='EventId', type='id', source='@EventId')]
+    unused = []
+    for path, spec in (profile.get('field_map') or {}).items():
+        if populated.get(path):
+            fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
+        else:
+            unused.append(path)
+    fields += [f for f in extra_fields if f.name not in {x.name for x in fields}]
+    time_field = next((f.name for f in fields if f.source == 'EventTime/TimeCreated'), 'EventTime')
+    if backend == 'elasticsearch' and not any(f.name == '@timestamp' for f in fields):
+        fields.append(PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'))
+        time_field = '@timestamp'
+    plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields)
+    rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
+    unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
+    return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
+            'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
+            'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again."}
+
+
+async def list_index_templates(
+        ctx: Context, pattern: Annotated[str, Field(description="Template name pattern, e.g. 'ecs-*'.")] = '*',
+) -> dict[str, Any]:
+    """Elasticsearch: index templates matching a pattern, with their index patterns, priority and field types."""
+    templates = await _es(ctx).index_templates(pattern)
+    return {'templates': [{'name': t['name'], 'index_patterns': t['index_template'].get('index_patterns'),
+                           'priority': t['index_template'].get('priority'),
+                           'composed_of': t['index_template'].get('composed_of'),
+                           'fields': flatten_mapping(((t['index_template'].get('template') or {}).get('mappings') or {})
+                                                     .get('properties'))} for t in templates]}
+
+
+async def simulate_index_template(
+        ctx: Context, index_name: Annotated[str, Field(description="Index or data stream name to simulate.")],
+) -> dict[str, Any]:
+    """Elasticsearch: the mapping an index of this name would get from the templates that match it."""
+    body = await _es(ctx).simulate(index_name)
+    if not body:
+        return {'index_name': index_name, 'matched': False}
+    return {'index_name': index_name, 'matched': True,
+            'fields': flatten_mapping(((body.get('template') or {}).get('mappings') or {}).get('properties')),
+            'overlapping': body.get('overlapping')}
+
+
+async def put_index_template(
+        ctx: Context,
+        plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
+        template_name: Annotated[str, Field(description="Template name, within the allowed patterns.")],
+        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
+) -> dict[str, Any]:
+    """Elasticsearch: create or update an index template from the field plan. Needs approval."""
+    if plan.backend != 'elasticsearch':
+        raise ToolError("put_index_template is for Elasticsearch; Lucene fields are set with set_index_fields")
+    rendered = plan.elastic_template(template_name)
+    details = {'template': template_name, 'index_patterns': rendered['body']['index_patterns'],
+               'fields': {f.name: f.type for f in plan.fields}}
+    gate = await consent_from(ctx).require(ctx, 'approval', 'put_index_template',
+                                           f"Put Elasticsearch index template '{template_name}'", details, approval_id)
+    if gate:
+        return gate
+    await _es(ctx).put_index_template(template_name, rendered['body'])
+    return {'template': template_name, 'saved': True}
+
+
+async def set_index_fields(
+        ctx: Context,
+        index_uuid: Annotated[str, Field(description="A Lucene Index doc this server created.")],
+        plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend lucene).")],
+) -> dict[str, Any]:
+    """Lucene: add the plan's fields to the index doc (keywords as TEXT with the KEYWORD analyzer)."""
+    if plan.backend != 'lucene':
+        raise ToolError("set_index_fields is for Lucene; Elasticsearch fields come from put_index_template")
+    stroom = gateway_from(ctx)
+    doc = await stroom.get_doc('Index', index_uuid)
+    ref = {'type': 'Index', 'uuid': index_uuid, 'name': doc.get('name')}
+    await guard_from(ctx).check_managed(ref)
+    existing = await stroom.post('/dataSource/v1/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
+    have = {f['fldName'] for f in existing.get('values') or []}
+    added = []
+    for field in plan.lucene_fields():
+        if field['fldName'] not in have:
+            await stroom.post('/index/v2/addField', {'indexDocRef': ref, 'indexField': field})
+            added.append(field['fldName'])
+    return {'index': doc.get('name'), 'added': added, 'already_present': sorted(have)}
+
+
+async def find_elastic_clusters(
+        ctx: Context, test: Annotated[bool, Field(description="Also run Stroom's connection test on each.")] = False,
+) -> dict[str, Any]:
+    """
+    Elasticsearch: the Elastic Cluster docs in Stroom with their connection URLs (never credentials), the
+    Elastic Index docs that use each, and those docs' settings. Pick the cluster that sibling sources use and
+    confirm it with the user; this server never creates or changes cluster docs.
+    """
+    stroom = gateway_from(ctx)
+    clusters = [v['docRef'] for v in (await stroom.find_documents('*', ['ElasticCluster'], 50)).get('values') or []
+                if v['docRef'].get('type') == 'ElasticCluster']
+    indexes = [v for v in (await stroom.find_documents('*', ['ElasticIndex'], 500)).get('values') or []
+               if v['docRef'].get('type') == 'ElasticIndex']
+    by_cluster: dict[str, list[dict[str, Any]]] = {}
+    for value in indexes:
+        doc = await stroom.get_doc('ElasticIndex', value['docRef']['uuid'])
+        cluster = (doc.get('clusterRef') or {}).get('uuid')
+        by_cluster.setdefault(cluster, []).append({'name': doc.get('name'), 'uuid': doc.get('uuid'),
+                                                   'index_name': doc.get('indexName'), 'time_field': doc.get('timeField'),
+                                                   'path': (value.get('path') or '').replace(' / ', '/')})
+    out = []
+    for ref in clusters:
+        doc = _redact(await stroom.get_doc('ElasticCluster', ref['uuid']))
+        entry = {'name': doc.get('name'), 'uuid': doc.get('uuid'),
+                 'urls': (doc.get('connection') or {}).get('connectionUrls'),
+                 'index_docs': by_cluster.get(ref['uuid'], [])}
+        if test:
+            entry['test'] = await stroom.post('/elasticCluster/v1/testCluster', await stroom.get_doc('ElasticCluster', ref['uuid']))
+        out.append(entry)
+    return {'clusters': out}
+
+
+async def create_index_doc(
+        ctx: Context,
+        build: Build,
+        backend: Backend,
+        name: Annotated[str, Field(description="Index doc name, following the environment's convention.")],
+        time_field: Annotated[str, Field(description="The plan's time field.")],
+        index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
+        cluster_uuid: Annotated[str | None, Field(description="Elasticsearch: an existing Elastic Cluster doc.")] = None,
+        volume_group: Annotated[str, Field(description="Lucene: the index volume group.")] = 'Default Volume Group',
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+) -> dict[str, Any]:
+    """
+    Create the build's index doc: a Lucene Index in a volume group, or an Elastic Index doc on an existing
+    Elastic Cluster doc pointing at the index or data stream. The user confirms the backend, name and target.
+    """
+    stroom = gateway_from(ctx)
+    if backend == 'elasticsearch':
+        if not (index_name and cluster_uuid):
+            raise ToolError("Elasticsearch needs index_name and cluster_uuid (find_elastic_clusters)")
+        cluster = await stroom.get_doc('ElasticCluster', cluster_uuid)
+        target = {'cluster': cluster.get('name'), 'index name': index_name}
+    else:
+        target = {'volume group': volume_group}
+    details = {'build': build, 'backend': backend, 'index doc': name, 'time field': time_field, **target}
+    gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_index_doc', f"Create {backend} index doc '{name}'",
+                                           details, confirmation_id)
+    if gate:
+        return gate
+    doc_type = INDEX_TYPE[backend]
+    ref = await guard_from(ctx).create(doc_type, name, build)
+    doc = await stroom.get_doc(doc_type, ref['uuid'])
+    if backend == 'lucene':
+        doc.update(volumeGroupName=volume_group, timeField=time_field, partitionBy='MONTH', partitionSize=1,
+                   shardsPerPartition=1)
+    else:
+        doc.update(clusterRef={'type': 'ElasticCluster', 'uuid': cluster_uuid, 'name': cluster.get('name')},
+                   indexName=index_name, timeField=time_field)
+    doc = await stroom.put_doc(doc)
+    return {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target}
+
+
+async def create_indexing_pipeline(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Pipeline name, e.g. 'Acme - Indexing'.")],
+        template_uuid: Annotated[str, Field(description="Indexing template (find_pipeline_templates stage=indexing).")],
+        xslt_uuid: Annotated[str, Field(description="The indexing XSLT, e.g. created from draft_index_mapping's draft.")],
+        index_uuid: Annotated[str | None, Field(description="Lucene: the Index doc.")] = None,
+        index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
+        cluster_uuid: Annotated[str | None, Field(
+            description="Elasticsearch: the cluster, if the template does not already set one.")] = None,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+) -> dict[str, Any]:
+    """
+    Create an indexing pipeline as a child of an indexing template, setting its XSLT and where it indexes:
+    the Lucene Index doc, or the Elasticsearch index name (and cluster if the template leaves it open).
+    """
+    shape = await _shape(gateway_from(ctx), template_uuid)
+    if shape['stage'] not in ('indexing', 'discovery'):
+        raise ToolError(f"That template is a {shape['stage']} template, not an indexing one")
+    xslt_element = next((s['element'] for s in shape['child_must_supply'] if s['type'] == 'XSLTFilter'), 'xsltFilter')
+    props = [PropertyValue(element=xslt_element, name='xslt', doc_uuid=xslt_uuid, doc_type='XSLT')]
+    open_props = {(s['element'], s['property']) for s in shape['child_must_supply']}
+    if shape['backend'] == 'lucene':
+        if not index_uuid:
+            raise ToolError("This template indexes into Lucene: give index_uuid")
+        element = next(e for e, p in open_props if p == 'index')
+        props.append(PropertyValue(element=element, name='index', doc_uuid=index_uuid, doc_type='Index'))
+    else:
+        if not index_name:
+            raise ToolError("This template indexes into Elasticsearch: give index_name")
+        element = next((e for e, p in open_props if p == 'indexName'), 'elasticIndexingFilter')
+        props.append(PropertyValue(element=element, name='indexName', value=index_name))
+        if (element, 'cluster') in open_props:
+            if not cluster_uuid:
+                raise ToolError("The template leaves the cluster open: give cluster_uuid")
+            props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
+    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id)
+    if result.get('uuid'):
+        result['backend'] = shape['backend']
+    return result
+
+
+async def test_elastic_index(ctx: Context, index_uuid: Annotated[str, Field(description="Elastic Index doc.")]) -> dict[str, Any]:
+    """Elasticsearch: Stroom's own connection and index test for an Elastic Index doc."""
+    stroom = gateway_from(ctx)
+    return {'result': await stroom.post('/elasticIndex/v1/testIndex', await stroom.get_doc('ElasticIndex', index_uuid))}
+
+
+# Fields the search API's TableSettings accepts; a dashboard's table component carries more (e.g.
+# selectionHandlers, pageSize) that the search request rejects with "Unable to process JSON".
+_TABLE_SETTINGS = {'aggregateFilter', 'applyValueFilters', 'conditionalFormattingRules', 'extractValues',
+                   'extractionPipeline', 'fields', 'maxResults', 'maxStringFieldLength', 'modelVersion',
+                   'overrideMaxStringFieldLength', 'queryId', 'showDetail', 'valueFilter', 'visSettings', 'window'}
+
+
+def _column(name: str) -> dict[str, Any]:
+    return {'id': str(uuidlib.uuid4()), 'name': name, 'expression': '${' + name + '}', 'visible': True,
+            'width': 150, 'format': {'type': 'GENERAL'}}
+
+
+async def create_verification_dashboard(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Dashboard name, e.g. the index name with a -VERIFY suffix.")],
+        index_uuid: Annotated[str, Field(description="The index doc to query.")],
+        backend: Backend,
+        fields: Annotated[list[str], Field(description="Minimal field set: StreamId, EventId, the time field and a "
+                                                       "few key fields.")],
+) -> dict[str, Any]:
+    """A workspace dashboard with a query on the index doc and a table of the given fields, for run_test_searches."""
+    stroom = gateway_from(ctx)
+    index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
+    source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
+    query_id, table_id = 'query-VERIFY', 'table-VERIFY'
+    table = {'type': 'table', 'queryId': query_id, 'fields': [_column(f) for f in fields], 'extractValues': False,
+             'maxResults': [1000], 'pageSize': 100}
+    config = {'components': [
+        {'type': 'query', 'id': query_id, 'name': 'Query', 'settings': {
+            'type': 'query', 'dataSource': source, 'expression': {'type': 'operator', 'op': 'AND', 'children': []},
+            'automate': {'open': False, 'refresh': False}}},
+        {'type': 'table', 'id': table_id, 'name': 'Table', 'settings': table}],
+        'layout': {'type': 'splitLayout', 'dimension': 1, 'children': [
+            {'type': 'tabLayout', 'tabs': [{'id': query_id, 'visible': True}], 'selected': 0},
+            {'type': 'tabLayout', 'tabs': [{'id': table_id, 'visible': True}], 'selected': 0}]}}
+    ref = await guard_from(ctx).create('Dashboard', name, build)
+    doc = await stroom.get_doc('Dashboard', ref['uuid'])
+    doc['dashboardConfig'] = config
+    doc = await stroom.put_doc(doc)
+    return {'type': 'Dashboard', 'uuid': doc['uuid'], 'name': doc['name'], 'data_source': source, 'fields': fields}
+
+
+async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any]) -> dict[str, Any]:
+    stroom = gateway_from(ctx)
+    components = dashboard['dashboardConfig']['components']
+    query = next(c for c in components if c['type'] == 'query')
+    table = next(c for c in components if c['type'] == 'table')
+    settings = table['settings']
+    request = {
+        'searchRequestSource': {'sourceType': 'DASHBOARD_UI', 'componentId': query['id'],
+                                'ownerDocRef': {'type': 'Dashboard', 'uuid': dashboard['uuid'], 'name': dashboard['name']}},
+        'search': {'dataSourceRef': query['settings']['dataSource'], 'expression': expression, 'incremental': True,
+                   'componentSettingsMap': {table['id']: settings}},
+        'componentResultRequests': [{'type': 'table', 'componentId': table['id'], 'fetch': 'ALL',
+                                     'requestedRange': {'offset': 0, 'length': 100}, 'tableName': table['name'],
+                                     'tableSettings': {k: v for k, v in settings.items() if k in _TABLE_SETTINGS}}],
+        'dateTimeSettings': {'localZoneId': 'UTC', 'referenceTime': int(time.time() * 1000)},
+        'storeHistory': False, 'timeout': 5000}
+    started = time.monotonic()
+    while True:
+        result = await stroom.post('/dashboard/v1/search', request)
+        if result.get('complete') or time.monotonic() - started > 60:
+            break
+        request['queryKey'] = result.get('queryKey')
+        await asyncio.sleep(0.5)
+    table_result = next((r for r in result.get('results') or [] if r.get('componentId') == table['id']), {})
+    columns = [f['name'] for f in settings['fields']]
+    rows = [dict(zip(columns, row.get('values') or [])) for row in table_result.get('rows') or []]
+    return {'rows': rows, 'errors': (result.get('errors') or []) + (table_result.get('errors') or [])}
+
+
+async def run_test_searches(
+        ctx: Context,
+        dashboard_uuid: Annotated[str, Field(description="A verification dashboard.")],
+        stream_ids: Annotated[list[int], Field(description="Events streams that were indexed.")],
+        expected_documents: Annotated[int, Field(description="Events records in those streams.")],
+        exact: Annotated[list[dict[str, str]], Field(
+            description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
+                        "each must return at least one row.")] = [],
+        time_range: Annotated[dict[str, Any] | None, Field(
+            description="{'field': ..., 'from': ISO, 'to': ISO, 'expected': n}")] = None,
+        retries: Annotated[int, Field(ge=0, le=20, description="Retries while the index catches up.")] = 6,
+) -> dict[str, Any]:
+    """
+    Run test searches through the verification dashboard, the way people will search: all documents for the
+    indexed stream ids (count must match), an exact match per key field, and a time range. Each check passes
+    or fails with the rows it returned. A failure points at the mapping or the indexing XSLT.
+    """
+    dashboard = await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
+    term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
+    by_stream = {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in stream_ids]}
+    for attempt in range(retries + 1):
+        found = await _search(ctx, dashboard, by_stream)
+        if len(found['rows']) >= expected_documents or attempt == retries:
+            break
+        await asyncio.sleep(5)
+    checks = [{'check': f'documents for streams {stream_ids}', 'expected': expected_documents,
+               'returned': len(found['rows']), 'pass': len(found['rows']) == expected_documents,
+               'errors': found['errors'], 'sample': found['rows'][:3]}]
+    for item in exact:
+        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
+            term(item['field'], 'EQUALS', item['value'])]})
+        checks.append({'check': f"{item['field']} = {item['value']}", 'returned': len(res['rows']),
+                       'pass': len(res['rows']) >= 1, 'errors': res['errors'], 'sample': res['rows'][:2]})
+    if time_range:
+        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
+            term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}")]})
+        checks.append({'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
+                       'expected': time_range.get('expected'), 'returned': len(res['rows']),
+                       'pass': len(res['rows']) == time_range.get('expected', len(res['rows'])), 'errors': res['errors']})
+    return {'passed': all(c['pass'] for c in checks), 'checks': checks}
+
+
+ALL_TOOLS = [get_field_conventions, draft_index_mapping, list_index_templates, simulate_index_template,
+             put_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
+             test_elastic_index, create_verification_dashboard, run_test_searches]
