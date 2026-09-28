@@ -316,7 +316,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (use `reprocess_streams`). For an Elasticsearch indexing pipeline, first confirms the index template for its destination index is written | `processorFilter/v1`, `fetchPipelineLayers` |
+| `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (use `reprocess_streams`). An indexing pipeline reading Events must name its source events pipeline, and the filter adds `Pipeline IS_DOC_REF <source>`. For an Elasticsearch indexing pipeline, first confirms the index template for its destination index is written | `processorFilter/v1`, `fetchPipelineLayers` |
 | `set_processor_filter_enabled` **W A** | Enable or disable a filter the agent created | `processorFilter/v1/{id}/enabled` |
 | `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. Same template confirmation for Elasticsearch | `processorFilter/v1` |
 | `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
@@ -451,6 +451,7 @@ The stage 2 details come in one prompt because they depend on each other: the te
 - A feed-wide filter needs approval and gets `maxProcessingTasks` from config (default 2) and a `minMetaCreateTimeMs`.
 - A plain filter is refused for any stream the pipeline has already processed (it has an output from that pipeline, or one of the pipeline's filters already selects it); those go through `reprocess_streams`, which takes at most `max_reprocess_streams` (default 10) per call with `maxProcessingTasks` of `reprocess_max_tasks` (default 1). When a pipeline processes a stream again, Stroom marks that pipeline's earlier outputs for it deleted (superseded), so each raw stream keeps one Events stream.
 - All processing tools act only on workspace pipelines this server built, so reprocessing never touches production pipelines.
+- Every indexing filter over Events carries `Pipeline IS_DOC_REF <events pipeline>` for the events pipeline this server built for the source (`source_pipeline_uuid`), in addition to the stream ids or feed. Stream ids are checked first: each must be an Events stream that pipeline produced. Indexing never picks up Events streams from another pipeline, even on a shared feed. Stroom rejects `EQUALS` on the `Pipeline` field; `IS_DOC_REF` matches by UUID.
 - A call that needs both a confirmation and an approval keeps the confirmation id valid until the whole call succeeds, so repeating the call for the approval does not use it up.
 
 **Local validation before Stroom**
@@ -577,6 +578,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Superseded outputs** need no tool: Stroom marks a pipeline's earlier outputs for a stream deleted when it processes that stream again (verified locally). The server itself deletes no streams.
 - **Moving from v1 to v2** of an index (aliases, data views, disabling or retiring v1) is the user's.
 - **Elasticsearch indexing** runs only through the Stroom indexing pipeline, and only after the user confirms the index template for the destination index has been written.
+- **Indexing input**: indexing filters select only Events produced by the events pipeline this server built for the source (a `Pipeline` condition), never Events from elsewhere. `index_event_data` on an existing production Events feed therefore needs that pipeline brought into a build first.
 
 **Open questions**
 

@@ -50,7 +50,8 @@ async def index_stage(ctx, csv: dict, stamp: str):
                             template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_uuid=index['uuid'])
     sample = await stepping.step_sample(ctx, pipeline['uuid'], events)
     check(sample['verdict'] == 'clean', f"stepped {sample['records_stepped']} events through the indexing pipeline clean")
-    await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=events)
+    await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=events,
+                 source_pipeline_uuid=csv['pipeline']['uuid'])
     gate = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, expect_events=False)
     check(gate['gate'] == 'pass', f"indexing finished with no Error stream: {gate['streams']}")
     dash = await indexing.create_verification_dashboard(ctx, csv['build'], f'{index_name}-VERIFY', index['uuid'], 'lucene',
@@ -84,7 +85,8 @@ async def version_two(ctx, csv: dict, v1: dict, stamp: str):
     paths = [f['path'] for f in diff['fields_changed']]
     print(f"    v1 -> v2 changed paths: {paths}")
     check(paths == ['record/data[Success]/@value'], 'v2 differs from v1 only by the added field')
-    await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=copy['uuid'], stream_ids=v1['events'])
+    await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=copy['uuid'], stream_ids=v1['events'],
+                 source_pipeline_uuid=csv['pipeline']['uuid'])
     gate = await processing_writes.wait_for_processing(ctx, copy['uuid'], v1['events'], expect_events=False)
     check(gate['gate'] == 'pass', 'v2 indexing finished with no Error stream')
     dash = await indexing.create_verification_dashboard(ctx, csv['build'], f'{name}-VERIFY', index['uuid'], 'lucene',

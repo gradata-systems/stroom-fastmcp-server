@@ -75,7 +75,8 @@ Stage 2, indexing:
 9. draft_index_mapping; set_index_fields (Lucene), or for Elasticsearch give the user the drafted index template
    and destination index name to write (put_index_template only if they ask); create_xslt with the drafted
    indexing XSLT; create_indexing_pipeline; step_sample on the Events streams.
-10. create_processor_filter on the Events stream ids (Elasticsearch: the user confirms the template is written),
+10. create_processor_filter on the Events stream ids with source_pipeline_uuid = the events pipeline from stage 1
+    (the filter then only selects Events from that pipeline; Elasticsearch: the user confirms the template is written),
     wait_for_processing expect_events=false, create_verification_dashboard and run_test_searches.
 
 Finish: write_documentation for both pipelines, then promote_build to the folders sibling sources use.

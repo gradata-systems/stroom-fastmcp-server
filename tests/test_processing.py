@@ -33,17 +33,31 @@ async def ctx():
     await stroom.close()
 
 
-def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = ()):
+def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = (), streams: dict | None = None):
+    """p1 is the pipeline under test (Elasticsearch indexing, or a translation); 'ev' is an events pipeline.
+
+    streams maps a stream id to (type, producing pipeline); by default indexing reads Events from 'ev' and a
+    translation reads Raw Events.
+    """
+    streams = streams or {i: ('Events', 'ev') if elastic else ('Raw Events', None) for i in range(1, 20)}
     respx.get(f'{API}/pipeline/v1/p1').mock(return_value=httpx.Response(200, json={'uuid': 'p1', 'name': 'Acme'}))
-    respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=layers(elastic)))
+    respx.get(f'{API}/pipeline/v1/ev').mock(return_value=httpx.Response(200, json={'uuid': 'ev', 'name': 'Acme-Events'}))
+    respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(side_effect=lambda request: httpx.Response(
+        200, json=layers(elastic and json.loads(request.content)['uuid'] == 'p1')))
     respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
         {'processorFilter': {'id': 3, 'pipelineUuid': 'p1', 'queryData': {'expression': {
             'type': 'operator', 'op': 'OR', 'children': [{'type': 'term', 'field': 'Id', 'condition': 'EQUALS',
                                                           'value': str(i)} for i in filtered]}}}}]}))
 
     def meta(request):
-        parent = json.loads(request.content)['expression']['children'][0]['value']
-        values = [{'meta': {'id': 99, 'pipelineUuid': 'p1', 'typeName': 'Events'}}] if int(parent) in with_output else []
+        terms = json.loads(request.content)['expression']['children']
+        if terms[0]['field'] == 'Id':
+            values = [{'meta': {'id': int(term['value']), 'typeName': streams[int(term['value'])][0],
+                                'pipelineUuid': streams[int(term['value'])][1]}}
+                      for term in terms if int(term['value']) in streams]
+        else:
+            parent = int(terms[0]['value'])
+            values = [{'meta': {'id': 99, 'pipelineUuid': 'p1', 'typeName': 'Events'}}] if parent in with_output else []
         return httpx.Response(200, json={'values': values})
     respx.post(f'{API}/meta/v1/find').mock(side_effect=meta)
     return respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 9, 'enabled': True}))
@@ -84,7 +98,7 @@ async def test_translation_pipeline_needs_only_approval(ctx):
 async def test_elasticsearch_indexing_waits_for_the_user_to_confirm_the_template_for_the_index(ctx):
     create = mock_stroom(elastic=True)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
-        gates, result = await gated_through(ctx, stream_ids=[6])
+        gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
     confirm, approve = gates
     assert confirm['status'] == 'needs_confirmation' and "index 'ecs-acme-v2'" in confirm['summary']
     assert confirm['details'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'}
@@ -124,11 +138,13 @@ async def test_reprocessing_is_bounded_to_ten_streams_it_already_processed(ctx, 
 
 @respx.mock
 async def test_reprocessing_into_elasticsearch_confirms_the_template_first(ctx):
-    mock_stroom(elastic=True, filtered=[5])
+    create = mock_stroom(elastic=True, filtered=[5])
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
-        gates, result = await reprocessed(ctx, stream_ids=[5])
+        gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
     assert [g['status'] for g in gates] == ['needs_confirmation', 'needs_approval']
     assert "index 'ecs-acme-v2'" in gates[0]['summary'] and 'indexed again' in gates[1]['details']['note']
+    expression = json.loads(create.calls.last.request.content)['queryData']['expression']
+    assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
 
 
 @respx.mock
@@ -144,3 +160,56 @@ async def test_wait_counts_only_the_given_filters_outputs(ctx):
     assert everything['gate'] == 'fail' and 'filter_id' in everything['problems'][0]
     latest = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
     assert latest['gate'] == 'pass' and latest['streams'] == [{'input': 5, 'events': [30], 'errors': []}]
+
+
+PIPELINE_TERM = {'type': 'term', 'field': 'Pipeline', 'condition': 'IS_DOC_REF',
+                 'docRef': {'type': 'Pipeline', 'uuid': 'ev', 'name': 'Acme-Events'}}
+
+
+@respx.mock
+async def test_indexing_filter_only_selects_events_from_the_source_events_pipeline(ctx):
+    create = mock_stroom(elastic=True)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())) as guard:
+        gates, result = await gated_through(ctx, stream_ids=[6, 7], source_pipeline_uuid='ev')
+    expression = json.loads(create.calls.last.request.content)['queryData']['expression']
+    assert expression == {'type': 'operator', 'op': 'AND', 'children': [
+        {'type': 'operator', 'op': 'OR', 'children': [
+            {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '6'},
+            {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '7'}]},
+        PIPELINE_TERM]}
+    assert "only Events from pipeline 'Acme-Events'" in gates[-1]['details']['scope']
+    assert result['events_from_pipeline'] == 'Acme-Events'
+    # the source is checked to be one this server built, like the indexing pipeline itself
+    assert {c.args[0]['uuid'] for c in guard.return_value.check_managed.call_args_list} == {'p1', 'ev'}
+
+
+@respx.mock
+async def test_feed_wide_indexing_filter_carries_the_pipeline_condition(ctx):
+    create = mock_stroom(elastic=True)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+        await gated_through(ctx, feed='ACME', stream_type='Events', created_after='2026-09-29T00:00:00Z',
+                            source_pipeline_uuid='ev')
+    children = json.loads(create.calls.last.request.content)['queryData']['expression']['children']
+    assert children[1] == PIPELINE_TERM and [c['field'] for c in children[0]['children']] == ['Feed', 'Type']
+
+
+@respx.mock
+@pytest.mark.parametrize('streams, ids, source, message', [
+    (None, [6], None, 'needs source_pipeline_uuid'),
+    ({6: ('Events', 'other')}, [6], 'ev', r"Stream\(s\) \[6\] were not produced by 'Acme-Events'"),
+    ({6: ('Events', 'ev'), 7: ('Raw Events', None)}, [6, 7], 'ev', 'Mixed stream types'),
+])
+async def test_indexing_refuses_events_it_cannot_tie_to_the_source(ctx, streams, ids, source, message):
+    create = mock_stroom(elastic=True, streams=streams)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+        with pytest.raises(ToolError, match=message):
+            await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=ids, source_pipeline_uuid=source)
+    assert not create.called
+
+
+@respx.mock
+async def test_translation_pipelines_take_no_source_pipeline(ctx):
+    mock_stroom(elastic=False)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+        with pytest.raises(ToolError, match='only for indexing pipelines'):
+            await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev')

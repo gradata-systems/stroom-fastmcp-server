@@ -62,7 +62,7 @@ NODES: dict[str, tuple[str, list[str]]] = {
     'step_indexing': ("Run step_sample on indexing pipeline {indexing_pipeline} over Events streams {events_stream_ids}.",
                       ['step_sample', 'step_pipeline']),
     'index_sample': ("create_processor_filter on indexing pipeline {indexing_pipeline} with stream_ids "
-                     "{events_stream_ids} (for Elasticsearch the user first confirms the index template is written; "
+                     "{events_stream_ids} and source_pipeline_uuid {translation_pipeline} (for Elasticsearch the user first confirms the index template is written; "
                      "streams already indexed by it go through reprocess_streams), wait_for_processing with "
                      "expect_events=false (and the filter_id after a reprocess), then "
                      "create_verification_dashboard and run_test_searches (stream ids, an exact match on key fields "

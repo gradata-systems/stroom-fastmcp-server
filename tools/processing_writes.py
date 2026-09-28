@@ -22,6 +22,10 @@ from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
 STREAM_STORE = {'type': 'StreamStore', 'uuid': '0', 'name': 'StreamStore'}
+INDEXING_ELEMENTS = {'IndexingFilter', 'ElasticIndexingFilter'}
+SourcePipeline = Annotated[str | None, Field(
+    description="Indexing pipelines reading Events: the events pipeline this server built that produced them. "
+                "The filter only selects Events streams from exactly that pipeline.")]
 
 
 def _term(field: str, value: Any, condition: str = 'EQUALS') -> dict[str, Any]:
@@ -63,6 +67,58 @@ async def _already_processed(stroom: StroomGateway, pipeline_uuid: str, stream_i
         if f.get('pipelineUuid') == pipeline_uuid and not f.get('deleted'):
             selected |= _selected_ids((f.get('queryData') or {}).get('expression'))
     return [i for i in stream_ids if i in selected or await _outputs(stroom, i, pipeline_uuid)]
+
+
+def _pipeline_term(ref: dict[str, Any]) -> dict[str, Any]:
+    return {'type': 'term', 'field': 'Pipeline', 'condition': 'IS_DOC_REF',
+            'docRef': {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': ref['name']}}
+
+
+async def _is_indexing(stroom: StroomGateway, pipeline_uuid: str) -> bool:
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    return any(e['type'] in INDEXING_ELEMENTS for e in merged['elements'])
+
+
+async def _events_source(ctx: Context, pipeline: dict[str, Any], source_uuid: str | None,
+                         stream_ids: list[int] | None, stream_type: str) -> dict[str, Any] | None:
+    """For an indexing pipeline reading Events: the events pipeline they must come from, checked.
+
+    Indexing filters over Events always carry `Pipeline IS_DOC_REF <source>`, so they never pick up Events
+    streams from anywhere else. The source must be an events pipeline this server built, and every given
+    stream must be an Events stream it produced. Raw input (a discovery index) has no source pipeline.
+    """
+    stroom = gateway_from(ctx)
+    if not await _is_indexing(stroom, pipeline['uuid']):
+        if source_uuid:
+            raise ToolError("source_pipeline_uuid is only for indexing pipelines")
+        return None
+    metas = []
+    if stream_ids:
+        metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in stream_ids], len(stream_ids),
+                                                            op='OR')).get('values') or []]
+        types = {m.get('typeName') for m in metas}
+        if 'Events' not in types:
+            if source_uuid:
+                raise ToolError("These streams are not Events streams; source_pipeline_uuid does not apply")
+            return None
+        if types != {'Events'}:
+            raise ToolError(f"Mixed stream types {sorted(t or '?' for t in types)}: process Events streams on their own")
+    elif stream_type != 'Events':
+        if source_uuid:
+            raise ToolError("source_pipeline_uuid only applies when the feed scope's stream_type is Events")
+        return None
+    if not source_uuid:
+        raise ToolError("Indexing Events needs source_pipeline_uuid: the events pipeline this server built that "
+                        "produced them. The filter only selects Events from that pipeline.")
+    source = await _managed_pipeline(ctx, source_uuid)
+    if await _is_indexing(stroom, source_uuid):
+        raise ToolError(f"'{source['name']}' is an indexing pipeline, not the events pipeline that produced the Events")
+    foreign = sorted(m['id'] for m in metas if m.get('pipelineUuid') != source_uuid)
+    missing = sorted(set(stream_ids or []) - {m['id'] for m in metas})
+    if foreign or missing:
+        raise ToolError(f"Stream(s) {foreign + missing} were not produced by '{source['name']}'"
+                        + (f" ({missing} not found)" if missing else '') + ": only its Events can be indexed here")
+    return {'type': 'Pipeline', 'uuid': source['uuid'], 'name': source['name']}
 
 
 async def elastic_destination(stroom: StroomGateway, pipeline_uuid: str) -> dict[str, Any] | None:
@@ -110,6 +166,7 @@ async def create_processor_filter(
         created_after: Annotated[str | None, Field(
             description="With a feed scope: only streams created after this ISO time. Required for a feed scope.")] = None,
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
+        source_pipeline_uuid: SourcePipeline = None,
         confirmation_id: Annotated[str | None, Field(
             description="From an earlier needs_confirmation reply (Elasticsearch: the index template is written).")] = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
@@ -118,13 +175,15 @@ async def create_processor_filter(
     Create and enable a processor filter so Stroom processes streams through the pipeline. Scope it to the
     sample stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task
     count. Streams the pipeline already processed are refused: use reprocess_streams for those.
-    For an Elasticsearch indexing pipeline the user first confirms that the index template for the
-    destination index has been written. Enabling processing always needs the user's approval.
+    An indexing pipeline reading Events needs source_pipeline_uuid, and its filter only selects Events from
+    exactly that events pipeline. For an Elasticsearch indexing pipeline the user first confirms that the
+    index template for the destination index has been written. Enabling processing always needs approval.
     """
     stroom = gateway_from(ctx)
     pipeline = await _managed_pipeline(ctx, pipeline_uuid)
     if bool(stream_ids) == bool(feed):
         raise ToolError("Give either stream_ids (the sample) or feed, not both")
+    source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, stream_type)
     min_ms = None
     if stream_ids:
         done = await _already_processed(stroom, pipeline_uuid, stream_ids)
@@ -139,6 +198,9 @@ async def create_processor_filter(
         min_ms = int(datetime.fromisoformat(created_after.replace('Z', '+00:00')).timestamp() * 1000)
         expression = {'type': 'operator', 'op': 'AND', 'children': [_term('Feed', feed), _term('Type', stream_type)]}
         scope, max_tasks = f"feed {feed} ({stream_type}) created after {created_after}", stroom.settings.max_feed_filter_tasks
+    if source:
+        expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
+        scope += f", only Events from pipeline '{source['name']}'"
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
 
     destination = await elastic_destination(stroom, pipeline_uuid)
@@ -157,7 +219,8 @@ async def create_processor_filter(
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
     consent_from(ctx).discard(confirmation_id)
     return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
-            **({'destination': destination} if destination else {})}
+            **({'destination': destination} if destination else {}),
+            **({'events_from_pipeline': source['name']} if source else {})}
 
 
 async def set_processor_filter_enabled(
@@ -192,6 +255,7 @@ async def reprocess_streams(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server built, after a change.")],
         stream_ids: Annotated[list[int], Field(description="Streams it already processed, to process again.")],
+        source_pipeline_uuid: SourcePipeline = None,
         confirmation_id: Annotated[str | None, Field(
             description="From an earlier needs_confirmation reply (Elasticsearch: the index template is written).")] = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
@@ -213,8 +277,10 @@ async def reprocess_streams(
     fresh = [i for i in stream_ids if i not in done]
     if fresh:
         raise ToolError(f"Stream(s) {fresh} have not been processed by '{pipeline['name']}': use create_processor_filter")
+    source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, 'Events')
     max_tasks = stroom.settings.reprocess_max_tasks
     details = {'pipeline': pipeline['name'], 'streams': stream_ids, 'max tasks': max_tasks,
+               **({'only Events from pipeline': source['name']} if source else {}),
                'earlier outputs': 'superseded: Stroom marks them deleted once the new ones are written'}
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
@@ -229,6 +295,8 @@ async def reprocess_streams(
     if gate:
         return gate
     expression = {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in stream_ids]}
+    if source:
+        expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
     created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None)
     consent_from(ctx).discard(confirmation_id)
     return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,

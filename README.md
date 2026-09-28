@@ -35,6 +35,8 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   version to the next.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.
+- Indexing filters over Events also carry `Pipeline IS_DOC_REF <events pipeline>`, where the events pipeline is the
+  one this server built for the source (`source_pipeline_uuid`), so no Events from elsewhere are picked up.
 
 Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts: `onboard_data_source`,
 `update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`,
