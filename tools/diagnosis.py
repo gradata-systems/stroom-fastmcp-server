@@ -13,27 +13,12 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from tools.pipelines import merge_layers
+from tools.pipelines import CODE_PROPERTIES, merge_layers, translation_docs  # noqa: F401
 from tools.stepping import _field_values, _markers, _Pipeline, _step, compare_outputs, step_sample
 from tools.streams import _meta, _term
 from utils.stroom import StroomGateway, gateway_from
 
 _EVENT = re.compile(r'<(?:[\w.-]+:)?Event[\s>/]')
-CODE_PROPERTIES = {'xslt': 'XSLT', 'textConverter': 'TextConverter'}
-
-
-def translation_docs(pipeline_uuid: str, layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The XSLTs and text converters a pipeline runs, and whether each is its own or its template's."""
-    merged = merge_layers(layers)
-    types = {e['id']: e['type'] for e in merged['elements']}
-    out = []
-    for prop in merged['properties']:
-        if prop['name'] in CODE_PROPERTIES and isinstance(prop.get('value'), dict):
-            source = prop.get('from') or {}
-            out.append({'element': prop['element'], 'element_type': types.get(prop['element']),
-                        'doc': prop['value'], 'set_by': source.get('name'),
-                        'inherited_from_template': source.get('uuid') not in (None, pipeline_uuid)})
-    return out
 
 
 async def _children(stroom: StroomGateway, stream_id: int) -> list[dict[str, Any]]:

@@ -51,6 +51,12 @@ async def get_instructions(
     translations, mappings, indexes and names. The user's own request takes precedence, and no instruction
     lifts an approval or the write guard. Other AGENTS docs are listed by folder so you know they exist.
     """
+    return await applicable_instructions(ctx, folders, feeds, docs)
+
+
+async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: list[str] = (),
+                                  docs: list[dict[str, str]] = ()) -> dict[str, Any]:
+    """get_instructions, for other tools to hand back with their results."""
     stroom = gateway_from(ctx)
     name = stroom.settings.instructions_doc_name
     found = await stroom.find_documents(name, ['Documentation'], 200)

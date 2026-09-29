@@ -1,4 +1,5 @@
 """Tools that step pipelines record by record, optionally with draft (unsaved) code."""
+import hashlib
 import re
 from typing import Annotated, Any, Literal
 
@@ -6,7 +7,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from tools.pipelines import merge_layers, own_elements
+from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.stroom import StroomGateway, gateway_from
 from utils.triage import from_stored_error, triage
 
@@ -33,6 +34,41 @@ class _Pipeline:
         """The pipeline's own XSLT steps, which is where its translation happens."""
         own_xslt = [e for e, t in self.types.items() if e in self.own and t == 'XSLTFilter']
         return own_xslt or [e for e, t in self.types.items() if t == 'XSLTFilter'][-1:]
+
+
+async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
+                           draft_code: dict[str, str] | None = None) -> dict[str, str]:
+    """Per element the pipeline sets its own code for, a hash of the code that runs: the draft where one is
+    given, else the saved XSLT or text converter."""
+    prints = {}
+    for doc in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid)):
+        if doc['inherited_from_template']:
+            continue
+        code = (draft_code or {}).get(doc['element'])
+        if code is None:
+            code = (await stroom.get_doc(doc['doc']['type'], doc['doc']['uuid'])).get('data') or ''
+        prints[doc['element']] = hashlib.sha256(code.encode()).hexdigest()
+    return prints
+
+
+CLEAN_RUNS = 20
+
+
+async def remember_clean(ctx: Context, pipeline_uuid: str, draft_code: dict[str, str] | None,
+                         result: dict[str, Any]) -> None:
+    """Record the code a clean step_sample or step_records ran, for promotion's checks. In memory: a restart
+    or another replica forgets, and promotion then says it has no record of a clean step."""
+    if result.get('verdict') != 'clean' or not result.get('records_stepped'):
+        return
+    runs = ctx.lifespan_context.setdefault('clean_steps', {}).setdefault(pipeline_uuid, [])
+    runs.append(await code_fingerprint(gateway_from(ctx), pipeline_uuid, draft_code))
+    del runs[:-CLEAN_RUNS]
+
+
+async def stepped_clean(ctx: Context, pipeline_uuid: str) -> bool:
+    """Whether the pipeline's saved code is code that has stepped clean on this server."""
+    runs = ctx.lifespan_context.get('clean_steps', {}).get(pipeline_uuid)
+    return bool(runs) and await code_fingerprint(gateway_from(ctx), pipeline_uuid) in runs
 
 
 def record_key(stream_id: int, location: dict[str, Any]) -> str:
@@ -177,6 +213,7 @@ async def step_sample(
                               'first_record_output': first_output}
     if len(records) >= cap:
         result['hint'] = f"Stopped at {cap} records; the sample has more."
+    await remember_clean(ctx, pipeline_uuid, draft_code, result)
     return result
 
 
@@ -230,10 +267,13 @@ async def step_records(
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
     missing = [r['record'] for r in records if r.get('found') is False]
     uncovered = sorted({r['shape'] for r in records if r.get('shape') and (r.get('events') == 0 or r.get('errors'))})
-    return {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records) - len(missing),
-            'records_with_errors': sum(1 for r in records if r.get('errors')), 'records_not_found': missing,
-            'shapes_not_clean': uncovered, 'draft_code_used': sorted(draft_code or {}), **summary,
-            'records': records[:100]}
+    result = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records) - len(missing),
+              'records_with_errors': sum(1 for r in records if r.get('errors')), 'records_not_found': missing,
+              'shapes_not_clean': uncovered, 'draft_code_used': sorted(draft_code or {}), **summary,
+              'records': records[:100]}
+    if not uncovered:
+        await remember_clean(ctx, pipeline_uuid, draft_code, result)
+    return result
 
 
 def _field_values(xml: str) -> dict[str, list[str]]:

@@ -8,7 +8,9 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import GENERATED, MANAGED, build_tag, guard_from
+from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
+from tools.stepping import stepped_clean
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
@@ -16,10 +18,20 @@ Build = Annotated[str, Field(description="Build name, e.g. 'keycloak-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
 
 
-async def start_build(ctx: Context, build: Build) -> dict[str, Any]:
-    """Create (or find) the build's workspace folder. Every write tool creates documents there."""
+async def start_build(
+        ctx: Context,
+        build: Build,
+        feeds: Annotated[list[str], Field(description="Feeds the build is for, if known, so the standing "
+                                                      "instructions for their folders are included.")] = [],
+        folders: Annotated[list[str], Field(description="Folders the work will be promoted to, if known.")] = [],
+) -> dict[str, Any]:
+    """
+    Create (or find) the build's workspace folder. Every write tool creates documents there. Returns the
+    standing instructions (AGENTS docs) that apply, which the work must follow.
+    """
     folder = await guard_from(ctx).build_folder(build)
-    return {'build': build, 'folder': folder['_path'], 'uuid': folder['uuid']}
+    return {'build': build, 'folder': folder['_path'], 'uuid': folder['uuid'],
+            'standing_instructions': await applicable_instructions(ctx, folders, feeds)}
 
 
 async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
@@ -31,9 +43,29 @@ async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
     return sorted(docs, key=lambda d: (d['type'], d['name'], d['uuid']))
 
 
+async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
+    """What a build's pipelines still lack before promotion: a clean step of their current code, and (for new
+    pipelines) a Documentation doc."""
+    documented = {d['name'] for d in docs if d['type'] == 'Documentation'}
+    problems = []
+    for doc in docs:
+        if doc['type'] != 'Pipeline':
+            continue
+        if not await stepped_clean(ctx, doc['uuid']):
+            problems.append(f"Pipeline '{doc['name']}': no clean step_sample or step_records of its current code is "
+                            "recorded on this server")
+        if not doc['working_copy_of'] and doc['name'] not in documented:
+            problems.append(f"Pipeline '{doc['name']}': no documentation (write_documentation)")
+    return problems
+
+
 async def list_build(ctx: Context, build: Build) -> dict[str, Any]:
-    """Documents in a build, with those that are working copies of production documents marked."""
-    return {'build': build, 'documents': await _build_docs(ctx, build)}
+    """
+    Documents in a build, with those that are working copies of production documents marked, and what the
+    build's pipelines still lack before promotion (a clean step of their current code, documentation).
+    """
+    docs = await _build_docs(ctx, build)
+    return {'build': build, 'documents': docs, 'before_promotion': await build_checks(ctx, docs)}
 
 
 async def write_documentation(
@@ -117,6 +149,10 @@ async def promote_build(
     processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], surveys)
     details = {'build': build, 'plan': [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}"
                                         for p in plan]}
+    warnings = await build_checks(ctx, docs)
+    if warnings:
+        # Shown in the approval, so the user decides with them in view.
+        details['warnings'] = warnings
     if processing:
         details['processing after promotion (created disabled, new data only)'] = [
             f"{e['pipeline']['name']}: feed {e['feed']} ({e['stream_type']})" for e in processing]
@@ -169,6 +205,8 @@ async def promote_build(
             done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
     filters = await create_promotion_filters(ctx, processing, started_ms)
     result: dict[str, Any] = {'build': build, 'promoted': done}
+    if warnings:
+        result['promoted_with_warnings'] = warnings
     if filters:
         result['processing_filters'] = filters
         result['next'] = ("Tell the user each promoted pipeline has a processing filter for new data, created disabled: "

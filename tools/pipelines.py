@@ -95,6 +95,23 @@ def merge_layers(layers: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+CODE_PROPERTIES = {'xslt': 'XSLT', 'textConverter': 'TextConverter'}
+
+
+def translation_docs(pipeline_uuid: str, layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The XSLTs and text converters a pipeline runs, and whether each is its own or its template's."""
+    merged = merge_layers(layers)
+    types = {e['id']: e['type'] for e in merged['elements']}
+    out = []
+    for prop in merged['properties']:
+        if prop['name'] in CODE_PROPERTIES and isinstance(prop.get('value'), dict):
+            source = prop.get('from') or {}
+            out.append({'element': prop['element'], 'element_type': types.get(prop['element']),
+                        'doc': prop['value'], 'set_by': source.get('name'),
+                        'inherited_from_template': source.get('uuid') not in (None, pipeline_uuid)})
+    return out
+
+
 def own_elements(layers: list[dict[str, Any]]) -> set[str]:
     """Elements the pipeline itself adds or configures, as opposed to ones inherited unchanged.
 

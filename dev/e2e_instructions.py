@@ -20,7 +20,7 @@ import e2e_phase2 as p2  # noqa: E402
 from config import Settings  # noqa: E402
 from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import feeds, instructions  # noqa: E402
+from tools import builds, feeds, instructions  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
@@ -77,6 +77,10 @@ async def main():
                  f"scopes: {mine[0]['applies_to']}; {mine[1]['applies_to']}")
         p2.check(any(o['uuid'] == created[2]['uuid'] for o in result['other_instruction_docs']),
                  "the other build's doc is listed, not applied")
+        started = await builds.start_build(ctx, build, feeds=[feed])
+        handed = [i['instructions'].split(':')[0] for i in started['standing_instructions']['instructions']
+                  if stamp in i['instructions']]
+        p2.check(handed == [f'Global {stamp}', f'Build {stamp}'], 'start_build hands back the same standing instructions')
         print('\nALL PASSED')
     finally:
         if created:

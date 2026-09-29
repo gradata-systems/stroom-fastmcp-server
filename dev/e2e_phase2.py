@@ -240,7 +240,10 @@ async def promotion(ctx, csv: dict, stamp: str):
                                               'permissionInheritance': 'DESTINATION'})
     dest = f'System/{dest_name}'
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
+    listed = await builds.list_build(ctx, csv['build'])
+    check(listed['before_promotion'] == [], f"stepped clean and documented, nothing outstanding: {listed['before_promotion']}")
     result = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations=everything)
+    check('promoted_with_warnings' not in result, 'promoted without warnings')
     check(len(result['promoted']) >= 5, f"promoted: {result['promoted']}")
     made = result.get('processing_filters') or []
     check([(f['pipeline'], f['feed'], f['enabled']) for f in made] == [(csv['pipeline']['name'], csv['feed'], False)],
@@ -267,8 +270,12 @@ async def promotion(ctx, csv: dict, stamp: str):
         check(False, 'guard refused a direct change to the promoted XSLT')
     except Exception as e:
         check('not created by this server' in str(e) or 'working copy' in str(e), f'guard refused a direct change: {str(e)[:80]}')
+    before = (await builds.list_build(ctx, fix_build))['before_promotion']
+    check(len(before) == 1 and 'no clean step' in before[0],
+          f"the working copy's changed code was compared but never stepped clean: {before}")
     result = await agreed(builds.promote_build, ctx=ctx, build=fix_build, destinations={})
     print(f"    {result['promoted']}")
+    check(result.get('promoted_with_warnings') == before, 'promotion carried the warning the user approved with')
     now = (await stroom.get_doc('XSLT', csv['xslt']['uuid']))['data']
     check('Interactive user logon' in now, 'working copy written back over the production XSLT')
     backups = []

@@ -11,7 +11,9 @@ _RULES = """Rules for every run:
 - Start with get_instructions (with the folders, feeds or documents involved): standing instructions from AGENTS
   docs in Stroom. Follow them, the most specific last. The user's request takes precedence, and they never lift an
   approval.
-- Build everything in one build (start_build); nothing leaves the workspace until promote_build is approved.
+- Build everything in one build (start_build, with the feeds when known: it returns the standing instructions
+  too); nothing leaves the workspace until promote_build is approved. Before promoting, list_build shows what
+  the build's pipelines still lack (a clean step of their current code, documentation): resolve it first.
 - Confirm key details with the user when a tool returns needs_confirmation, and ask for approval when it returns
   needs_approval: show the summary, and only pass the id back once the user has agreed.
 - Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
@@ -63,11 +65,11 @@ def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None
         return f"""Onboard "{source_name}"{f' from {vendor}' if vendor else ''} into Stroom.
 
 Stage 1, events:
-1. profile_sample on the sample below. start_build with a build name for this source.
+1. profile_sample on the sample below. start_build with a build name for this source (and the feed, once named).
 2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
-4. Draft the text converter (if the template needs one). Build the XSLT with build_translation_xslt from a mapping:
+4. Draft the text converter (if the template needs one). Build the XSLT with build_translation_xslt (feeds=[the feed]) from a mapping:
    which input field or constant goes to which event-logging path, one rule per kind of event, time patterns from
    profile_sample. Fix reported problems in the mapping and regenerate; hand-edit only what a mapping cannot express.
    step_sample with draft_code until the verdict is clean; step_pipeline on single records to debug.
@@ -188,15 +190,15 @@ pipeline once the user approves.{_docs(source_docs)}"""
     def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
         return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only.
 
-1. start_build, then survey_feed feed={feed} build=<the build>: it samples streams spread over the feed's lifetime, reading only the head of each (big
+1. start_build feeds=[{feed}], then survey_feed feed={feed} build=<the build>: it samples streams spread over the feed's lifetime, reading only the head of each (big
    streams are fine), and groups records into kinds of event (shapes), with counts, examples and where each example
    is, and keeps them in the build's '{feed} - Survey' doc. Not every kind appears in every stream.
-2. Draft the text converter if needed and the translation with build_translation_xslt, one rule per shape, then
+2. Draft the text converter if needed and the translation with build_translation_xslt (feeds=[{feed}]), one rule per shape, then
    create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped
    where they are. Create no feed, upload nothing and process nothing.
 3. survey_feed again with the same build: it carries on from the survey doc (streams read, shapes known). New
-   shapes: add rules, regenerate, and step_records over every location so far. Repeat until a survey is saturated or
-   every stream has been read. Surveys spread their streams over the feed's lifetime and read only the head of each.
+   shapes: add rules, regenerate, and step_records over every location so far. Repeat until a survey's coverage
+   says covered, or every stream has been read. Until then, say plainly that the feed is not covered yet.
 4. Broad check: step_sample over three of the surveyed streams (newest, oldest, middle) with records_per_stream=200,
    to catch variants the examples did not show; fix and step again until clean. Then tell the user which kinds of
    event the pipeline covers and their share of the data.

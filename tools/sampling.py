@@ -178,7 +178,10 @@ async def survey_feed(
     saturated = quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
     result = {
         'feed': feed, 'format': fmt, 'time_range': span, 'streams_read': read_ids, 'records_read': records_read,
-        'saturated': saturated, 'per_stream': per_stream,
+        'saturated': saturated,
+        'coverage': ('covered: no new kinds of event in the last streams read' if saturated else
+                     'NOT COVERED YET: keep surveying before treating the translation as complete'),
+        'per_stream': per_stream,
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],
                     'share_percent': share(counts, s['signature']), 'streams': s['streams'][:10],
                     'example': s['examples'][0]['text'][:500] if s['examples'] else None,
