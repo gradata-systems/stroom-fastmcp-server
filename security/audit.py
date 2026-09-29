@@ -1,7 +1,8 @@
 """Structured audit trail: one JSON object per line on the 'audit' logger.
 
-Records every tool call and every Stroom request with the Keycloak identity that caused it,
-so content the agent creates or changes can be traced back to a person.
+Records every tool call, every Stroom and Elasticsearch request, every confirmation and approval, and
+every refusal with the identity that caused it, so content the agent creates or changes can be traced
+back to a person. See docs/AUDIT.md.
 """
 import json
 import logging
@@ -40,7 +41,9 @@ def _identity() -> dict[str, Any]:
     claims = token.claims or {}
     return {
         'sub': token.subject,
-        'username': claims.get('preferred_username'),
+        # preferred_username from Keycloak, Okta and Entra ID when the profile scope is granted; else Entra's
+        # upn, else email.
+        'username': claims.get('preferred_username') or claims.get('upn') or claims.get('email'),
         'client_id': claims.get('azp') or token.client_id,
     }
 

@@ -8,18 +8,25 @@ jwks_uri in the issuer's discovery document, fetched when the first token arrive
 FastMCP's JWTVerifier fetches keys with the system CAs only, and logs why a token was rejected at debug
 level when the keys can't be fetched or the signing algorithm is wrong, so those failures show up only as
 "invalid token". This verifier trusts an extra CA for the provider and logs those failures as warnings.
+Every rejected token is also audited as access_denied, with the first check it failed.
 """
+import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 import httpx2
 from fastmcp.server.auth import AccessToken, RemoteAuthProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
-from fastmcp.utilities.auth import decode_jwt_header
+from fastmcp.utilities.auth import decode_jwt_header, decode_jwt_payload
 from pydantic import AnyHttpUrl
 
 from config import Settings
+from security.audit import audit
 from utils.tls import trust
+
+# Set when the token being verified failed because its signing key couldn't be had.
+_key_failed: ContextVar[bool] = ContextVar('oidc_key_failed', default=False)
 
 
 def discovery_url(issuer: str) -> str:
@@ -58,6 +65,7 @@ class OIDCTokenVerifier(JWTVerifier):
             return await super()._get_verification_key(token)
         except Exception as e:
             self.logger.warning("Bearer token rejected: couldn't get its signing key from %s: %s", self.jwks_uri, e)
+            _key_failed.set(True)
             raise
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -68,12 +76,46 @@ class OIDCTokenVerifier(JWTVerifier):
         if algorithm and algorithm != self.algorithm:
             self.logger.warning("Bearer token rejected: signed with %s, but only %s is accepted "
                                 "(STROOM_MCP_OIDC_TOKEN_ALGORITHM)", algorithm, self.algorithm)
-        access_token = await super().load_access_token(token)
+        reset = _key_failed.set(False)
+        try:
+            access_token = await super().load_access_token(token)
+            key_failed = _key_failed.get()
+        finally:
+            _key_failed.reset(reset)
+        if access_token is None:
+            audit('access_denied', reason='invalid_token', check=self._failed_check(token, algorithm, key_failed))
+            return None
         # Stroom matches users on sub; without it, calls would fail later and less clearly.
-        if access_token and not (access_token.claims or {}).get('sub'):
+        if not (access_token.claims or {}).get('sub'):
             self.logger.warning("Bearer token rejected for client %s: no sub claim", access_token.client_id)
+            audit('access_denied', reason='invalid_token', check='sub')
             return None
         return access_token
+
+    def _failed_check(self, token: str, algorithm: str | None, key_failed: bool) -> str:
+        """The first check a rejected token failed, in the order JWTVerifier makes them. Read from the
+        unverified token, so it says why the token was refused, not that its claims are genuine."""
+        try:
+            claims = decode_jwt_payload(token)
+        except Exception:
+            return 'malformed'
+        if not algorithm:
+            return 'malformed'
+        if algorithm != self.algorithm:
+            return 'algorithm'
+        if key_failed:
+            return 'signing_key'
+        exp = claims.get('exp')
+        if isinstance(exp, (int, float)) and exp < time.time():
+            return 'expired'
+        if self.issuer and claims.get('iss') != self.issuer:
+            return 'issuer'
+        aud = claims.get('aud')
+        if self.audience and self.audience not in (aud if isinstance(aud, list) else [aud]):
+            return 'audience'
+        if not set(self.required_scopes) <= set(self._extract_scopes(claims)):
+            return 'scopes'
+        return 'signature'
 
 
 def oidc_http_client(ca_file: Path | None) -> httpx2.AsyncClient:

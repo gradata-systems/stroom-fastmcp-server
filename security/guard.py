@@ -9,6 +9,7 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 
+from security.audit import audit
 from utils.stroom import StroomGateway
 
 # The agent may change these; the tag comes off when a build is promoted.
@@ -97,6 +98,7 @@ class WriteGuard:
     async def check_managed(self, ref: dict[str, Any]) -> list[str]:
         tags = await self.tags(ref)
         if MANAGED not in tags:
+            audit('access_denied', reason='not_managed', doc={k: ref.get(k) for k in ('type', 'uuid', 'name')})
             raise ToolError(f"{ref.get('type')} '{ref.get('name') or ref.get('uuid')}' was not created by this server. "
                             "Make a working copy in a build (copy_pipeline) and change that instead; "
                             "promote_build writes it back after approval.")
@@ -106,6 +108,7 @@ class WriteGuard:
         """A doc this server generated, whether still in the workspace or promoted."""
         tags = await self.tags(ref)
         if GENERATED not in tags and MANAGED not in tags:
+            audit('access_denied', reason='not_built', doc={k: ref.get(k) for k in ('type', 'uuid', 'name')})
             raise ToolError(f"{ref.get('type')} '{ref.get('name') or ref.get('uuid')}' was not built by this server")
         return tags
 

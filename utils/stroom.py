@@ -169,8 +169,12 @@ class StroomGateway:
         except httpx.HTTPError as e:
             audit('stroom_request', outcome='error', error=str(e), method='POST', path=self.settings.datafeed_path)
             raise ToolError("Stroom's datafeed is unavailable") from e
-        audit('stroom_request', outcome='success' if response.is_success else 'error', status=response.status_code,
-              method='POST', path=self.settings.datafeed_path, feed=feed, bytes=len(data))
+        who = {'method': 'POST', 'path': self.settings.datafeed_path, 'feed': feed, 'bytes': len(data)}
+        if response.status_code in (401, 403):
+            audit('access_denied', reason=f'stroom_{response.status_code}', status=response.status_code, **who)
+        else:
+            audit('stroom_request', outcome='success' if response.is_success else 'error',
+                  status=response.status_code, **who)
         if response.is_error:
             raise ToolError(f"Stroom refused the upload ({response.status_code}): "
                             f"{response.headers.get('Stroom-Error') or response.text[:300]}")
