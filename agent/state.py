@@ -35,6 +35,7 @@ class BuildState(TypedDict, total=False):
     template_choice: str              # accept | changed | change_pipeline | change_template
     filter_ready: dict[str, Any]      # an Elasticsearch indexing filter created disabled: id, link
     survey: dict[str, Any]            # onboard_existing_feed: feed, shapes, where their examples are, how far back
+    instructions: str                 # standing instructions from AGENTS docs in Stroom, as one block
     attempts: dict[str, int]
     notes: list[str]                  # short progress notes shown to the user
     last_node: str
@@ -62,6 +63,8 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
                                 'shapes': [{k: s.get(k) for k in ('signature', 'count', 'example')}
                                            for s in data.get('shapes') or []][:30],
                                 'locations': data.get('locations') or []}
+        elif name == 'get_instructions' and 'instructions' in data:
+            update['instructions'] = instructions_text(data)
         elif name == 'draft_index_mapping' and data.get('plan'):
             update['field_plan'] = data['plan']
         elif name == 'propose_index_template' and data.get('dev_tools'):
@@ -104,6 +107,12 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
         elif name == 'promote_build' and data.get('promoted'):
             update['promoted'] = True
     return update
+
+
+def instructions_text(result: dict[str, Any]) -> str:
+    """get_instructions' answer as one block for a prompt: each doc headed by where it applies."""
+    return '\n\n'.join(f"[{i['folder']}: applies to {i['applies_to']}]\n{i['instructions'].strip()}"
+                       for i in result.get('instructions') or []) or 'none'
 
 
 def findings_text(state: BuildState) -> str:

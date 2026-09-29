@@ -277,7 +277,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-59 tools in 12 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+60 tools in 13 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -346,6 +346,12 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. For Elasticsearch, the same hand-over: pre-created disabled for the user to enable | `processorFilter/v1` |
 | `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
 | `wait_for_processing` | Poll `processing_status` with backoff until all tasks are complete or failed, or a timeout; then reports, per input stream, the child Events stream id and record count, flagging inputs with none or more than one; can count only one filter's outputs | as above |
+
+**Standing instructions** (`tools/instructions.py`, read-only)
+
+| Tool | Purpose | Stroom API |
+| --- | --- | --- |
+| `get_instructions` | Standing instructions from `AGENTS` Documentation docs: those that apply to the given folders, feeds or documents (a doc applies to its folder and below; one directly under a root folder applies everywhere), most general first, with their text; other `AGENTS` docs listed by folder | `explorer/v2/find`, `documentation/v1` |
 
 **Sampling** (`tools/sampling.py`, read-only)
 
@@ -608,6 +614,8 @@ class BuildState(TypedDict):
 
 **Error routing**: in stage 1, `step_and_validate` steps every sample record and loops to `draft_translation` on blocking findings; `process_sample` then runs the processor to produce Events and checks every raw sample stream has exactly one Events child. A missing or duplicate one is investigated through that stream's task status and Error stream before stage 2 starts; that is the only time a stage 1 Error stream is read. In stage 2, `run_and_triage` routes on the triage of the indexing Error streams: blocking groups go back to `draft_indexing` as findings, review groups get one model check and, if still unclear, an interrupt, and benign groups go into the stage summary shown to the user. `verify_indexed` then builds the verification dashboard and runs the test searches; a failed search is a blocking finding for `draft_indexing`.
 
+**Standing instructions**: a `load_instructions` step runs first in every mode, calling `get_instructions` in code, so no mode can skip it. Drafting and indexing steps may call it again with the folders, feeds or documents involved; the result replaces the instructions in the state. Every step's prompt carries them beside the request.
+
 **Carry-over from the MCP design**: tool names, the `hints` field, approval ids and resource URIs are the agent's contract. Nodes should be written against those, not raw Stroom APIs, so the agent needs no changes when server internals change.
 
 ## Open questions, risks and delivery
@@ -624,6 +632,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Elasticsearch indexing** runs only through the Stroom indexing pipeline. The agent suggests the index template and checks the user's changes against the pipeline; once the user confirms they have committed it, the indexing filter is pre-created disabled and the user enables it after reviewing the pipeline through a direct link.
 - **Indexing input**: indexing filters select only Events produced by an events pipeline this server generated (a `Pipeline` condition), never Events from elsewhere. A promoted pipeline still counts, through its `mcp-generated` tag, so `index_event_data` works on the Events of a pipeline the agent built and promoted.
 - **Tags**: everything the server creates is tagged `mcp-generated`, for good, including promotion backups. `mcp-managed` (and the build tag) mark what the agent may still change and come off at promotion. A production doc that a working copy is written back over is not tagged: it was not generated.
+- **Standing instructions**: people keep standing instructions for building pipelines in Documentation docs named `AGENTS` (configurable), the equivalent of an AGENTS.md. A doc applies to its folder and below; one directly under a root folder applies everywhere; where several apply they are read most general first. The agent loads them in code at the start of every run and whenever a step calls `get_instructions` with the folders involved, and every step's prompt carries them. The user's request takes precedence, and no instruction lifts an approval or the write guard. Anyone who can edit a folder can edit its `AGENTS` doc, so its permissions matter.
 - **Survey record**: survey results are kept in the build as a Documentation doc, `<FEED> - Survey`, with example records; access to them is governed by the folder's permissions.
 - **Existing feeds are stepped, not copied**: `onboard_existing_feed` steps the feed's own records where they are and ends with the translation promoted; processing the source feed is the user's to start.
 

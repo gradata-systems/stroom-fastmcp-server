@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # Path of the data receiver, relative to stroom_url.
     datafeed_path: str = '/stroom/datafeed'
 
+    # Standing instructions: Documentation docs with this name apply to their folder and below.
+    instructions_doc_name: str = 'AGENTS'
     # Where the agent builds everything before it is promoted.
     workspace_folder: str = 'MCP Workspace'
     event_logging_version: str = '3.5.2'

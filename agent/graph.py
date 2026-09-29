@@ -20,7 +20,8 @@ from langchain.agents import create_agent
 from langgraph.types import interrupt
 
 from agent.gating import agreed, gated
-from agent.state import BuildState, findings_text, harvest
+from agent.gating import parse
+from agent.state import BuildState, findings_text, harvest, instructions_text
 
 MAX_ATTEMPTS = 5
 RULES = ("Confirmations and approvals are handled for you: call the tool, and if the user declines you get a "
@@ -46,7 +47,7 @@ NODES: dict[str, tuple[str, list[str]]] = {
                           "Previous findings to fix: {findings}",
                           ['find_pipeline_templates', 'list_template_children', 'describe_template_contract',
                            'find_similar_translations', 'get_document', 'build_translation_xslt', 'check_xslt',
-                           'step_sample', 'step_records', 'step_pipeline', 'profile_sample',
+                           'step_sample', 'step_records', 'step_pipeline', 'profile_sample', 'get_instructions',
                            'create_text_converter', 'update_text_converter', 'create_xslt', 'update_xslt',
                            'create_pipeline', 'read_stream', 'get_stream_attributes']),
     'survey': ("start_build (a short name for the source), then survey the existing feed named in the request with "
@@ -84,7 +85,8 @@ NODES: dict[str, tuple[str, list[str]]] = {
                       "it): {user_template}. Changes to make or previous findings: {findings}",
                       ['find_pipeline_templates', 'get_field_conventions', 'find_elastic_clusters', 'draft_index_mapping',
                        'create_index_doc', 'set_index_fields', 'create_xslt', 'update_xslt', 'get_document',
-                       'create_indexing_pipeline', 'list_index_templates', 'simulate_index_template']),
+                       'create_indexing_pipeline', 'list_index_templates', 'simulate_index_template',
+                       'get_instructions']),
     'propose_template': ("Propose the index template: call propose_index_template for indexing pipeline "
                          "{indexing_pipeline} with this field plan and Events streams {events_stream_ids}. "
                          "Field plan: {field_plan}. Then say in one or two lines what the template maps.",
@@ -180,7 +182,10 @@ def _node(name: str, model: BaseChatModel, tools: dict[str, BaseTool]) -> Callab
         attempts[name] = attempts.get(name, 0) + 1
         result = await agent.ainvoke({'messages': [
             SystemMessage(f"You are building Stroom content, step '{name}'. {RULES}"),
-            HumanMessage(f"Request:\n{state.get('request', '')}\n\nThis step: {_prompt(name, state)}")]})
+            HumanMessage(f"Request:\n{state.get('request', '')}\n\n"
+                         f"Standing instructions (AGENTS docs in Stroom; follow them, the most specific last; the "
+                         f"request takes precedence, and they never lift an approval):\n{state.get('instructions') or 'none'}"
+                         f"\n\nThis step: {_prompt(name, state)}")]})
         update = harvest(result['messages'])
         if 'fix' in update:
             update['fix_attempt'] = attempts[name]
@@ -198,6 +203,17 @@ def _node(name: str, model: BaseChatModel, tools: dict[str, BaseTool]) -> Callab
         last = result['messages'][-1].content if result['messages'] else ''
         return {**update, 'attempts': attempts, 'messages': result['messages'], 'last_node': name,
                 'notes': (state.get('notes') or []) + [f"{name}: {str(last)[:300]}"]}
+    return run
+
+
+def load_instructions(tools: dict[str, BaseTool]) -> Callable:
+    """Standing instructions at the start of every run, fetched in code so no mode can skip them."""
+    async def run(state: BuildState) -> dict[str, Any]:
+        tool = tools.get('get_instructions')
+        if tool is None:
+            return {'instructions': 'none'}
+        result = parse(await tool.ainvoke({}))
+        return {'instructions': instructions_text(result) if isinstance(result, dict) else 'none'}
     return run
 
 
@@ -395,7 +411,9 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_node('review_template', review_template)
     graph.add_node('flag_pipeline_changes', flag_pipeline_changes)
     graph.add_node('await_enable', await_enable)
-    graph.add_conditional_edges(START, start, ['intake', 'locate_issue', 'survey'])
+    graph.add_node('load_instructions', load_instructions(by_name))
+    graph.add_edge(START, 'load_instructions')
+    graph.add_conditional_edges('load_instructions', start, ['intake', 'locate_issue', 'survey'])
     graph.add_conditional_edges('survey', after_survey, ['draft_translation', 'ask_for_help'])
     graph.add_conditional_edges('resurvey', after_resurvey, ['draft_translation', 'broad_check', 'resurvey'])
     graph.add_conditional_edges('broad_check', after_broad_check, ['document', 'draft_translation', 'ask_for_help'])

@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 GUIDES = ROOT / 'knowledge' / 'guides'
 
 _RULES = """Rules for every run:
+- Start with get_instructions (with the folders, feeds or documents involved): standing instructions from AGENTS
+  docs in Stroom. Follow them, the most specific last. The user's request takes precedence, and they never lift an
+  approval.
 - Build everything in one build (start_build); nothing leaves the workspace until promote_build is approved.
 - Confirm key details with the user when a tool returns needs_confirmation, and ask for approval when it returns
   needs_approval: show the summary, and only pass the id back once the user has agreed.
@@ -30,7 +33,7 @@ def _docs(source_docs: str) -> str:
 
 def register(mcp: FastMCP) -> None:
     @mcp.resource('stroom://guide/{name}', mime_type='text/markdown',
-                  description="Working guides: event-logging, xslt, data-splitter, json-input, indexing.")
+                  description="Working guides: event-logging, xslt, data-splitter, json-input, indexing, agent-instructions.")
     def guide(name: str) -> str:
         path = GUIDES / f'{name}.md'
         if not path.is_file() or path.parent != GUIDES:
