@@ -22,6 +22,9 @@ _RULES = """Rules for every run:
 - While developing a pipeline in the build, reprocess sample streams after a fix with reprocess_streams (at most
   10 per call, one task at a time) and wait_for_processing with its filter_id. Reprocessing production data, and
   switching readers from one index version to the next, are the user's.
+- A translation pipeline only processes the build's own feeds: step production records in place (step_records) or
+  copy them into a test feed. Promotion pre-creates each pipeline's filter for new data, disabled: give the user
+  the pipeline link to review and enable it.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, and only after the user confirms that
   the index template for the destination index has been written."""
 

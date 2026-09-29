@@ -312,7 +312,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 | `describe_pipeline` | Flattened element chain with effective properties, including inherited ones and removed elements | `pipeline/v1/fetchPipelineJson`, `fetchPipelineLayers` |
 | `set_pipeline_property` **W** | Set one element property, e.g. `schemaFilter.schemaGroup`, `elasticIndexingFilter.indexName` | `pipeline/v1/savePipelineJson` |
 | `write_documentation` **W** | Create or update a pipeline's Documentation doc from the documentation template, in the workspace; updates revise sections and append a change-log entry | `explorer/v2/create`, `documentation/v1/{uuid}` |
-| `promote_build` **W A** | Move a build's docs from the workspace to confirmed destination folders, or write working copies into the production docs they replace after a backup; widens sample-scoped processor filters if approved | `explorer/v2/move`, doc `PUT`s, `processorFilter/v1/{id}` |
+| `promote_build` **W A** | Move a build's docs from the workspace to confirmed destination folders, or write working copies into the production docs they replace after a backup; pre-creates, disabled, a filter for new data on each promoted pipeline's feed (from its sample filters, or the surveyed feed) with the pipeline link | `explorer/v2/move`, doc `PUT`s, `processorFilter/v1` |
 
 **Translation content** (`tools/translation.py`)
 
@@ -464,7 +464,8 @@ All work happens in the workspace; promotion is the approval-gated step that put
 
 - New docs and new versions are moved with `explorer/v2/move`. UUIDs do not change, so processor filters, pipeline references and dashboard queries keep working. Promoted docs lose `mcp-managed` and the build tag, so any later change goes through a working copy, but keep `mcp-generated`.
 - A change to an existing production doc is made on a working copy in the workspace. On promotion the server backs up the production doc to `MCP Workspace/backups/`, writes the copy's content into it and removes the copy.
-- Processor filters on workspace pipelines stay scoped to sample stream ids; widening them to the whole feed is part of the promotion approval.
+- Processor filters on workspace pipelines stay scoped to sample stream ids, one task at a time (`sample_max_tasks`). Promotion pre-creates each promoted pipeline's filter for its feed, from the promotion time (new data only), with the feed task limit, disabled: the user reviews the pipeline through the link and enables it, after disabling any earlier version that processes the same feed.
+- A translation pipeline only processes streams from the build's own feeds: its Events land in the input's feed, so processing a production stream would put test Events into the production feed. Production records are stepped in place, or copied into a test feed. Indexing pipelines write to an index, so they are not limited this way.
 - Anything not promoted stays in the workspace, tagged for a person to clear.
 
 **Approval gates (A tools)**
@@ -634,7 +635,10 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Superseded outputs** need no tool: Stroom marks a pipeline's earlier outputs for a stream deleted when it processes that stream again (verified locally). The server itself deletes no streams.
 - **Moving from v1 to v2** of an index (aliases, data views, disabling or retiring v1) is the user's.
 - **Elasticsearch indexing** runs only through the Stroom indexing pipeline. The agent suggests the index template and checks the user's changes against the pipeline; once the user confirms they have committed it, the indexing filter is pre-created disabled and the user enables it after reviewing the pipeline through a direct link.
-- **Indexing input**: indexing filters select only Events produced by an events pipeline this server generated (a `Pipeline` condition), never Events from elsewhere. A promoted pipeline still counts, through its `mcp-generated` tag, so `index_event_data` works on the Events of a pipeline the agent built and promoted.
+- **Indexing input**: indexing filters select only Events produced by one named events pipeline (a `Pipeline` condition), never Events from elsewhere. A pipeline this server generated counts (through its `mcp-generated` tag, promoted or not); another pipeline needs the user's confirmation of that exact pipeline (`source_confirmation_id`).
+- **Sample filters** run one task at a time.
+- **Promotion hands over processing**: each promoted pipeline gets a filter for new data on its feed, created disabled, for the user to review and enable.
+- **Translation pipelines process only the build's feeds**; production records are stepped in place or copied into a test feed.
 - **Tags**: everything the server creates is tagged `mcp-generated`, for good, including promotion backups. `mcp-managed` (and the build tag) mark what the agent may still change and come off at promotion. A production doc that a working copy is written back over is not tagged: it was not generated.
 - **Standing instructions**: people keep standing instructions for building pipelines in Documentation docs named `AGENTS` (configurable), the equivalent of an AGENTS.md. A doc applies to its folder and below; one directly under a root folder applies everywhere; where several apply they are read most general first. The agent loads them in code at the start of every run and whenever a step calls `get_instructions` with the folders involved, and every step's prompt carries them. The user's request takes precedence, and no instruction lifts an approval or the write guard. Anyone who can edit a folder can edit its `AGENTS` doc, so its permissions matter.
 - **Survey record**: survey results are kept in the build as a Documentation doc, `<FEED> - Survey`, with example records; access to them is governed by the folder's permissions.
@@ -647,12 +651,12 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Evaluation reports: decided. They are returned in the chat and saved as Stroom Documentation docs beside the pipeline, and every pipeline the agent creates or changes is documented the same way.
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
-- [ ] Is token authentication enabled on the live `/stroom/datafeed` receiver (`receive.authenticationRequired` with the external IdP)? Uploads use the user's token; this works locally.
+- [x] Live uploads with the user's token: checked read-only. The live instance uses an external IdP (a Keycloak realm), requires authentication on receipt with token and certificate authentication enabled, and validates the audience against its client id `stroom`. Tokens carrying `stroom` in `aud` will be accepted; the VS Code client in that realm needs the `stroom-mcp` and `stroom` audience mappers.
 - [x] Front end: decided. VS Code's chat is the agent (setup in `docs/VSCODE.md`); OpenWebUI and the LangGraph agent are not needed.
-- [ ] Sample-scoped filters have no task limit (`maxProcessingTasks` 0); should they use 1, like reprocessing?
-- [ ] `promote_build` does not yet widen sample filters to the whole feed, and a promoted pipeline is no longer the agent's to process. Should promotion create the feed-wide filter (from the promotion time) under the same approval?
-- [ ] Should translation pipelines only process streams from feeds in the build (their Events output lands in the input's feed), with production records copied into a test feed first?
-- [ ] Indexing an existing Events feed whose pipeline the agent did not generate (`index_event_data`): allow a confirmed exception, or bring that pipeline into a build first?
+- [x] Sample filters: decided, one task at a time.
+- [x] Processing after promotion: decided, pre-created disabled for new data, with the pipeline link.
+- [x] Translation pipelines: decided, the build's own feeds only.
+- [x] Indexing Events from a pipeline the agent did not build: decided, allowed once the user confirms that exact source pipeline; the Pipeline condition still applies.
 
 **Risks**
 

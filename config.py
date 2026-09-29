@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     # concurrent task limit. Reprocessing with production pipelines stays with the user.
     max_reprocess_streams: int = 10
     reprocess_max_tasks: int = 1
+    # Task limit on processor filters over the build's sample streams.
+    sample_max_tasks: int = 1
     # Task limit on feed-wide processor filters.
     max_feed_filter_tasks: int = 2
 

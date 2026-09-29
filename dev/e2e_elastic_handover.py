@@ -40,7 +40,7 @@ FIXTURE_CLUSTER = 'E2E_LOCAL_ES'
 
 async def fixtures(stroom: StroomGateway) -> tuple[dict, dict]:
     """The fixture ES indexing template (beside 'Indexing') and a cluster doc, created once."""
-    found = (await stroom.find_documents('Indexing', ['Pipeline'], 20))['values']
+    found = (await stroom.find_documents('Indexing', ['Pipeline'], 500))['values']
     lucene = next(v for v in found if v['docRef']['name'] == 'Indexing')
     existing = {v['docRef']['name']: v['docRef'] for v in
                 (await stroom.find_documents('E2E*', ['Pipeline', 'ElasticCluster'], 20))['values']}

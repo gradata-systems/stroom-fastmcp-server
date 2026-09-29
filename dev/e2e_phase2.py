@@ -242,6 +242,11 @@ async def promotion(ctx, csv: dict, stamp: str):
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
     result = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations=everything)
     check(len(result['promoted']) >= 5, f"promoted: {result['promoted']}")
+    made = result.get('processing_filters') or []
+    check([(f['pipeline'], f['feed'], f['enabled']) for f in made] == [(csv['pipeline']['name'], csv['feed'], False)],
+          f"promotion pre-creates the pipeline's filter for its feed, disabled: {made}")
+    stored = await stroom.get(f"/processorFilter/v1/{made[0]['filter_id']}")
+    check(stored.get('enabled') is False and stored.get('minMetaCreateTimeMs'), 'the filter is disabled and only takes new data')
     info = await stroom.post('/explorer/v2/info', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid']})
     check(info['explorerNode']['uuid'] == csv['pipeline']['uuid'], 'pipeline kept its UUID')
     tags = (await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'],

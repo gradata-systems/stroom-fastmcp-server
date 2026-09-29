@@ -45,6 +45,9 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   per call and runs one task at a time, and Stroom supersedes (deletes) the earlier output. Promoted pipelines are
   refused by the write guard, so reprocessing production data is the user's, as is moving readers from one index
   version to the next.
+- Processing: sample filters run one task at a time; a translation pipeline only processes the build's own feeds;
+  promotion pre-creates each promoted pipeline's filter for new data, disabled, with a link to review and enable it.
+  Indexing Events from a pipeline the agent did not build needs the user's confirmation of that pipeline.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.
 - The agent proposes the index template (a Dev Tools request) and checks any changes the user sends back

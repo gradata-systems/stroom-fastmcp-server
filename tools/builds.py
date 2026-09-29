@@ -1,4 +1,5 @@
 """Tools for builds: the workspace folder, Documentation docs, and promotion out of the workspace."""
+import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -7,6 +8,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import GENERATED, MANAGED, build_tag, guard_from
+from tools.processing_writes import create_promotion_filters, promotion_processing
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
@@ -110,13 +112,20 @@ async def promote_build(
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
             plan.append({'doc': doc, 'action': 'move', 'target': target})
+    moving = [p['doc'] for p in plan if p['action'] == 'move' and p['doc']['type'] == 'Pipeline']
+    surveys = [d['name'][:-len(' - Survey')] for d in docs if d['type'] == 'Documentation' and d['name'].endswith(' - Survey')]
+    processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], surveys)
     details = {'build': build, 'plan': [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}"
                                         for p in plan]}
+    if processing:
+        details['processing after promotion (created disabled, new data only)'] = [
+            f"{e['pipeline']['name']}: feed {e['feed']} ({e['stream_type']})" for e in processing]
     gate = await consent_from(ctx).require(ctx, 'approval', 'promote_build', f"Promote build '{build}'", details,
                                            approval_id)
     if gate:
         return gate
 
+    started_ms = int(time.time() * 1000)
     done = []
     order = {'write back': 0, 'move': 1, 'discard': 2}
     for step in sorted(plan, key=lambda p: order[p['action']]):
@@ -158,7 +167,14 @@ async def promote_build(
             await stroom.put_doc(original)
             await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
             done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
-    return {'build': build, 'promoted': done}
+    filters = await create_promotion_filters(ctx, processing, started_ms)
+    result: dict[str, Any] = {'build': build, 'promoted': done}
+    if filters:
+        result['processing_filters'] = filters
+        result['next'] = ("Tell the user each promoted pipeline has a processing filter for new data, created disabled: "
+                          "review the pipeline (pipeline_link) and enable it on its Processors tab when ready. If an "
+                          "earlier version still processes the same feed, disable that one first.")
+    return result
 
 
 ALL_TOOLS = [start_build, list_build, write_documentation, promote_build]
