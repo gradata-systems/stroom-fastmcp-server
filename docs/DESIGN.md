@@ -134,6 +134,8 @@ The user names an existing Raw Events feed instead of giving a sample. Not every
 2. **Translate every shape, stepping in place.** The mapping gets one rule per shape (`build_translation_xslt`), and `step_records` steps the translation on the survey's locations, the feed's own records, until clean. Records no rule matches are logged, not dropped, so a missed shape shows up.
 3. **Read more streams.** The agent surveys again, skipping the streams already read and passing the signatures it already knows, so only new shapes come back. The mapping gains rules and every location found so far is stepped again. This repeats until a survey is saturated or every stream has been read.
 4. **Broad check.** Two examples per shape cannot show every variant (a missing optional field, an odd value), so `step_sample` steps the first 200 records of three surveyed streams spread over time (`records_per_stream`). Anything blocking or for review goes back to the mapping. Then the agent reports which kinds of event the pipeline covers and their share of the data.
+The survey is kept in the build as a Documentation doc, `<FEED> - Survey`: the kinds of event with counts, shares and streams, example records with where each one is, the surveys run, and a machine-readable state block. A later survey with the same build carries on from it (skipping the streams read, knowing the shapes found), so an interrupted or later session need not start again, and it is promoted beside the pipeline as a record of what the feed holds. Example records are the feed's own data; who can read them is down to the permissions on the folder the doc lives in.
+
 5. **Document, promote, hand over.** The translation is documented and promoted on approval. Processing the source feed with it is the user's to start; once its Events exist, `index_event_data` builds the indexing, since an indexing pipeline can only be stepped and filled from real Events streams.
 
 **Fix a reported pipeline issue**
@@ -349,7 +351,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `survey_feed` | Sample an existing feed's streams spread over its lifetime, reading only the head of each (characters, parts and records capped), and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`. Continues with `skip_stream_ids` and `known_signatures` | `meta/v1/find`, `data/v1/fetch` |
+| `survey_feed` | Sample an existing feed's streams spread over its lifetime, reading only the head of each (characters, parts and records capped), and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`. Continues with `skip_stream_ids` and `known_signatures`, or, given a `build`, from the build's `<FEED> - Survey` doc, which it keeps up to date | `meta/v1/find`, `data/v1/fetch` |
 
 **Diagnosis** (`tools/diagnosis.py`, read-only)
 
@@ -622,6 +624,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Elasticsearch indexing** runs only through the Stroom indexing pipeline. The agent suggests the index template and checks the user's changes against the pipeline; once the user confirms they have committed it, the indexing filter is pre-created disabled and the user enables it after reviewing the pipeline through a direct link.
 - **Indexing input**: indexing filters select only Events produced by an events pipeline this server generated (a `Pipeline` condition), never Events from elsewhere. A promoted pipeline still counts, through its `mcp-generated` tag, so `index_event_data` works on the Events of a pipeline the agent built and promoted.
 - **Tags**: everything the server creates is tagged `mcp-generated`, for good, including promotion backups. `mcp-managed` (and the build tag) mark what the agent may still change and come off at promotion. A production doc that a working copy is written back over is not tagged: it was not generated.
+- **Survey record**: survey results are kept in the build as a Documentation doc, `<FEED> - Survey`, with example records; access to them is governed by the folder's permissions.
 - **Existing feeds are stepped, not copied**: `onboard_existing_feed` steps the feed's own records where they are and ends with the translation promoted; processing the source feed is the user's to start.
 
 **Open questions**
@@ -632,6 +635,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
 - [ ] Is token authentication enabled on the live `/stroom/datafeed` receiver? Uploads need it now that they use the user's token.
+- [ ] OpenWebUI as the agent's front end (proposed): an OpenWebUI Pipe passes `__chat_id__` (the LangGraph thread id) and `__oauth_token__` (the user's token, refreshed by OpenWebUI) to an agent service that checkpoints with `AsyncPostgresSaver` on OpenWebUI's Postgres server (a separate database). Interrupts become assistant replies; the user's next message resumes the graph. SQLite for a single instance.
 - [ ] Sample-scoped filters have no task limit (`maxProcessingTasks` 0); should they use 1, like reprocessing?
 - [ ] `promote_build` does not yet widen sample filters to the whole feed, and a promoted pipeline is no longer the agent's to process. Should promotion create the feed-wide filter (from the promotion time) under the same approval?
 - [ ] Should translation pipelines only process streams from feeds in the build (their Events output lands in the input's feed), with production records copied into a test feed first?

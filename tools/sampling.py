@@ -7,9 +7,11 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from security.guard import guard_from
 from tools.streams import _term
 from utils.stroom import StroomGateway, gateway_from
 from utils.survey import Shapes, share, split_records
+from utils.surveydoc import doc_name, merge, read_state, render
 
 
 def _iso(ms: int) -> str:
@@ -102,6 +104,10 @@ async def survey_feed(
         max_parts_per_stream: Annotated[int, Field(ge=1, le=20)] = 3,
         max_records_per_stream: Annotated[int, Field(ge=10, le=10_000)] = 1000,
         examples_per_shape: Annotated[int, Field(ge=1, le=10)] = 2,
+        build: Annotated[str | None, Field(
+            description="Keep the survey record in this build: a Documentation doc '<feed> - Survey' with the kinds "
+                        "of event, examples and survey state. An existing record is continued: its streams are "
+                        "skipped and its shapes are known.")] = None,
 ) -> dict[str, Any]:
     """
     Sample a feed's streams spread over its lifetime (newest, oldest, then the middle, then the quarters...)
@@ -111,16 +117,23 @@ async def survey_feed(
     ones. Stops when quiet_streams streams in a row show nothing new (saturated), or when every stream has
     been read. Returns each shape with its count, share and examples, and where each example is (stream,
     part, record) for step_records. Call again with skip_stream_ids (all streams read so far) and
-    known_signatures to read further streams for kinds of event not seen yet. Reads only.
+    known_signatures to read further streams for kinds of event not seen yet. With a build, the results are
+    kept in (and continued from) the build's survey doc. Reads only, apart from that doc.
     """
     stroom = gateway_from(ctx)
+    record = await _load_record(ctx, build, feed) if build else None
+    state = read_state(record.get('documentation')) if record else None
+    if state:
+        skip_stream_ids = sorted(set(skip_stream_ids) | set(state['streams_read']))
+        known_signatures = list(dict.fromkeys(known_signatures + list(state['shapes'])))
     terms = [_term('Feed', feed), _term('Type', stream_type)]
     skip = set(skip_stream_ids)
     streams, span = await pick_spread(stroom, terms, max_streams, skip)
     if not streams and skip:
-        return {'feed': feed, 'streams_read': [], 'records_read': 0, 'saturated': True, 'shapes': [],
-                'new_shapes': 0, 'locations': [], 'time_range': span,
-                'hint': "Every stream in the feed has been read: the survey is complete."}
+        result = {'feed': feed, 'streams_read': [], 'records_read': 0, 'saturated': True, 'shapes': [],
+                  'new_shapes': 0, 'locations': [], 'time_range': span,
+                  'hint': "Every stream in the feed has been read: the survey is complete."}
+        return await _keep(ctx, build, record, state, result, {}, examples_per_shape)
     if not streams:
         raise ToolError(f"No {stream_type} streams in feed '{feed}'")
     shapes = Shapes(known_signatures, examples_per_shape)
@@ -163,7 +176,7 @@ async def survey_feed(
     to_step = new_shapes if known_signatures else found
     read_ids = [p['stream'] for p in per_stream if 'records' in p]
     saturated = quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
-    return {
+    result = {
         'feed': feed, 'format': fmt, 'time_range': span, 'streams_read': read_ids, 'records_read': records_read,
         'saturated': saturated, 'per_stream': per_stream,
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],
@@ -174,6 +187,31 @@ async def survey_feed(
         'locations': [{**e['location'], 'shape': s['signature']} for s in to_step for e in s['examples']],
         'hint': _hint(saturated, new_shapes, known_signatures),
     }
+    return await _keep(ctx, build, record, state, result, shapes.shapes, examples_per_shape)
+
+
+async def _load_record(ctx: Context, build: str, feed: str) -> dict[str, Any] | None:
+    """The build's survey doc for this feed, if there is one."""
+    found = next((d for d in await guard_from(ctx).folder_contents(build)
+                  if d['type'] == 'Documentation' and d['name'] == doc_name(feed)), None)
+    return await gateway_from(ctx).get_doc('Documentation', found['uuid']) if found else None
+
+
+async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, state: dict[str, Any] | None,
+                result: dict[str, Any], shapes: dict[str, dict[str, Any]], examples: int) -> dict[str, Any]:
+    """Write this survey into the build's survey doc (creating it the first time)."""
+    if not build:
+        return result
+    stroom = gateway_from(ctx)
+    merged = merge(state, result, shapes, examples)
+    if record is None:
+        ref = await guard_from(ctx).create('Documentation', doc_name(result['feed']), build)
+        record = await stroom.get_doc('Documentation', ref['uuid'])
+    record['documentation'] = render(merged)
+    saved = await stroom.put_doc(record)
+    result['survey_doc'] = {'type': 'Documentation', 'uuid': saved['uuid'], 'name': saved['name'],
+                            'kinds_of_event': len(merged['shapes']), 'streams_read_in_total': len(merged['streams_read'])}
+    return result
 
 
 def _hint(saturated: bool, new_shapes: list, known: list[str]) -> str:

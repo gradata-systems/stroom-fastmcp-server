@@ -49,12 +49,15 @@ NODES: dict[str, tuple[str, list[str]]] = {
                            'step_sample', 'step_records', 'step_pipeline', 'profile_sample',
                            'create_text_converter', 'update_text_converter', 'create_xslt', 'update_xslt',
                            'create_pipeline', 'read_stream', 'get_stream_attributes']),
-    'survey': ("Survey the existing feed named in the request with survey_feed, and start_build (a short name for "
-               "the source). The feed's records are only read and stepped where they are: create no feed, upload "
-               "nothing and process nothing.",
+    'survey': ("start_build (a short name for the source), then survey the existing feed named in the request with "
+               "survey_feed, passing build so the results are kept in the build's survey doc (and an earlier survey "
+               "there is continued). The feed's records are only read and stepped where they are: create no feed, "
+               "upload nothing and process nothing.",
                ['survey_feed', 'start_build', 'find_documents', 'get_document', 'profile_sample', 'record_source_notes']),
-    'resurvey': ("Read more of feed {survey_feed}: survey_feed with skip_stream_ids={survey_streams} and "
-                 "known_signatures={survey_signatures}. Report how many new kinds of event it found.",
+    'resurvey': ("Read more of feed {survey_feed}: survey_feed with build={build} (it carries on from the survey doc, "
+                 "skipping the streams read and knowing the shapes found; if there is no build, pass "
+                 "skip_stream_ids={survey_streams} and known_signatures={survey_signatures}). Report how many new "
+                 "kinds of event it found.",
                  ['survey_feed']),
     'broad_check': ("Broad check of pipeline {translation_pipeline}: step_sample over the source streams "
                     "{broad_streams} with records_per_stream=200 (whole records from the head of each stream, "

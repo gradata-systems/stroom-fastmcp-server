@@ -182,13 +182,13 @@ pipeline once the user approves.{_docs(source_docs)}"""
     def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
         return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only.
 
-1. survey_feed feed={feed}: it samples streams spread over the feed's lifetime, reading only the head of each (big
+1. start_build, then survey_feed feed={feed} build=<the build>: it samples streams spread over the feed's lifetime, reading only the head of each (big
    streams are fine), and groups records into kinds of event (shapes), with counts, examples and where each example
-   is. Not every kind appears in every stream. start_build.
+   is, and keeps them in the build's '{feed} - Survey' doc. Not every kind appears in every stream.
 2. Draft the text converter if needed and the translation with build_translation_xslt, one rule per shape, then
    create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped
    where they are. Create no feed, upload nothing and process nothing.
-3. survey_feed again with skip_stream_ids=every stream read so far and known_signatures=every signature so far. New
+3. survey_feed again with the same build: it carries on from the survey doc (streams read, shapes known). New
    shapes: add rules, regenerate, and step_records over every location so far. Repeat until a survey is saturated or
    every stream has been read. Surveys spread their streams over the feed's lifetime and read only the head of each.
 4. Broad check: step_sample over three of the surveyed streams (newest, oldest, middle) with records_per_stream=200,

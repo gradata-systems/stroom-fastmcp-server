@@ -137,8 +137,10 @@ async def main():
 
         ids = sorted(m['meta']['id'] for m in (await stroom.find_meta([p2.processing_writes._term('Feed', source)], 10))['values'])
 
-        print('\n### 1. survey two streams, spread over the feed')
-        first = await sampling.survey_feed(ctx, source, max_streams=2)
+        build = f'existing-{stamp}'
+        print('\n### 1. survey two streams, spread over the feed, recorded in the build')
+        first = await sampling.survey_feed(ctx, source, max_streams=2, build=build)
+        p2.check(first['survey_doc']['name'] == f'{source} - Survey', f"survey kept in {first['survey_doc']['name']}")
         signatures = [s['signature'] for s in first['shapes']]
         kinds = sorted(s['signature'].split('action=')[-1] for s in first['shapes'])
         print(f"    read {first['streams_read']} of {ids}; kinds: {kinds}")
@@ -146,7 +148,6 @@ async def main():
         p2.check(kinds == ['file_read', 'login', 'logout'] and not first['saturated'], 'three kinds so far, keep looking')
 
         print('\n### 2. pipeline for those shapes, stepped on the feed\'s own records')
-        build = f'existing-{stamp}'
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == 'Event Data (JSON)')
         xslt = await translation.create_xslt(ctx, build, f'{source}-Events', await xslt_for(ctx, V1))
@@ -164,7 +165,7 @@ async def main():
                      f"location {location['stream']}:{location['record']} is a {action} record")
 
         print('\n### 3. survey the streams not read yet')
-        second = await sampling.survey_feed(ctx, source, skip_stream_ids=first['streams_read'], known_signatures=signatures)
+        second = await sampling.survey_feed(ctx, source, build=build)  # carries on from the survey doc
         new = [s['signature'].split('action=')[-1] for s in second['shapes'] if s['new']]
         print(f"    read {second['streams_read']}; new kinds: {new}")
         p2.check(sorted(second['streams_read']) == ids[1:3] and new == ['passwd_change'],
@@ -182,10 +183,15 @@ async def main():
                  f"every kind of event steps clean ({both['records_stepped']} records)")
 
         print('\n### 5. survey again: every stream read')
-        third = await sampling.survey_feed(ctx, source, skip_stream_ids=first['streams_read'] + second['streams_read'],
-                                           known_signatures=signatures + [s['signature'] for s in second['shapes']])
+        third = await sampling.survey_feed(ctx, source, build=build)
         p2.check(third['saturated'] and third['new_shapes'] == 0 and not third['streams_read'],
                  f"the feed is covered: {third['hint']}")
+        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['documentation']
+        state = sampling.read_state(record)
+        p2.check(sorted(state['streams_read']) == ids and len(state['shapes']) == 4 and state['saturated'],
+                 f"the survey doc records all {len(ids)} streams and 4 kinds of event")
+        p2.check('## Kinds of event' in record and '"action": "passwd_change"' in record and 'Stream ' in record,
+                 'the doc shows the kinds of event with example records and where they are')
 
         print('\n### 6. broad check: the head of each stream')
         broad = await stepping.step_sample(ctx, pipeline['uuid'], ids, records_per_stream=2)

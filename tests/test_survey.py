@@ -87,3 +87,27 @@ def test_spread_order_covers_the_range_early():
     from tools.sampling import spread_order
     assert spread_order(5) == [4, 0, 2, 1, 3] and sorted(spread_order(10)) == list(range(10))
     assert spread_order(10)[:3] == [9, 0, 4]
+
+
+def test_survey_doc_round_trips_and_merges():
+    from utils.surveydoc import merge, read_state, render
+    first_shapes = {'fields:action | action=login': {'count': 5, 'streams': [4], 'examples': [
+        {'text': '{"action": "login", "user": "a|b"}', 'location': {'stream': 4, 'part': 0, 'record': 0}}]}}
+    result = {'feed': 'SRC', 'format': 'json array', 'streams_read': [4, 1], 'records_read': 5, 'saturated': False,
+              'new_shapes': 1, 'time_range': {'oldest': 't0', 'newest': 't1'}}
+    state = merge(None, result, first_shapes, 2)
+    markdown = render(state)
+    assert '| 1 | fields:action \| action=login | 5 | 100.0% | 1 |' in markdown
+    assert 'Stream 4, part 0, record 0:' in markdown and '{"action": "login", "user": "a|b"}' in markdown
+    again = read_state(markdown)
+    assert again == state
+    more = {'fields:action | action=login': {'count': 2, 'streams': [2], 'examples': [
+                {'text': '{"action": "login", "user": "c"}', 'location': {'stream': 2, 'part': 0, 'record': 1}}]},
+            'fields:action | action=logout': {'count': 1, 'streams': [2], 'examples': [
+                {'text': '{"action": "logout"}', 'location': {'stream': 2, 'part': 0, 'record': 2}}]}}
+    merged = merge(again, {**result, 'streams_read': [2], 'records_read': 3, 'saturated': True}, more, 2)
+    login = merged['shapes']['fields:action | action=login']
+    assert login['count'] == 7 and login['streams'] == [2, 4] and len(login['examples']) == 2
+    assert merged['streams_read'] == [1, 2, 4] and merged['saturated'] and len(merged['surveys']) == 2
+    assert 'the feed looks covered' in render(merged)
+    assert read_state('no state here') is None
