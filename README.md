@@ -41,13 +41,14 @@ framework. The rules that must hold (the workspace, confirmations and approvals,
 Elasticsearch hand-over, checks before promotion) are enforced by the server, not by prompts, so every client gets
 them. What a client needs is in [docs/DESIGN.md](docs/DESIGN.md#clients).
 
-Setting up VS Code (the Keycloak client, Stroom trusting the realm, `mcp.json`) is described in
-[docs/VSCODE.md](docs/VSCODE.md); other clients need the same Keycloak client and token audiences.
+Setting up VS Code (the identity provider's client, Stroom trusting the provider, `mcp.json`) is described in
+[docs/VSCODE.md](docs/VSCODE.md); other clients need the same kind of client and token audiences. Any OpenID Connect provider
+that issues JWT access tokens works; Keycloak is the worked example.
 
 ## How it works
 
 - **As the user.** Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards
-  their Keycloak token, whose `aud` must include `stroom` as well as the MCP audience. There is no shared API key.
+  their access token, whose `aud` must include `stroom` as well as the MCP audience (or one audience both accept). There is no shared API key.
 - **In a workspace.** Everything is written under `MCP Workspace/<build>` and tagged `mcp-managed` and
   `mcp-generated`. Only `mcp-managed` docs can be changed; promotion moves them into place and removes
   `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
@@ -91,7 +92,7 @@ uv run python main.py
 TLS is required: the server refuses to start without a certificate unless a proxy in front terminates TLS
 (`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` for probes.
 
-For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak and calls Stroom with
+For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without sign-in and calls Stroom with
 `STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
 API key when authentication is on.
 
@@ -117,7 +118,7 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_elastic_handover.py` | The Elasticsearch template hand-over, without Elasticsearch |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 
-To call one tool directly (no MCP client or Keycloak): `uv run python dev/try_tool.py find_pipeline_templates
+To call one tool directly (no MCP client or sign-in): `uv run python dev/try_tool.py find_pipeline_templates
 stage=translation`, or `--live` for the instance in `.ai/secrets` (read-only tools only). `dev/live_readonly.py [FEED]`
 runs the read-only tools against that instance through a gateway that refuses any request that could change
 Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (every name carries `E2E_STAMP`), and

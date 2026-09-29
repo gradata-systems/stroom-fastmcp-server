@@ -1,7 +1,7 @@
 # Rendered in CI: cert-manager certificate, overridden policy, rules and conventions, several replicas.
 publicBaseUrl: https://stroom-mcp.example.com
 stroom: {url: https://stroom.example.com}
-keycloak: {realmUrl: https://keycloak.example.com/realms/stroom}
+oidc: {issuerUrl: https://keycloak.example.com/realms/stroom}
 tls:
   certManager: {enabled: true, issuerRef: {name: internal-ca}}
 replicaCount: 2

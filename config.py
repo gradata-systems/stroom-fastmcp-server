@@ -11,8 +11,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix='STROOM_MCP_', env_file='.env', extra='ignore')
 
-    # Stroom. Every call acts as the user who asked: the caller's Keycloak access token is forwarded, so
-    # its aud claim must include stroom_audience as well as keycloak_audience. The API key is only for
+    # Stroom. Every call acts as the user who asked: the caller's access token is forwarded, so its aud
+    # claim must include stroom_audience as well as oidc_audience. The API key is only for
     # development with dev_no_auth (or tools run directly), where there is no caller token.
     stroom_url: str
     stroom_audience: str = 'stroom'
@@ -64,14 +64,23 @@ class Settings(BaseSettings):
     # Audit trail as JSON lines; stdout when unset (suits Kubernetes log shipping).
     audit_log_file: Path | None = None
 
-    # Keycloak (OAuth2 authorization server)
-    keycloak_realm_url: str = ''
-    keycloak_audience: str = ''
-    # Algorithm Keycloak signs access tokens with.
-    keycloak_token_algorithm: str = 'RS256'
-    # CA that signed Keycloak's HTTPS certificate, trusted in addition to the system CAs for fetching the
-    # realm's signing keys. Needed when Keycloak uses a private CA.
-    keycloak_ca_certs: Path | None = None
+    # OpenID Connect provider (the OAuth2 authorization server Stroom trusts): Keycloak, Entra ID, Okta,
+    # Auth0, Cognito and so on.
+    # Issuer URL, exactly as in the tokens' iss claim, e.g. https://keycloak.example.com/realms/stroom.
+    oidc_issuer_url: str = ''
+    oidc_audience: str = ''
+    # Where the provider publishes its signing keys. Unset: jwks_uri from the issuer's
+    # /.well-known/openid-configuration, fetched when the first token arrives.
+    oidc_jwks_uri: str | None = None
+    # Algorithm the provider signs access tokens with.
+    oidc_token_algorithm: str = 'RS256'
+    # Scopes every access token must carry (scope or scp claim), comma- or space-separated; also advertised
+    # to clients as the scopes to request. Keycloak and Okta put 'openid' in access tokens; Entra ID
+    # puts only API scopes there (e.g. api://stroom-mcp/access), so set this to those, or to empty.
+    oidc_required_scopes: Annotated[list[str], NoDecode] = ['openid']
+    # CA that signed the provider's HTTPS certificate, trusted in addition to the system CAs for fetching
+    # its discovery document and signing keys. Needed when the provider uses a private CA.
+    oidc_ca_certs: Path | None = None
     # External URL clients use to reach the server (https://...). Used in OAuth metadata.
     public_base_url: str = ''
     # Keys that seal the state carried between rounds of a form (confirmations and approvals), each at
@@ -95,4 +104,11 @@ class Settings(BaseSettings):
     def _split_keys(cls, value):
         if isinstance(value, str):
             return [k.strip() for k in value.split(',') if k.strip()]
+        return value
+
+    @field_validator('oidc_required_scopes', mode='before')
+    @classmethod
+    def _split_scopes(cls, value):
+        if isinstance(value, str):
+            return value.replace(',', ' ').split()
         return value

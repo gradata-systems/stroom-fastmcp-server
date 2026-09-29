@@ -150,14 +150,14 @@ A user reports that something came out wrong, often one event type that is not t
 
 ## Architecture
 
-The server copies the ES MCP server's shape: FastMCP over streamable HTTP, Keycloak auth, audit middleware, a lifespan-managed gateway per backend, and tools that return compact, budgeted JSON with hints the model can act on. The one new idea is a **write guard**, because this server creates and changes content.
+The server copies the ES MCP server's shape: FastMCP over streamable HTTP, OIDC auth, audit middleware, a lifespan-managed gateway per backend, and tools that return compact, budgeted JSON with hints the model can act on. The one new idea is a **write guard**, because this server creates and changes content.
 
 ```mermaid
 flowchart TB
     client[MCP client: chat client, IDE or agent framework<br/>signs the user in: auth code + PKCE]
-    kc[Keycloak<br/>issues user tokens with<br/>aud = stroom-mcp and stroom]
+    kc[OIDC provider, e.g. Keycloak<br/>issues user tokens with<br/>aud = stroom-mcp and stroom]
     subgraph server[Stroom FastMCP server, standalone]
-        mw[Middleware<br/>KeycloakAuthProvider<br/>AuditMiddleware<br/>WriteGuard: workspace folder, approvals]
+        mw[Middleware<br/>OIDC token verifier<br/>AuditMiddleware<br/>WriteGuard: workspace folder, approvals]
         tools[Tools and resources<br/>feeds, pipelines, XSLT<br/>processing, streams, errors<br/>stepping, validation<br/>ES templates, schema resources]
         gw[Gateways<br/>StroomGateway: the caller's own token<br/>ElasticsearchGateway: templates only, optional]
     end
@@ -170,9 +170,9 @@ flowchart TB
     stroom -- indexes --> es
 ```
 
-**Identity.** The server acts as the user who asked. Stroom 7.x trusts the same Keycloak realm, and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, through a Keycloak audience mapper), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without `stroom` in `aud` is refused with a message naming the missing mapper, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
+**Identity.** The server acts as the user who asked. Stroom 7.x trusts the same OpenID Connect provider (Keycloak, Entra ID, Okta, ...), and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, e.g. through a Keycloak audience mapper; with a provider that issues one audience per token, Stroom accepts the server's audience instead), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without Stroom's audience in `aud` is refused with a message saying so, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
 
-**Clients.** Any MCP client can drive the server; what one needs is under Clients below. VS Code's chat (agent mode) is the first set up and tested: its model runs the workflows from the prompts (slash commands), guides attach as resources, and VS Code handles the Keycloak sign-in with a pre-registered public client (PKCE, redirect URIs `http://127.0.0.1:33418` and `https://vscode.dev/redirect`). Setup: `docs/VSCODE.md`.
+**Clients.** Any MCP client can drive the server; what one needs is under Clients below. VS Code's chat (agent mode) is the first set up and tested: its model runs the workflows from the prompts (slash commands), guides attach as resources, and VS Code handles the sign-in with a pre-registered public client (PKCE, redirect URIs `http://127.0.0.1:33418` and `https://vscode.dev/redirect`). Setup: `docs/VSCODE.md`.
 
 **Asking the user.** Confirmations and approvals are forms the user answers, so the model never holds the answer. On MCP 2026-07-28 connections, which have no server-initiated requests, the tool returns an input-required result with the form, and the client repeats the call with the answer (SEP-2322); the sealed request state names the exact request and user, and the gates already passed in the call. On earlier connections the server sends the elicitation during the call. A client that cannot answer forms gets a one-time id bound to the request and user instead.
 
@@ -204,7 +204,7 @@ stroom-fastmcp-server/
   conventions/            # field convention profiles (*.yaml)
   knowledge/guides/       # the stroom://guide/{name} resources
   security/
-    auth.py               # Keycloak token verification (private CA, clear rejection reasons)
+    auth.py               # OIDC token verification (key discovery, private CA, clear rejection reasons)
     audit.py              # audit middleware and events
     guard.py              # write guard: workspace folders, mcp-* tags, managed docs only
     policy.py             # access policy (template sources)
@@ -224,7 +224,7 @@ stroom-fastmcp-server/
 
 **Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in `docs/DEPLOYMENT.md`.
 
-**Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom, Keycloak and Elasticsearch are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and Keycloak, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
+**Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom, the identity provider and Elasticsearch are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and the identity provider, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
 
 **Dependencies**: `fastmcp`, `httpx`, `pydantic`, `pydantic-settings`, `lxml` (XSD validation, XSLT well-formedness, incremental parsing), `pyyaml`; dev: `pytest`, `pytest-asyncio`, `respx`, `saxonche` (running generated XSLT in tests).
 
@@ -547,7 +547,7 @@ The server includes no agent. The agent is whatever the user runs: a chat client
 | A client needs | Why | What the server provides |
 | --- | --- | --- |
 | Streamable HTTP | The transport | `<public url>/mcp` |
-| OAuth sign-in as the user: authorization code with PKCE, or another flow that yields the user's own token | Every Stroom call acts as the user | Protected resource metadata (`/.well-known/oauth-protected-resource/mcp`) naming the Keycloak realm. Tokens must carry both audiences (the server's and `stroom`), `sub`, and the `openid` scope; the client refreshes them |
+| OAuth sign-in as the user: authorization code with PKCE, or another flow that yields the user's own token | Every Stroom call acts as the user | Protected resource metadata (`/.well-known/oauth-protected-resource/mcp`) naming the OIDC issuer. Tokens must carry both audiences (the server's and `stroom`, or one both accept), `sub`, and the required scopes (`openid` by default); the client refreshes them |
 | Forms, or a way to show a summary and send back an id | The user, not the model, answers confirmations and approvals | On MCP 2026-07-28, an input-required result the client answers by repeating the call (SEP-2322); on earlier versions, elicitation during the call; otherwise `needs_confirmation` / `needs_approval` with a summary and an id, which the client passes back only once the user agrees |
 | Prompts (optional) | The workflows, e.g. as slash commands | Eight prompts; a client without prompt support can send the same text |
 | Resources (optional) | Reference guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
@@ -564,7 +564,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 
 **Design decisions** (can be revisited)
 
-- **Identity**: the server acts as the user who asked, forwarding their token; Keycloak adds `stroom` to the token's `aud`. No token exchange, and no API key outside local development.
+- **Identity**: the server acts as the user who asked, forwarding their token; the provider adds `stroom` to the token's `aud` (or Stroom accepts the server's audience). No token exchange, and no API key outside local development.
 - **Uploads**: `/stroom/datafeed` is called with the user's token, not an API key.
 - **Reprocessing** is part of developing a pipeline in the workspace: up to 10 streams per call, with a processor filter task limit of 1. Reprocessing with production pipelines is the user's; the write guard refuses it.
 - **Superseded outputs** need no tool: Stroom marks a pipeline's earlier outputs for a stream deleted when it processes that stream again (verified locally). The server itself deletes no streams.

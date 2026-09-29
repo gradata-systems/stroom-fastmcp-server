@@ -68,7 +68,7 @@ def _reason(response: httpx.Response) -> str:
 class StroomGateway:
     """Calls the Stroom REST API (`/api/...`) as the MCP caller.
 
-    The caller's Keycloak access token is forwarded, so Stroom applies that user's own permissions
+    The caller's access token is forwarded, so Stroom applies that user's own permissions
     and audits them by name. Only with dev_no_auth (no caller token) is the configured API key used.
     """
 
@@ -96,8 +96,8 @@ class StroomGateway:
         audience = (token.claims or {}).get('aud')
         if self.settings.stroom_audience not in (audience if isinstance(audience, list) else [audience]):
             raise ToolError(f"Your access token is not valid for Stroom: its aud claim lacks "
-                            f"'{self.settings.stroom_audience}'. Keycloak needs an audience mapper for it on the "
-                            f"client you signed in with.")
+                            f"'{self.settings.stroom_audience}'. The identity provider must add it to tokens "
+                            f"for the client you signed in with (in Keycloak, an audience mapper).")
         if token.expires_at and token.expires_at <= time.time():
             raise ToolError("Your access token expired during this call; sign in again or refresh, then call again")
         return {'Authorization': f'Bearer {token.token}'}

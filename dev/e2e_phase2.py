@@ -50,8 +50,8 @@ def target_settings() -> 'Settings':
         url, key = secrets['STROOM_URL'], secrets['STROOM_API_KEY']
     else:
         url, key = 'http://127.0.0.1:18080', env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
-    return Settings(_env_file=None, stroom_url=url, dev_no_auth=True, stroom_api_key=key, keycloak_realm_url='-',
-                    keycloak_audience='-', public_base_url='-', event_logging_version=VERSION)
+    return Settings(_env_file=None, stroom_url=url, dev_no_auth=True, stroom_api_key=key, oidc_issuer_url='-',
+                    oidc_audience='-', public_base_url='-', event_logging_version=VERSION)
 EVENT_TAIL = """
       <EventDetail>
         <TypeId>{type_id}</TypeId>

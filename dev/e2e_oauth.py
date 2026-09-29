@@ -1,8 +1,8 @@
 """Sign-in the way VS Code does it, against the MCP server running with Keycloak (dev/keycloak).
 
 Start Keycloak (dev/keycloak) and the server with Keycloak auth, e.g.
-    STROOM_MCP_STROOM_URL=http://127.0.0.1:18080 STROOM_MCP_KEYCLOAK_REALM_URL=http://127.0.0.1:18180/realms/stroom \\
-    STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp STROOM_MCP_PUBLIC_BASE_URL=http://127.0.0.1:8765 \\
+    STROOM_MCP_STROOM_URL=http://127.0.0.1:18080 STROOM_MCP_OIDC_ISSUER_URL=http://127.0.0.1:18180/realms/stroom \\
+    STROOM_MCP_OIDC_AUDIENCE=stroom-mcp STROOM_MCP_PUBLIC_BASE_URL=http://127.0.0.1:8765 \\
     STROOM_MCP_HOST=127.0.0.1 STROOM_MCP_PORT=8765 uv run python main.py
 then
     uv run python dev/e2e_oauth.py [--stroom]

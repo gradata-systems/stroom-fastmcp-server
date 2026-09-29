@@ -1,0 +1,80 @@
+"""Access token verification against a generic OpenID Connect provider."""
+import httpx2
+import pytest
+from fastmcp.server.auth.providers.jwt import RSAKeyPair
+from joserfc.jwk import RSAKey
+
+from config import Settings
+from security.auth import oidc_auth
+
+KEYS = RSAKeyPair.generate()
+JWKS = {'keys': [{**RSAKey.import_key(KEYS.public_key).as_dict(), 'kid': 'k1', 'use': 'sig'}]}
+
+
+def provider(issuer: str, requests: list[str]) -> httpx2.AsyncClient:
+    """A provider at `issuer` that publishes its keys at a path Keycloak doesn't use."""
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        if str(request.url) == f"{issuer.rstrip('/')}/.well-known/openid-configuration":
+            return httpx2.Response(200, json={'issuer': issuer, 'jwks_uri': 'https://idp.example/keys'})
+        if str(request.url) == 'https://idp.example/keys':
+            return httpx2.Response(200, json=JWKS)
+        return httpx2.Response(404)
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+
+
+def settings(**overrides) -> Settings:
+    return Settings(_env_file=None, stroom_url='https://stroom.example', oidc_audience='stroom-mcp',
+                    public_base_url='https://mcp.example', **overrides)
+
+
+def token(issuer: str, **kwargs) -> str:
+    return KEYS.create_token(issuer=issuer, audience=['stroom-mcp', 'stroom'], kid='k1', **kwargs)
+
+
+# Auth0's issuer ends in '/', which must be kept to match the iss claim.
+@pytest.mark.parametrize('issuer', ['https://login.example/tenant/v2.0', 'https://tenant.auth0.example/'])
+async def test_signing_keys_come_from_the_discovery_document(issuer):
+    requests = []
+    auth = oidc_auth(settings(oidc_issuer_url=issuer), provider(issuer, requests))
+    access = await auth.verify_token(token(issuer, subject='u1', scopes=['openid']))
+    assert access is not None and access.claims['sub'] == 'u1'
+    assert requests == [f"{issuer.rstrip('/')}/.well-known/openid-configuration", 'https://idp.example/keys']
+    # Discovered once, not per token.
+    await auth.verify_token(token(issuer, subject='u2', scopes=['openid']))
+    assert len(requests) == 2
+
+
+async def test_configured_jwks_uri_skips_discovery():
+    requests = []
+    auth = oidc_auth(settings(oidc_issuer_url='https://idp.example', oidc_jwks_uri='https://idp.example/keys'),
+                     provider('https://idp.example', requests))
+    assert await auth.verify_token(token('https://idp.example', scopes=['openid']))
+    assert requests == ['https://idp.example/keys']
+
+
+async def test_required_scopes_are_configurable():
+    issuer = 'https://idp.example'
+    entra_like = token(issuer, additional_claims={'scp': 'access'})
+    assert await oidc_auth(settings(oidc_issuer_url=issuer), provider(issuer, [])).verify_token(entra_like) is None
+    auth = oidc_auth(settings(oidc_issuer_url=issuer, oidc_required_scopes=[]), provider(issuer, []))
+    assert await auth.verify_token(entra_like)
+
+
+async def test_token_without_sub_is_rejected():
+    issuer = 'https://idp.example'
+    auth = oidc_auth(settings(oidc_issuer_url=issuer), provider(issuer, []))
+    assert await auth.verify_token(token(issuer, subject='', scopes=['openid'])) is None
+
+
+async def test_token_from_another_issuer_is_rejected():
+    issuer = 'https://idp.example'
+    auth = oidc_auth(settings(oidc_issuer_url=issuer), provider(issuer, []))
+    assert await auth.verify_token(token('https://other.example', scopes=['openid'])) is None
+
+
+@pytest.mark.parametrize('value, expected', [('openid', ['openid']), ('openid, profile api://x/y', ['openid', 'profile', 'api://x/y']),
+                                             ('', [])])
+def test_required_scopes_parse_from_the_environment(monkeypatch, value, expected):
+    monkeypatch.setenv('STROOM_MCP_OIDC_REQUIRED_SCOPES', value)
+    assert Settings(_env_file=None, stroom_url='https://s').oidc_required_scopes == expected

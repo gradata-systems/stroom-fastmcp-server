@@ -1,15 +1,16 @@
 # Deployment
 
-The server is one container that terminates TLS itself, signs users in with Keycloak and calls Stroom as each
+The server is one container that terminates TLS itself, signs users in with an OpenID Connect provider
+(Keycloak, Entra ID, Okta, Auth0, ...) and calls Stroom as each
 user with their own token. It holds no credentials for Stroom. VS Code (or any MCP client) connects to
 `<publicBaseUrl>/mcp`; setup for users is in [VSCODE.md](VSCODE.md).
 
 ## Prerequisites
 
-- **Keycloak**: the realm Stroom already trusts, with a public client for VS Code whose access tokens carry
-  both audiences, `stroom-mcp` (this server) and `stroom` (Stroom), plus `sub` and `preferred_username`.
-  Details: [VSCODE.md, section 1](VSCODE.md#1-keycloak).
-- **Stroom** trusts that realm (`identityProviderType: EXTERNAL_IDP`, audience `stroom`), and receipt accepts
+- **An OpenID Connect provider**: the one Stroom already trusts, with a public client for VS Code whose access
+  tokens are JWTs carrying this server's audience and Stroom's (or one audience both accept), plus `sub`.
+  Details: [VSCODE.md, section 1](VSCODE.md#1-identity-provider).
+- **Stroom** trusts that provider (`identityProviderType: EXTERNAL_IDP`, audience `stroom`), and receipt accepts
   tokens if samples are uploaded through the server ([VSCODE.md, section 2](VSCODE.md#2-stroom)).
 - **A certificate** for the server's DNS name: a Secret, or cert-manager. Plain HTTP is only allowed when a
   proxy in front terminates TLS.
@@ -27,9 +28,9 @@ publicBaseUrl: https://stroom-mcp.example.com
 stroom:
   url: https://stroom.example.com
   ca: {secretName: internal-ca}            # when Stroom uses a private CA
-keycloak:
-  realmUrl: https://keycloak.example.com/realms/stroom
-  ca: {secretName: internal-ca}            # when Keycloak uses a private CA
+oidc:
+  issuerUrl: https://keycloak.example.com/realms/stroom
+  ca: {secretName: internal-ca}            # when the provider uses a private CA
 tls:
   certManager: {enabled: true, issuerRef: {name: internal-ca}}   # or: existingSecret: stroom-mcp-tls
 ```
@@ -38,7 +39,7 @@ tls:
 helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.1.1 -f values.yaml
 ```
 
-The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `keycloak.realmUrl`, and, with TLS on,
+The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `oidc.issuerUrl`, and, with TLS on,
 a certificate source. Everything else has a default; see `charts/stroom-mcp/values.yaml`.
 
 - **TLS**: on by default. `tls.existingSecret` (a `kubernetes.io/tls` Secret) or `tls.certManager` (the
@@ -57,7 +58,7 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
 - **Environment files**: `accessPolicy` (where template pipelines are looked for), `errorRules` (error
   triage) and `conventions` (field convention profiles) replace the image's copies when set.
 - **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
-  token. `/healthz` is unauthenticated and doesn't depend on Stroom or Keycloak.
+  token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider.
 - **Audit**: one JSON line per tool call on stdout (with the user), for the cluster's log shipping.
 
 ## Container
@@ -65,8 +66,8 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
 ```
 docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
   -e STROOM_MCP_STROOM_URL=https://stroom.example.com \
-  -e STROOM_MCP_KEYCLOAK_REALM_URL=https://keycloak.example.com/realms/stroom \
-  -e STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp \
+  -e STROOM_MCP_OIDC_ISSUER_URL=https://keycloak.example.com/realms/stroom \
+  -e STROOM_MCP_OIDC_AUDIENCE=stroom-mcp \
   -e STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com \
   -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
   ghcr.io/gradata-systems/stroom-fastmcp-server:0.1.1
@@ -85,10 +86,12 @@ brackets.
 | `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
-| `KEYCLOAK_REALM_URL` | required | Realm URL; also the tokens' issuer [`keycloak.realmUrl`] |
-| `KEYCLOAK_AUDIENCE` | required | This server's audience [`keycloak.audience`] |
-| `KEYCLOAK_TOKEN_ALGORITHM` | `RS256` | Token signing algorithm [`keycloak.tokenAlgorithm`] |
-| `KEYCLOAK_CA_CERTS` | | CA for Keycloak's certificate, added to the system CAs [`keycloak.ca`] |
+| `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one) [`oidc.issuerUrl`] |
+| `OIDC_AUDIENCE` | required | This server's audience [`oidc.audience`] |
+| `OIDC_JWKS_URI` | discovered | The provider's signing keys; by default `jwks_uri` from `<issuer>/.well-known/openid-configuration`, fetched on the first request [`oidc.jwksUri`] |
+| `OIDC_TOKEN_ALGORITHM` | `RS256` | Token signing algorithm [`oidc.tokenAlgorithm`] |
+| `OIDC_REQUIRED_SCOPES` | `openid` | Scopes every token must carry (`scope` or `scp`), comma- or space-separated; may be empty [`oidc.requiredScopes`] |
+| `OIDC_CA_CERTS` | | CA for the provider's certificate, added to the system CAs [`oidc.ca`] |
 | `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata [`publicBaseUrl`] |
 | `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state, comma-separated [`requestState`] |
 | `TLS_CERTFILE`, `TLS_KEYFILE` | | Server certificate and key [`tls`] |
@@ -123,5 +126,5 @@ brackets.
 `.github/workflows/ci.yml`: unit tests; `helm lint --strict` and a render of each `charts/stroom-mcp/ci/*-values.yaml`,
 and checks the chart refuses to render without its required settings or a certificate; builds the image and
 checks it refuses to start without TLS, then, run read-only with no capabilities and a self-signed
-certificate, answers `/healthz` with `ok` and an unauthenticated `POST /mcp` with 401 naming the realm. Pushes
+certificate, answers `/healthz` with `ok` and an unauthenticated `POST /mcp` with 401 naming the issuer. Pushes
 to master and tags publish the image; a `v<version>` tag matching `Chart.yaml` publishes the chart.

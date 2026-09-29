@@ -14,8 +14,8 @@ SETTINGS = Settings(
     _env_file=None,
     stroom_url='https://stroom.example/',
     dev_no_auth=True, stroom_api_key='sak_test',
-    keycloak_realm_url='https://kc.example/realms/r',
-    keycloak_audience='stroom-mcp',
+    oidc_issuer_url='https://kc.example/realms/r',
+    oidc_audience='stroom-mcp',
     public_base_url='https://mcp.example',
 )
 API = 'https://stroom.example/api'

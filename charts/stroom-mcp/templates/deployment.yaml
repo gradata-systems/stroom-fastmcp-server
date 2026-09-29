@@ -1,7 +1,7 @@
 {{- $stroom := .Values.stroom }}
-{{- $kc := .Values.keycloak }}
+{{- $oidc := .Values.oidc }}
 {{- $es := .Values.elasticsearch }}
-{{- range $name, $ca := dict "stroom" $stroom.ca "keycloak" $kc.ca "elasticsearch" $es.ca }}
+{{- range $name, $ca := dict "stroom" $stroom.ca "oidc" $oidc.ca "elasticsearch" $es.ca }}
 {{- if and $ca.secretName $ca.configMapName }}
 {{- fail (printf "set only one of %s.ca.secretName and %s.ca.configMapName" $name $name) }}
 {{- end }}
@@ -92,15 +92,21 @@ spec:
             - name: STROOM_MCP_STROOM_CA_CERTS
               value: /etc/stroom-mcp/stroom-ca/{{ $stroom.ca.key }}
             {{- end }}
-            - name: STROOM_MCP_KEYCLOAK_REALM_URL
-              value: {{ required "keycloak.realmUrl is required" $kc.realmUrl | quote }}
-            - name: STROOM_MCP_KEYCLOAK_AUDIENCE
-              value: {{ required "keycloak.audience is required" $kc.audience | quote }}
-            - name: STROOM_MCP_KEYCLOAK_TOKEN_ALGORITHM
-              value: {{ $kc.tokenAlgorithm | quote }}
-            {{- if or $kc.ca.secretName $kc.ca.configMapName }}
-            - name: STROOM_MCP_KEYCLOAK_CA_CERTS
-              value: /etc/stroom-mcp/keycloak-ca/{{ $kc.ca.key }}
+            - name: STROOM_MCP_OIDC_ISSUER_URL
+              value: {{ required "oidc.issuerUrl is required" $oidc.issuerUrl | quote }}
+            - name: STROOM_MCP_OIDC_AUDIENCE
+              value: {{ required "oidc.audience is required" $oidc.audience | quote }}
+            {{- if $oidc.jwksUri }}
+            - name: STROOM_MCP_OIDC_JWKS_URI
+              value: {{ $oidc.jwksUri | quote }}
+            {{- end }}
+            - name: STROOM_MCP_OIDC_TOKEN_ALGORITHM
+              value: {{ $oidc.tokenAlgorithm | quote }}
+            - name: STROOM_MCP_OIDC_REQUIRED_SCOPES
+              value: {{ join " " $oidc.requiredScopes | quote }}
+            {{- if or $oidc.ca.secretName $oidc.ca.configMapName }}
+            - name: STROOM_MCP_OIDC_CA_CERTS
+              value: /etc/stroom-mcp/oidc-ca/{{ $oidc.ca.key }}
             {{- end }}
             {{- if $es.url }}
             - name: STROOM_MCP_ES_URL
@@ -208,9 +214,9 @@ spec:
               mountPath: /etc/stroom-mcp/stroom-ca
               readOnly: true
             {{- end }}
-            {{- if or $kc.ca.secretName $kc.ca.configMapName }}
-            - name: keycloak-ca
-              mountPath: /etc/stroom-mcp/keycloak-ca
+            {{- if or $oidc.ca.secretName $oidc.ca.configMapName }}
+            - name: oidc-ca
+              mountPath: /etc/stroom-mcp/oidc-ca
               readOnly: true
             {{- end }}
             {{- if and $es.url (or $es.ca.secretName $es.ca.configMapName) }}
@@ -240,7 +246,7 @@ spec:
             secretName: {{ include "stroom-mcp.tlsSecretName" . }}
         {{- end }}
         {{- with include "stroom-mcp.caVolume" (dict "name" "stroom-ca" "ca" $stroom.ca) | trim }}{{ . | nindent 8 }}{{ end }}
-        {{- with include "stroom-mcp.caVolume" (dict "name" "keycloak-ca" "ca" $kc.ca) | trim }}{{ . | nindent 8 }}{{ end }}
+        {{- with include "stroom-mcp.caVolume" (dict "name" "oidc-ca" "ca" $oidc.ca) | trim }}{{ . | nindent 8 }}{{ end }}
         {{- if $es.url }}
         {{- with include "stroom-mcp.caVolume" (dict "name" "es-ca" "ca" $es.ca) | trim }}{{ . | nindent 8 }}{{ end }}
         {{- end }}

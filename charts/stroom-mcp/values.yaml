@@ -24,7 +24,7 @@ stroom:
   # Base URL of the Stroom UI in links shown to users; defaults to stroom.url.
   uiUrl: ""
   # Stroom's client id: every call to Stroom forwards the user's token, so its aud claim must include
-  # this as well as keycloak.audience.
+  # this as well as oidc.audience.
   audience: stroom
   requestTimeout: 60
   # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs.
@@ -33,15 +33,22 @@ stroom:
     configMapName: ""
     key: ca.crt
 
-keycloak:
-  # The realm Stroom trusts, e.g. https://keycloak.example.com/realms/stroom
-  realmUrl: ""
-  # This server's audience in the realm's access tokens.
+# The OpenID Connect provider Stroom trusts (Keycloak, Entra ID, Okta, Auth0, ...).
+oidc:
+  # Issuer URL, exactly as in the tokens' iss claim, e.g. https://keycloak.example.com/realms/stroom
+  # or https://login.microsoftonline.com/<tenant>/v2.0.
+  issuerUrl: ""
+  # This server's audience in the provider's access tokens.
   audience: stroom-mcp
-  # Algorithm Keycloak signs access tokens with (realm or client "Access token signature algorithm").
+  # Where the provider publishes its signing keys; empty: the jwks_uri in the issuer's discovery document.
+  jwksUri: ""
+  # Algorithm the provider signs access tokens with (in Keycloak, "Access token signature algorithm").
   tokenAlgorithm: RS256
-  # CA that signed Keycloak's HTTPS certificate, for fetching the realm's signing keys. Trusted in
-  # addition to the system CAs. May be the same Secret or ConfigMap as stroom.ca.
+  # Scopes every access token must carry, also advertised to clients. Keycloak and Okta put openid in
+  # access tokens; for Entra ID, use the API scope (e.g. [api://stroom-mcp/access]) or [].
+  requiredScopes: [openid]
+  # CA that signed the provider's HTTPS certificate, for fetching its discovery document and signing
+  # keys. Trusted in addition to the system CAs. May be the same Secret or ConfigMap as stroom.ca.
   ca:
     secretName: ""
     configMapName: ""

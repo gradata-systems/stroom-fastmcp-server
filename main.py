@@ -8,7 +8,7 @@ from starlette.responses import PlainTextResponse, Response
 
 from config import Settings
 from security.audit import AuditMiddleware, configure_audit_log
-from security.auth import keycloak_auth, keycloak_http_client
+from security.auth import oidc_auth, oidc_http_client
 from security.policy import AccessPolicy
 from main_tools import TOOL_MODULES
 from tools import resources
@@ -55,15 +55,15 @@ if settings.dev_no_auth:
     logger.warning("Authentication is disabled (dev_no_auth); for local development only")
     auth = None
 else:
-    if not (settings.keycloak_realm_url and settings.keycloak_audience and settings.public_base_url):
-        raise SystemExit("Set STROOM_MCP_KEYCLOAK_REALM_URL, _KEYCLOAK_AUDIENCE and _PUBLIC_BASE_URL")
+    if not (settings.oidc_issuer_url and settings.oidc_audience and settings.public_base_url):
+        raise SystemExit("Set STROOM_MCP_OIDC_ISSUER_URL, _OIDC_AUDIENCE and _PUBLIC_BASE_URL")
     if not (settings.public_base_url.startswith('https://') or loopback):
         raise SystemExit("STROOM_MCP_PUBLIC_BASE_URL must be an https:// URL")
     if settings.stroom_api_key:
         # Every call acts as the signed-in user; a shared key would hand its owner's rights to every caller.
         raise SystemExit("STROOM_MCP_STROOM_API_KEY is for dev_no_auth only; Stroom calls use the caller's token")
-    # The HTTP client lives as long as the process; it fetches Keycloak's signing keys.
-    auth = keycloak_auth(settings, keycloak_http_client(settings.keycloak_ca_certs))
+    # The HTTP client lives as long as the process; it fetches the provider's signing keys.
+    auth = oidc_auth(settings, oidc_http_client(settings.oidc_ca_certs))
 
 if any(len(k.get_secret_value()) < 32 for k in settings.request_state_keys):
     raise SystemExit("Each of STROOM_MCP_REQUEST_STATE_KEYS must be at least 32 characters")
@@ -77,7 +77,7 @@ mcp = FastMCP("stroom", lifespan=lifespan, auth=auth, middleware=[AuditMiddlewar
 
 @mcp.custom_route('/healthz', methods=['GET'], include_in_schema=False)
 async def healthz(request: Request) -> Response:
-    """Liveness and readiness probe. Unauthenticated, and deliberately independent of Stroom, Keycloak and
+    """Liveness and readiness probe. Unauthenticated, and deliberately independent of Stroom, the OIDC provider and
     Elasticsearch so an outage there doesn't restart every replica."""
     return PlainTextResponse('ok')
 

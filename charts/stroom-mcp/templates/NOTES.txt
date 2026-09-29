@@ -3,9 +3,9 @@ stroom-mcp is listening on {{ include "stroom-mcp.portName" . | upper }} port {{
 MCP endpoint: {{ trimSuffix "/" .Values.publicBaseUrl }}/mcp
 
 VS Code (mcp.json):
-  "stroom": {"type": "http", "url": "{{ trimSuffix "/" .Values.publicBaseUrl }}/mcp", "oauth": {"clientId": "<VS Code client id in the realm>"}}
+  "stroom": {"type": "http", "url": "{{ trimSuffix "/" .Values.publicBaseUrl }}/mcp", "oauth": {"clientId": "<VS Code client id at the identity provider>"}}
 
-Access tokens must carry both audiences, {{ .Values.keycloak.audience | quote }} and {{ .Values.stroom.audience | quote }}: every call to
+Access tokens must carry both audiences, {{ .Values.oidc.audience | quote }} and {{ .Values.stroom.audience | quote }}: every call to
 Stroom forwards the user's token.
 {{- if eq .Values.service.type "LoadBalancer" }}
 

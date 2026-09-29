@@ -78,8 +78,8 @@ jobs:
             -keyout tls/tls.key -out tls/tls.crt
           chmod 644 tls/tls.key
           env_common="-e STROOM_MCP_STROOM_URL=https://stroom.invalid
-            -e STROOM_MCP_KEYCLOAK_REALM_URL=https://keycloak.invalid/realms/ci
-            -e STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp -e STROOM_MCP_PUBLIC_BASE_URL=https://localhost:8443"
+            -e STROOM_MCP_OIDC_ISSUER_URL=https://keycloak.invalid/realms/ci
+            -e STROOM_MCP_OIDC_AUDIENCE=stroom-mcp -e STROOM_MCP_PUBLIC_BASE_URL=https://localhost:8443"
           # Without a certificate the server must refuse to start.
           if docker run --rm $env_common stroom-mcp:ci; then
             echo "server started without TLS" && exit 1

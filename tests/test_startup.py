@@ -11,8 +11,8 @@ from config import Settings
 ROOT = Path(__file__).resolve().parents[1]
 BASE = {
     'STROOM_MCP_STROOM_URL': 'https://stroom.invalid',
-    'STROOM_MCP_KEYCLOAK_REALM_URL': 'https://keycloak.invalid/realms/ci',
-    'STROOM_MCP_KEYCLOAK_AUDIENCE': 'stroom-mcp',
+    'STROOM_MCP_OIDC_ISSUER_URL': 'https://keycloak.invalid/realms/ci',
+    'STROOM_MCP_OIDC_AUDIENCE': 'stroom-mcp',
     'STROOM_MCP_PUBLIC_BASE_URL': 'https://stroom-mcp.example.com',
     'STROOM_MCP_DEV_NO_AUTH': 'false',
     'STROOM_MCP_STROOM_API_KEY': '',
