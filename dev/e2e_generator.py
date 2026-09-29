@@ -116,14 +116,12 @@ async def run(ctx, fmt: str, stamp: str) -> None:
 
 
 async def main():
-    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
+    settings = p2.target_settings()
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = p2.STAMP
     try:
         for fmt in sys.argv[1:] or list(MAPPINGS):
             await run(ctx, fmt, stamp)

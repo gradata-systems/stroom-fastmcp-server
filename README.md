@@ -67,6 +67,8 @@ To call a tool directly during development (no MCP client or Keycloak):
 `uv run python dev/try_tool.py find_pipeline_templates stage=translation` against the local stack,
 or `--live` for the instance in `.ai/secrets` (read-only tools only). `dev/live_readonly.py [FEED]` runs the
 read-only tools against that instance in one go, through a gateway that refuses any request that could change Stroom.
+The e2e suites run there with `E2E_TARGET=live` (every name carries `E2E_STAMP`); `dev/e2e_cleanup.py STAMP --apply`
+removes a run afterwards: filters, streams (marked deleted), documents and folders.
 
 ## Running
 

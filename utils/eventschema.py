@@ -99,12 +99,17 @@ class EventSchema:
             for child in node:
                 self._particle(child, out, choice, optional)
         elif node.tag == _q('choice'):
+            # One of (maxOccurs 1), or, when the choice repeats, any number of its members; either way a
+            # required choice needs at least one member, and no member is required on its own.
             exclusive = _occurs(node, 'maxOccurs') == 1
-            cid = id(node) if exclusive else choice
+            cid = id(node) if exclusive or choice is None else choice
             before = len(out)
             for child in node:
                 self._particle(child, out, cid, optional)
-            if exclusive and not optional and choice is None:
+            if not exclusive:  # members of a repeating choice can each appear many times
+                out[before:] = [(name, decl, False, True, member_choice)
+                                for name, decl, _, _, member_choice in out[before:]]
+            if not optional and choice is None:
                 self.required_choices[cid] = [entry[0] for entry in out[before:]]
         elif node.tag == _q('group'):
             group = self._groups.get(_local(node.get('ref'))) if node.get('ref') else node

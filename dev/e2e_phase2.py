@@ -1,6 +1,10 @@
 """Phase 2 exit test against the local Docker stack, driving the real tools.
 
     uv run python dev/e2e_phase2.py
+    E2E_TARGET=live E2E_STAMP=... uv run python dev/e2e_phase2.py   # the read/write instance in .ai/secrets
+
+Against live, everything is named with the run stamp and promoted into a workspace folder, so
+dev/e2e_cleanup.py can remove the run afterwards.
 
 1. CSV, JSON, XML and syslog samples each go from sample to valid Events: feed, upload, template,
    converter and XSLT, pipeline, stepping, processing (exactly one Events stream per raw stream),
@@ -13,6 +17,7 @@ Confirmations and approvals are granted here the way a user would, by passing th
 """
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from config import Settings  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
+from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from tools import (builds, feeds, pipeline_writes, processing_writes, stepping, streams, templates,  # noqa: E402
                    translation, validation)
@@ -31,7 +37,21 @@ from utils.consent import ConsentStore  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
 
-VERSION = '4.1.0'  # what the local content pack has; live pipelines use 3.5.2
+LIVE = os.environ.get('E2E_TARGET') == 'live'
+VERSION = '3.5.2' if LIVE else '4.1.0'  # the local content pack has 4.1.0; live pipelines use 3.5.2
+# One stamp for every script in a run, so the run can be found and cleaned up.
+STAMP = os.environ.get('E2E_STAMP') or time.strftime('%H%M%S')
+
+
+def target_settings() -> 'Settings':
+    """The local stack, or with E2E_TARGET=live the instance in .ai/secrets."""
+    if LIVE:
+        secrets = env(ROOT / '.ai' / 'secrets')
+        url, key = secrets['STROOM_URL'], secrets['STROOM_API_KEY']
+    else:
+        url, key = 'http://127.0.0.1:18080', env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
+    return Settings(_env_file=None, stroom_url=url, dev_no_auth=True, stroom_api_key=key, keycloak_realm_url='-',
+                    keycloak_audience='-', public_base_url='-', event_logging_version=VERSION)
 EVENT_TAIL = """
       <EventDetail>
         <TypeId>{type_id}</TypeId>
@@ -230,15 +250,19 @@ async def field_fix(ctx, csv: dict):
 async def promotion(ctx, csv: dict, stamp: str):
     print('\n### promotion of the CSV build, then an in-place fix through a working copy')
     stroom = ctx.lifespan_context['stroom']
-    system = next(r for r in (await stroom.post('/explorer/v2/fetchExplorerNodes', {
-        'openItems': [], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None, 'showAlerts': False,
-        'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
-                   'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
-                   'recentItems': None}}))['rootNodes'] if r['type'] == 'System')
-    dest_name = f'E2E Promoted {stamp}'
-    await stroom.post('/explorer/v2/create', {'docType': 'Folder', 'docName': dest_name, 'destinationFolder': system,
-                                              'permissionInheritance': 'DESTINATION'})
-    dest = f'System/{dest_name}'
+    if LIVE:
+        # Keep the run inside the workspace on a shared instance.
+        dest = (await guard_from(ctx).build_folder(f'e2e-promoted-{stamp}'))['_path']
+    else:
+        system = next(r for r in (await stroom.post('/explorer/v2/fetchExplorerNodes', {
+            'openItems': [], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None, 'showAlerts': False,
+            'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
+                       'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
+                       'recentItems': None}}))['rootNodes'] if r['type'] == 'System')
+        dest_name = f'E2E Promoted {stamp}'
+        await stroom.post('/explorer/v2/create', {'docType': 'Folder', 'docName': dest_name, 'destinationFolder': system,
+                                                  'permissionInheritance': 'DESTINATION'})
+        dest = f'System/{dest_name}'
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
     ref = {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'], 'name': csv['pipeline']['name']}
     stepped = [t for t in (await stroom.post('/explorer/v2/getFromDocRef', ref)).get('tags') or [] if t.startswith('mcp-stepped-')]
@@ -295,14 +319,12 @@ async def promotion(ctx, csv: dict, stamp: str):
 
 
 async def main():
-    local = env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True, stroom_api_key=local['STROOM_ADMIN_API_KEY'],
-                        keycloak_realm_url='-', keycloak_audience='-', public_base_url='-', event_logging_version=VERSION)
-    stroom = StroomGateway(settings)
+    stroom = StroomGateway(target_settings())
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = STAMP
+    print(f'RUN STAMP {stamp} against {stroom.settings.stroom_url if LIVE else "the local stack"}')
     only = sys.argv[1:] or list(CASES)
     try:
         built = {fmt: await onboard(ctx, fmt, CASES[fmt], stamp) for fmt in only if fmt in CASES}

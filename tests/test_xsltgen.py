@@ -156,3 +156,22 @@ def test_a_drop_rule_takes_no_fields():
              {'name': 'logon', 'fields': LOGON}]
     result = generate(mapping(events=rules), SCHEMA, '4.1.0')
     assert not result['ok'] and any('takes no fields' in p for p in result['problems'])
+
+
+XSD_352 = (Path(__file__).parent / 'fixtures' / 'event-logging-v3.5.2.xsd').read_bytes()
+SCHEMA_352 = EventSchema.parse(XSD_352)
+
+
+def test_v352_objects_from_a_repeating_choice_are_alternatives_not_all_required():
+    # In 3.5.2, View's objects come from an extended base type whose choice repeats (maxOccurs unbounded).
+    view = [{'path': 'EventDetail/TypeId', 'value': 'FileRead'},
+            {'path': 'EventDetail/View/File/Path', 'field': 'action'}]
+    result = generate(mapping(events=[{'name': 'view', 'fields': view}]), SCHEMA_352, '3.5.2')
+    assert result['ok'], result['problems']
+    events = transform(result['xslt'], RECORDS)
+    validator = etree.XMLSchema(etree.fromstring(XSD_352))
+    assert validator.validate(events), [e.message for e in validator.error_log]
+
+    empty = [{'path': 'EventDetail/TypeId', 'value': 'FileRead'}, {'path': 'EventDetail/View/Outcome/Success', 'value': 'true'}]
+    problems = generate(mapping(events=[{'name': 'view', 'fields': empty}]), SCHEMA_352, '3.5.2')['problems']
+    assert any('EventDetail/View needs one of' in p and 'File' in p for p in problems), problems

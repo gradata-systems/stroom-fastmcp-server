@@ -31,12 +31,14 @@ async def processing_status(
     filters = [row['processorFilter'] for row in rows.get('values') or []
                if row.get('processorFilter') and row['processorFilter'].get('pipelineUuid') == pipeline_uuid
                and not row['processorFilter'].get('deleted')]
-    tasks = await stroom.post('/processorTask/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []},
-                                                         'pageRequest': {'offset': 0, 'length': 1000}})
     by_filter: dict[int, Counter] = {}
-    for task in tasks.get('values') or []:
-        fid = (task.get('processorFilter') or {}).get('id')
-        by_filter.setdefault(fid, Counter())[task.get('status')] += 1
+    for f in filters:
+        # Each filter's own tasks: on a busy instance a page of every task in the system may not include them.
+        tasks = await stroom.post('/processorTask/v1/find', {
+            'expression': {'type': 'operator', 'op': 'AND', 'children': [
+                {'type': 'term', 'field': 'Processor Filter Id', 'condition': 'EQUALS', 'value': str(f['id'])}]},
+            'pageRequest': {'offset': 0, 'length': 1000}})
+        by_filter[f['id']] = Counter(task.get('status') for task in tasks.get('values') or [])
     result = []
     for f in filters:
         tracker = f.get('processorFilterTracker') or {}
