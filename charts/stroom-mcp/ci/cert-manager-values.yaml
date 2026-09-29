@@ -1,0 +1,19 @@
+# Rendered in CI: cert-manager certificate, overridden policy, rules and conventions, several replicas.
+publicBaseUrl: https://stroom-mcp.example.com
+stroom: {url: https://stroom.example.com}
+keycloak: {realmUrl: https://keycloak.example.com/realms/stroom}
+tls:
+  certManager: {enabled: true, issuerRef: {name: internal-ca}}
+replicaCount: 2
+statelessHttp: true
+requestState: {keys: [ci-not-a-real-key-0123456789abcdef0123]}
+podDisruptionBudget: {enabled: true}
+accessPolicy:
+  pipeline_templates:
+    translation: {folders: [System/Template Pipelines], names: ['Event Data (*)']}
+errorRules: |
+  rules:
+    - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
+conventions:
+  mini.yaml: {name: mini, description: CI profile, structure: flat, field_map: {}}
+build: {defaultConvention: mini}

@@ -1,0 +1,34 @@
+{{- if or .Values.accessPolicy .Values.errorRules }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stroom-mcp.fullname" . }}
+  labels:
+    {{- include "stroom-mcp.labels" . | nindent 4 }}
+data:
+  {{- with .Values.accessPolicy }}
+  access_policy.yaml: |
+    {{- include "stroom-mcp.yamlFile" . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.errorRules }}
+  error_rules.yaml: |
+    {{- include "stroom-mcp.yamlFile" . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.conventions }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stroom-mcp.fullname" . }}-conventions
+  labels:
+    {{- include "stroom-mcp.labels" . | nindent 4 }}
+data:
+  {{- range $file, $profile := .Values.conventions }}
+  {{- if not (hasSuffix ".yaml" $file) }}
+  {{- fail (printf "conventions key '%s' must be a file name ending in .yaml" $file) }}
+  {{- end }}
+  {{ $file }}: |
+    {{- include "stroom-mcp.yamlFile" $profile | nindent 4 }}
+  {{- end }}
+{{- end }}

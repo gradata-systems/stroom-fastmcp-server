@@ -34,7 +34,7 @@ def _docs(source_docs: str) -> str:
             f"field meanings and event types:\n{source_docs}") if source_docs else ''
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None:
     @mcp.resource('stroom://guide/{name}', mime_type='text/markdown',
                   description="Working guides: event-logging, xslt, data-splitter, json-input, indexing, agent-instructions.")
     def guide(name: str) -> str:
@@ -53,8 +53,8 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.resource('stroom://conventions/{name}', mime_type='text/yaml', description="A field convention profile.")
     def convention(name: str) -> str:
-        path = ROOT / 'conventions' / f'{name}.yaml'
-        if not path.is_file():
+        path = conventions_dir / f'{name}.yaml'
+        if not path.is_file() or path.parent != conventions_dir:
             raise ResourceError(f"No convention '{name}'")
         return path.read_text(encoding='utf-8')
 

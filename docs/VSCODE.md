@@ -52,7 +52,8 @@ STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp
 STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com
 ```
 
-No Stroom API key: the server refuses one when sign-in is on. Put it behind TLS.
+No Stroom API key: the server refuses one when sign-in is on. It serves TLS itself (or behind a TLS proxy);
+deployment with the Helm chart and every setting: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## 4. VS Code
 

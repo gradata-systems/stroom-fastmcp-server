@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import ssl
 import time
 from typing import Any
 
@@ -11,6 +10,7 @@ from fastmcp.server.dependencies import get_access_token
 
 from config import Settings
 from security.audit import audit
+from utils.tls import trust
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,7 @@ class StroomGateway:
         self._client = httpx.AsyncClient(
             base_url=settings.stroom_url.rstrip('/') + '/api',
             headers={'Accept': 'application/json'},
-            # The OS trust store, so an internal CA the host already trusts works without extra config.
-            verify=ssl.create_default_context(cafile=str(settings.stroom_ca_certs) if settings.stroom_ca_certs else None),
+            verify=trust(settings.stroom_ca_certs),
             timeout=settings.stroom_request_timeout,
             transport=transport,
         )

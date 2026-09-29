@@ -1,0 +1,37 @@
+{{- $cm := .Values.tls.certManager }}
+{{- if and .Values.tls.enabled $cm.enabled }}
+{{- $dnsNames := $cm.dnsNames }}
+{{- if and (not $dnsNames) (not $cm.ipAddresses) }}
+{{- $dnsNames = list (required "publicBaseUrl is required" .Values.publicBaseUrl | urlParse).hostname }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "stroom-mcp.fullname" . }}
+  labels:
+    {{- include "stroom-mcp.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "stroom-mcp.tlsSecretName" . }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required" $cm.issuerRef.name }}
+    kind: {{ $cm.issuerRef.kind }}
+    group: {{ $cm.issuerRef.group }}
+  {{- with $dnsNames }}
+  dnsNames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $cm.ipAddresses }}
+  ipAddresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $cm.duration }}
+  duration: {{ . }}
+  {{- end }}
+  {{- with $cm.renewBefore }}
+  renewBefore: {{ . }}
+  {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+{{- end }}

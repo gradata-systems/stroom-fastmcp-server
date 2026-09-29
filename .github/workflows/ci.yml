@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  CHART_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest -q
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Lint and render each CI values file
+        run: |
+          for values in charts/stroom-mcp/ci/*-values.yaml; do
+            echo "::group::$values"
+            helm lint --strict charts/stroom-mcp -f "$values"
+            helm template ci charts/stroom-mcp -f "$values" > /dev/null
+            echo "::endgroup::"
+          done
+      - name: Refuse to render without required settings
+        run: |
+          if helm template ci charts/stroom-mcp > /dev/null 2>&1; then
+            echo "chart rendered with no values; required settings are not enforced" && exit 1
+          fi
+          if helm template ci charts/stroom-mcp -f charts/stroom-mcp/ci/no-tls-values.yaml --set tls.enabled=true > /dev/null 2>&1; then
+            echo "chart rendered with TLS on but no certificate" && exit 1
+          fi
+
+  image:
+    needs: [test, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: stroom-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test over TLS
+        run: |
+          mkdir tls
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+            -subj /CN=localhost -addext subjectAltName=DNS:localhost \
+            -keyout tls/tls.key -out tls/tls.crt
+          chmod 644 tls/tls.key
+          env_common="-e STROOM_MCP_STROOM_URL=https://stroom.invalid
+            -e STROOM_MCP_KEYCLOAK_REALM_URL=https://keycloak.invalid/realms/ci
+            -e STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp -e STROOM_MCP_PUBLIC_BASE_URL=https://localhost:8443"
+          # Without a certificate the server must refuse to start.
+          if docker run --rm $env_common stroom-mcp:ci; then
+            echo "server started without TLS" && exit 1
+          fi
+          docker run -d --name stroom-mcp --read-only --tmpfs /tmp --cap-drop ALL -p 8443:8000 \
+            -v "$PWD/tls:/etc/stroom-mcp/tls:ro" $env_common \
+            -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
+            stroom-mcp:ci
+          for _ in $(seq 30); do
+            curl -sf --cacert tls/tls.crt https://localhost:8443/healthz && break
+            sleep 1
+          done
+          test "$(curl -s --cacert tls/tls.crt https://localhost:8443/healthz)" = ok
+          test "$(curl -s -o /dev/null -w '%{http_code}' --cacert tls/tls.crt -X POST https://localhost:8443/mcp)" = 401
+          curl -sf --cacert tls/tls.crt https://localhost:8443/.well-known/oauth-protected-resource/mcp \
+            | grep -q 'keycloak.invalid/realms/ci'
+      - name: Container logs
+        if: always()
+        run: docker logs stroom-mcp || true
+
+      - name: Image tags
+        id: meta
+        if: github.event_name == 'push'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  chart-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Check the tag matches the chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart_version=$(helm show chart charts/stroom-mcp | awk '/^version:/ {print $2}')
+          app_version=$(helm show chart charts/stroom-mcp | awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}')
+          if [ "$version" != "$chart_version" ] || [ "$version" != "$app_version" ]; then
+            echo "tag $GITHUB_REF_NAME must match Chart.yaml version ($chart_version) and appVersion ($app_version)"
+            exit 1
+          fi
+      - name: Package and push chart
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/stroom-mcp
+          helm push stroom-mcp-*.tgz "$CHART_REPO"

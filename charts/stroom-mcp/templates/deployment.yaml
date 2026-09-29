@@ -1,0 +1,275 @@
+{{- $stroom := .Values.stroom }}
+{{- $kc := .Values.keycloak }}
+{{- $es := .Values.elasticsearch }}
+{{- range $name, $ca := dict "stroom" $stroom.ca "keycloak" $kc.ca "elasticsearch" $es.ca }}
+{{- if and $ca.secretName $ca.configMapName }}
+{{- fail (printf "set only one of %s.ca.secretName and %s.ca.configMapName" $name $name) }}
+{{- end }}
+{{- end }}
+{{- $publicBaseUrl := required "publicBaseUrl is required" .Values.publicBaseUrl }}
+{{- if not (hasPrefix "https://" $publicBaseUrl) }}
+{{- fail "publicBaseUrl must be an https:// URL" }}
+{{- end }}
+{{- $esKeySecret := include "stroom-mcp.esApiKeySecretName" . }}
+{{- $rsSecret := include "stroom-mcp.requestStateSecretName" . }}
+{{- if and (gt (int .Values.replicaCount) 1) (not $rsSecret) }}
+{{- fail "replicaCount > 1 needs requestState.existingSecret (or requestState.keys) so every replica can read forms another one sent" }}
+{{- end }}
+{{- $portName := include "stroom-mcp.portName" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stroom-mcp.fullname" . }}
+  labels:
+    {{- include "stroom-mcp.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "stroom-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stroom-mcp.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Restart pods when the policy, rules, conventions or chart-created secrets change.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "stroom-mcp.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: stroom-mcp
+          image: {{ include "stroom-mcp.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: {{ $portName }}
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            - name: STROOM_MCP_HOST
+              value: "0.0.0.0"
+            - name: STROOM_MCP_PORT
+              value: {{ .Values.containerPort | quote }}
+            - name: STROOM_MCP_PUBLIC_BASE_URL
+              value: {{ $publicBaseUrl | quote }}
+            - name: STROOM_MCP_STROOM_URL
+              value: {{ required "stroom.url is required" $stroom.url | quote }}
+            {{- with $stroom.uiUrl }}
+            - name: STROOM_MCP_STROOM_UI_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: STROOM_MCP_STROOM_AUDIENCE
+              value: {{ required "stroom.audience is required" $stroom.audience | quote }}
+            - name: STROOM_MCP_STROOM_REQUEST_TIMEOUT
+              value: {{ $stroom.requestTimeout | quote }}
+            {{- if or $stroom.ca.secretName $stroom.ca.configMapName }}
+            - name: STROOM_MCP_STROOM_CA_CERTS
+              value: /etc/stroom-mcp/stroom-ca/{{ $stroom.ca.key }}
+            {{- end }}
+            - name: STROOM_MCP_KEYCLOAK_REALM_URL
+              value: {{ required "keycloak.realmUrl is required" $kc.realmUrl | quote }}
+            - name: STROOM_MCP_KEYCLOAK_AUDIENCE
+              value: {{ required "keycloak.audience is required" $kc.audience | quote }}
+            - name: STROOM_MCP_KEYCLOAK_TOKEN_ALGORITHM
+              value: {{ $kc.tokenAlgorithm | quote }}
+            {{- if or $kc.ca.secretName $kc.ca.configMapName }}
+            - name: STROOM_MCP_KEYCLOAK_CA_CERTS
+              value: /etc/stroom-mcp/keycloak-ca/{{ $kc.ca.key }}
+            {{- end }}
+            {{- if $es.url }}
+            - name: STROOM_MCP_ES_URL
+              value: {{ $es.url | quote }}
+            - name: STROOM_MCP_ES_TEMPLATE_PATTERNS
+              value: {{ toJson $es.templatePatterns | quote }}
+            {{- if $esKeySecret }}
+            - name: STROOM_MCP_ES_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $esKeySecret }}
+                  key: {{ include "stroom-mcp.esApiKeySecretKey" . }}
+            {{- end }}
+            {{- if or $es.ca.secretName $es.ca.configMapName }}
+            - name: STROOM_MCP_ES_CA_CERTS
+              value: /etc/stroom-mcp/es-ca/{{ $es.ca.key }}
+            {{- end }}
+            {{- end }}
+            {{- if $rsSecret }}
+            - name: STROOM_MCP_REQUEST_STATE_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rsSecret }}
+                  key: {{ include "stroom-mcp.requestStateSecretKey" . }}
+            {{- end }}
+            - name: STROOM_MCP_WORKSPACE_FOLDER
+              value: {{ .Values.build.workspaceFolder | quote }}
+            - name: STROOM_MCP_EVENT_LOGGING_VERSION
+              value: {{ .Values.build.eventLoggingVersion | quote }}
+            - name: STROOM_MCP_INSTRUCTIONS_DOC_NAME
+              value: {{ .Values.build.instructionsDocName | quote }}
+            {{- with .Values.build.defaultConvention }}
+            - name: STROOM_MCP_DEFAULT_CONVENTION
+              value: {{ . | quote }}
+            {{- end }}
+            - name: STROOM_MCP_MAX_REPROCESS_STREAMS
+              value: {{ .Values.processing.maxReprocessStreams | quote }}
+            - name: STROOM_MCP_REPROCESS_MAX_TASKS
+              value: {{ .Values.processing.reprocessMaxTasks | quote }}
+            - name: STROOM_MCP_SAMPLE_MAX_TASKS
+              value: {{ .Values.processing.sampleMaxTasks | quote }}
+            - name: STROOM_MCP_MAX_FEED_FILTER_TASKS
+              value: {{ .Values.processing.maxFeedFilterTasks | quote }}
+            - name: STROOM_MCP_MAX_RESPONSE_CHARS
+              value: {{ .Values.limits.maxResponseChars | quote }}
+            - name: STROOM_MCP_MAX_STREAM_CHARS
+              value: {{ .Values.limits.maxStreamChars | quote }}
+            - name: STROOM_MCP_MAX_SAMPLE_RECORDS
+              value: {{ .Values.limits.maxSampleRecords | quote }}
+            {{- if .Values.accessPolicy }}
+            - name: STROOM_MCP_ACCESS_POLICY_FILE
+              value: /etc/stroom-mcp/config/access_policy.yaml
+            {{- end }}
+            {{- if .Values.errorRules }}
+            - name: STROOM_MCP_ERROR_RULES_FILE
+              value: /etc/stroom-mcp/config/error_rules.yaml
+            {{- end }}
+            {{- if .Values.conventions }}
+            - name: STROOM_MCP_CONVENTIONS_DIR
+              value: /etc/stroom-mcp/conventions
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: STROOM_MCP_TLS_CERTFILE
+              value: /etc/stroom-mcp/tls/tls.crt
+            - name: STROOM_MCP_TLS_KEYFILE
+              value: /etc/stroom-mcp/tls/tls.key
+            {{- else }}
+            - name: STROOM_MCP_TLS_TERMINATED_UPSTREAM
+              value: "true"
+            {{- end }}
+            - name: FASTMCP_STATELESS_HTTP
+              value: {{ .Values.statelessHttp | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- range $name := list "livenessProbe" "readinessProbe" }}
+          {{- with index $.Values $name }}
+          {{- $probe := deepCopy . }}
+          {{- if $probe.httpGet }}
+          {{- $_ := set $probe.httpGet "port" $portName }}
+          {{- $_ := set $probe.httpGet "scheme" (upper $portName) }}
+          {{- end }}
+          {{ $name }}:
+            {{- toYaml $probe | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/stroom-mcp/tls
+              readOnly: true
+            {{- end }}
+            {{- if or $stroom.ca.secretName $stroom.ca.configMapName }}
+            - name: stroom-ca
+              mountPath: /etc/stroom-mcp/stroom-ca
+              readOnly: true
+            {{- end }}
+            {{- if or $kc.ca.secretName $kc.ca.configMapName }}
+            - name: keycloak-ca
+              mountPath: /etc/stroom-mcp/keycloak-ca
+              readOnly: true
+            {{- end }}
+            {{- if and $es.url (or $es.ca.secretName $es.ca.configMapName) }}
+            - name: es-ca
+              mountPath: /etc/stroom-mcp/es-ca
+              readOnly: true
+            {{- end }}
+            {{- if or .Values.accessPolicy .Values.errorRules }}
+            - name: config
+              mountPath: /etc/stroom-mcp/config
+              readOnly: true
+            {{- end }}
+            {{- if .Values.conventions }}
+            - name: conventions
+              mountPath: /etc/stroom-mcp/conventions
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "stroom-mcp.tlsSecretName" . }}
+        {{- end }}
+        {{- with include "stroom-mcp.caVolume" (dict "name" "stroom-ca" "ca" $stroom.ca) | trim }}{{ . | nindent 8 }}{{ end }}
+        {{- with include "stroom-mcp.caVolume" (dict "name" "keycloak-ca" "ca" $kc.ca) | trim }}{{ . | nindent 8 }}{{ end }}
+        {{- if $es.url }}
+        {{- with include "stroom-mcp.caVolume" (dict "name" "es-ca" "ca" $es.ca) | trim }}{{ . | nindent 8 }}{{ end }}
+        {{- end }}
+        {{- if or .Values.accessPolicy .Values.errorRules }}
+        - name: config
+          configMap:
+            name: {{ include "stroom-mcp.fullname" . }}
+        {{- end }}
+        {{- if .Values.conventions }}
+        - name: conventions
+          configMap:
+            name: {{ include "stroom-mcp.fullname" . }}-conventions
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

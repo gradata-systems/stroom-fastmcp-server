@@ -74,6 +74,13 @@ cp .env.example .env   # fill in
 uv run python main.py
 ```
 
+TLS is required: the server refuses to start without a certificate unless a proxy in front terminates TLS
+(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development).
+`/healthz` answers `ok` for probes.
+
+Deployment: a container image and a Helm chart (`charts/stroom-mcp`), with every setting, in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 Tests: `uv run pytest`.
 
 ## Local Stroom for development

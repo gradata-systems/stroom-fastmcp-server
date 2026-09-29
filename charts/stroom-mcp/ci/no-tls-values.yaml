@@ -1,0 +1,5 @@
+# Rendered in CI: TLS terminated in front of the server.
+publicBaseUrl: https://stroom-mcp.example.com
+stroom: {url: https://stroom.example.com}
+keycloak: {realmUrl: https://keycloak.example.com/realms/stroom}
+tls: {enabled: false}

@@ -1,0 +1,127 @@
+# Deployment
+
+The server is one container that terminates TLS itself, signs users in with Keycloak and calls Stroom as each
+user with their own token. It holds no credentials for Stroom. VS Code (or any MCP client) connects to
+`<publicBaseUrl>/mcp`; setup for users is in [VSCODE.md](VSCODE.md).
+
+## Prerequisites
+
+- **Keycloak**: the realm Stroom already trusts, with a public client for VS Code whose access tokens carry
+  both audiences, `stroom-mcp` (this server) and `stroom` (Stroom), plus `sub` and `preferred_username`.
+  Details: [VSCODE.md, section 1](VSCODE.md#1-keycloak).
+- **Stroom** trusts that realm (`identityProviderType: EXTERNAL_IDP`, audience `stroom`), and receipt accepts
+  tokens if samples are uploaded through the server ([VSCODE.md, section 2](VSCODE.md#2-stroom)).
+- **A certificate** for the server's DNS name: a Secret, or cert-manager. Plain HTTP is only allowed when a
+  proxy in front terminates TLS.
+- **Stroom folder permissions**: users need rights on the workspace folder (`MCP Workspace` by default), where
+  builds, survey docs and backups are made; promotion needs rights on the destination folders.
+
+## Kubernetes (Helm)
+
+The chart is `charts/stroom-mcp`, published to `oci://ghcr.io/p-kimberley/charts/stroom-mcp` on each release
+tag; the image is `ghcr.io/p-kimberley/stroom-fastmcp-server`.
+
+```yaml
+# values.yaml
+publicBaseUrl: https://stroom-mcp.example.com
+stroom:
+  url: https://stroom.example.com
+  ca: {secretName: internal-ca}            # when Stroom uses a private CA
+keycloak:
+  realmUrl: https://keycloak.example.com/realms/stroom
+  ca: {secretName: internal-ca}            # when Keycloak uses a private CA
+tls:
+  certManager: {enabled: true, issuerRef: {name: internal-ca}}   # or: existingSecret: stroom-mcp-tls
+```
+
+```
+helm install stroom-mcp oci://ghcr.io/p-kimberley/charts/stroom-mcp --version 0.1.0 -f values.yaml
+```
+
+The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `keycloak.realmUrl`, and, with TLS on,
+a certificate source. Everything else has a default; see `charts/stroom-mcp/values.yaml`.
+
+- **TLS**: on by default. `tls.existingSecret` (a `kubernetes.io/tls` Secret) or `tls.certManager` (the
+  certificate is issued for the host of `publicBaseUrl` unless `dnsNames` are given). The server reads the
+  certificate at startup, so restart after renewal, or annotate the deployment for a reloader. `tls.enabled:
+  false` only when an ingress or mesh terminates TLS; the server then sets `STROOM_MCP_TLS_TERMINATED_UPSTREAM`.
+- **Service**: ClusterIP by default; a LoadBalancer can pass TLS straight through (`service.type`,
+  `loadBalancerIP`, `loadBalancerSourceRanges`).
+- **Replicas**: MCP sessions live in the replica that started them, so with more than one either set
+  `statelessHttp: true` or `service.sessionAffinity: ClientIP`. Forms (confirmations and approvals) carry sealed
+  state between rounds; several replicas must share the sealing keys: `requestState.existingSecret` (keys
+  comma-separated, each at least 32 characters). The chart refuses `replicaCount` > 1 without them.
+- **Elasticsearch** (optional): `elasticsearch.url` and an API key that can read index and component
+  templates, used only to check a template the user changed against the indexing pipeline. Indexing always
+  goes through Stroom, and templates are written by the user.
+- **Environment files**: `accessPolicy` (where template pipelines are looked for), `errorRules` (error
+  triage) and `conventions` (field convention profiles) replace the image's copies when set.
+- **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
+  token. `/healthz` is unauthenticated and doesn't depend on Stroom or Keycloak.
+- **Audit**: one JSON line per tool call on stdout (with the user), for the cluster's log shipping.
+
+## Container
+
+```
+docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
+  -e STROOM_MCP_STROOM_URL=https://stroom.example.com \
+  -e STROOM_MCP_KEYCLOAK_REALM_URL=https://keycloak.example.com/realms/stroom \
+  -e STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp \
+  -e STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com \
+  -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
+  ghcr.io/p-kimberley/stroom-fastmcp-server:0.1.0
+```
+
+## Settings
+
+Environment variables with the prefix `STROOM_MCP_` (or a `.env` file); the chart value that sets each is in
+brackets.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `STROOM_URL` | required | Stroom base URL [`stroom.url`] |
+| `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom [`stroom.audience`] |
+| `STROOM_UI_URL` | `STROOM_URL` | Base of Stroom links shown to users [`stroom.uiUrl`] |
+| `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
+| `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
+| `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
+| `KEYCLOAK_REALM_URL` | required | Realm URL; also the tokens' issuer [`keycloak.realmUrl`] |
+| `KEYCLOAK_AUDIENCE` | required | This server's audience [`keycloak.audience`] |
+| `KEYCLOAK_TOKEN_ALGORITHM` | `RS256` | Token signing algorithm [`keycloak.tokenAlgorithm`] |
+| `KEYCLOAK_CA_CERTS` | | CA for Keycloak's certificate, added to the system CAs [`keycloak.ca`] |
+| `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata [`publicBaseUrl`] |
+| `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state, comma-separated [`requestState`] |
+| `TLS_CERTFILE`, `TLS_KEYFILE` | | Server certificate and key [`tls`] |
+| `TLS_TERMINATED_UPSTREAM` | `false` | Serve plain HTTP behind a TLS proxy [`tls.enabled: false`]. Without it or a certificate, the server only starts when listening on localhost |
+| `HOST`, `PORT` | `0.0.0.0`, `8000` | Listener [`containerPort`] |
+| `WORKSPACE_FOLDER` | `MCP Workspace` | Explorer folder for builds [`build.workspaceFolder`] |
+| `EVENT_LOGGING_VERSION` | `3.5.2` | Event-logging schema version for new translations [`build.eventLoggingVersion`] |
+| `INSTRUCTIONS_DOC_NAME` | `AGENTS` | Name of standing-instruction Documentation docs [`build.instructionsDocName`] |
+| `DEFAULT_CONVENTION` | | Field convention used when none is named [`build.defaultConvention`] |
+| `CONVENTIONS_DIR` | `conventions` | Convention profiles [`conventions`] |
+| `ACCESS_POLICY_FILE` | `access_policy.yaml` | Template pipeline sources [`accessPolicy`] |
+| `ERROR_RULES_FILE` | `error_rules.yaml` | Error triage rules [`errorRules`] |
+| `MAX_REPROCESS_STREAMS` | `10` | Streams per development reprocess [`processing.maxReprocessStreams`] |
+| `REPROCESS_MAX_TASKS` | `1` | Task limit on reprocess filters [`processing.reprocessMaxTasks`] |
+| `SAMPLE_MAX_TASKS` | `1` | Task limit on sample filters [`processing.sampleMaxTasks`] |
+| `MAX_FEED_FILTER_TASKS` | `2` | Task limit on feed filters made at promotion [`processing.maxFeedFilterTasks`] |
+| `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
+| `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
+| `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
+| `ES_URL` | | Elasticsearch, for reading templates [`elasticsearch.url`] |
+| `ES_API_KEY` | | API key for it [`elasticsearch.apiKey`] |
+| `ES_CA_CERTS` | | CA for its certificate, added to the system CAs [`elasticsearch.ca`] |
+| `ES_TEMPLATE_PATTERNS` | `["stroom-*"]` | Templates the server may read (JSON list) [`elasticsearch.templatePatterns`] |
+| `AUDIT_LOG_FILE` | stdout | Audit JSON lines [`extraEnv`] |
+| `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
+| `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
+
+`FASTMCP_STATELESS_HTTP` [`statelessHttp`] runs each request on its own.
+
+## CI
+
+`.github/workflows/ci.yml`: unit tests; `helm lint --strict` and a render of each `charts/stroom-mcp/ci/*-values.yaml`,
+and checks the chart refuses to render without its required settings or a certificate; builds the image and
+checks it refuses to start without TLS, then, run read-only with no capabilities and a self-signed
+certificate, answers `/healthz` with `ok` and an unauthenticated `POST /mcp` with 401 naming the realm. Pushes
+to master and tags publish the image; a `v<version>` tag matching `Chart.yaml` publishes the chart.

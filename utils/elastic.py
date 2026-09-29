@@ -4,7 +4,6 @@ Documents reach Elasticsearch through Stroom's ElasticIndexingFilter, and indexi
 Stroom searches, so reads and writes here are limited to index and component templates.
 """
 import fnmatch
-import ssl
 from typing import Any
 
 import httpx
@@ -12,6 +11,7 @@ from fastmcp.exceptions import ToolError
 
 from config import Settings
 from security.audit import audit
+from utils.tls import trust
 
 
 class ElasticTemplates:
@@ -24,7 +24,7 @@ class ElasticTemplates:
                 headers['Authorization'] = f'ApiKey {settings.es_api_key.get_secret_value()}'
             self._client = httpx.AsyncClient(
                 base_url=settings.es_url.rstrip('/'), headers=headers, timeout=30, transport=transport,
-                verify=ssl.create_default_context(cafile=str(settings.es_ca_certs) if settings.es_ca_certs else None))
+                verify=trust(settings.es_ca_certs))
 
     @property
     def configured(self) -> bool:

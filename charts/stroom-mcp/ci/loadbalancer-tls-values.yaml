@@ -1,0 +1,16 @@
+# Rendered in CI: LoadBalancer with TLS from an existing Secret, private CAs, Elasticsearch templates.
+publicBaseUrl: https://stroom-mcp.example.com
+stroom:
+  url: https://stroom.example.com
+  ca: {secretName: internal-ca}
+keycloak: {realmUrl: https://keycloak.example.com/realms/stroom, ca: {secretName: internal-ca}}
+elasticsearch:
+  url: https://es.example.svc:9200
+  apiKey: {existingSecret: stroom-mcp-es}
+  ca: {configMapName: es-ca}
+tls: {existingSecret: stroom-mcp-tls}
+service:
+  type: LoadBalancer
+  loadBalancerIP: 10.0.0.50
+  loadBalancerSourceRanges: [10.0.0.0/8]
+  externalTrafficPolicy: Local

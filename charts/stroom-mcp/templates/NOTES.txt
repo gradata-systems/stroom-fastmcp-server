@@ -1,0 +1,25 @@
+stroom-mcp is listening on {{ include "stroom-mcp.portName" . | upper }} port {{ include "stroom-mcp.servicePort" . }} of service {{ include "stroom-mcp.fullname" . }} ({{ .Values.service.type }}).
+
+MCP endpoint: {{ trimSuffix "/" .Values.publicBaseUrl }}/mcp
+
+VS Code (mcp.json):
+  "stroom": {"type": "http", "url": "{{ trimSuffix "/" .Values.publicBaseUrl }}/mcp", "oauth": {"clientId": "<VS Code client id in the realm>"}}
+
+Access tokens must carry both audiences, {{ .Values.keycloak.audience | quote }} and {{ .Values.stroom.audience | quote }}: every call to
+Stroom forwards the user's token.
+{{- if eq .Values.service.type "LoadBalancer" }}
+
+Point the DNS name in publicBaseUrl at the load balancer address:
+  kubectl get service {{ include "stroom-mcp.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.status.loadBalancer.ingress[0]}'
+{{- end }}
+{{- if and .Values.tls.enabled .Values.tls.certManager.enabled }}
+
+The certificate is loaded at startup; restart the deployment after cert-manager renews it, or
+annotate it for a reloader via deploymentAnnotations.
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.statelessHttp) (ne .Values.service.sessionAffinity "ClientIP") }}
+
+WARNING: {{ .Values.replicaCount }} replicas with in-memory MCP sessions and no session affinity.
+Clients may be routed to a replica that doesn't know their session. Set statelessHttp=true or
+service.sessionAffinity=ClientIP.
+{{- end }}

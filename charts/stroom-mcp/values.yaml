@@ -1,0 +1,216 @@
+image:
+  repository: ghcr.io/p-kimberley/stroom-fastmcp-server
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+# MCP sessions are held in memory by the replica that started them. With more than one replica, either
+# run stateless (each request stands alone) or pin clients with service.sessionAffinity; either way set
+# requestState so every replica can read the forms (confirmations and approvals) another one sent.
+statelessHttp: false
+
+# External URL clients use to reach the server, e.g. https://stroom-mcp.example.com. Used in OAuth
+# metadata, so it must match what clients (VS Code's mcp.json) connect to.
+publicBaseUrl: ""
+
+stroom:
+  # e.g. https://stroom.example.com
+  url: ""
+  # Base URL of the Stroom UI in links shown to users; defaults to stroom.url.
+  uiUrl: ""
+  # Stroom's client id: every call to Stroom forwards the user's token, so its aud claim must include
+  # this as well as keycloak.audience.
+  audience: stroom
+  requestTimeout: 60
+  # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs.
+  ca:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+
+keycloak:
+  # The realm Stroom trusts, e.g. https://keycloak.example.com/realms/stroom
+  realmUrl: ""
+  # This server's audience in the realm's access tokens.
+  audience: stroom-mcp
+  # Algorithm Keycloak signs access tokens with (realm or client "Access token signature algorithm").
+  tokenAlgorithm: RS256
+  # CA that signed Keycloak's HTTPS certificate, for fetching the realm's signing keys. Trusted in
+  # addition to the system CAs. May be the same Secret or ConfigMap as stroom.ca.
+  ca:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+
+# Elasticsearch, for reading index templates only (checking a template against an indexing pipeline).
+# Optional: indexing itself goes through Stroom, and templates are written by the user.
+elasticsearch:
+  url: ""
+  # API key with read access to index and component templates.
+  apiKey:
+    # Used to create a Secret when existingSecret is empty. Prefer existingSecret.
+    value: ""
+    existingSecret: ""
+    existingSecretKey: api-key
+  templatePatterns: [stroom-*]
+  ca:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+
+# Seals the state carried between the rounds of a form. Not needed for one replica (a per-process key
+# is used); required for several, which must share the keys. Each key is at least 32 characters; the
+# first seals and all unseal, so rotate with [old, new], then [new, old], then [new].
+requestState:
+  existingSecret: ""
+  # Key in existingSecret holding the keys, comma-separated.
+  existingSecretKey: keys
+  # Used to create a Secret when existingSecret is empty. Prefer existingSecret.
+  keys: []
+
+build:
+  # Explorer folder where builds are made before promotion.
+  workspaceFolder: MCP Workspace
+  eventLoggingVersion: 3.5.2
+  # Documentation docs with this name hold standing instructions for their folder and below.
+  instructionsDocName: AGENTS
+  # Convention profile used when the user names none (a file name in conventions, without .yaml).
+  defaultConvention: ""
+
+processing:
+  # Reprocessing during development: streams per call, and that filter's concurrent task limit.
+  maxReprocessStreams: 10
+  reprocessMaxTasks: 1
+  # Task limit on filters over a build's sample streams.
+  sampleMaxTasks: 1
+  # Task limit on the feed filters created (disabled) at promotion.
+  maxFeedFilterTasks: 2
+
+limits:
+  maxResponseChars: 100000
+  maxStreamChars: 20000
+  maxSampleRecords: 500
+
+# Replaces the image's access_policy.yaml (where template pipelines are looked for) when set, e.g.
+#   pipeline_templates:
+#     translation: {folders: [System/Template Pipelines], names: ['Event Data (*)']}
+accessPolicy: {}
+
+# Replaces the image's error_rules.yaml (error triage) when set, as YAML text or a map with `rules`.
+errorRules: ""
+
+# Replaces the image's field convention profiles when set. Keys are file names; values are the profile
+# as YAML text or as a map, e.g. --set-file 'conventions.ecs\.yaml=conventions/ecs.yaml'.
+conventions: {}
+
+# The server terminates TLS itself, so a LoadBalancer service can pass traffic straight through.
+tls:
+  # false only when TLS is terminated in front of the server (an ingress or mesh); the server then
+  # serves plain HTTP, and still requires publicBaseUrl to be https://.
+  enabled: true
+  # kubernetes.io/tls Secret with tls.crt and tls.key.
+  existingSecret: ""
+  # Or have cert-manager issue the certificate (into <fullname>-tls unless existingSecret is set).
+  certManager:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    # Defaults to the host of publicBaseUrl.
+    dnsNames: []
+    ipAddresses: []
+    duration: ""
+    renewBefore: ""
+  # The server reads its certificate at startup, so a renewed certificate takes effect on the next
+  # restart. Set deploymentAnnotations for a reloader (e.g. secret.reloader.stakater.com/reload) to
+  # restart automatically.
+
+service:
+  # ClusterIP, NodePort or LoadBalancer.
+  type: ClusterIP
+  # Defaults to 443 with TLS enabled, 80 without.
+  port: null
+  nodePort: null
+  annotations: {}
+  labels: {}
+  loadBalancerIP: ""
+  loadBalancerClass: ""
+  loadBalancerSourceRanges: []
+  # Local preserves client source addresses on LoadBalancer and NodePort services.
+  externalTrafficPolicy: ""
+  internalTrafficPolicy: ""
+  # ClientIP pins each client to one replica, keeping in-memory MCP sessions working.
+  sessionAffinity: ""
+  sessionAffinityConfig: {}
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  externalIPs: []
+
+containerPort: 8000
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The server never calls the Kubernetes API.
+  automountToken: false
+
+deploymentAnnotations: {}
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 768Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /healthz
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Additional STROOM_MCP_* settings or anything else, e.g. [{name: STROOM_MCP_AUDIT_LOG_FILE, value: ...}].
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""

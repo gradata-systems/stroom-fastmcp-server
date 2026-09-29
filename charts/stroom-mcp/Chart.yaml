@@ -1,0 +1,6 @@
+apiVersion: v2
+name: stroom-mcp
+description: MCP server for building, testing and promoting Stroom pipelines, acting as the signed-in user
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

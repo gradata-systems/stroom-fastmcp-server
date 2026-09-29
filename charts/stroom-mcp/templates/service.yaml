@@ -1,0 +1,63 @@
+{{- $svc := .Values.service }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stroom-mcp.fullname" . }}
+  labels:
+    {{- include "stroom-mcp.labels" . | nindent 4 }}
+    {{- with $svc.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  selector:
+    {{- include "stroom-mcp.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ include "stroom-mcp.portName" . }}
+      port: {{ include "stroom-mcp.servicePort" . }}
+      targetPort: {{ include "stroom-mcp.portName" . }}
+      protocol: TCP
+      appProtocol: {{ include "stroom-mcp.portName" . }}
+      {{- if and $svc.nodePort (has $svc.type (list "NodePort" "LoadBalancer")) }}
+      nodePort: {{ $svc.nodePort }}
+      {{- end }}
+  {{- if eq $svc.type "LoadBalancer" }}
+  {{- with $svc.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  {{- with $svc.loadBalancerClass }}
+  loadBalancerClass: {{ . }}
+  {{- end }}
+  {{- with $svc.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  {{- if and $svc.externalTrafficPolicy (has $svc.type (list "NodePort" "LoadBalancer")) }}
+  externalTrafficPolicy: {{ $svc.externalTrafficPolicy }}
+  {{- end }}
+  {{- with $svc.internalTrafficPolicy }}
+  internalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with $svc.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  {{- with $svc.sessionAffinityConfig }}
+  sessionAffinityConfig:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $svc.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $svc.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $svc.externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
