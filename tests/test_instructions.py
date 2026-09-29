@@ -1,7 +1,4 @@
-import json
 from types import SimpleNamespace
-
-import pytest
 
 from config import Settings
 from tools import instructions
@@ -56,22 +53,3 @@ async def test_without_targets_only_root_docs_apply_and_names_must_match_exactly
 async def test_folders_can_be_given_directly():
     result = await instructions.get_instructions(ctx(), folders=['System/Elastic Indices/Keycloak'])
     assert [i['uuid'] for i in result['instructions']] == ['g', 'x']
-
-
-pytest.importorskip('langgraph')
-
-
-async def test_the_agent_loads_instructions_before_any_step():
-    from langchain_core.tools import StructuredTool
-    from agent import graph as g
-    from agent.state import harvest
-
-    async def get_instructions(folders: list[str] | None = None) -> str:
-        return json.dumps({'instructions': [{'folder': 'System', 'applies_to': 'everything', 'instructions': 'Rule one.'}]})
-    tool = StructuredTool.from_function(coroutine=get_instructions, name='get_instructions', description='x')
-    update = await g.load_instructions({'get_instructions': tool})({})
-    assert update['instructions'] == '[System: applies to everything]\nRule one.'
-    assert (await g.load_instructions({})({})) == {'instructions': 'none'}
-    from langchain_core.messages import ToolMessage
-    later = harvest([ToolMessage(content=await get_instructions(), name='get_instructions', tool_call_id='1')])
-    assert later['instructions'].endswith('Rule one.')

@@ -1,8 +1,6 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 from utils.eventschema import EventSchema
 from utils.xsltgen import TranslationMapping, generate
 
@@ -24,7 +22,7 @@ def test_ten_cases_each_with_a_reference_mapping_the_schema_accepts():
         assert {'name', 'template', 'request', 'expected', 'sample', 'reference'} <= set(case), case['id']
         result = generate(TranslationMapping.model_validate(case['reference']['mapping']), SCHEMA, '4.1.0')
         assert result['ok'], (case['id'], result['problems'])
-        assert 'Sample:\n' in ev.agent_request(case) and 'stroom-flat' in ev.agent_request(case)
+        assert 'Sample:\n' in ev.request_text(case) and 'stroom-flat' in ev.request_text(case)
 
 
 def test_scoring_counts_events_types_and_missing_paths():
@@ -37,22 +35,6 @@ def test_scoring_counts_events_types_and_missing_paths():
     good = ev.Score('y', 'test')
     ev.score_events(good, {'expected': {**case['expected'], 'paths': ['EventSource/User/Id']}}, [EVENTS], [True])
     assert good.stage1 and not good.problems
-
-
-@pytest.mark.parametrize('payload, reply', [
-    ({'kind': 'confirmation'}, {'approved': True}), ({'kind': 'template'}, {'approved': True}),
-    ({'kind': 'enable'}, {'approved': True, 'note': 'enable it for me'}),
-])
-def test_the_scripted_user_agrees_and_enables(payload, reply):
-    assert ev.respond(payload, {}, ev.Score('x', 'test')) == reply
-
-
-def test_help_uses_the_cases_hints_and_counts_them():
-    score = ev.Score('x', 'test')
-    case = {'hints': ['The time is in UTC.']}
-    assert ev.respond({'kind': 'help'}, case, score) == {'note': 'The time is in UTC.'}
-    assert ev.respond({'kind': 'help'}, case, score)['note'].startswith('No hint')
-    assert score.hints == 2
 
 
 def test_summary_applies_the_exit_criterion():

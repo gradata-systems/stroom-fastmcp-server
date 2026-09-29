@@ -10,7 +10,6 @@
 **/__pycache__/
 .pytest_cache/
 audit*.log
-agent/
 charts/
 dev/
 docs/
