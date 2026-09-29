@@ -1,6 +1,7 @@
 # Using the Stroom MCP server from VS Code
 
-VS Code's chat (agent mode) is the agent: its model works through the server's tools, the workflows are
+The server works with any MCP client that can sign the user in; this guide sets up VS Code's chat (agent
+mode), and sections 1 and 2 apply to any client. The model works through the server's tools, the workflows are
 prompts, and every rule that must hold (workspace and promotion, approvals, processing limits, the Elasticsearch
 hand-over) is enforced by the server. Each call to Stroom is made as you, with your Keycloak token.
 

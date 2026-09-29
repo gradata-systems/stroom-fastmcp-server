@@ -1,11 +1,11 @@
-# Stroom FastMCP Server & LangGraph Agent — Design
+# Stroom FastMCP Server — Design
 
-As of 2026-09-28. Exported from the shared design doc
+As of 2026-09-29. Kept in step with the shared design doc
 (https://claude.ai/code/artifact/d0f92563-de5d-4c87-9d9b-8ba1c06f8c9a); diagrams are redrawn here in Mermaid.
 
 ## Overview
 
-The Stroom MCP server lets a chat agent (OpenWebUI, later a LangGraph agent) take a sample of raw data and turn it into working Stroom content: a feed, a translation pipeline that emits [GCHQ event-logging](https://github.com/gchq/event-logging-schema) XML, and an indexing pipeline that sends those events to Elasticsearch. It is standalone: it talks to Stroom and Elasticsearch directly and needs no other MCP server. It borrows its structure from the Elasticsearch FastMCP server project but does not call it.
+The Stroom MCP server lets an agent, whatever runs it, take a sample of raw data, or a feed that already holds data, and turn it into working Stroom content: a feed, a translation pipeline that emits [GCHQ event-logging](https://github.com/gchq/event-logging-schema) XML, and an indexing pipeline that sends those events to Elasticsearch. It is standalone: it talks to Stroom and Elasticsearch directly and needs no other MCP server. It borrows its structure from the Elasticsearch FastMCP server project but does not call it. It includes no agent or model: any MCP client that can sign the user in drives it (see Clients), and the rules that must hold are enforced by the server, not by a client.
 
 **Goals**
 
@@ -68,7 +68,7 @@ flowchart TD
 10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
 11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace: a query on that index and a table with a minimal field set (`StreamId`, `EventId`, the time field and a few key fields from the template). Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; and a time-range search around the sample timestamps. Each must return the expected records, which checks the mapping and the way people will actually search it. A failed search sends the agent back to step 7.
 12. **Document.** Write Stroom Documentation docs for the events and indexing pipelines (`write_documentation`) from what stages 1 and 2 measured: the field mapping, event types from the processed sample, the index template and version, and the verification results. The same summary is returned in the chat.
-13. **Promote on approval.** Everything so far lives in the workspace. `promote_build` proposes destination folders from where sibling sources live; the user confirms them and approves, the docs are moved into place, and the processor filters are widened from the sample to the whole feed (new data only, from a create time) as part of the same approval.
+13. **Promote on approval.** Everything so far lives in the workspace. `list_build` shows what the build still lacks (a clean step of each pipeline's current code, documentation). `promote_build` proposes destination folders from where sibling sources live; the user confirms them and approves, with any of those warnings in view, and the docs are moved into place. Each promoted pipeline gets a processor filter for new data on its feed, created disabled, with a link to the pipeline for the user to review and enable it.
 
 ## Further use cases
 
@@ -112,7 +112,7 @@ A read-only review that explains an existing translation and measures its output
 2. **Sample the data.** Recent Raw Events and their Events streams from each feed, up to `max_sample_records` (`find_streams`, `read_stream`). Stepping a handful of records shows input and output side by side.
 3. **Map the translation.** `describe_translation` reads the XSLT and lists which input fields feed which event-logging paths; comparing that with the sample profile shows input fields that are never used.
 4. **Inventory the events.** `summarise_events` counts events by `EventDetail` type, `TypeId` and `Action`, with examples, and reports how often each path is populated.
-5. **Measure conformance.** Validate the sampled events against the schema version the pipeline targets and the latest pinned version (`validate_events`), run the quality rules (`check_event_quality`), and triage recent Error streams (`summarise_errors`). Results are rates, e.g. 97% valid, 12% missing `EventSource/Device/IPAddress`.
+5. **Measure conformance.** Validate the sampled events against the schema version the pipeline targets and the latest version the instance holds (`validate_events`), run the quality rules (`check_event_quality`), and triage recent Error streams (`summarise_errors`). Results are rates, e.g. 97% valid, 12% missing `EventSource/Device/IPAddress`.
 6. **Suggest improvements.** Prioritised changes, each with the rule or field it fixes, the share of events affected and a draft XSLT change.
 
 The report is returned in the chat and saved as the pipeline's Documentation doc: written in the workspace and, on approval, moved beside the pipeline or written into its existing doc after a backup, with a change-log entry. It uses the shared documentation sections, with suggestions under Open items:
@@ -130,11 +130,11 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 
 The user names an existing Raw Events feed instead of giving a sample. Not every kind of event shows up in every stream, so the agent samples stream after stream until more streams add nothing new. It only reads and steps: no feed is created, nothing is uploaded or processed, so there are no filters or streams to clean up.
 
-1. **Survey.** `survey_feed` picks streams spread over the feed's lifetime (by create time, read newest, oldest, then the middle, then the quarters, so any prefix spans the whole range) and reads only the head of each: up to 250,000 characters of up to 3 parts, and 1,000 records, so a multi-GB stream costs the same as a small one. A cut-off last record is dropped, and JSON arrays and XML are parsed incrementally, so only complete records count. It groups the records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples, with where each example is (stream, part, record).
-2. **Translate every shape, stepping in place.** The mapping gets one rule per shape (`build_translation_xslt`), and `step_records` steps the translation on the survey's locations, the feed's own records, until clean. Records no rule matches are logged, not dropped, so a missed shape shows up.
-3. **Read more streams.** The agent surveys again, skipping the streams already read and passing the signatures it already knows, so only new shapes come back. The mapping gains rules and every location found so far is stepped again. This repeats until a survey is saturated or every stream has been read.
+1. **Survey.** `survey_feed` picks streams spread over the feed's lifetime (by create time, read newest, oldest, then the middle, then the quarters, so any prefix spans the whole range) and reads only the head of each: up to 250,000 characters of up to 3 parts, and 1,000 records, so a multi-GB stream costs the same as a small one. A cut-off last record is dropped, and JSON arrays and XML are parsed incrementally, so only complete records count. It groups the records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. A message-like field (body, message...) is unwrapped: JSON inside it, after any text prefix or byte order mark, is signed by its fields and naming values (logger names count), and naming `key=value` pairs keep their values (`type="LOGIN"`), so a wrapper such as syslog shipped as JSON does not hide the kinds of event. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples, with where each example is (stream, part, record), and says plainly whether the feed is covered yet.
+2. **Translate every shape, stepping in place.** The mapping gets one rule per shape (`build_translation_xslt`), and `step_records` steps the translation on the survey's locations, the feed's own records, until clean. Records no rule matches are logged, not dropped, so a missed shape shows up. Kinds not worth translating (housekeeping, debug) are shown to the user with their share; only if the user agrees are they left untranslated: `set_shape_handling` records the choice and the user's reason in the survey doc (a confirmation), the mapping gets an explicit drop rule for them, and their locations are stepped expecting no Event.
+3. **Read more streams.** The agent surveys again, skipping the streams already read and passing the signatures it already knows, so only new shapes come back. The mapping gains rules and every location found so far is stepped again. This repeats until a survey says the feed is covered, or every stream has been read; until then the agent says plainly that it is not covered yet.
 4. **Broad check.** Two examples per shape cannot show every variant (a missing optional field, an odd value), so `step_sample` steps the first 200 records of three surveyed streams spread over time (`records_per_stream`). Anything blocking or for review goes back to the mapping. Then the agent reports which kinds of event the pipeline covers and their share of the data.
-The survey is kept in the build as a Documentation doc, `<FEED> - Survey`: the kinds of event with counts, shares and streams, example records with where each one is, the surveys run, and a machine-readable state block. A later survey with the same build carries on from it (skipping the streams read, knowing the shapes found), so an interrupted or later session need not start again, and it is promoted beside the pipeline as a record of what the feed holds. Example records are the feed's own data; who can read them is down to the permissions on the folder the doc lives in.
+The survey is kept in the build as a Documentation doc, `<FEED> - Survey`: the kinds of event with counts, shares, streams and handling (translated, or left untranslated and why), example records with where each one is, the surveys run, and a machine-readable state block. A later survey with the same build carries on from it (skipping the streams read, knowing the shapes found), so an interrupted or later session need not start again, and it is promoted beside the pipeline as a record of what the feed holds. Example records are the feed's own data; who can read them is down to the permissions on the folder the doc lives in.
 
 5. **Document, promote, hand over.** The translation is documented and promoted on approval. Processing the source feed with it is the user's to start; once its Events exist, `index_event_data` builds the indexing, since an indexing pipeline can only be stepped and filled from real Events streams.
 
@@ -154,7 +154,7 @@ The server copies the ES MCP server's shape: FastMCP over streamable HTTP, Keycl
 
 ```mermaid
 flowchart TB
-    client[Chat client or agent<br/>OpenWebUI: auth code + PKCE<br/>LangGraph: device sign-in as the user]
+    client[MCP client: chat client, IDE or agent framework<br/>signs the user in: auth code + PKCE]
     kc[Keycloak<br/>issues user tokens with<br/>aud = stroom-mcp and stroom]
     subgraph server[Stroom FastMCP server, standalone]
         mw[Middleware<br/>KeycloakAuthProvider<br/>AuditMiddleware<br/>WriteGuard: workspace folder, approvals]
@@ -166,17 +166,17 @@ flowchart TB
     kc -- access token --> client
     client -- MCP over HTTP, bearer token --> server
     server -- as the user --> stroom
-    server -- run-as the user --> es
+    server -- templates, API key, optional --> es
     stroom -- indexes --> es
 ```
 
-**Identity.** The server acts as the user who asked. Stroom 7.x trusts the same Keycloak realm, and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, through a Keycloak audience mapper), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without `stroom` in `aud` is refused with a message naming the missing mapper, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. The LangGraph agent signs the person in with the device authorization grant and refreshes the token for the length of a run. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
+**Identity.** The server acts as the user who asked. Stroom 7.x trusts the same Keycloak realm, and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, through a Keycloak audience mapper), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without `stroom` in `aud` is refused with a message naming the missing mapper, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
 
-**Front end.** VS Code's chat (agent mode) is the intended client: its model runs the workflows from the prompts (slash commands), guides attach as resources, and VS Code handles the Keycloak sign-in with a pre-registered public client (PKCE, redirect URIs `http://127.0.0.1:33418` and `https://vscode.dev/redirect`). Everything that must hold is enforced by the server, so any MCP client gets the same rules; the LangGraph agent in `agent/` is optional. Setup: `docs/VSCODE.md`.
+**Clients.** Any MCP client can drive the server; what one needs is under Clients below. VS Code's chat (agent mode) is the first set up and tested: its model runs the workflows from the prompts (slash commands), guides attach as resources, and VS Code handles the Keycloak sign-in with a pre-registered public client (PKCE, redirect URIs `http://127.0.0.1:33418` and `https://vscode.dev/redirect`). Setup: `docs/VSCODE.md`.
 
 **Asking the user.** Confirmations and approvals are forms the user answers, so the model never holds the answer. On MCP 2026-07-28 connections, which have no server-initiated requests, the tool returns an input-required result with the form, and the client repeats the call with the answer (SEP-2322); the sealed request state names the exact request and user, and the gates already passed in the call. On earlier connections the server sends the elicitation during the call. A client that cannot answer forms gets a one-time id bound to the request and user instead.
 
-**Elasticsearch.** Only template reads and writes go direct to ES; indexed documents are verified through Stroom searches, through a copy of the ES server's `ElasticsearchGateway` (run-as). Documents reach ES through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
+**Elasticsearch.** Only template reads (and, if the user asks, a template write) go direct to Elasticsearch, with an API key limited to the allowed template patterns; the connection is optional. Indexed documents are verified through Stroom searches. Documents reach Elasticsearch through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
 
 **Stroom API details.** Explorer calls (`fetchExplorerNodes`, `find`) must send `filter.requiredPermissions: ["VIEW"]`, as the Stroom UI does, and `find` needs a name filter (`*` or `type:Pipeline`); without them Stroom returns nothing below System. Docs are matched by UUID, because names held in inherited references go stale when a doc is renamed.
 
@@ -196,34 +196,37 @@ flowchart TB
 
 ```
 stroom-fastmcp-server/
-  main.py                 # FastMCP app, lifespan, tool registration
+  main.py                 # FastMCP app: auth, TLS, /healthz, lifespan, tool registration
+  main_tools.py           # the tool modules
   config.py               # Settings, STROOM_MCP_* env vars
-  access_policy.yaml      # workspace folder, readable roots, ES template patterns, pipeline template sources
+  access_policy.yaml      # where template pipelines are looked for, per stage
   error_rules.yaml        # error triage rules: message regex, element, severity -> class
   conventions/            # field convention profiles (*.yaml)
+  knowledge/guides/       # the stroom://guide/{name} resources
   security/
-    audit.py              # copied from ES server; adds stroom_request events
-    policy.py             # WritePolicy: where the agent may create/change docs
-    guard.py              # WriteGuardMiddleware, approval tokens
+    auth.py               # Keycloak token verification (private CA, clear rejection reasons)
+    audit.py              # audit middleware and events
+    guard.py              # write guard: workspace folders, mcp-* tags, managed docs only
+    policy.py             # access policy (template sources)
   utils/
-    stroom.py             # StroomGateway: httpx.AsyncClient, forwards the caller's token, error mapping
-    elasticsearch.py      # ES gateway subset: templates and mappings
-    expressions.py        # builders for Stroom ExpressionOperator trees
-  tools/
-    explorer.py  feeds.py  pipelines.py  translation.py
-    processing.py  streams.py  stepping.py  indexing.py  validation.py
-  knowledge/
-    event-logging/        # fallback XSDs; normally read from Stroom's XML Schemas
-    snippets/             # reference XSLT fragments per source format
-    documentation.md      # Documentation doc template
-  tests/                  # respx-mocked Stroom, recorded fixtures
+    stroom.py             # StroomGateway: forwards the caller's token, error mapping
+    elastic.py            # Elasticsearch templates, within the allowed patterns
+    consent.py            # confirmations and approvals: forms, elicitation or ids
+    schemas.py  eventschema.py   # event-logging XSD from Stroom; element order, required parts, choices
+    xsltgen.py            # translation XSLT from a field mapping
+    survey.py  surveydoc.py      # kinds of event in a feed; the survey doc
+    profile.py  fieldplan.py  templatecheck.py  triage.py  tls.py
+  tools/                  # one module per tool group (see the tool catalogue)
+  charts/stroom-mcp/      # Helm chart
+  dev/                    # local Stroom and Keycloak stacks, e2e suites, evaluation set, live checks
+  tests/                  # unit tests: respx-mocked Stroom, schema fixtures
 ```
 
 **Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in `docs/DEPLOYMENT.md`.
 
 **Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom, Keycloak and Elasticsearch are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and Keycloak, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
 
-**Dependencies**: `fastmcp`, `httpx`, `pydantic-settings`, `lxml` (local XSD validation and XSLT well-formedness), `elasticsearch`, `pyyaml`; dev: `pytest`, `pytest-asyncio`, `respx`.
+**Dependencies**: `fastmcp`, `httpx`, `pydantic`, `pydantic-settings`, `lxml` (XSD validation, XSLT well-formedness, incremental parsing), `pyyaml`; dev: `pytest`, `pytest-asyncio`, `respx`, `saxonche` (running generated XSLT in tests).
 
 **Field conventions.** Index field names and structure are environment-specific: some environments use ECS, others a custom scheme. The server has no built-in naming scheme. A convention profile is a YAML file in `conventions/` (`STROOM_MCP_CONVENTIONS_DIR`), loaded like the ES server's source packs, and exposed as `stroom://conventions/{name}`.
 
@@ -239,7 +242,7 @@ field_map:                           # optional: event-logging path -> index fie
 type_overrides: {'*.ip': ip}
 ```
 
-Selection order: the profile the user names in the conversation, else `STROOM_MCP_DEFAULT_CONVENTION`, else none. With none, `get_field_conventions` returns `needs_guidance`, and the agent asks the user to pick a profile, point at reference templates, or describe the convention. A described convention is kept in the build state as an ad-hoc profile. The agent never falls back to ECS or any other scheme on its own.
+Selection order: the profile the user names in the conversation, else `STROOM_MCP_DEFAULT_CONVENTION`, else none. With none, `get_field_conventions` returns `needs_guidance`, and the agent asks the user to pick a profile, point at reference templates, or describe the convention. A described convention goes into the field plan as explicit fields (`draft_index_mapping`'s `extra_fields`); one worth keeping is added as a profile by whoever runs the server (the chart's `conventions`). The agent never falls back to ECS or any other scheme on its own.
 
 **Pipeline templates.** Before drafting either pipeline, the agent looks for an existing pipeline to inherit from. A local template often carries shared elements a new source should reuse, not copy: user decoration XSLTs, reference data lookups, schema filter settings, indexing properties. Discovery uses three signals, in order:
 
@@ -283,7 +286,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-61 tools in 13 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+61 tools in 14 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -313,33 +316,39 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 | `copy_pipeline` **W** | Copy an existing pipeline and the docs it owns into the workspace under new names, e.g. a version bump; keeps the original's structure, reference loaders and settings, rewires the copies and can set properties such as `indexName` | `explorer/v2/copy`, `pipeline/v1/savePipelineJson` |
 | `describe_pipeline` | Flattened element chain with effective properties, including inherited ones and removed elements | `pipeline/v1/fetchPipelineJson`, `fetchPipelineLayers` |
 | `set_pipeline_property` **W** | Set one element property, e.g. `schemaFilter.schemaGroup`, `elasticIndexingFilter.indexName` | `pipeline/v1/savePipelineJson` |
+
+**Builds** (`tools/builds.py`)
+
+| Tool | Purpose | Stroom API |
+| --- | --- | --- |
+| `start_build` **W** | Create or find the build's workspace folder; returns the standing instructions that apply to the feeds or folders given | `explorer/v2/create`, `documentation/v1` |
+| `list_build` | The build's documents, working copies marked, and what its pipelines still lack before promotion: a clean step of their current code, documentation | `explorer/v2/fetchExplorerNodes`, doc reads |
 | `write_documentation` **W** | Create or update a pipeline's Documentation doc from the documentation template, in the workspace; updates revise sections and append a change-log entry | `explorer/v2/create`, `documentation/v1/{uuid}` |
-| `promote_build` **W A** | Move a build's docs from the workspace to confirmed destination folders, or write working copies into the production docs they replace after a backup; pre-creates, disabled, a filter for new data on each promoted pipeline's feed (from its sample filters, or the surveyed feed) with the pipeline link | `explorer/v2/move`, doc `PUT`s, `processorFilter/v1` |
+| `promote_build` **W A** | Move a build's docs from the workspace to confirmed destination folders, or write working copies into the production docs they replace after a backup; the approval carries what `list_build` says is missing. Pre-creates, disabled, a filter for new data on each promoted pipeline's feed (from its sample filters, or the surveyed feed) with the pipeline link | `explorer/v2/move`, doc `PUT`s, `processorFilter/v1` |
 
 **Translation content** (`tools/translation.py`)
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
 | `create_text_converter` **W** | Create a Data Splitter or XML Fragment converter with code | `textConverter/v1` |
-| `update_text_converter` **W** | Replace converter code (approval and a backup first if the agent did not create the doc); optimistic on `version` | `textConverter/v1/{uuid}` |
+| `update_text_converter` **W** | Replace the code of a converter the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `textConverter/v1/{uuid}` |
 | `create_xslt` **W** | Create an XSLT doc with code | `xslt/v1` |
-| `update_xslt` **W** | Replace XSLT code (approval and a backup first if the agent did not create the doc); optimistic on `version` | `xslt/v1/{uuid}` |
-| `suggest_data_splitter` | Local: generate a starting Data Splitter from the sample profile | none |
+| `update_xslt` **W** | Replace the code of an XSLT the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `xslt/v1/{uuid}` |
 
 **Generation** (`tools/generation.py`, reads the schema from Stroom, writes nothing)
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `build_translation_xslt` | Write the event-logging translation from a field mapping: input kind, fields every event shares, and one rule per kind of event (conditions, then input field or constant to event-logging path, with time patterns, value maps, defaults and `Data` entries). Mistakes the schema catches come back as problems per mapping entry, with suggestions: unknown paths, disallowed constants, alternatives used together, missing required elements, unquoted pattern letters. Otherwise it returns XSLT in schema order that leaves out elements with empty inputs and logs unmatched records | `xmlSchema/v1` |
+| `build_translation_xslt` | Write the event-logging translation from a field mapping: input kind, fields every event shares, and one rule per kind of event (conditions, then input field or constant to event-logging path, with time patterns, value maps, defaults and `Data` entries). Mistakes the schema catches come back as problems per mapping entry, with suggestions: unknown paths, disallowed constants, alternatives used together, missing required elements, unquoted pattern letters. Otherwise it returns XSLT in schema order that leaves out elements with empty inputs and logs unmatched records. Drop rules (conditions only) leave kinds the user chose not to translate out without the warning. The standing instructions for the feeds given come back with the result | `xmlSchema/v1` |
 
 A model that is weak at XSLT only has to produce the mapping. The generator carries what the model would otherwise get wrong: the input namespace, element order, `stroom:format-date`, guards against empty elements, and `xsl:choose` per event kind. Hand-written XSLT remains for what a mapping cannot express, such as unpacking embedded JSON or reference lookups.
 
-**Validation** (`tools/validation.py`, local, no Stroom calls)
+**Validation** (`tools/validation.py`: checks run locally; the XSD is read from Stroom once and cached)
 
 | Tool | Purpose |
 | --- | --- |
 | `check_xslt` | Well-formed, XSLT 2.0/3.0 namespace, declared `stroom:` functions exist |
-| `validate_events` | Validate event XML against the pinned event-logging XSD, or a named schema version; errors with line, path and a short fix hint |
+| `validate_events` | Validate event XML against the event-logging XSD held in the Stroom instance (the configured version, or the one the events declare); errors with line, path and a short fix hint |
 | `check_event_quality` | Beyond the XSD: `EventTime/TimeCreated` parses, `EventSource/System/Name` set, no empty elements, `EventDetail` type matches the action |
 | `describe_translation` | Read an XSLT and list, per output event-logging path, the input fields or expressions that feed it; flags constant values and paths never set |
 
@@ -350,7 +359,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | `create_processor_filter` **W A** | Filter for a pipeline on sample stream ids, or on feed + stream type from a create time. Refuses streams the pipeline already processed (use `reprocess_streams`). An indexing pipeline reading Events must name its source events pipeline, and the filter adds `Pipeline IS_DOC_REF <source>`. For an Elasticsearch indexing pipeline, once the user confirms the index template for its destination index is committed, pre-creates the filter disabled and returns the pipeline link for the user to enable it | `processorFilter/v1`, `fetchPipelineLayers` |
 | `set_processor_filter_enabled` **W A** | Enable or disable a filter the agent created | `processorFilter/v1/{id}/enabled` |
 | `reprocess_streams` **W A** | Process up to 10 streams again through a workspace pipeline after a change, one task at a time; Stroom supersedes the earlier output. For Elasticsearch, the same hand-over: pre-created disabled for the user to enable | `processorFilter/v1` |
-| `processing_status` | Tracker state, task counts by status, last error, for a filter or pipeline | `processorFilter/v1/find`, `processorTask/v1/find` |
+| `processing_status` | A pipeline's filters with tracker state and task counts by status, each filter's own tasks asked for by id (a page of every task in the system misses them on a busy instance) | `processorFilter/v1/find`, `processorTask/v1/find` |
 | `wait_for_processing` | Poll `processing_status` with backoff until all tasks are complete or failed, or a timeout; then reports, per input stream, the child Events stream id and record count, flagging inputs with none or more than one; can count only one filter's outputs | as above |
 
 **Standing instructions** (`tools/instructions.py`, read-only)
@@ -364,7 +373,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
 | `survey_feed` | Sample an existing feed's streams spread over its lifetime, reading only the head of each (characters, parts and records capped), and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`, and says plainly whether the feed is covered yet. A message-like field (body, message...) is unwrapped: JSON inside it (after any prefix or byte order mark) is signed by its fields and naming values, and naming `key=value` pairs keep their values, so a wrapper such as syslog shipped as JSON does not hide the kinds of event. Continues with `skip_stream_ids` and `known_signatures`, or, given a `build`, from the build's `<FEED> - Survey` doc, which it keeps up to date. Kinds the user chose to leave untranslated are marked, and their locations carry `expect: none` | `meta/v1/find`, `data/v1/fetch` |
-| `set_shape_handling` | Record in the survey doc, after the user confirms, that some kinds of event are left untranslated on purpose (with the user's reason), or undo that; returns their example locations to step. The doc shows each kind's handling | `documentation/v1` |
+| `set_shape_handling` **W** | Record in the survey doc, after the user confirms, that some kinds of event are left untranslated on purpose (with the user's reason), or undo that; returns their example locations to step. The doc shows each kind's handling | `documentation/v1` |
 
 **Diagnosis** (`tools/diagnosis.py`, read-only)
 
@@ -383,14 +392,13 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | `read_stream` | Records from a stream in a range, trimmed to `max_stream_chars` | `data/v1/fetch` (TEXT) |
 | `summarise_events` | Profile Events streams: counts by `EventDetail` type, `TypeId` and `Action` with examples, and how often each event-logging path is populated | `data/v1/fetch` |
 | `summarise_errors` | Error markers grouped by message, element and severity with counts and first locations, each group classified blocking, review or benign with the rule that matched | `data/v1/fetch` (MARKER) |
-| `error_context` | For one error: the raw input record and the XSLT lines it points at, side by side | `data/v1/fetch`, `xslt/v1` |
 
 **Stepping** (`tools/stepping.py`)
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
 | `step_pipeline` | Step one record (first, last, or a record index) with optional draft code per element; returns the chosen elements' input and output and every element's errors, triaged | `stepping/v1/step` |
-| `step_sample` | Step every record of the sample streams to completion (capped by `max_sample_records`, default 500, and optionally `records_per_stream` for the head of each stream); one compact verdict per record, errors triaged | `stepping/v1/step` |
+| `step_sample` | Step every record of the sample streams to completion (capped by `max_sample_records`, default 500, and optionally `records_per_stream` for the head of each stream); one compact verdict per record, errors triaged. A clean run of a build pipeline is recorded as an `mcp-stepped-*` tag on it, for promotion's checks | `stepping/v1/step` |
 | `step_records` | Step chosen records of existing streams in place (e.g. `survey_feed`'s locations: stream, part, record) with optional draft code; one verdict like `step_sample`, plus which shapes did not step clean. A location with `expect: none` (a kind left untranslated) is clean when it writes no Event and flagged when it writes one. Nothing is copied or processed | `stepping/v1/step` |
 | `compare_outputs` | Step the same records through two pipelines, or one pipeline with current and draft code, and diff each record's output (event XML or index document); reports fields added, removed and changed | `stepping/v1/step` |
 
@@ -415,25 +423,19 @@ Stepping holds no session between calls: each step is a fresh request from the l
 | `create_verification_dashboard` **W** | Workspace dashboard with a query on the index doc and a table of a minimal field set (`StreamId`, `EventId`, time field, key fields); same on either backend | `explorer/v2/create`, `dashboard/v1/{uuid}` |
 | `run_test_searches` | Run test searches through the dashboard (stream id count, exact match per key field, time range) and poll to completion; per search, pass or fail with expected and returned rows | `dashboard/v1/search` |
 
-Every tool returns `{ok, ..., hints[]}`. Stroom errors are mapped to short reasons (not found, permission, validation, version conflict) with a hint naming the tool that fixes it. Output is cut to `max_response_chars` with `truncated: true`, as in the ES server.
+Tools return compact JSON with a `hint` for the next step where one helps, and gates as a `status` (`needs_confirmation`, `needs_approval`, `needs_guidance`) when the client cannot answer forms. Stroom errors are mapped to short reasons (not found, permission, validation, version conflict). Output is cut to `max_response_chars`, as in the ES server.
 
 ## MCP resources and prompts
 
-Resources carry the reference knowledge the model needs but should not have to discover by tool calls; prompts package the workflow so OpenWebUI users get the same behaviour as the LangGraph agent.
+Resources carry the reference knowledge the model needs but should not have to discover by tool calls; prompts package the workflows, so every client runs them the same way.
 
 **Resources**
 
 | URI | Content |
 | --- | --- |
-| `stroom://schema/event-logging` | The event-logging XSD for the configured version, read from Stroom's XML Schemas (`xmlSchema/v1`), plus a condensed element guide: required elements, `EventDetail` choices, common paths |
-| `stroom://schema/event-logging/examples/{type}` | Minimal valid events per `EventDetail` type: Authenticate, Process, Network, Send, Receive, Create, Delete, View, Alert |
-| `stroom://guide/xslt` | Stroom XSLT conventions: `records:2` input, `stroom:` functions (`format-date`, `lookup`, `feed-name`, `stream-id`), identity templates, unpacking embedded JSON with `json-to-xml()`, stream meta with `stroom:meta()` |
-| `stroom://guide/data-splitter` | Data Splitter elements (`split`, `regex`, `group`, `data`) with CSV, Syslog and key=value recipes |
-| `stroom://guide/json-input` | JSON via `JSONParser` producing `xpath-functions` XML, and how the XSLT addresses it |
-| `stroom://guide/elastic-indexing` | JSON-XML output form, mandatory `StreamId`, `EventId`, `@timestamp`, array and object encoding, `_`-prefixed element rule |
+| `stroom://guides` | Index of the guides |
+| `stroom://guide/{name}` | Short working guides: `event-logging` (required elements, `EventDetail` choices, common paths), `xslt` (`records:2` input, `stroom:` functions, identity templates, `json-to-xml()`, `stroom:meta()`), `data-splitter` (CSV, syslog and key=value recipes), `json-input` (`JSONParser` output and how the XSLT addresses it), `indexing` (Lucene fields; the JSON-XML form, `StreamId`, `EventId`, `@timestamp` for Elasticsearch), `agent-instructions` (writing AGENTS docs) |
 | `stroom://conventions/{name}` | Configured field convention profiles |
-| `stroom://templates/{name}` | Existing index and component templates (live from ES), for field-name and type consistency |
-| `stroom://workspace` | Docs the agent has created, grouped by build, with their last validation state |
 
 **Prompts**
 
@@ -448,17 +450,17 @@ Resources carry the reference knowledge the model needs but should not have to d
 | `onboard_existing_feed` | `feed`, `source_docs?` | Build the events pipeline from the data a feed already holds by stepping only: survey its streams for kinds of event, step the translation on those records in place, look further back until nothing new turns up, then document, promote and hand over |
 | `fix_pipeline_issue` | `stream_id`, `issue`, `event_id?` | Locate a reported event, confirm the problem, prove a fix, then apply it or give the manual steps, as the user chooses |
 
-**Where the knowledge comes from.** The XSD and examples are vendored into `knowledge/` from the [event-logging-schema](https://github.com/gchq/event-logging-schema) repo at a pinned tag. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/), each under about 4,000 tokens, with links to the full page.
+**Where the knowledge comes from.** The [event-logging](https://github.com/gchq/event-logging-schema) XSD is read from the Stroom instance's XML Schemas for the configured version, so generation and validation use exactly what the pipelines validate against. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/) in `knowledge/guides`, with links to the full page.
 
 ## Validation and safety
 
 The agent may create freely inside its workspace, but anything that processes production data or changes Elasticsearch needs a human yes. Validation runs locally first, so most mistakes never reach Stroom.
 
-**Write scope** (`access_policy.yaml`)
+**Write scope**
 
-- `workspace_folder`: everything the agent creates or changes is built under `MCP Workspace/<build-name>/`, including new versions and working copies of production docs. Nothing reaches its destination until the user approves promotion (`promote_build`). Inside the workspace, updates are allowed only to docs the server created, tracked by an explorer tag `mcp-managed` plus the creating username.
-- `readable_roots`: folders whose docs may be read as examples, e.g. `Standard Pipelines`, `Event Sources`.
-- `template_patterns`: ES template names the server may write, e.g. `stroom-*`; reads may cover all templates.
+- Workspace (`STROOM_MCP_WORKSPACE_FOLDER`): everything the server creates or changes is built under `MCP Workspace/<build-name>/`, including new versions and working copies of production docs. Nothing reaches its destination until the user approves promotion (`promote_build`). Updates are allowed only to docs the server created and has not yet promoted, tracked by explorer tags: `mcp-managed`, `mcp-generated` and `mcp-build-<build>`. Stroom's own permissions still apply, since every call is made as the user.
+- `access_policy.yaml`: where template pipelines are looked for, per stage.
+- Elasticsearch templates (`STROOM_MCP_ES_TEMPLATE_PATTERNS`, default `stroom-*`): the template names the server may read or, when the user asks, write.
 - No delete tools in v1, and no Elastic Cluster docs are created or changed, since they hold credentials. Abandoned builds are left tagged for a person to clear.
 
 **Workspace and promotion**
@@ -475,11 +477,11 @@ All work happens in the workspace; promotion is the approval-gated step that put
 
 **Approval gates (A tools)**
 
-The tool returns `needs_approval` with a plain-language summary and an `approval_id` instead of acting. The client shows the summary; the call is repeated with `approval_id` once the user agrees. OpenWebUI shows it as a chat turn; LangGraph uses `interrupt()`. Gated actions: enabling any processor filter (an Elasticsearch indexing filter is instead pre-created disabled once the user confirms the index template is committed, and the user enables it), putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
+Before acting, the tool asks for the user's approval with a plain-language summary: as a form where the client supports one (see Asking the user), otherwise as `needs_approval` with an `approval_id` that the client passes back once the user agrees. Gated actions: enabling any processor filter (an Elasticsearch indexing filter is instead pre-created disabled once the user confirms the index template is committed, and the user enables it), putting an index template, changing a doc the agent did not create, and promoting a build out of the workspace.
 
 **Confirmations**
 
-Approvals guard actions; confirmations fix the key details those actions use. Both are asked through MCP elicitation when the client supports it, so the user answers the server directly rather than through the model; otherwise the tool returns an id with a summary for the client to show. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. Confirmed values are stored in the build state and passed to tools as a `confirmation_id`: `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_index_doc` and `put_index_template` refuse to run without one covering the values they set.
+Approvals guard actions; confirmations fix the key details those actions use. Both are asked through MCP elicitation when the client supports it, so the user answers the server directly rather than through the model; otherwise the tool returns an id with a summary for the client to show. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. A confirmation is bound to the exact request and user: answered in a form, the call carries on; otherwise the tool returns a `confirmation_id` for the repeated call. `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_index_doc`, `set_shape_handling` and `put_index_template` do not act without one covering the values they set.
 
 | Detail | Confirmed at | Proposed from |
 | --- | --- | --- |
@@ -528,105 +530,33 @@ Rules live in `error_rules.yaml` (message regex, element, severity, class) so an
 
 **Idempotency and concurrency**
 
-- Create tools take a `name`; if a doc of that type and name already exists in the build folder, it is returned instead of duplicated.
-- Update tools require the `version` returned by the last read. A conflict returns the current content so the model can merge.
-- Stepping sessions are tracked per MCP session and ended on disconnect.
+- Update tools take the `version` from the last read and refuse the save if the doc changed since, so the model re-reads and reapplies its change.
+- Stepping holds no session between calls (see Stepping), so there is nothing to end on disconnect.
+- Confirmations, approvals and clean-step records are held in Stroom or in sealed form state, not in the server's memory, so several replicas can serve one user (with shared sealing keys).
 
 **Naming**
 
 Names follow the environment's versioned conventions, learned from sibling content and confirmed with the user. In the reference environment, feeds and events pipelines carry a version (`Fortigate-FG60F-V1.2`, `Keycloak-V1.2-Events`, XSLT `Fortigate-FG60F-Events-V1.2`), indexing pipelines are `<Source> - Indexing`, and indices are `ecs-<source>-v<n>`. Test feeds add `-MCP-TEST`, the verification dashboard takes the index's name with a `-VERIFY` suffix, and Documentation docs take the name of the pipeline they document.
 
-**Audit**: the ES server's audit events, plus `stroom_request` (method, path, doc UUID, status, ms) and `approval` (id, summary, granted by, outcome).
+**Audit**: JSON lines with the user: `tool_call` (tool, arguments, outcome), `stroom_request` (method, path, status, ms), `access_denied`, and each confirmation and approval (action, details, requested, granted or declined, and how: form, elicitation or id).
 
-## LangGraph agent design
+## Clients
 
-The agent is a `StateGraph` whose nodes map one-to-one to the workflow steps and whose edges are the loops. It needs only this server, reached through `fastmcp.Client` (`langchain-mcp-adapters` pins `mcp<2`, so the agent wraps the tools itself). It runs as the person using it: a terminal run signs them in with Keycloak's device grant and refreshes the token, so every Stroom change is theirs.
+The server includes no agent. The agent is whatever the user runs: a chat client, an IDE's agent mode, or an agent framework, and building one is a separate initiative. Nothing a workflow depends on lives in the client: the server holds the rules (write guard, confirmations and approvals, processing limits, the Elasticsearch hand-over, checks before promotion), the prompts carry the workflows, and tool replies carry the next step.
 
-```mermaid
-flowchart TD
-    intake[intake<br/>profile_sample, record_source_notes] --> onboard_feed[onboard_feed<br/>create_feed, upload_sample<br/>confirms feed name, encoding]
-    onboard_feed --> select_translation_template[select_translation_template<br/>find_pipeline_templates, children<br/>confirms template]
-    select_translation_template --> draft_translation[draft_translation<br/>create/update_xslt, text converter]
-    draft_translation --> step_and_validate[step_and_validate<br/>step_sample every record, validate]
-    step_and_validate -- blocking --> draft_translation
-    step_and_validate --> approve_processing{{approve_processing<br/>interrupt: create_processor_filter}}
-    approve_processing --> process_sample[process_sample<br/>wait_for_processing, Events gate]
-    process_sample --> research_conventions[research_conventions<br/>list_index_templates, get_field_conventions<br/>asks if no convention set]
-    research_conventions --> select_indexing_template[select_indexing_template<br/>find_pipeline_templates, children<br/>confirms cluster, index, template, convention]
-    select_indexing_template --> draft_indexing[draft_indexing<br/>draft template, indexing pipeline]
-    draft_indexing --> step_indexing[step_indexing<br/>step_sample on Events]
-    step_indexing -- mismatch --> draft_indexing
-    step_indexing --> propose_template[propose_template<br/>propose_index_template]
-    propose_template --> review_template{{review_template<br/>interrupt: accept, or send a changed template}}
-    review_template -- changed --> check_template[check_template<br/>check_index_template]
-    check_template -- not compatible --> flag_changes{{flag_pipeline_changes<br/>interrupt: change the pipeline?}}
-    flag_changes -- yes --> draft_indexing
-    flag_changes -- no --> review_template
-    check_template -- compatible --> index_sample
-    review_template -- accepted --> index_sample[index_sample<br/>template committed? filter pre-created disabled]
-    index_sample --> await_enable{{await_enable<br/>interrupt: ready to enable, pipeline link}}
-    await_enable --> run_and_triage[run_and_triage<br/>summarise_errors, error_context]
-    run_and_triage -- blocking errors --> draft_indexing
-    run_and_triage --> verify_indexed[verify_indexed<br/>verification dashboard, test searches]
-    verify_indexed --> document[document<br/>write_documentation]
-    document --> promote{{promote<br/>interrupt: promote_build}}
-```
+| A client needs | Why | What the server provides |
+| --- | --- | --- |
+| Streamable HTTP | The transport | `<public url>/mcp` |
+| OAuth sign-in as the user: authorization code with PKCE, or another flow that yields the user's own token | Every Stroom call acts as the user | Protected resource metadata (`/.well-known/oauth-protected-resource/mcp`) naming the Keycloak realm. Tokens must carry both audiences (the server's and `stroom`), `sub`, and the `openid` scope; the client refreshes them |
+| Forms, or a way to show a summary and send back an id | The user, not the model, answers confirmations and approvals | On MCP 2026-07-28, an input-required result the client answers by repeating the call (SEP-2322); on earlier versions, elicitation during the call; otherwise `needs_confirmation` / `needs_approval` with a summary and an id, which the client passes back only once the user agrees |
+| Prompts (optional) | The workflows, e.g. as slash commands | Eight prompts; a client without prompt support can send the same text |
+| Resources (optional) | Reference guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
+| Patience with long calls | Processing takes time | `wait_for_processing` returns at its timeout with a hint to call again |
+| Room for 61 tools | Some clients cap tools per request | Tool groups a client can switch off (e.g. Elasticsearch on a Lucene-only instance) |
 
-**State** (checkpointed, so a build survives restarts and approvals that take days)
+**For agent frameworks.** Replies are made to be routed on in code rather than by the model: gates come back as a `status` with an id, and verdicts are fields: stepping `verdict` (clean, review, blocking) and `shapes_not_clean`, the processing `gate` (pass or fail), survey `saturated` and `coverage`, and `before_promotion` from `list_build`. A framework can loop on those (e.g. draft, step, fix until clean) with the model only writing the mapping and explaining results, and keep its own state in the build: the survey doc and the build folder carry what a later session needs to carry on.
 
-```python
-class BuildState(TypedDict):
-    build_name: str
-    sample: SampleProfile            # format, delimiter, fields, timestamp format
-    source_notes: SourceNotes | None  # field dictionary and event catalogue from user-supplied docs
-    feed: DocRef | None
-    raw_stream_ids: list[int]
-    templates: dict[str, DocRef]     # chosen parent pipeline per stage
-    translation: Translation         # pipeline, xslt, text_converter DocRefs + current code
-    attempts: dict[str, int]         # per loop, e.g. {'translation': 2}
-    last_findings: list[Finding]     # errors/warnings from stepping or Error streams
-    events_stream_ids: list[int]
-    conventions: FieldConventions | None  # selected profile or user-described; None until guided
-    index_template: dict | None
-    indexing: IndexingBuild | None
-    approvals: list[Approval]
-    mode: Literal['onboard', 'update_events_pipeline', 'update_indexing_pipeline', 'create_discovery_index',
-                  'evaluate_events_pipeline']
-    baseline: Baseline | None        # existing pipeline, docs, index name and template being changed
-    test_feed: DocRef | None         # workspace feed for new samples in update_events_pipeline
-    version: int | None              # target index version in update_indexing_pipeline
-```
-
-**Nodes**
-
-- Each node is one LLM call with a small, node-specific tool subset plus deterministic Python checks. `draft_translation` only sees translation and reference tools, not processing ones.
-- Router edges are code, not model choices: `step_and_validate` goes back to `draft_translation` while `validate_events` returns errors and `attempts['translation'] < 5`.
-- `last_findings` is the only error context carried into the next draft, deduplicated and capped at 20 items, so the context stays small across iterations.
-- After the attempt limit, the graph interrupts with the findings and asks the user to fix, hint or stop.
-
-**Human in the loop**: `approve_processing` calls `interrupt()` with the server's approval summary; resuming passes the `approval_id` back. For Elasticsearch, `review_template`, `flag_pipeline_changes` and `await_enable` interrupt with the proposed template, the pipeline changes a user's template needs, and the ready-to-enable link. One tool call can raise more than one interrupt in turn, and the ids collected so far are passed on each repeat. OpenWebUI follows the same prompts manually, so both clients share the server's gates.
-
-**Convention guidance**: `research_conventions` interrupts when no convention profile is selected, asking the user to choose a profile, name reference templates or describe the convention. It never picks one itself.
-
-**Entry modes**: `intake` routes the request to one of five modes. `onboard` is the graph above. `update_events_pipeline` loads the baseline, uploads samples to a test feed or finds issue records, then enters at `draft_translation`; `step_and_validate` adds `compare_outputs` against the current code, and `approve_processing` becomes `approve_update`, which confirms new version or in place and the names, then copies to the new version or saves in place after a backup. `update_indexing_pipeline` loads the baseline, runs `copy_pipeline` with the version bump, then enters at `draft_indexing`; `step_indexing` adds `compare_outputs` against v1.
-
-`create_discovery_index` runs `onboard_feed` or takes an existing feed, skips stage 1 and `research_conventions`, and enters at `select_indexing_template` with discovery-stage templates; `draft_indexing` drafts the near-identity XSLT and the permissive template, and the rest of stage 2 runs unchanged.
-
-`onboard_existing_feed` starts at `survey` (survey the feed and start the build), then runs `draft_translation` and `step_and_validate`, which step the survey's locations with `step_records`. When stepping is clean and the survey is not saturated, `resurvey` reads more streams, skipping those read and passing the known signatures: new shapes go back to `draft_translation`, and a survey with nothing new moves on (once saturated, or after at most 6 surveys) to `broad_check`, which steps the head of three surveyed streams spread over time; a clean result goes on to `document` and `promote`, anything else back to `draft_translation`. The kinds of event and their locations travel in the state, so the drafting step sees every shape it has to translate. The `document` step also hands over: what the translation covers, and that processing the source feed, then `index_event_data`, are next.
-
-`fix_pipeline_issue` runs `locate_issue` (locate the event, plan and confirm the problem), then `draft_fix`, which loops until `summarise_fix` says the fix is ready. A `draft_fix` attempt that proposes no fix means the issue did not reproduce, so the graph asks the user instead of looping. `offer_fix` interrupts with the diff and asks whether to apply it: yes runs `apply_fix` (copy, update, compare, document, promote, as in `update_events_pipeline`); no runs `explain_fix`, which returns the manual steps and the diff.
-
-`evaluate_events_pipeline` is a read-only chain: load the baseline, sample, map the translation, inventory events, measure conformance, report. Its only write is the Documentation doc, promoted on approval like any other change; its suggestions can seed an `update_events_pipeline` run.
-
-**Source notes and documentation**: `intake` collects any vendor documentation or annotated samples from the chat and calls `record_source_notes`; the drafting nodes get the condensed field dictionary and event catalogue, not the full documents, so context stays small. Every mode ends with a `document` node that calls `write_documentation` and returns the same summary in the chat, then a `promote` node that interrupts for the destination confirmation and approval before calling `promote_build`.
-
-**Template choice**: `select_translation_template` and `select_indexing_template` run `find_pipeline_templates`, `list_template_children` and `describe_template_contract`, record the choice and rationale in `templates`, and interrupt to confirm the choice. The `select_indexing_template` interrupt also carries the field convention, Elastic Cluster and destination index name, so stage 2 needs one confirmation. The contract is passed into the drafting node so the XSLT produces what shared elements expect.
-
-**Error routing**: in stage 1, `step_and_validate` steps every sample record and loops to `draft_translation` on blocking findings; `process_sample` then runs the processor to produce Events and checks every raw sample stream has exactly one Events child. A missing or duplicate one is investigated through that stream's task status and Error stream before stage 2 starts; that is the only time a stage 1 Error stream is read. In stage 2, `run_and_triage` routes on the triage of the indexing Error streams: blocking groups go back to `draft_indexing` as findings, review groups get one model check and, if still unclear, an interrupt, and benign groups go into the stage summary shown to the user. `verify_indexed` then builds the verification dashboard and runs the test searches; a failed search is a blocking finding for `draft_indexing`.
-
-**Standing instructions**: a `load_instructions` step runs first in every mode, calling `get_instructions` in code, so no mode can skip it. Drafting and indexing steps may call it again with the folders, feeds or documents involved; the result replaces the instructions in the state. Every step's prompt carries them beside the request.
-
-**Carry-over from the MCP design**: tool names, the `hints` field, approval ids and resource URIs are the agent's contract. Nodes should be written against those, not raw Stroom APIs, so the agent needs no changes when server internals change.
+**Models.** A model weak at XSLT only writes a field mapping (`build_translation_xslt`); schema order, required parts, choices, namespaces and date formats come from the generator. Error triage, the survey and the template checks are deterministic, so the model explains and acts on results rather than judging them. Standing instructions come back from the tools that need them. The evaluation set (`dev/eval`) measures any agent against 10 samples: `--request` prints a case's request, and the reference mode shows what a passing run produces.
 
 ## Open questions, risks and delivery
 
@@ -645,7 +575,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Promotion hands over processing**: each promoted pipeline gets a filter for new data on its feed, created disabled, for the user to review and enable.
 - **Translation pipelines process only the build's feeds**; production records are stepped in place or copied into a test feed.
 - **Tags**: everything the server creates is tagged `mcp-generated`, for good, including promotion backups. `mcp-managed` (and the build tag) mark what the agent may still change and come off at promotion. A production doc that a working copy is written back over is not tagged: it was not generated.
-- **Standing instructions**: people keep standing instructions for building pipelines in Documentation docs named `AGENTS` (configurable), the equivalent of an AGENTS.md. A doc applies to its folder and below; one directly under a root folder applies everywhere; where several apply they are read most general first. The agent loads them in code at the start of every run and whenever a step calls `get_instructions` with the folders involved, and every step's prompt carries them. The user's request takes precedence, and no instruction lifts an approval or the write guard. Anyone who can edit a folder can edit its `AGENTS` doc, so its permissions matter.
+- **Standing instructions**: people keep standing instructions for building pipelines in Documentation docs named `AGENTS` (configurable), the equivalent of an AGENTS.md. A doc applies to its folder and below; one directly under a root folder applies everywhere; where several apply they are read most general first. The prompts start with `get_instructions`, and `start_build` and `build_translation_xslt` return the ones that apply, so a client that skips the step still gets them. The user's request takes precedence, and no instruction lifts an approval or the write guard. Anyone who can edit a folder can edit its `AGENTS` doc, so its permissions matter.
 - **Survey record**: survey results are kept in the build as a Documentation doc, `<FEED> - Survey`, with example records; access to them is governed by the folder's permissions.
 - **Existing feeds are stepped, not copied**: `onboard_existing_feed` steps the feed's own records where they are and ends with the translation promoted; processing the source feed is the user's to start.
 
@@ -657,7 +587,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
 - [x] Live uploads with the user's token: checked read-only. The live instance uses an external IdP (a Keycloak realm), requires authentication on receipt with token and certificate authentication enabled, and validates the audience against its client id `stroom`. Tokens carrying `stroom` in `aud` will be accepted; the VS Code client in that realm needs the `stroom-mcp` and `stroom` audience mappers.
-- [x] Front end: decided. VS Code's chat is the agent (setup in `docs/VSCODE.md`); OpenWebUI and the LangGraph agent are not needed.
+- [x] Clients: decided. The server is client-agnostic and includes no agent; building an agent is a separate initiative. VS Code is the first client set up and tested (`docs/VSCODE.md`).
 - [x] Sample filters: decided, one task at a time.
 - [x] Processing after promotion: decided, pre-created disabled for new data, with the pipeline link.
 - [x] Translation pipelines: decided, the build's own feeds only.
@@ -681,6 +611,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | 1. Read and validate | Explorer, template discovery, streams, errors, stepping (read-only), pipeline evaluation, validation tools, resources | Agent can explain errors in an existing broken pipeline and produce an evaluation report for a working one |
 | 2. Stage 1 writes | Feeds, translation, pipelines, processing, write guard and approvals, translation updates with backups and output diffs, pipeline documentation, workspace promotion | CSV, JSON, XML and Syslog samples each reach valid Events; a reported field fix lands with a diff limited to that field |
 | 3. Stage 2 | Indexing on both backends (Lucene locally, Elasticsearch live), ES template tools, convention profiles, indexing pipeline, stepping checks, versioned indexing copies, discovery indices | Sample events indexed and found by the verification searches, mapping matches the selected convention; a v2 copy indexes an added field beside v1 |
-| 4. LangGraph agent | State graph, checkpointer, interrupts, evaluation set of 10 samples (`dev/eval`) | 8 of 10 samples reach indexed events with at most one human hint. Every case's reference solution passes on the local stack; the agent run needs a model |
+| 4. Clients | Sign-in as the user, forms for confirmations and approvals, VS Code setup, the evaluation set of 10 samples (`dev/eval`) | Sign-in as VS Code does it works end to end; every case's reference solution passes on the local stack. An agent reaching 8 of 10 with at most one hint each is measured with whichever agent is used |
+| 5. Deployment | Container image, Helm chart, TLS, CI; the e2e suites against a live instance | Released as 0.1.0; the Phase 2, existing-feed and generator suites pass on the live instance and are cleaned up afterwards |
 
 Sources: [Stroom 7.13 OpenAPI spec](https://gchq.github.io/stroom/v7.13/stroom.json), [Stroom API docs](https://gchq.github.io/stroom-docs/docs/user-guide/api/), [Elasticsearch indexing in Stroom](https://gchq.github.io/stroom-docs/docs/user-guide/indexing/elasticsearch/indexing/), [event-logging-schema](https://github.com/gchq/event-logging-schema).

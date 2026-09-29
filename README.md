@@ -1,10 +1,12 @@
 # Stroom FastMCP server
 
-MCP server that lets a chat client or agent take a raw data sample and build working Stroom
-content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
-pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
+MCP server that lets an agent take a raw data sample, or a feed that already holds data, and build working
+Stroom content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
+pipeline, stepped and verified before anything is promoted. It works with any MCP client that can sign the user
+in; it includes no agent or model of its own. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 61 tools:
+Status: 0.1.0, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+The server has 61 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -17,7 +19,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 61 tool
 | Stepping | `step_pipeline`, `step_sample`, `step_records` (chosen records in place), `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Standing instructions | `get_instructions` (AGENTS Documentation docs in Stroom, by folder) |
-| Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream), `set_shape_handling` (kinds the user leaves untranslated) |
+| Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream), `set_shape_handling`* (kinds the user leaves untranslated) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
@@ -25,50 +27,59 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 61 tool
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
 
-\* needs the user's confirmation, \*\* needs approval: asked through MCP elicitation where the client supports it,
-otherwise returned as an id to pass back. Everything is written under `MCP Workspace/<build>` and tagged
-`mcp-managed` and `mcp-generated`; only `mcp-managed` docs can be changed, and promotion moves them into place,
-removing `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
+\* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the
+model never holds the answer; a client without forms gets an id to pass back once the user has agreed.
 
-**VS Code** is the intended front end: its chat (agent mode) works through these tools, signed in with Keycloak,
-with approvals as forms. Setup (Keycloak client, Stroom trusting the realm, `mcp.json`): [docs/VSCODE.md](docs/VSCODE.md).
-The LangGraph agent in `agent/` is optional and not needed to run the server.
+Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts (the workflows, e.g. as
+slash commands): `onboard_data_source`, `update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`,
+`create_discovery_index`, `evaluate_events_pipeline`, `onboard_existing_feed`, `fix_pipeline_issue`.
 
-Standing instructions: a Documentation doc named `AGENTS` in a Stroom folder holds instructions for building
-pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. The agent loads them at the
-start of every run.
+## Clients
+
+Any MCP client that speaks streamable HTTP and OAuth can use the server: a chat client, an IDE, or an agent
+framework. The rules that must hold (the workspace, confirmations and approvals, processing limits, the
+Elasticsearch hand-over, checks before promotion) are enforced by the server, not by prompts, so every client gets
+them. What a client needs is in [docs/DESIGN.md](docs/DESIGN.md#clients).
+
+Setting up VS Code (the Keycloak client, Stroom trusting the realm, `mcp.json`) is described in
+[docs/VSCODE.md](docs/VSCODE.md); other clients need the same Keycloak client and token audiences.
+
+## How it works
+
+- **As the user.** Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards
+  their Keycloak token, whose `aud` must include `stroom` as well as the MCP audience. There is no shared API key.
+- **In a workspace.** Everything is written under `MCP Workspace/<build>` and tagged `mcp-managed` and
+  `mcp-generated`. Only `mcp-managed` docs can be changed; promotion moves them into place and removes
+  `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
+- **Checked before promotion.** `list_build` and the promotion approval show what a build's pipelines still lack:
+  a clean step of their current code (recorded as `mcp-stepped-*` tags on the pipeline) and documentation.
+- **Standing instructions.** A Documentation doc named `AGENTS` in a Stroom folder holds instructions for building
+  pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. `get_instructions` returns
+  them, and `start_build` and `build_translation_xslt` hand them back too, so a model that skips the step still sees
+  them.
 
 Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
-- Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards their Keycloak
-  token, whose `aud` must include `stroom` as well as the MCP audience. There is no shared API key.
 - Reprocessing is allowed while developing a pipeline in the workspace: `reprocess_streams` takes at most 10 streams
   per call and runs one task at a time, and Stroom supersedes (deletes) the earlier output. Promoted pipelines are
   refused by the write guard, so reprocessing production data is the user's, as is moving readers from one index
   version to the next.
 - Processing: sample filters run one task at a time; a translation pipeline only processes the build's own feeds;
   promotion pre-creates each promoted pipeline's filter for new data, disabled, with a link to review and enable it.
-  Indexing Events from a pipeline the agent did not build needs the user's confirmation of that pipeline.
+  Indexing Events from a pipeline the server did not build needs the user's confirmation of that pipeline.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.
-- The agent proposes the index template (a Dev Tools request) and checks any changes the user sends back
+- The server proposes the index template (a Dev Tools request) and checks any changes the user sends back
   against the candidate indexing pipeline, listing the pipeline changes an incompatible template needs. Once the
   user has committed it, the indexing filter is created disabled and the user gets a link to the pipeline
   (`<stroom>/?action=open-doc&docType=Pipeline&docUuid=...`) to review it and enable the filter.
 - Indexing filters over Events also carry `Pipeline IS_DOC_REF <events pipeline>`, where the events pipeline is the
   one this server built for the source (`source_pipeline_uuid`), so no Events from elsewhere are picked up.
+- Kinds of event the user chooses to leave untranslated are recorded in the build's survey doc
+  (`set_shape_handling`), dropped by an explicit rule in the mapping, and checked as producing no Event.
 
-Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts: `onboard_data_source`,
-`update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`, `create_discovery_index`, `evaluate_events_pipeline`,
-`onboard_existing_feed`, `fix_pipeline_issue`.
-Field conventions: `conventions/*.yaml`. Elasticsearch (templates only) is optional: `STROOM_MCP_ES_URL`.
-Error triage rules: `error_rules.yaml`. Template sources: `access_policy.yaml`.
-
-To call a tool directly during development (no MCP client or Keycloak):
-`uv run python dev/try_tool.py find_pipeline_templates stage=translation` against the local stack,
-or `--live` for the instance in `.ai/secrets` (read-only tools only). `dev/live_readonly.py [FEED]` runs the
-read-only tools against that instance in one go, through a gateway that refuses any request that could change Stroom.
-The e2e suites run there with `E2E_TARGET=live` (every name carries `E2E_STAMP`); `dev/e2e_cleanup.py STAMP --apply`
-removes a run afterwards: filters, streams (marked deleted), documents and folders.
+Configuration: field conventions in `conventions/*.yaml`, error triage rules in `error_rules.yaml`, template sources in
+`access_policy.yaml`. Elasticsearch (template reads, for checking a template against a pipeline) is optional:
+`STROOM_MCP_ES_URL`. Every setting is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#settings).
 
 ## Running
 
@@ -78,51 +89,42 @@ uv run python main.py
 ```
 
 TLS is required: the server refuses to start without a certificate unless a proxy in front terminates TLS
-(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development).
-`/healthz` answers `ok` for probes.
+(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` for probes.
 
-Deployment: a container image and a Helm chart (`charts/stroom-mcp`), with every setting, in
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak and calls Stroom with
+`STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
+API key when authentication is on.
 
 Tests: `uv run pytest`.
 
-## Local Stroom for development
+## Development and testing
 
-`dev/stroom` runs Stroom v7.13 and MySQL in Docker, bound to localhost. Destructive tests run
-here, never against a shared instance.
+`dev/stroom` runs Stroom v7.13 and MySQL in Docker, bound to localhost; destructive tests run there.
 
 ```
 cd dev/stroom && ./init-env.sh && docker compose up -d
 ```
 
-`dev/e2e_phase2.py` and `dev/e2e_phase3.py` run the Phase 2 and 3 exit tests against it.
-`dev/e2e_agent_transport.py` checks the agent against a local server over MCP (no model needed). The Phase 0 spike (`spike/phase0.py`) proves the risky Stroom APIs against it; results are in
-[spike/FINDINGS.md](spike/FINDINGS.md).
+End-to-end suites, driving the real tools against that stack:
 
-## LangGraph agent
+| Script | Covers |
+| --- | --- |
+| `dev/e2e_phase2.py` | CSV, JSON, XML and syslog samples to valid Events; a field fix and reprocessing; promotion and a working copy written back |
+| `dev/e2e_phase3.py` | Indexing on the Lucene backend: field plan, index doc, indexing pipeline, verification searches, a v2 copy |
+| `dev/e2e_existing_feed.py` | Building a pipeline from a feed that already holds data: surveys, stepping in place, kinds left untranslated |
+| `dev/e2e_generator.py` | Translations generated from field mappings, stepped and validated |
+| `dev/e2e_instructions.py` | Standing instructions (AGENTS docs) by folder |
+| `dev/e2e_elastic_handover.py` | The Elasticsearch template hand-over, without Elasticsearch |
+| `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 
-`agent/` is a LangGraph build agent that uses only this server. Install it with the `agent` extra.
+To call one tool directly (no MCP client or Keycloak): `uv run python dev/try_tool.py find_pipeline_templates
+stage=translation`, or `--live` for the instance in `.ai/secrets` (read-only tools only). `dev/live_readonly.py [FEED]`
+runs the read-only tools against that instance through a gateway that refuses any request that could change
+Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (every name carries `E2E_STAMP`), and
+`dev/e2e_cleanup.py STAMP --apply` removes the run afterwards: filters, streams (marked deleted), documents and
+folders.
 
-- `graph.py`: one node per workflow step. Each node is a small tool-calling agent with its own tool subset. Routing between nodes is code, not the model: step verdicts, processing gates and search results decide the next node. Retry loops are capped at 5 attempts, after which the agent asks the user for help.
-- `gating.py`: when a tool replies `needs_confirmation`/`needs_approval`/`needs_guidance`, the agent raises a LangGraph `interrupt`. If the user agrees, the tool is re-called with the id; a decline returns the user's note to the model.
-- `mcp_tools.py`: loads the tools with `fastmcp.Client`. It does not use `langchain-mcp-adapters`, which pins `mcp<2`.
-- `auth.py`: signs the person in with Keycloak's device grant and refreshes their token, so the agent acts as them.
-- `run.py`: a terminal runner. It needs `AGENT_MCP_URL`, `AGENT_REALM_URL` and `AGENT_CLIENT_ID` (or `AGENT_BEARER`),
-  and `AGENT_MODEL`:
-
-```
-uv run --extra agent python -m agent.run --sample sample.csv "Onboard Acme VPN logs"
-uv run --extra agent python -m agent.run --mode onboard_existing_feed "Build a pipeline for feed ACME-VPN-V1.0"
-uv run --extra agent python -m agent.run --mode fix_pipeline_issue "Stream 15768876 event 3: the user id is missing"
-```
-
-In `fix_pipeline_issue` mode the agent locates the event, confirms the problem, proves a fix, and asks whether
-to apply it or give you the manual steps.
-
-The Phase 4 exit test (8 of 10 samples indexed with at most one hint each) is in [dev/eval](dev/eval/README.md):
-10 cases across CSV, JSON, XML, syslog and key=value, each with a reference solution. `--reference`
-runs those through the local stack without a model; `--agent` runs the agent with the model you give it.
-
-For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without Keycloak and calls Stroom with
-`STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
-API key when authentication is on.
+The evaluation set in [dev/eval](dev/eval/README.md) has 10 cases across CSV, JSON, XML, syslog and key=value, each
+with a reference solution: `--reference` runs those through the local stack without a model, and `--request` prints
+the request to give an agent, whatever runs it. The Phase 0 spike (`spike/phase0.py`) proved the risky Stroom APIs;
+what has been tested, locally and live, is in [spike/FINDINGS.md](spike/FINDINGS.md).

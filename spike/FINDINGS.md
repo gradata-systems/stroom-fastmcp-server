@@ -53,13 +53,11 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | Live ES search | `run_test_searches` on the live Keycloak dashboard (read-only) returned Elasticsearch documents with ECS fields plus Stroom's `__stream_id__` and `__event_id__`. A real dashboard's table settings carry fields (`selectionHandlers`, `pageSize`) that the search API rejects as "Unable to process JSON". | Send only TableSettings fields; errors now include Stroom's detail. |
 | Live clusters | `find_elastic_clusters` lists `ES_PROD` (six Elastic Index docs, e.g. Keycloak `ecs-keycloak-v1`) and `ES_DEV` (none), with credentials redacted. | Cluster proposal has real data. |
 
-## Phase 4 additions (`dev/e2e_agent_transport.py`, `tests/test_agent.py`)
+## Phase 4 additions (a scripted MCP client)
 
 | Area | Result | Consequence |
 | --- | --- | --- |
-| MCP adapters | `langchain-mcp-adapters` fails to import against mcp 2 (`ImportError: RequestContext`); it pins `mcp<2`. | The agent wraps tools itself with `fastmcp.Client` (`agent/mcp_tools.py`). |
-| Transport | All 52 tools load over streamable HTTP. A gated `create_feed` inside a LangGraph graph interrupts on `needs_confirmation`, then resumes and creates the feed with the id. | Consent works end to end through the agent. |
-| Graph | Unit tests with a fake model: the gate goes both ways (a decline passes the user's note back to the model), facts are harvested from tool results, routing is bounded, and every node compiles. | Routing never depends on the model's prose. |
+| Transport | All the tools load over streamable HTTP in a client built on `fastmcp.Client`. A gated `create_feed` returns `needs_confirmation`; repeating the call with the id creates the feed, and a decline stops it. | Gates work for a client that cannot answer forms, with routing on the reply's `status` rather than the model's prose. The client used here was an agent prototype, since moved to a separate initiative. |
 
 ## Decisions and fix use case (`tests/test_processing.py`, `tests/test_diagnosis.py`)
 
@@ -94,6 +92,7 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 
 ## Not yet tested
 
-- Writing to Elasticsearch (index templates, ES indexing pipelines processing into a live index): no ES credentials, and the live instance stays read-only. Covered by mocked tests and the XSLT/XSD check.
-- Agent runs with a real model: the 10-sample evaluation (`dev/eval`, the Phase 4 exit criterion) is ready to run with one.
-- The live instance with a real user's token (works locally against a dev Keycloak), the agent's device sign-in, and whether live `/stroom/datafeed` accepts OIDC tokens.
+- Writing to Elasticsearch (index templates, Elasticsearch indexing pipelines processing into a live index): the live instance's Elasticsearch is never written to. Covered by mocked tests, the XSLT/XSD check and the hand-over suite without Elasticsearch.
+- An agent working through the evaluation set with a real model: the cases and their reference solutions pass (`dev/eval`); measuring an agent needs one.
+- The live instance with a real user's token through a client: proven locally with the dev Keycloak, and the live receipt settings accept tokens carrying `stroom` in `aud`; the live e2e runs used an API key.
+- The standing-instructions and Elasticsearch hand-over suites on the live instance: the first puts a System-wide AGENTS doc in front of every user while it runs, the second needs Elasticsearch writes.

@@ -1,7 +1,7 @@
-# Phase 4 evaluation
+# Evaluation set
 
-The exit test for the LangGraph agent: at least 8 of these 10 samples reach indexed events with at most one
-human hint each.
+Ten samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least 8 of
+the 10 reach indexed events with at most one human hint each.
 
 | Case | Format | Events | What it tests |
 | --- | --- | --- | --- |
@@ -16,36 +16,34 @@ human hint each.
 | `09_csv_noheader_copy` | CSV without a header | Copy | Named columns from a regex, Source and Destination |
 | `10_xml_attrs_lock` | XML attributes | Authenticate (screen lock) | Attribute paths, enumerated actions |
 
-Each case (`cases/*.yaml`) holds the sample, the request the agent is given, what the output must contain
-(record count, event types, paths every event must have), an optional list of `hints`, and a reference solution
-(a Data Splitter where the format needs one, and a `build_translation_xslt` mapping).
+Each case (`cases/*.yaml`) holds the sample, the request to give the agent, what the output must contain (record
+count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data
+Splitter where the format needs one, and a `build_translation_xslt` mapping).
 
 ## Running
 
-Both modes need the local Stroom stack (`dev/stroom`).
+Both need the local Stroom stack (`dev/stroom`).
 
 **Reference** (no model): proves the cases and the scoring by putting each reference solution through the real
 path: generated XSLT, stepping, processing, event validation, a Lucene index and a verification search.
 
 ```
-uv run python dev/eval/run_eval.py --reference
+uv run python dev/eval/run_eval.py --reference          # all cases, or name some: --reference 04 06
 ```
 
-**Agent**: start the MCP server locally, then point the runner at a model.
+Results are written to `results/<time>-reference.json` (ignored by git) with a summary table.
+
+**An agent**: start the server locally, connect the agent to it, and give it each case's request.
 
 ```
 STROOM_MCP_STROOM_URL=http://127.0.0.1:18080 STROOM_MCP_STROOM_API_KEY=<admin key from dev/stroom/.env> \
 STROOM_MCP_DEV_NO_AUTH=true STROOM_MCP_HOST=127.0.0.1 STROOM_MCP_PORT=8765 \
 STROOM_MCP_EVENT_LOGGING_VERSION=4.1.0 STROOM_MCP_DEFAULT_CONVENTION=stroom-flat uv run python main.py
 
-# e.g. Gemma served by vLLM (OpenAI-compatible):
-AGENT_MODEL=openai:google/gemma-4-31b-it AGENT_MODEL_BASE_URL=http://gpu-host:8000/v1 OPENAI_API_KEY=unused \
-uv run --extra agent python dev/eval/run_eval.py --agent
+uv run python dev/eval/run_eval.py --request 06         # the request (with its sample) to paste into the agent
 ```
 
-A scripted user answers the agent's questions: yes to every confirmation and approval, accepts the proposed
-template, enables the indexing filter, and answers a request for help with the case's next hint (each counts
-against the one allowed) or "no hint". Pass case names to run a subset (`--agent 04 06`), and `--timeout` to
-change the per-case limit (default 1800 s).
-
-Results are written to `results/<time>-<mode>.json` (ignored by git) with a summary table.
+Play the user: agree to confirmations and approvals, accept the proposed index template, enable the indexing
+filter when it is handed over, and when the agent asks for help give the case's next hint, counting each one
+(only one is allowed). A case passes when its Events hold the expected record count, event types and paths, and
+the verification search finds them in the index.
