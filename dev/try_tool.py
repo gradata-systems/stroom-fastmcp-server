@@ -30,7 +30,7 @@ TOOLS = {t.__name__: t for m in TOOL_MODULES for t in m.ALL_TOOLS}
 WRITE_TOOLS = {t.__name__ for m in TOOL_MODULES if m.__name__.endswith(('_writes', 'translation', 'builds'))
                for t in m.ALL_TOOLS} | {'create_feed', 'upload_sample', 'record_source_notes', 'put_index_template',
                                         'set_index_fields', 'create_index_doc', 'create_indexing_pipeline',
-                                        'create_verification_dashboard'}
+                                        'create_verification_dashboard', 'set_shape_handling'}
 
 
 CONSENT = ConsentStore(use_elicitation=False)
