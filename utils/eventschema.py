@@ -43,7 +43,10 @@ class EventSchema:
         self._simple = {e.get('name'): e for e in root.findall(_q('simpleType'))}
         self._groups = {e.get('name'): e for e in root.findall(_q('group'))}
         self._elements = {e.get('name'): e for e in root.findall(_q('element'))}
-        self._children: dict[int, list[Child]] = {}
+        # Keyed by element, not id(): lxml makes element proxies on access and frees them, so an id() can be
+        # reused by a different node. Holding the element keeps its proxy, and so its identity, stable.
+        self._children: dict[etree._Element, list[Child]] = {}
+        self._choice_ids: dict[etree._Element, int] = {}
         self.required_choices: dict[int, list[str]] = {}   # choice id -> member names, for required choices
         self.event = next(c for c in self.children(self._elements['Events']) if c.name == 'Event').decl
         self._paths: dict[str, list[str]] | None = None
@@ -64,8 +67,7 @@ class EventSchema:
 
     def children(self, decl: etree._Element) -> list[Child]:
         decl = self._resolve(decl)
-        key = id(decl)
-        if key not in self._children:
+        if decl not in self._children:
             found: list[tuple] = []
             ctype = self._complex(decl)
             if ctype is not None:
@@ -75,8 +77,8 @@ class EventSchema:
                 if name not in seen:
                     seen.add(name)
                     out.append(Child(name, self._resolve(child_decl), len(out), required, repeatable, choice))
-            self._children[key] = out
-        return self._children[key]
+            self._children[decl] = out
+        return self._children[decl]
 
     def _walk_type(self, ctype: etree._Element, out: list, choice: int | None, optional: bool) -> None:
         for node in ctype:
@@ -102,7 +104,7 @@ class EventSchema:
             # One of (maxOccurs 1), or, when the choice repeats, any number of its members; either way a
             # required choice needs at least one member, and no member is required on its own.
             exclusive = _occurs(node, 'maxOccurs') == 1
-            cid = id(node) if exclusive or choice is None else choice
+            cid = self._choice_ids.setdefault(node, len(self._choice_ids)) if exclusive or choice is None else choice
             before = len(out)
             for child in node:
                 self._particle(child, out, cid, optional)
