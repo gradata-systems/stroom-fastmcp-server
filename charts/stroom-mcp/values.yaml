@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/p-kimberley/stroom-fastmcp-server
+  repository: ghcr.io/gradata-systems/stroom-fastmcp-server
   # Defaults to the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent

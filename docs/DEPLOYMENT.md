@@ -18,8 +18,8 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 
 ## Kubernetes (Helm)
 
-The chart is `charts/stroom-mcp`, published to `oci://ghcr.io/p-kimberley/charts/stroom-mcp` on each release
-tag; the image is `ghcr.io/p-kimberley/stroom-fastmcp-server`.
+The chart is `charts/stroom-mcp`, published to `oci://ghcr.io/gradata-systems/charts/stroom-mcp` on each release
+tag; the image is `ghcr.io/gradata-systems/stroom-fastmcp-server`.
 
 ```yaml
 # values.yaml
@@ -35,7 +35,7 @@ tls:
 ```
 
 ```
-helm install stroom-mcp oci://ghcr.io/p-kimberley/charts/stroom-mcp --version 0.1.0 -f values.yaml
+helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.1.0 -f values.yaml
 ```
 
 The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `keycloak.realmUrl`, and, with TLS on,
@@ -69,7 +69,7 @@ docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
   -e STROOM_MCP_KEYCLOAK_AUDIENCE=stroom-mcp \
   -e STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com \
   -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
-  ghcr.io/p-kimberley/stroom-fastmcp-server:0.1.0
+  ghcr.io/gradata-systems/stroom-fastmcp-server:0.1.0
 ```
 
 ## Settings
