@@ -177,12 +177,13 @@ class StroomGateway:
                             f"{response.headers.get('Stroom-Error') or response.text[:300]}")
         return response
 
-    async def find_meta(self, terms: list[dict[str, Any]], limit: int, op: str = 'AND') -> dict[str, Any]:
-        """Stream metadata matching expression terms, newest first."""
+    async def find_meta(self, terms: list[dict[str, Any]], limit: int, op: str = 'AND',
+                        newest_first: bool = True) -> dict[str, Any]:
+        """Stream metadata matching expression terms, newest first (or oldest first)."""
         return await self.post('/meta/v1/find', {
             'expression': {'type': 'operator', 'op': op, 'children': terms},
             'pageRequest': {'offset': 0, 'length': limit},
-            'sortList': [{'id': 'Id', 'desc': True}],
+            'sortList': [{'id': 'Id', 'desc': newest_first}],
         })
 
     async def fetch_data(self, meta_id: int, record_index: int, record_count: int, mode: str = 'TEXT',

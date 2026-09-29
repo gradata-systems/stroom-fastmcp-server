@@ -2,16 +2,20 @@
 
     uv run python dev/e2e_existing_feed.py
 
-A source feed gets four streams in which the kinds of event are spread out: the newest two hold only logins,
-older ones add logouts, password changes and file reads. Then, as the agent would:
+A source feed gets four streams in which the kinds of event are spread out: every stream has logins, the oldest
+also has a file read and a logout, the second oldest a password change. Then, as the agent would:
 
-1. survey_feed over the newest streams finds only logins;
-2. the translation is generated from a mapping for that shape and steps clean on the feed's own records, at
+1. survey_feed with two streams reads the newest and the oldest (spread over the feed's lifetime) and finds
+   logins, file reads and logouts;
+2. the translation is generated from a mapping for those shapes and steps clean on the feed's own records, at
    the survey's locations (each checked to be the record it names);
-3. survey_feed further back, with the known signatures, finds the new shapes; stepping them in place with
-   the current translation flags every new record as unmatched (not dropped silently);
-4. the mapping gains rules for them, and every location steps clean;
-5. a last survey finds no older streams: the feed is covered.
+3. survey_feed again, skipping the streams read, finds the password change; stepping it in place with the
+   current translation flags it as unmatched (not dropped silently);
+4. the mapping gains a rule for it, and every location steps clean;
+5. a last survey finds every stream read: the feed is covered;
+6. the broad check steps the head of each stream (records_per_stream) clean;
+7. a single-line JSON stream of about 3 MB is surveyed from its head only (max_chars_per_stream): a bounded
+   read, complete records only, and its locations step clean.
 Nothing is copied or processed: no test feed, no processor filter, no new streams.
 """
 import asyncio
@@ -64,10 +68,9 @@ def authenticate(verb: str) -> list[dict]:
             {'path': 'EventDetail/Authenticate/User/Id', 'field': 'user'}]
 
 
-V1 = [rule('login', 'login', authenticate('Logon'))]
-V2 = V1 + [rule('logout', 'logout', authenticate('Logoff')),
-           rule('password change', 'passwd_change', authenticate('ChangePassword')),
-           rule('file read', 'file_read', [{'path': 'EventDetail/View/File/Path', 'field': 'path'}])]
+V1 = [rule('login', 'login', authenticate('Logon')), rule('logout', 'logout', authenticate('Logoff')),
+      rule('file read', 'file_read', [{'path': 'EventDetail/View/File/Path', 'field': 'path'}])]
+V2 = V1 + [rule('password change', 'passwd_change', authenticate('ChangePassword'))]
 
 
 async def xslt_for(ctx, rules: list[dict]) -> str:
@@ -132,15 +135,17 @@ async def main():
             await feeds.upload_sample(ctx, source, text)
         await asyncio.sleep(2)
 
-        print('\n### 1. survey the newest streams')
+        ids = sorted(m['meta']['id'] for m in (await stroom.find_meta([p2.processing_writes._term('Feed', source)], 10))['values'])
+
+        print('\n### 1. survey two streams, spread over the feed')
         first = await sampling.survey_feed(ctx, source, max_streams=2)
         signatures = [s['signature'] for s in first['shapes']]
-        print(f"    read {first['streams_read']}; shapes: {[(s['signature'][-40:], s['count']) for s in first['shapes']]}")
-        p2.check(first['format'] == 'json array' and len(first['shapes']) == 1 and first['shapes'][0]['count'] == 5,
-                 'only logins in the newest two streams')
-        p2.check(not first['saturated'], 'not saturated after two streams: keep looking')
+        kinds = sorted(s['signature'].split('action=')[-1] for s in first['shapes'])
+        print(f"    read {first['streams_read']} of {ids}; kinds: {kinds}")
+        p2.check(first['streams_read'] == [ids[-1], ids[0]], 'the newest and the oldest stream are read first')
+        p2.check(kinds == ['file_read', 'login', 'logout'] and not first['saturated'], 'three kinds so far, keep looking')
 
-        print('\n### 2. pipeline for that shape, stepped on the feed\'s own records')
+        print('\n### 2. pipeline for those shapes, stepped on the feed\'s own records')
         build = f'existing-{stamp}'
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == 'Event Data (JSON)')
@@ -151,34 +156,59 @@ async def main():
                                        PropertyValue(element='jsonParser', name='addRootObject', value=False)])
         stepped = await stepping.step_records(ctx, pipeline['uuid'], first['locations'])
         p2.check(stepped['verdict'] == 'clean' and stepped['records_stepped'] == len(first['locations']),
-                 f"the login records step clean in place ({stepped['records_stepped']} records)")
+                 f"those records step clean in place ({stepped['records_stepped']} records)")
         for location in first['locations']:
             one = await stepping.step_pipeline(ctx, pipeline['uuid'], location['stream'], location['record'], part=location['part'])
-            p2.check('<TypeId>login</TypeId>' in one['elements']['translationFilter']['output'],
-                     f"location {location['stream']}:{location['part']}:{location['record']} is a login record")
+            action = location['shape'].split('action=')[-1]
+            p2.check(f'<TypeId>{action}</TypeId>' in one['elements']['translationFilter']['output'],
+                     f"location {location['stream']}:{location['record']} is a {action} record")
 
-        print('\n### 3. survey further back with the known shapes')
-        second = await sampling.survey_feed(ctx, source, before_stream_id=first['oldest_stream_read'],
-                                            known_signatures=signatures)
+        print('\n### 3. survey the streams not read yet')
+        second = await sampling.survey_feed(ctx, source, skip_stream_ids=first['streams_read'], known_signatures=signatures)
         new = [s['signature'].split('action=')[-1] for s in second['shapes'] if s['new']]
-        print(f"    read {second['streams_read']}; new shapes: {new}")
-        p2.check(sorted(new) == ['file_read', 'logout', 'passwd_change'], 'the older streams add three kinds of event')
+        print(f"    read {second['streams_read']}; new kinds: {new}")
+        p2.check(sorted(second['streams_read']) == ids[1:3] and new == ['passwd_change'],
+                 'the other two streams add the password change')
         gaps = await stepping.step_records(ctx, pipeline['uuid'], second['locations'])
         unmatched = [g for g in gaps['groups'] if 'No event mapping matched' in str(g)]
-        p2.check(unmatched and unmatched[0]['count'] == 3 and len(gaps['shapes_not_clean']) == 3,
-                 f"the current translation flags all 3 new records: {[(g['class'], g['count']) for g in gaps['groups']]}")
+        p2.check(unmatched and unmatched[0]['count'] == 1 and len(gaps['shapes_not_clean']) == 1,
+                 f"the current translation flags it: {[(g['class'], g['count']) for g in gaps['groups']]}")
 
         print('\n### 4. extend the mapping and step every location')
         await translation.update_xslt(ctx, xslt['uuid'], await xslt_for(ctx, V2))
-        both = await stepping.step_records(ctx, pipeline['uuid'], first['locations'] + second['locations'])
-        p2.check(both['verdict'] == 'clean' and not both['shapes_not_clean'] and both['records_stepped'] == 5,
+        every = first['locations'] + second['locations']
+        both = await stepping.step_records(ctx, pipeline['uuid'], every)
+        p2.check(both['verdict'] == 'clean' and not both['shapes_not_clean'] and both['records_stepped'] == len(every),
                  f"every kind of event steps clean ({both['records_stepped']} records)")
 
-        print('\n### 5. survey again: nothing older')
-        third = await sampling.survey_feed(ctx, source, before_stream_id=second['oldest_stream_read'],
+        print('\n### 5. survey again: every stream read')
+        third = await sampling.survey_feed(ctx, source, skip_stream_ids=first['streams_read'] + second['streams_read'],
                                            known_signatures=signatures + [s['signature'] for s in second['shapes']])
         p2.check(third['saturated'] and third['new_shapes'] == 0 and not third['streams_read'],
                  f"the feed is covered: {third['hint']}")
+
+        print('\n### 6. broad check: the head of each stream')
+        broad = await stepping.step_sample(ctx, pipeline['uuid'], ids, records_per_stream=2)
+        p2.check(broad['verdict'] == 'clean' and broad['records_stepped'] == 2 * len(ids),
+                 f"{broad['records_stepped']} records, 2 from each stream, step clean")
+
+        print('\n### 7. a big single-line stream is read from its head only')
+        big_feed = f'SRC-BIG-{stamp}'
+        await p2.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=big_feed)
+        rows = [{'ts': '2026-09-28T10:00:00Z', 'host': 'app02', 'user': f'user{i}',
+                 'action': 'logout' if i % 50 == 7 else 'login'} for i in range(30000)]
+        big = json.dumps(rows)
+        await feeds.upload_sample(ctx, big_feed, big)
+        await asyncio.sleep(2)
+        head = await sampling.survey_feed(ctx, big_feed, max_chars_per_stream=100_000)
+        stream = head['per_stream'][0]
+        print(f"    {len(big)} chars; read {head['records_read']} records; per stream {stream}")
+        p2.check(stream['head_only'] and 0 < head['records_read'] < 2000, 'only the head was read')
+        p2.check(sorted(s['signature'].split('action=')[-1] for s in head['shapes']) == ['login', 'logout'],
+                 'both kinds found in the head')
+        located = await stepping.step_records(ctx, pipeline['uuid'], head['locations'])
+        p2.check(located['verdict'] == 'clean' and located['records_stepped'] == len(head['locations']),
+                 f"its locations step clean ({located['records_stepped']} records)")
 
         print('\n### nothing copied or processed; generated docs are tagged')
         created = [m['meta'] for m in (await stroom.find_meta([p2.processing_writes._term('Feed', source)], 50))['values']]

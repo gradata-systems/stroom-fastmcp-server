@@ -53,9 +53,14 @@ NODES: dict[str, tuple[str, list[str]]] = {
                "the source). The feed's records are only read and stepped where they are: create no feed, upload "
                "nothing and process nothing.",
                ['survey_feed', 'start_build', 'find_documents', 'get_document', 'profile_sample', 'record_source_notes']),
-    'resurvey': ("Look further back in feed {survey_feed}: survey_feed with before_stream_id={survey_oldest} and "
+    'resurvey': ("Read more of feed {survey_feed}: survey_feed with skip_stream_ids={survey_streams} and "
                  "known_signatures={survey_signatures}. Report how many new kinds of event it found.",
                  ['survey_feed']),
+    'broad_check': ("Broad check of pipeline {translation_pipeline}: step_sample over the source streams "
+                    "{broad_streams} with records_per_stream=200 (whole records from the head of each stream, "
+                    "spread over the feed's lifetime). Report the verdict; for any blocking or review group, "
+                    "step_pipeline one of its records (stream:record, or stream:part:record) to show what breaks.",
+                    ['step_sample', 'step_pipeline']),
     'step_and_validate': ("Check the translation pipeline {translation_pipeline}: with survey locations "
                           "({survey_locations}) run step_records over them, otherwise step_sample over streams "
                           "{raw_stream_ids}. Report the verdict.", ['step_sample', 'step_records', 'step_pipeline']),
@@ -146,7 +151,8 @@ def _prompt(name: str, state: BuildState) -> str:
     fix = state.get('fix') or {}
     survey = state.get('survey') or {}
     values.update(survey_shapes=json.dumps(survey.get('shapes')) if survey.get('shapes') else 'none',
-                  survey_feed=survey.get('feed'), survey_oldest=survey.get('oldest_stream_read'),
+                  survey_feed=survey.get('feed'), survey_streams=json.dumps(survey.get('streams_read') or []),
+                  broad_streams=json.dumps(broad_streams(survey.get('streams_read') or [])),
                   survey_signatures=json.dumps(survey.get('signatures') or []),
                   survey_locations=json.dumps(survey.get('locations')) if survey.get('locations') else 'none',
                   handover=(" This build started from existing feed " + str(survey.get('feed')) + ": list the kinds "
@@ -182,8 +188,8 @@ def _node(name: str, model: BaseChatModel, tools: dict[str, BaseTool]) -> Callab
             update['survey']['shapes'] = (earlier.get('shapes', []) + [
                 s for s in update['survey']['shapes'] if s['signature'] not in earlier.get('signatures', [])])[:40]
             update['survey']['locations'] = earlier.get('locations', []) + update['survey'].get('locations', [])
-            if update['survey'].get('oldest_stream_read') is None:
-                update['survey']['oldest_stream_read'] = earlier.get('oldest_stream_read')
+            update['survey']['streams_read'] = sorted(set(earlier.get('streams_read', []) +
+                                                          update['survey'].get('streams_read', [])))
         if 'raw_stream_ids' in update:
             update['raw_stream_ids'] = sorted(set((state.get('raw_stream_ids') or []) + update['raw_stream_ids']))
         last = result['messages'][-1].content if result['messages'] else ''
@@ -271,6 +277,14 @@ def await_enable(state: BuildState) -> dict[str, Any]:
 MAX_SURVEYS = 6
 
 
+def broad_streams(read: list[int], count: int = 3) -> list[int]:
+    """A few of the surveyed streams spread over time (by id): newest, oldest, middle."""
+    ordered = sorted(read)
+    if len(ordered) <= count:
+        return ordered
+    return sorted({ordered[-1], ordered[0], ordered[len(ordered) // 2]})
+
+
 def start(state: BuildState) -> str:
     return {'fix_pipeline_issue': 'locate_issue', 'onboard_existing_feed': 'survey'}.get(state.get('mode'), 'intake')
 
@@ -284,8 +298,14 @@ def after_resurvey(state: BuildState) -> str:
     if survey.get('new_shapes'):
         return 'draft_translation'
     if survey.get('saturated') or (state.get('attempts') or {}).get('resurvey', 0) >= MAX_SURVEYS:
-        return 'document'
+        return 'broad_check'
     return 'resurvey'
+
+
+def after_broad_check(state: BuildState) -> str:
+    if state.get('step_verdict') == 'clean':
+        return 'document'
+    return 'draft_translation' if (state.get('attempts') or {}).get('draft_translation', 0) < MAX_ATTEMPTS else 'ask_for_help'
 
 
 def after_locate(state: BuildState) -> str:
@@ -308,7 +328,7 @@ def after_offer(state: BuildState) -> str:
 def after_step(state: BuildState) -> str:
     if state.get('step_verdict') == 'clean':
         if state.get('mode') == 'onboard_existing_feed':
-            return 'document' if (state.get('survey') or {}).get('saturated') else 'resurvey'
+            return 'broad_check' if (state.get('survey') or {}).get('saturated') else 'resurvey'
         return 'process_sample'
     return 'draft_translation' if (state.get('attempts') or {}).get('draft_translation', 0) < MAX_ATTEMPTS else 'ask_for_help'
 
@@ -353,7 +373,7 @@ RESUME_AT = {'intake': 'draft_translation', 'onboard_feed': 'draft_translation',
              'plan_indexing': 'plan_indexing', 'step_indexing': 'plan_indexing', 'index_sample': 'plan_indexing',
              'locate_issue': 'locate_issue', 'draft_fix': 'draft_fix', 'propose_template': 'plan_indexing',
              'check_template': 'plan_indexing', 'verify_index': 'plan_indexing', 'survey': 'survey',
-             'resurvey': 'resurvey'}
+             'resurvey': 'resurvey', 'broad_check': 'draft_translation'}
 
 
 def after_help(state: BuildState) -> str:
@@ -374,11 +394,12 @@ def build_graph(model: BaseChatModel, tools: list[BaseTool], checkpointer: Any =
     graph.add_node('await_enable', await_enable)
     graph.add_conditional_edges(START, start, ['intake', 'locate_issue', 'survey'])
     graph.add_conditional_edges('survey', after_survey, ['draft_translation', 'ask_for_help'])
-    graph.add_conditional_edges('resurvey', after_resurvey, ['draft_translation', 'document', 'resurvey'])
+    graph.add_conditional_edges('resurvey', after_resurvey, ['draft_translation', 'broad_check', 'resurvey'])
+    graph.add_conditional_edges('broad_check', after_broad_check, ['document', 'draft_translation', 'ask_for_help'])
     graph.add_edge('intake', 'onboard_feed')
     graph.add_edge('onboard_feed', 'draft_translation')
     graph.add_edge('draft_translation', 'step_and_validate')
-    graph.add_conditional_edges('step_and_validate', after_step, ['process_sample', 'resurvey', 'document',
+    graph.add_conditional_edges('step_and_validate', after_step, ['process_sample', 'resurvey', 'broad_check',
                                                                    'draft_translation', 'ask_for_help'])
     graph.add_conditional_edges('process_sample', after_processing, ['plan_indexing', 'ask_for_help'])
     graph.add_edge('plan_indexing', 'step_indexing')

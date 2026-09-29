@@ -56,7 +56,7 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
         elif name == 'upload_sample' and data.get('stream_id'):
             update.setdefault('raw_stream_ids', []).append(data['stream_id'])
         elif name == 'survey_feed' and 'shapes' in data:
-            update['survey'] = {'feed': data.get('feed'), 'oldest_stream_read': data.get('oldest_stream_read'),
+            update['survey'] = {'feed': data.get('feed'), 'streams_read': data.get('streams_read') or [],
                                 'saturated': data.get('saturated'), 'new_shapes': data.get('new_shapes'),
                                 'signatures': [s['signature'] for s in data.get('shapes') or []],
                                 'shapes': [{k: s.get(k) for k in ('signature', 'count', 'example')}

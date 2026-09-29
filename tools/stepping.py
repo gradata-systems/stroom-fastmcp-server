@@ -135,11 +135,15 @@ async def step_sample(
         draft_code: DraftCode = None,
         max_records: Annotated[int | None, Field(
             ge=1, description="Stop after this many records (default: the server's max_sample_records).")] = None,
+        records_per_stream: Annotated[int | None, Field(
+            ge=1, description="Step at most this many records from the start of each stream, e.g. for a broad "
+                              "check over a few big production streams.")] = None,
 ) -> dict[str, Any]:
     """
     Step every record of the sample streams to completion and return one verdict for the whole sample:
     error groups triaged (blocking / review / benign) with the records they affect, plus per-record
     status. This is the correctness check before processing; a blocking group means fix and step again.
+    With records_per_stream, only the head of each stream is stepped (a broad check on existing streams).
     """
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
@@ -149,7 +153,9 @@ async def step_sample(
     first_output = None
     for stream_id in stream_ids:
         result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
-        while result.get('foundRecord') and len(records) < cap:
+        stream_start = len(records)
+        while result.get('foundRecord') and len(records) < cap and (
+                records_per_stream is None or len(records) - stream_start < records_per_stream):
             location = result['foundLocation']
             key = record_key(stream_id, location)
             found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)

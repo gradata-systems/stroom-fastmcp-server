@@ -68,3 +68,22 @@ def test_known_shapes_are_recognised_and_samples_keep_the_format():
     assert sample_text(csv_chunk, csv_chunk.records[1:]) == 'time,user,action\n2026-09-28 08:01:00,u2,logout\n'
     _, json_chunk = shapes_of(json.dumps([{'a': 1}, {'a': 2}]))
     assert json.loads(sample_text(json_chunk, json_chunk.records)) == [{'a': 1}, {'a': 2}]
+
+
+def test_cut_off_heads_keep_only_complete_records():
+    array = json.dumps([{'n': i, 'action': 'x'} for i in range(50)])
+    chunk = split_records(array[:500], truncated=True)
+    assert chunk.format == 'json array' and 0 < len(chunk.records) < 50
+    assert all(json.loads(r) for r in chunk.records)
+    xml = '<audit>' + ''.join(f'<entry><op>read</op><n>{i}</n></entry>' for i in range(50)) + '</audit>'
+    chunk = split_records(xml[:600], truncated=True)
+    assert chunk.format == 'xml' and chunk.records[-1].endswith('</entry>') and len(chunk.records) < 50
+    lines = ''.join(f'2026-09-28T15:00:0{i % 10}Z fw action=allow src=10.0.0.{i} dport=53\n' for i in range(30))
+    chunk = split_records(lines[:700], truncated=True)
+    assert all(r.endswith('dport=53') for r in chunk.records)
+
+
+def test_spread_order_covers_the_range_early():
+    from tools.sampling import spread_order
+    assert spread_order(5) == [4, 0, 2, 1, 3] and sorted(spread_order(10)) == list(range(10))
+    assert spread_order(10)[:3] == [9, 0, 4]

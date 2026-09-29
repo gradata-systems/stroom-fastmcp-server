@@ -251,23 +251,26 @@ def test_existing_feed_steps_in_place_until_nothing_new_then_hands_over():
     assert g.after_survey({}) == 'ask_for_help'
     existing = {'mode': 'onboard_existing_feed', 'step_verdict': 'clean'}
     assert g.after_step({**existing, 'survey': {'saturated': False}}) == 'resurvey'
-    # no processing in this mode: once covered, document and promote
-    assert g.after_step({**existing, 'survey': {'saturated': True}}) == 'document'
+    # no processing in this mode: once covered, a broad check, then document and promote
+    assert g.after_step({**existing, 'survey': {'saturated': True}}) == 'broad_check'
     assert g.after_resurvey({'survey': {'new_shapes': 2}}) == 'draft_translation'
-    assert g.after_resurvey({'survey': {'new_shapes': 0, 'saturated': True}}) == 'document'
+    assert g.after_resurvey({'survey': {'new_shapes': 0, 'saturated': True}}) == 'broad_check'
     assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': 1}}) == 'resurvey'
-    assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': g.MAX_SURVEYS}}) == 'document'
+    assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': g.MAX_SURVEYS}}) == 'broad_check'
+    assert g.after_broad_check({'step_verdict': 'clean'}) == 'document'
+    assert g.after_broad_check({'step_verdict': 'blocking', 'attempts': {'draft_translation': 1}}) == 'draft_translation'
+    assert g.broad_streams([5, 9, 1, 7, 3]) == [1, 5, 9] and g.broad_streams([4, 2]) == [2, 4]
     assert g.after_step({'mode': 'onboard', 'step_verdict': 'clean'}) == 'process_sample'
 
 
 def test_harvest_picks_up_the_survey_and_its_locations():
     update = harvest([
-        tool_message('survey_feed', {'feed': 'SRC', 'oldest_stream_read': 102, 'saturated': False, 'new_shapes': 1,
+        tool_message('survey_feed', {'feed': 'SRC', 'streams_read': [105, 102], 'saturated': False, 'new_shapes': 1,
                                      'shapes': [{'signature': 'fields:a | action=login', 'count': 5, 'example': '{}'}],
                                      'locations': [{'stream': 105, 'part': 0, 'record': 0, 'shape': 'fields:a | action=login'}]}),
         tool_message('step_records', {'verdict': 'clean', 'groups': []}),
     ])
-    assert update['survey']['signatures'] == ['fields:a | action=login'] and update['survey']['oldest_stream_read'] == 102
+    assert update['survey']['signatures'] == ['fields:a | action=login'] and update['survey']['streams_read'] == [105, 102]
     assert update['survey']['locations'][0]['stream'] == 105 and update['step_verdict'] == 'clean'
     assert 'test_feed' not in update
 

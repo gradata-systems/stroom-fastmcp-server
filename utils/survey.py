@@ -43,22 +43,25 @@ class Chunk:
     naming_columns: list[str] = field(default_factory=list)
 
 
-def split_records(text: str, max_records: int = 5000) -> Chunk:
-    """Split one stream part into records, using the same detection as profile_sample."""
-    text = text.strip('﻿\r\n ')
-    info = profile(text[:200_000], max_records=200)
-    fmt = info['format']
+def split_records(text: str, max_records: int = 5000, truncated: bool = False) -> Chunk:
+    """Split the start of one stream part into records, using the same detection as profile_sample.
+
+    `truncated` means only the start of the part was read: a cut-off last record is dropped, and JSON
+    arrays and XML are parsed incrementally so the complete records before the cut still count.
+    """
+    text = text.lstrip('﻿\r\n ')
+    head = text[:1]
+    if head == '[':
+        return _json_array(text, max_records)
+    if head == '<' and not SYSLOG_5424.match(text) and not SYSLOG_3164.match(text):
+        chunk = _xml_records(text, max_records)
+        if chunk is not None:
+            return chunk
     lines = [line for line in text.splitlines() if line.strip()]
-    if fmt == 'xml':
-        root = etree.fromstring(text.encode('utf-8'))
-        records = [r for r in root if isinstance(r.tag, str)][:max_records]
-        qname = etree.QName(root)
-        opening = f'<{qname.localname}' + (f' xmlns="{qname.namespace}"' if qname.namespace else '') + '>'
-        return Chunk(fmt, [_xml_text(r) for r in records],
-                     [_xml_fields(r) for r in records], root=f'{opening}\n{{records}}\n</{qname.localname}>')
-    if fmt == 'json array':
-        data = [r for r in json.loads(text) if isinstance(r, dict)][:max_records]
-        return Chunk(fmt, [json.dumps(r) for r in data], [_flatten(r) for r in data])
+    if truncated and lines and not text.endswith(('\n', '\r')):
+        lines = lines[:-1]
+    info = profile('\n'.join(lines[:max_records + 1]), max_records=200)
+    fmt = info['format']
     if fmt == 'json lines':
         data = [json.loads(line) for line in lines[:max_records]]
         return Chunk(fmt, lines[:max_records], [_flatten(r) for r in data])
@@ -74,6 +77,54 @@ def split_records(text: str, max_records: int = 5000) -> Chunk:
         parsed = [dict(zip(columns, row)) for row in rows]
         return Chunk(fmt, body[:max_records], parsed, header=header, naming_columns=_naming_columns(columns, parsed))
     return Chunk(fmt, lines[:max_records], [None] * min(len(lines), max_records))
+
+
+def _json_array(text: str, max_records: int) -> Chunk:
+    """Elements of a JSON array one at a time, stopping at the first that does not parse (a cut-off end)."""
+    decoder, records, parsed = json.JSONDecoder(), [], []
+    i = 1
+    while len(records) < max_records:
+        while i < len(text) and text[i] in ' \t\r\n,':
+            i += 1
+        if i >= len(text) or text[i] == ']':
+            break
+        try:
+            value, i = decoder.raw_decode(text, i)
+        except ValueError:
+            break
+        if isinstance(value, dict):
+            records.append(json.dumps(value))
+            parsed.append(_flatten(value))
+    return Chunk('json array', records, parsed)
+
+
+def _xml_records(text: str, max_records: int) -> Chunk | None:
+    """Children of the root element that are complete, even if the document is cut off."""
+    parser = etree.XMLPullParser(events=('start', 'end'))
+    root, depth, records = None, 0, []
+    try:
+        parser.feed(text.encode('utf-8'))
+    except etree.XMLSyntaxError:
+        pass
+    try:
+        for event, element in parser.read_events():
+            if event == 'start':
+                depth += 1
+                root = root if root is not None else element
+            else:
+                depth -= 1
+                if depth == 1 and isinstance(element.tag, str):
+                    records.append(element)
+                    if len(records) >= max_records:
+                        break
+    except etree.XMLSyntaxError:
+        pass
+    if root is None:
+        return None
+    qname = etree.QName(root)
+    opening = f'<{qname.localname}' + (f' xmlns="{qname.namespace}"' if qname.namespace else '') + '>'
+    return Chunk('xml', [_xml_text(r) for r in records], [_xml_fields(r) for r in records],
+                 root=f'{opening}\n{{records}}\n</{qname.localname}>')
 
 
 def _xml_text(node: etree._Element) -> str:
