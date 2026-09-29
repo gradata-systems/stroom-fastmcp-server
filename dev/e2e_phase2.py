@@ -240,7 +240,12 @@ async def promotion(ctx, csv: dict, stamp: str):
                                               'permissionInheritance': 'DESTINATION'})
     dest = f'System/{dest_name}'
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
-    listed = await builds.list_build(ctx, csv['build'])
+    ref = {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'], 'name': csv['pipeline']['name']}
+    stepped = [t for t in (await stroom.post('/explorer/v2/getFromDocRef', ref)).get('tags') or [] if t.startswith('mcp-stepped-')]
+    check(stepped, f"clean steps are recorded on the pipeline: {stepped}")
+    # A new context, as after a restart or on another replica: the record is in Stroom, not in memory.
+    fresh = SimpleNamespace(lifespan_context=dict(ctx.lifespan_context))
+    listed = await builds.list_build(fresh, csv['build'])
     check(listed['before_promotion'] == [], f"stepped clean and documented, nothing outstanding: {listed['before_promotion']}")
     result = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations=everything)
     check('promoted_with_warnings' not in result, 'promoted without warnings')
@@ -254,7 +259,8 @@ async def promotion(ctx, csv: dict, stamp: str):
     check(info['explorerNode']['uuid'] == csv['pipeline']['uuid'], 'pipeline kept its UUID')
     tags = (await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'],
                                                              'name': csv['pipeline']['name']})).get('tags') or []
-    check('mcp-generated' in tags and 'mcp-managed' not in tags, f"promoted pipeline keeps mcp-generated only: {tags}")
+    check('mcp-generated' in tags and 'mcp-managed' not in tags and not any(t.startswith('mcp-stepped-') for t in tags),
+          f"promoted pipeline keeps mcp-generated only: {tags}")
 
     fix_build = f'e2e-fix-{stamp}'
     copy = await agreed(pipeline_writes.copy_pipeline, ctx=ctx, build=fix_build, source_uuid=csv['pipeline']['uuid'],

@@ -10,7 +10,7 @@ from pydantic import Field
 from security.guard import GENERATED, MANAGED, build_tag, guard_from
 from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
-from tools.stepping import stepped_clean
+from tools.stepping import stepped_clean, stepped_tags
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
@@ -44,16 +44,16 @@ async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
 
 
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
-    """What a build's pipelines still lack before promotion: a clean step of their current code, and (for new
-    pipelines) a Documentation doc."""
+    """What a build's pipelines still lack before promotion: a clean step of their current code (recorded as
+    mcp-stepped-* tags on the pipeline), and (for new pipelines) a Documentation doc."""
     documented = {d['name'] for d in docs if d['type'] == 'Documentation'}
     problems = []
     for doc in docs:
         if doc['type'] != 'Pipeline':
             continue
-        if not await stepped_clean(ctx, doc['uuid']):
+        if not await stepped_clean(ctx, doc):
             problems.append(f"Pipeline '{doc['name']}': no clean step_sample or step_records of its current code is "
-                            "recorded on this server")
+                            "recorded")
         if not doc['working_copy_of'] and doc['name'] not in documented:
             problems.append(f"Pipeline '{doc['name']}': no documentation (write_documentation)")
     return problems
@@ -176,7 +176,9 @@ async def promote_build(
                                                               'permissionInheritance': 'DESTINATION'})
             # Now production content: the agent may no longer change it directly.
             # mcp-generated stays, so it is still known as the server's own.
-            await guard.untag([{k: doc[k] for k in ('type', 'uuid', 'name')}], [MANAGED, build_tag(build)])
+            ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
+            # Clean-step records only mean something inside a build.
+            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(await guard.tags(ref)))
             done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
         else:
             original = await stroom.get_doc(doc['type'], step['target'])

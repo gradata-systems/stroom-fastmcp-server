@@ -1,15 +1,21 @@
 """Tools that step pipelines record by record, optionally with draft (unsaved) code."""
 import hashlib
+import json
+import logging
 import re
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
+from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.stroom import StroomGateway, gateway_from
 from utils.triage import from_stored_error, triage
+
+logger = logging.getLogger(__name__)
 
 PipelineUuid = Annotated[str, Field(description="UUID of the pipeline to step.")]
 DraftCode = Annotated[dict[str, str] | None, Field(
@@ -51,24 +57,51 @@ async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
     return prints
 
 
-CLEAN_RUNS = 20
+# Clean steps are recorded as explorer tags on the pipeline, 'mcp-stepped-<UTC time>-<code digest>', so
+# every replica sees them and they survive restarts. Only pipelines the server manages (in a build) are
+# tagged: stepping anything else stays read-only. Promotion removes them with mcp-managed.
+STEPPED = 'mcp-stepped-'
+KEEP_STEPPED = 5
 
 
-async def remember_clean(ctx: Context, pipeline_uuid: str, draft_code: dict[str, str] | None,
+def fingerprint_digest(prints: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(prints, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def stepped_tags(tags: list[str]) -> list[str]:
+    return sorted(t for t in tags if t.startswith(STEPPED))
+
+
+async def remember_clean(ctx: Context, pipeline: dict[str, Any], draft_code: dict[str, str] | None,
                          result: dict[str, Any]) -> None:
-    """Record the code a clean step_sample or step_records ran, for promotion's checks. In memory: a restart
-    or another replica forgets, and promotion then says it has no record of a clean step."""
+    """Record the code a clean step_sample or step_records ran, for promotion's checks (the last few runs)."""
     if result.get('verdict') != 'clean' or not result.get('records_stepped'):
         return
-    runs = ctx.lifespan_context.setdefault('clean_steps', {}).setdefault(pipeline_uuid, [])
-    runs.append(await code_fingerprint(gateway_from(ctx), pipeline_uuid, draft_code))
-    del runs[:-CLEAN_RUNS]
+    guard = guard_from(ctx)
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    try:
+        tags = await guard.tags(ref)
+        if MANAGED not in tags:
+            return
+        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid'], draft_code))
+        mine = stepped_tags(tags)
+        if any(t.endswith(f'-{digest}') for t in mine):
+            return
+        await guard.tag([ref], [f"{STEPPED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
+        if len(mine) >= KEEP_STEPPED:
+            await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
+    except Exception as e:  # the record is a convenience; never fail the step over it
+        logger.warning("Couldn't record a clean step on pipeline %s: %s", ref['uuid'], e)
 
 
-async def stepped_clean(ctx: Context, pipeline_uuid: str) -> bool:
-    """Whether the pipeline's saved code is code that has stepped clean on this server."""
-    runs = ctx.lifespan_context.get('clean_steps', {}).get(pipeline_uuid)
-    return bool(runs) and await code_fingerprint(gateway_from(ctx), pipeline_uuid) in runs
+async def stepped_clean(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Whether the pipeline's saved code is code that has stepped clean (a recent run, on any replica)."""
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    mine = stepped_tags(await guard_from(ctx).tags(ref))
+    if not mine:
+        return False
+    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+    return any(t.endswith(f'-{digest}') for t in mine)
 
 
 def record_key(stream_id: int, location: dict[str, Any]) -> str:
@@ -213,7 +246,7 @@ async def step_sample(
                               'first_record_output': first_output}
     if len(records) >= cap:
         result['hint'] = f"Stopped at {cap} records; the sample has more."
-    await remember_clean(ctx, pipeline_uuid, draft_code, result)
+    await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
     return result
 
 
@@ -284,7 +317,7 @@ async def step_records(
               'draft_code_used': sorted(draft_code or {}), **summary,
               'records': records[:100]}
     if not uncovered:
-        await remember_clean(ctx, pipeline_uuid, draft_code, result)
+        await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
     return result
 
 
