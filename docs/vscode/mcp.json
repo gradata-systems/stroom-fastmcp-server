@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "stroom": {
+      "type": "http",
+      "url": "https://stroom-mcp.example.com/mcp",
+      "oauth": {
+        "clientId": "stroom-mcp-vscode"
+      }
+    },
+    "stroom-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "oauth": {
+        "clientId": "stroom-mcp-vscode"
+      }
+    }
+  }
+}

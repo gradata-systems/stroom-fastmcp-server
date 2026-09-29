@@ -1,0 +1,27 @@
+# Keycloak for local development of the MCP server's sign-in (VS Code, scripts). Local use only:
+# fixed dev passwords, HTTP, bound to 127.0.0.1.
+#
+#   cd dev/keycloak && docker compose up -d
+#   Admin console: http://127.0.0.1:18180/admin   (admin / admin)
+#   Realm:         http://127.0.0.1:18180/realms/stroom
+#   Test user:     analyst / analyst-dev
+#
+# The realm (realm-stroom.json) has:
+# - stroom-mcp-vscode: a public client with PKCE for VS Code, redirect URIs http://127.0.0.1:33418 and
+#   https://vscode.dev/redirect. Direct access grants are on for scripted tests only; turn them off anywhere real.
+# - a default client scope adding both audiences the server needs: stroom-mcp (the MCP server) and stroom
+#   (Stroom, which the server forwards the token to).
+name: stroom-mcp-keycloak
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5
+    command: ["start-dev", "--import-realm", "--http-port=18180", "--hostname=http://127.0.0.1:18180"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18180:18180"
+    volumes:
+      - ./realm-stroom.json:/opt/keycloak/data/import/realm-stroom.json:ro

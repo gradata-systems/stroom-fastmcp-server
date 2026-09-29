@@ -1,0 +1,177 @@
+# Local Stroom trusting the dev Keycloak (dev/keycloak): used by docker-compose.oidc.yml only.
+# Stroom configuration file
+# =========================
+
+# For information on the structure of this configuration file see:
+# https://www.dropwizard.io/en/latest/manual/configuration.html
+# For information on the logback logFormat strings see:
+# http://logback.qos.ch/manual/layouts.html
+
+# This configuration file was made for the docker distribution.
+
+# This section is the DropWizard configuration for Stroom
+
+server:
+  applicationContextPath: "/"
+  adminContextPath: "/stroomAdmin"
+  applicationConnectors:
+    - type: http
+      port: 8080
+      useForwardedHeaders: true
+  adminConnectors:
+    - type: http
+      port: 8081
+      useForwardedHeaders: true
+  detailedJsonProcessingExceptionMapper: true
+  requestLog:
+    appenders:
+      # Log appender for the web server request logging
+    - type: file
+      currentLogFilename: logs/access/access.log
+      discardingThreshold: 0
+      # Rolled and gzipped every minute
+      archivedLogFilenamePattern: logs/access/access-%d{yyyy-MM-dd'T'HH:mm}.log.gz
+      archivedFileCount: 10080
+      logFormat: '%h %l "%u" [%t] "%r" %s %b "%i{Referer}" "%i{User-Agent}" %D'
+
+logging:
+  level: WARN
+  loggers:
+    # Logs useful information about stroom. Only set DEBUG on specific 'stroom' classes or packages
+    # due to the large volume of logs that would be produced for all of 'stroom' in DEBUG.
+    stroom: INFO
+    # Logs useful information about dropwizard when booting stroom
+    io.dropwizard: INFO
+    # Logs useful information about the jetty server when booting stroom
+    org.eclipse.jetty: INFO
+    # Set this to INFO if you want to log all REST request/responses with headers/payloads.
+    org.glassfish.jersey.logging.LoggingFeature: OFF
+    # Logs summary information about FlyWay database migrations
+    org.flywaydb: INFO
+    # Logger and appender for audit logs
+    "event-logger":
+      level: INFO
+      additive: false
+      appenders:
+        - type: file
+          currentLogFilename: logs/user/user.log
+          discardingThreshold: 0
+          # Rolled every minute
+          archivedLogFilenamePattern: logs/user/user-%d{yyyy-MM-dd'T'HH:mm}.log
+          # Minute rolled logs older than a week will be deleted. Note rolled logs are deleted
+          # based on the age of the window they contain, not the number of them. This value should be greater
+          # than the maximum time stroom is not producing events for.
+          archivedFileCount: 10080
+          logFormat: "%msg%n"
+    # Logger and appender for the flyway DB migration SQL output
+    org.flywaydb.core.internal.sqlscript:
+      level: DEBUG
+      additive: false
+      appenders:
+        - type: file
+          currentLogFilename: logs/migration/migration.log
+          discardingThreshold: 0
+          # Rolled every day
+          archivedLogFilenamePattern: logs/migration/migration-%d{yyyy-MM-dd}.log
+          archivedFileCount: 10
+          logFormat: "%-6level [%d{\"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'\",UTC}] [%t] %logger - %X{code} %msg %n"
+
+  appenders:
+
+    # stdout for docker
+  - type: console
+    # Multi-coloured log format for console output
+    logFormat: "%highlight(%-6level) [%d{\"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'\",UTC}] [%green(%t)] %cyan(%logger) - %X{code} %msg %n"
+    timeZone: UTC
+
+    # Minute rolled files for stroom/datafeed, will be curl'd/deleted by stroom-log-sender
+  - type: file
+    currentLogFilename: logs/app/app.log
+    discardingThreshold: 0
+    # Rolled and gzipped every minute
+    archivedLogFilenamePattern: logs/app/app-%d{yyyy-MM-dd'T'HH:mm}.log.gz
+    # One week using minute files
+    archivedFileCount: 10080
+    logFormat: "%-6level [%d{\"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'\",UTC}] [%t] %logger - %X{code} %msg %n"
+
+# This section contains the configuration for the various HTTP clients used in stroom
+# See https://gchq.github.io/stroom-docs/docs/user-guide/properties/#jersey-http-client-configuration
+jerseyClients:
+  OPEN_ID:
+    # KeyCloak and Azure AD don't like gzip encoded requests
+    gzipEnabledForRequests: false
+
+# This section contains the Stroom configuration properties
+# For more information see:
+# https://gchq.github.io/stroom-docs/docs/user-guide/properties/
+
+appConfig:
+  commonDbDetails:
+    connection:
+      jdbcDriverUrl: "${STROOM_JDBC_DRIVER_URL:-jdbc:mysql://localhost:3307/stroom?useUnicode=yes&characterEncoding=UTF-8}"
+      jdbcDriverUsername: "${STROOM_JDBC_DRIVER_USERNAME:-stroomuser}"
+      jdbcDriverPassword: "${STROOM_JDBC_DRIVER_PASSWORD:-stroompassword1}"
+  contentPackImport:
+    enabled: ${STROOM_CONTENT_PACK_IMPORT_ENABLED:-false}
+  job:
+    enableJobsOnBootstrap: ${STROOM_ENABLE_JOBS_ON_BOOTSTRAP:-false}
+  node:
+    # The name for the node, should be unique to each node in the cluster
+    name: "node1a"
+  nodeUri:
+    # The FQDN of the this node for inter-node communication. Can be private within the stroom cluster.
+    # If not set stroom will try to determine it
+    hostname: "${STROOM_HOST:-localhost}"
+  path:
+    # By default all files read or written to by stroom will be in directories relative to
+    # the home location. This must be set to an absolute path and also to one that differs
+    # from the location of the installed software as it has a different lifecycle.
+    home: "/stroom"
+  publicUri:
+    # The public FQDN for stroom, as typed into the browser, typically the public address of nginx
+    # or the load balancer in front of multiple nginx instances.
+    # If not set stroom will try to determine it
+    hostname: "${API_GATEWAY_HOST:-localhost}"
+    port: "${API_GATEWAY_PORT:-443}"
+  receive:
+    # Whether authentication is required for requests sent to /datafeed
+    authenticationRequired: ${RECEIVE_AUTH_REQUIRED:-true}
+  security:
+    authentication:
+      openId:
+        # (EXTERNAL_IDP|INTERNAL_IDP)
+        # INTERNAL_IDP - Use API Keys generated in Stroom for feed status check. No support for token
+        #            authentication on data receipt.
+        # EXTERNAL_IDP - Usa an external IDP for receipt token auth and for outbound HTTP connections
+        identityProviderType: "EXTERNAL_IDP"
+        # Keycloak from dev/keycloak. Tokens name the issuer as the browser sees it (127.0.0.1); the
+        # container reaches Keycloak through host.docker.internal.
+        openIdConfigurationEndpoint: "http://host.docker.internal:18180/realms/stroom/.well-known/openid-configuration"
+        jwksUri: "http://host.docker.internal:18180/realms/stroom/protocol/openid-connect/certs"
+        validIssuers:
+          - "http://127.0.0.1:18180/realms/stroom"
+        clientId: "stroom-mcp-vscode"
+        allowedAudiences:
+          - "stroom"
+        audienceClaimRequired: true
+        uniqueIdentityClaim: "sub"
+        userDisplayNameClaim: "preferred_username"
+    identity:
+      # Enable this for test environments using INTERNAL_IDP
+      autoCreateAdminAccountOnBoot: ${AUTO_CREATE_ADMIN_ACCOUNT:-false}
+      passwordPolicy:
+        forcePasswordChangeOnFirstLogin: ${FORCE_PASSWORD_CHANGE_ON_FIRST_LOGIN:-true}
+        minimumPasswordLength: ${MIN_PASSWORD_LENGTH:-8}
+  statistics:
+    internal:
+      enabledStoreTypes: ${STROOM_ENABLED_STAT_STORE_TYPES:-[ "StatisticStore" ]}
+    sql:
+      db:
+        connection:
+          jdbcDriverUrl: "${STROOM_STATISTICS_JDBC_DRIVER_URL:-jdbc:mysql://localhost:3307/stats?useUnicode=yes&characterEncoding=UTF-8}"
+          jdbcDriverUsername: "${STROOM_STATISTICS_JDBC_DRIVER_USERNAME:-statsuser}"
+          jdbcDriverPassword: "${STROOM_STATISTICS_JDBC_DRIVER_PASSWORD:-stroompassword1}"
+  ui:
+    helpUrl: "https://${API_GATEWAY_HOST:-localhost}/stroom-docs/docs"
+
+# vim: set filetype=yaml tabstop=2 shiftwidth=2 expandtab:

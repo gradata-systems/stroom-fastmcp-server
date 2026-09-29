@@ -54,3 +54,48 @@ def test_output_without_elements_is_an_error():
     assert 'did not match' in _empty_output(result, 'translationFilter', 'r1')[0]['message']
     ok = {'stepData': {'elementMap': {'translationFilter': {'output': '<?xml version="1.1"?><Events/>'}}}}
     assert _empty_output(ok, 'translationFilter', 'r1') == []
+
+
+class ModernCtx:
+    """A 2026-07-28 request: no server-initiated requests; answers arrive with the repeated call."""
+
+    def __init__(self, forms=True, responses=None, state=None):
+        caps = {'elicitation': {'form': {}}} if forms else {}
+        self.request_context = SimpleNamespace(meta={'io.modelcontextprotocol/clientCapabilities': caps})
+        self.input_responses, self.request_state = responses, state
+
+    def _is_modern_protocol(self):
+        return True
+
+
+async def test_modern_connections_ask_with_a_form_and_read_the_answer_on_the_repeated_call():
+    import mcp_types
+    store = ConsentStore()
+    details = {'feed name': 'ACME'}
+    asked = await store.require(ModernCtx(), 'confirmation', 'create_feed', "Create feed 'ACME'", details, None)
+    assert isinstance(asked, mcp_types.InputRequiredResult)
+    [(key, form)] = asked.input_requests.items()
+    assert "Create feed 'ACME'" in form.params.message and form.params.requested_schema['properties']['value']['type'] == 'boolean'
+    accept = {key: {'action': 'accept', 'content': {'value': True}}}
+    assert await store.require(ModernCtx(responses=accept, state=asked.request_state), 'confirmation', 'create_feed',
+                               "Create feed 'ACME'", details, None) is None
+    decline = {key: {'action': 'accept', 'content': {'value': False}}}
+    with pytest.raises(ToolError, match='did not agree'):
+        await store.require(ModernCtx(responses=decline, state=asked.request_state), 'confirmation', 'create_feed',
+                            "Create feed 'ACME'", details, None)
+
+
+async def test_a_form_answer_only_counts_for_the_request_it_was_asked_for():
+    store = ConsentStore()
+    asked = await store.require(ModernCtx(), 'approval', 'promote_build', 'Promote', {'plan': ['a']}, None)
+    [key] = asked.input_requests
+    answer = {key: {'action': 'accept', 'content': {'value': True}}}
+    # the same answer against different details is not an answer to this question: it asks again
+    again = await store.require(ModernCtx(responses=answer, state=asked.request_state), 'approval', 'promote_build',
+                                'Promote', {'plan': ['b']}, None)
+    assert again.input_requests and list(again.input_requests) != [key]
+
+
+async def test_modern_clients_without_forms_get_an_id():
+    pending = await ConsentStore().require(ModernCtx(forms=False), 'approval', 'x', 'X', {}, None)
+    assert pending['status'] == 'needs_approval'

@@ -30,6 +30,10 @@ otherwise returned as an id to pass back. Everything is written under `MCP Works
 `mcp-managed` and `mcp-generated`; only `mcp-managed` docs can be changed, and promotion moves them into place,
 removing `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
 
+**VS Code** is the intended front end: its chat (agent mode) works through these tools, signed in with Keycloak,
+with approvals as forms. Setup (Keycloak client, Stroom trusting the realm, `mcp.json`): [docs/VSCODE.md](docs/VSCODE.md).
+The LangGraph agent in `agent/` is optional and not needed to run the server.
+
 Standing instructions: a Documentation doc named `AGENTS` in a Stroom folder holds instructions for building
 pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. The agent loads them at the
 start of every run.

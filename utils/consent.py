@@ -1,9 +1,15 @@
 """Confirmations (key details) and approvals (risky actions) before a write tool acts.
 
-The user is asked directly through MCP elicitation when the client supports it. Otherwise the tool
-returns a pending id with a plain-language summary; the client shows it to the user and repeats the
-call with the id once they agree. The id is bound to the action, the exact details and the caller,
-and expires, so it cannot be reused for something else.
+The user is asked directly, as a form, when the client supports elicitation, so the model never holds the
+answer:
+- MCP 2026-07-28 connections have no server-initiated requests: the tool returns an input-required result
+  holding the form, the client asks the user and repeats the call with the answer (SEP-2322). The request
+  state, sealed by the framework, names the exact request (and any gates already passed in this call), so
+  an answer cannot be replayed for something else.
+- Earlier connections: the server sends the elicitation request during the call.
+Otherwise the tool returns a pending id with a plain-language summary; the client shows it to the user
+and repeats the call with the id once they agree. The id is bound to the action, the exact details and
+the caller, and expires, so it cannot be reused for something else.
 """
 import hashlib
 import json
@@ -13,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import mcp_types
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 
@@ -42,6 +49,50 @@ def _digest(action: str, details: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps([action, details], sort_keys=True, default=str).encode()).hexdigest()
 
 
+CAPABILITIES_META_KEY = 'io.modelcontextprotocol/clientCapabilities'
+
+
+def _modern(ctx: Any) -> bool:
+    """A 2026-07-28 connection: no server-initiated requests, input is gathered by repeating the call."""
+    check = getattr(ctx, '_is_modern_protocol', None)
+    try:
+        return bool(check()) if check else False
+    except Exception:
+        return False
+
+
+def _client_can_answer_forms(ctx: Any) -> bool:
+    """Whether this request's client declared form elicitation (sent per request on modern connections)."""
+    meta = getattr(getattr(ctx, 'request_context', None), 'meta', None)
+    if meta is not None and not isinstance(meta, dict):
+        meta = getattr(meta, 'model_extra', None) or (meta.model_dump(by_alias=True) if hasattr(meta, 'model_dump') else {})
+    caps = (meta or {}).get(CAPABILITIES_META_KEY) or {}
+    if hasattr(caps, 'model_dump'):
+        caps = caps.model_dump(by_alias=True, exclude_none=True)
+    return isinstance(caps, dict) and caps.get('elicitation') is not None
+
+
+def _call_state(ctx: Any) -> dict[str, Any]:
+    """This call's consent state: gates granted so far, from the sealed request state of earlier rounds."""
+    state = getattr(ctx, '_consent_call_state', None)
+    if state is None:
+        raw = None
+        try:
+            raw = ctx.request_state
+        except Exception:
+            pass
+        try:
+            state = json.loads(raw) if raw else {}
+        except ValueError:
+            state = {}
+        state.setdefault('granted', [])
+        try:
+            setattr(ctx, '_consent_call_state', state)
+        except Exception:
+            pass
+    return state
+
+
 class ConsentStore:
     def __init__(self, use_elicitation: bool = True):
         self.use_elicitation = use_elicitation
@@ -67,7 +118,11 @@ class ConsentStore:
             pending.granted = True
             return None
 
-        if self.use_elicitation and hasattr(ctx, 'elicit'):
+        if self.use_elicitation and _modern(ctx):
+            outcome = self._form_round(ctx, kind, action, summary, details, digest)
+            if outcome is not False:
+                return outcome
+        elif self.use_elicitation and hasattr(ctx, 'elicit'):
             try:
                 answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", bool)
             except Exception as e:  # client without elicitation support
@@ -87,6 +142,41 @@ class ConsentStore:
                         f"same arguments plus {kind}_id='{pending_id}'. If they change a detail, call again with "
                         f"the new values and no id to get a fresh {kind}."}
 
+
+    def _form_round(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
+                    digest: str) -> Any:
+        """Modern connections: None if agreed, an input-required result to ask, False if the client cannot."""
+        state = _call_state(ctx)
+        bound = f"{digest}:{_user()}"
+        if bound in state['granted']:
+            return None
+        key = f"{kind}-{digest[:16]}"
+        try:
+            responses = ctx.input_responses
+        except Exception:
+            responses = None
+        answer = (responses or {}).get(key) if responses else None
+        if answer is not None and state.get('asked') == bound:
+            action_taken = getattr(answer, 'action', None) or (answer.get('action') if isinstance(answer, dict) else None)
+            content = getattr(answer, 'content', None) or (answer.get('content') if isinstance(answer, dict) else None) or {}
+            agreed = action_taken == 'accept' and bool(content.get('value'))
+            audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='form')
+            if not agreed:
+                raise ToolError(f"The user did not agree to: {summary}")
+            state['granted'].append(bound)
+            state.pop('asked', None)
+            return None
+        if not _client_can_answer_forms(ctx):
+            return False
+        state['asked'] = bound
+        audit(kind, action=action, details=details, outcome='requested', via='form')
+        form = mcp_types.ElicitRequest(params=mcp_types.ElicitRequestFormParams(
+            message=f"{summary}\n\n{_format(details)}",
+            requested_schema={'type': 'object', 'required': ['value'], 'properties': {
+                'value': {'type': 'boolean', 'title': 'Approve' if kind == 'approval' else 'Confirm',
+                          'description': summary}}}))
+        return mcp_types.InputRequiredResult(input_requests={key: form},
+                                            request_state=json.dumps(state, sort_keys=True))
 
     def discard(self, token: str | None) -> None:
         if token:

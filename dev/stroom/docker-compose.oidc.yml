@@ -1,0 +1,16 @@
+# Opt-in: local Stroom trusts the dev Keycloak (dev/keycloak), so the MCP server can forward a signed-in
+# user's token to it, as in production.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.oidc.yml up -d     # switch to Keycloak
+#   docker compose up -d                                                      # back to the internal IdP
+#
+# API keys keep working. Grant the Keycloak test user rights first: uv run python dev/stroom/oidc_user.py
+services:
+  stroom:
+    environment:
+      # With an external IdP, data receipt can require a token, as the live instance should.
+      RECEIVE_AUTH_REQUIRED: "true"
+    volumes:
+      - ./config-oidc.yml:/stroom/config/config.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
