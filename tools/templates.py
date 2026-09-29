@@ -84,8 +84,8 @@ def _slot(element: str, etype: str, key: str, value: Any, open_slots: list[dict]
     if value not in (None, ''):
         shared.append({'element': element, 'type': etype, 'property': key, 'value': value})
         return
-    # An unset XSLTFilter after the first one (e.g. an empty decoration step) passes records
-    # through unchanged, so only the first unset XSLT is required.
+    # Stroom treats an XSLTFilter with no XSLT as a no-op: records pass through unchanged. The first
+    # unset one is where the child's translation goes; later ones (e.g. an empty decoration step) are optional.
     optional = etype == 'XSLTFilter' and any(s['type'] == 'XSLTFilter' for s in open_slots)
     open_slots.append({'element': element, 'type': etype, 'property': key,
                        **({'optional': 'passes records through unchanged if left unset'} if optional else {})})

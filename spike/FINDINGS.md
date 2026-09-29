@@ -28,7 +28,7 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 | --- | --- | --- |
 | Error streams | MARKER fetch returns `summary` entries per severity and `storedError` entries (severity, element, message). Locations are `-1`: no record position. A bad date was a WARNING in the XSLT that caused two schema ERRORs. | Record positions come from stepping; triage keeps the cause (own XSLT warning, review) next to its effect (schema error, blocking). |
 | Stepping to a record | `REFRESH` with a `stepLocation` jumps straight to a record; `LAST` works. | `step_pipeline` takes a record index. |
-| Empty XSLTFilter | The template's unset `decorationFilter` output is identical to its input. | Unset XSLT steps after the first are optional (pass-through). |
+| Empty XSLTFilter | The template's unset `decorationFilter` output is identical to its input. Confirmed by the Stroom team: an XSLTFilter with no XSLT is a no-op. | Unset XSLT steps after the first are optional (pass-through); the first is where the child's translation goes. |
 | Segmented streams | `data/v1/fetch` returns one record per call from an Events stream, whatever `recordCount` asks for. | `read_stream` and `summarise_events` read record by record. |
 | Receipt headers | Held in the `Meta Data` child part as `key:value` lines (`Feed`, `ReceivedTime`, `RemoteAddress`, `UploadUserId`, custom headers). | `get_stream_attributes` reads that part. |
 | Schema selection | Stroom's XMLSchema docs carry a `systemId` equal to what Events name in `xsi:schemaLocation`; lxml loads Stroom's XSD directly. On live a Keycloak record validated against v3.5.2 picked this way. | `validate_events` needs no version configuration in the normal case. |
@@ -94,4 +94,3 @@ Run against a local `gchq/stroom:v7.13-beta.17` stack (`dev/stroom`), 2026-09-28
 - Writing to Elasticsearch (index templates, ES indexing pipelines processing into a live index): no ES credentials, and the live instance stays read-only. Covered by mocked tests and the XSLT/XSD check.
 - Agent runs with a real model: the 10-sample evaluation (`dev/eval`, the Phase 4 exit criterion) is ready to run with one.
 - The live instance with a real user's token (works locally against a dev Keycloak), the agent's device sign-in, and whether live `/stroom/datafeed` accepts OIDC tokens.
-- Stepping a pipeline with an empty XSLTFilter (the question of what Stroom does with a template's unset `decorationFilter`).
