@@ -218,13 +218,17 @@ async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, 
 
 
 def _hint(saturated: bool, new_shapes: list, known: list[str]) -> str:
+    translate = ("Translate every shape and check it with step_records(pipeline, locations, draft_code): the feed's "
+                 "own records are stepped where they are.")
+    broad = " Then run the broad check (step_sample over a few whole streams with records_per_stream)."
     if known and not new_shapes:
-        return ("No new kinds of event in these streams." + (" The feed looks covered: run the broad check "
-                "(step_sample over a few whole streams with records_per_stream)." if saturated else
-                " Read more with skip_stream_ids=every stream read so far."))
-    return ("Translate every shape and check it with step_records(pipeline, locations, draft_code): the feed's own "
-            "records are stepped where they are. Then call again with skip_stream_ids=every stream read so far and "
-            "known_signatures=every signature so far, until saturated.")
+        return "No new kinds of event in these streams." + (
+            " The feed looks covered:" + broad[5:] if saturated else
+            " Read more with skip_stream_ids=every stream read so far.")
+    if saturated:
+        return f"{translate} The last streams read added no new kinds of event, so the feed looks covered.{broad}"
+    return (f"{translate} Then call again with skip_stream_ids=every stream read so far and known_signatures=every "
+            "signature so far, until saturated.")
 
 
 ALL_TOOLS = [survey_feed]

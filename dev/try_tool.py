@@ -53,6 +53,9 @@ async def main(argv: list[str]):
     name, args = argv[0], dict(a.split('=', 1) for a in argv[1:])
     if live and name in WRITE_TOOLS:
         raise SystemExit(f'{name} changes Stroom; run it against the local stack only')
+    if live and 'build' in args:
+        # e.g. survey_feed writes its survey doc into the build.
+        raise SystemExit(f'{name} with a build writes to Stroom; leave build out against the live instance')
     if live:
         secrets = env(ROOT / '.ai' / 'secrets')
         url, key = secrets['STROOM_URL'], secrets['STROOM_API_KEY']

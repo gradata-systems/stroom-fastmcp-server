@@ -4,7 +4,10 @@ A feed's streams rarely show every event type in one stream, so the agent sample
 groups records into shapes, one per kind of event, until a few more streams add nothing new. A shape is:
 
 - JSON, XML, key=value: which fields a record has, plus the values of fields that usually name the event
-  (action, event, type, category and similar).
+  (action, event, type, category, logger and similar). A message-like field (body, message, msg...) is
+  unwrapped: JSON inside it (after any text prefix or byte order mark) is signed the same way, and
+  key=value pairs in it keep the values of naming keys (type="LOGIN"). Its text is masked as below only
+  when nothing else names the event, so a wrapper (e.g. syslog shipped as JSON) doesn't hide the kinds.
 - Delimited: the values of those naming columns, or of the low-variety columns when none is named that way.
 - Syslog and other text: the message with its variable parts masked (numbers, addresses, quoted strings),
   merged with other messages that differ only in a few words (user names, hosts), in the style of Drain.
@@ -22,7 +25,11 @@ from lxml import etree
 from utils.profile import SYSLOG_3164, SYSLOG_5424, _flatten, profile
 
 NAMING = re.compile(r'(^|[._-])(type|event|event_?type|event_?name|event_?id|action|category|activity|operation|'
-                    r'op|kind|result_?type|msg_?id|message_?id|log_?type|subtype)$', re.I)
+                    r'op|kind|result_?type|msg_?id|message_?id|log_?type|subtype|logger|logger_?name)$', re.I)
+# Fields holding the message itself, whose content may name the event.
+MESSAGE = re.compile(r'(^|[._-])(body|message|msg|log|text|payload)$', re.I)
+_KV = re.compile(r'(?<![\w.])([A-Za-z_][\w.]*)=\\?"?([\w.:-]+)')
+_DEPTH = 3
 _MASKS = [(re.compile(r'"[^"]*"'), '<s>'), (re.compile(r"'[^']*'"), '<s>'),
           (re.compile(r'\b[\w.+-]+@[\w-]+\.[\w.]+\b'), '<email>'),
           (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b'), '<ip>'),
@@ -200,11 +207,40 @@ class Shapes:
             columns = chunk.naming_columns
             return 'row:' + (', '.join(f'{c}={parsed.get(c, "")}' for c in columns) if columns else 'all')
         if parsed is not None:
-            keys = sorted(parsed)
-            naming = sorted(f'{k}={parsed[k]}' for k in keys if NAMING.search(k.split('@')[-1]) and
-                            isinstance(parsed[k], (str, int, bool)) and len(str(parsed[k])) <= 60)
-            return 'fields:' + ','.join(keys) + (' | ' + ', '.join(naming) if naming else '')
-        program, message = _syslog_parts(record)
+            return 'fields:' + self._fields(parsed, 0)
+        return self._text(*_syslog_parts(record))
+
+    def _fields(self, parsed: dict[str, Any], depth: int) -> str:
+        keys = sorted(parsed)
+        naming = sorted(f'{k}={parsed[k]}' for k in keys if NAMING.search(k.split('@')[-1]) and
+                        isinstance(parsed[k], (str, int, bool)) and len(str(parsed[k])) <= 60)
+        signature = ','.join(keys) + (' | ' + ', '.join(naming) if naming else '')
+        message = next((k for k in keys if MESSAGE.search(k.split('@')[-1]) and isinstance(parsed[k], str)
+                        and parsed[k].strip()), None)
+        if message and depth < _DEPTH:
+            inner = self._inner(parsed[message], depth + 1, drain=not naming)
+            if inner:
+                signature += f' > {message}: {inner}'
+        return signature
+
+    def _inner(self, text: str, depth: int, drain: bool) -> str | None:
+        """The shape of a message field's content: JSON in it, naming key=value pairs, or (only when nothing
+        else names the event) its masked text."""
+        text = text.replace('\ufeff', '').strip()
+        start = text.find('{')
+        if start >= 0:
+            try:
+                inner = json.loads(text[start:])
+            except ValueError:
+                inner = None
+            if isinstance(inner, dict):
+                return 'json:' + self._fields(_flatten(inner), depth)
+        pairs = sorted({f'{k}={v}' for k, v in _KV.findall(text) if NAMING.search(k) and len(v) <= 60})
+        if pairs:
+            return 'kv:' + ', '.join(pairs)
+        return self._text('', text) if drain else None
+
+    def _text(self, program: str, message: str) -> str:
         tokens = mask(message)
         bucket = self._templates.setdefault((program, len(tokens)), [])
         for template in bucket:
@@ -213,12 +249,27 @@ class Shapes:
                 merged = [a if a == b else WILD for a, b in zip(template, tokens)]
                 old = f"text:{program}|{' '.join(template)}"
                 new = f"text:{program}|{' '.join(merged)}"
-                if new != old and old in self.shapes:
-                    self.shapes[new] = {**self.shapes.pop(old), 'signature': new}
+                if new != old:
+                    self._rename(old, new)
                 template[:] = merged
                 return new
         bucket.append(tokens)
         return f"text:{program}|{' '.join(tokens)}"
+
+    def _rename(self, old: str, new: str) -> None:
+        """A text template widened: rename the shapes that end in it (a message inside a record ends its
+        signature), merging into a shape that already has the new name."""
+        for key in [k for k in self.shapes if k.endswith(old)]:
+            shape = self.shapes.pop(key)
+            renamed = key[:-len(old)] + new
+            into = self.shapes.get(renamed)
+            if into is None:
+                self.shapes[renamed] = {**shape, 'signature': renamed}
+                continue
+            into['count'] += shape['count']
+            into['known'] = into['known'] or shape['known']
+            into['streams'] += [s for s in shape['streams'] if s not in into['streams']]
+            into['examples'] = (into['examples'] + shape['examples'])[:self.examples]
 
     def add(self, chunk: Chunk, index: int, stream_id: int, part: int = 0) -> bool:
         """Count a record; True if it started a shape not seen before (known ones included).

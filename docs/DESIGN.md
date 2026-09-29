@@ -219,7 +219,9 @@ stroom-fastmcp-server/
   tests/                  # respx-mocked Stroom, recorded fixtures
 ```
 
-**Config (`STROOM_MCP_*`)**: `stroom_url`, `stroom_ca_certs`, `stroom_request_timeout`, `keycloak_realm_url`, `keycloak_audience`, `stroom_token_audience`, `es_url` + impersonator credentials, `workspace_folder` (default `MCP Workspace`), `conventions_dir`, `default_convention`, `event_logging_version`, `max_response_chars`, `max_stream_chars`, `step_timeout_ms`, `audit_log_file`, `host`, `port`, TLS files.
+**Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in `docs/DEPLOYMENT.md`.
+
+**Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom, Keycloak and Elasticsearch are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and Keycloak, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
 
 **Dependencies**: `fastmcp`, `httpx`, `pydantic-settings`, `lxml` (local XSD validation and XSLT well-formedness), `elasticsearch`, `pyyaml`; dev: `pytest`, `pytest-asyncio`, `respx`.
 
@@ -361,7 +363,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `survey_feed` | Sample an existing feed's streams spread over its lifetime, reading only the head of each (characters, parts and records capped), and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`. Continues with `skip_stream_ids` and `known_signatures`, or, given a `build`, from the build's `<FEED> - Survey` doc, which it keeps up to date | `meta/v1/find`, `data/v1/fetch` |
+| `survey_feed` | Sample an existing feed's streams spread over its lifetime, reading only the head of each (characters, parts and records capped), and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`, and says plainly whether the feed is covered yet. A message-like field (body, message...) is unwrapped: JSON inside it (after any prefix or byte order mark) is signed by its fields and naming values, and naming `key=value` pairs keep their values, so a wrapper such as syslog shipped as JSON does not hide the kinds of event. Continues with `skip_stream_ids` and `known_signatures`, or, given a `build`, from the build's `<FEED> - Survey` doc, which it keeps up to date | `meta/v1/find`, `data/v1/fetch` |
 
 **Diagnosis** (`tools/diagnosis.py`, read-only)
 
@@ -466,6 +468,8 @@ All work happens in the workspace; promotion is the approval-gated step that put
 - A change to an existing production doc is made on a working copy in the workspace. On promotion the server backs up the production doc to `MCP Workspace/backups/`, writes the copy's content into it and removes the copy.
 - Processor filters on workspace pipelines stay scoped to sample stream ids, one task at a time (`sample_max_tasks`). Promotion pre-creates each promoted pipeline's filter for its feed, from the promotion time (new data only), with the feed task limit, disabled: the user reviews the pipeline through the link and enables it, after disabling any earlier version that processes the same feed.
 - A translation pipeline only processes streams from the build's own feeds: its Events land in the input's feed, so processing a production stream would put test Events into the production feed. Production records are stepped in place, or copied into a test feed. Indexing pipelines write to an index, so they are not limited this way.
+- Before promotion, `list_build` shows what the build's pipelines still lack: a clean `step_sample` or `step_records` of their current code (stepping remembers, per pipeline, a hash of the code that stepped clean, draft or saved), and, for new pipelines, a Documentation doc. `promote_build` puts these warnings in the approval, so the user decides with them in view. The memory is per process: after a restart, or on another replica, promotion says it has no record of a clean step.
+- Standing instructions come back with `start_build` (given the feeds) and `build_translation_xslt`, not only from `get_instructions`, so a model that skips that step still sees them.
 - Anything not promoted stays in the workspace, tagged for a person to clear.
 
 **Approval gates (A tools)**

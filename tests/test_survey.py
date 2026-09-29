@@ -37,6 +37,41 @@ def test_json_groups_by_fields_and_naming_values():
     assert shapes.shapes['fields:action,ts,user | action=login']['count'] == 2
 
 
+def wrapped(logger: str, message: str, host: str = 'kc-1') -> dict:
+    """Syslog shipped as JSON, whose body is an app prefix, a byte order mark and a JSON log record."""
+    record = {'timestamp': 't', 'loggerName': logger, 'level': 'INFO', 'message': message}
+    return {'timestamp': 't', 'hostname': host, 'facility': 1, 'severity': 6, 'priority': 14, 'version': 1,
+            'body': f'keycloak 1234 {logger} - ﻿' + json.dumps(record)}
+
+
+def test_wrapped_messages_are_unwrapped_to_the_kind_of_event():
+    text = json.dumps([
+        wrapped('org.keycloak.events', 'type="LOGIN", realmId=r1, userId=u1, ipAddress=192.0.2.1'),
+        wrapped('org.keycloak.events', 'type="LOGIN", realmId=r1, userId=u2, ipAddress=192.0.2.2', host='kc-2'),
+        wrapped('org.keycloak.events', 'type="LOGIN_ERROR", realmId=r1, error="invalid_user_credentials"'),
+        wrapped('org.infinispan.CLUSTER', 'ISPN000094: Received new cluster view 42'),
+        wrapped('org.infinispan.CLUSTER', 'ISPN000094: Received new cluster view 43'),
+    ])
+    shapes, _ = shapes_of(text)
+    kinds = {k.split(' > body: ')[1]: v['count'] for k, v in shapes.shapes.items()}
+    prefix = 'json:level,loggerName,message,timestamp | '
+    assert kinds == {
+        prefix + 'loggerName=org.keycloak.events > message: kv:type=LOGIN': 2,
+        prefix + 'loggerName=org.keycloak.events > message: kv:type=LOGIN_ERROR': 1,
+        # A logger names these, so their free text isn't split further.
+        prefix + 'loggerName=org.infinispan.CLUSTER': 2,
+    }
+
+
+def test_free_text_bodies_are_masked_when_nothing_else_names_them():
+    text = json.dumps([{'host': 'a', 'message': 'Accepted password for frank from 192.0.2.44'},
+                       {'host': 'b', 'message': 'Accepted password for grace from 192.0.2.45'},
+                       {'host': 'a', 'message': 'Disk /dev/sda1 is 91% full'}])
+    shapes, _ = shapes_of(text)
+    assert sorted(v['count'] for v in shapes.shapes.values()) == [1, 2]
+    assert 'fields:host,message > message: text:|Accepted password for <*> from <ip>' in shapes.shapes
+
+
 def test_delimited_groups_by_naming_or_low_variety_columns():
     named = 'time,user,action\n' + '\n'.join(f'2026-09-28 08:0{i}:00,u{i},{a}' for i, a in enumerate('ab' * 4))
     shapes, chunk = shapes_of(named)
@@ -97,7 +132,7 @@ def test_survey_doc_round_trips_and_merges():
               'new_shapes': 1, 'time_range': {'oldest': 't0', 'newest': 't1'}}
     state = merge(None, result, first_shapes, 2)
     markdown = render(state)
-    assert '| 1 | fields:action \| action=login | 5 | 100.0% | 1 |' in markdown
+    assert r'| 1 | fields:action \| action=login | 5 | 100.0% | 1 |' in markdown
     assert 'Stream 4, part 0, record 0:' in markdown and '{"action": "login", "user": "a|b"}' in markdown
     again = read_state(markdown)
     assert again == state
