@@ -1,7 +1,7 @@
 """Sampling an existing feed to learn which kinds of event it holds."""
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -9,9 +9,10 @@ from pydantic import Field
 
 from security.guard import guard_from
 from tools.streams import _term
+from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 from utils.survey import Shapes, share, split_records
-from utils.surveydoc import doc_name, merge, read_state, render
+from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
 
 
 def _iso(ms: int) -> str:
@@ -174,6 +175,7 @@ async def survey_feed(
     counts = Counter({s['signature']: s['count'] for s in found})
     new_shapes = [s for s in found if not s['known']]
     to_step = new_shapes if known_signatures else found
+    drop = dropped(state)
     read_ids = [p['stream'] for p in per_stream if 'records' in p]
     saturated = quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
     result = {
@@ -185,9 +187,13 @@ async def survey_feed(
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],
                     'share_percent': share(counts, s['signature']), 'streams': s['streams'][:10],
                     'example': s['examples'][0]['text'][:500] if s['examples'] else None,
-                    'locations': [e['location'] for e in s['examples']]} for s in found][:60],
+                    'locations': [e['location'] for e in s['examples']],
+                    **({'handling': 'drop', 'reason': drop[s['signature']]} if s['signature'] in drop else {})}
+                   for s in found][:60],
         'new_shapes': len(new_shapes),
-        'locations': [{**e['location'], 'shape': s['signature']} for s in to_step for e in s['examples']],
+        # Records of a kind left untranslated are stepped too, expecting no Event.
+        'locations': [{**e['location'], 'shape': s['signature'], **({'expect': 'none'} if s['signature'] in drop else {})}
+                      for s in to_step for e in s['examples']],
         'hint': _hint(saturated, new_shapes, known_signatures),
     }
     return await _keep(ctx, build, record, state, result, shapes.shapes, examples_per_shape)
@@ -217,6 +223,60 @@ async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, 
     return result
 
 
+async def set_shape_handling(
+        ctx: Context,
+        build: Annotated[str, Field(description="The build holding the feed's survey doc.")],
+        feed: Annotated[str, Field(description="The surveyed feed.")],
+        shapes: Annotated[list[str], Field(description="Kinds of event: their signatures from survey_feed, or text "
+                                                       "found in exactly one signature, e.g. 'loggerName=org.jgroups'.")],
+        handling: Annotated[Literal['drop', 'translate'], Field(
+            description="drop: the pipeline deliberately writes no Event for these records; translate: undo that.")],
+        reason: Annotated[str, Field(description="Why, in the user's words, e.g. 'cluster housekeeping, no "
+                                                 "security value'.")] = '',
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+) -> dict[str, Any]:
+    """
+    Record, in the build's survey doc, that some kinds of event are left untranslated on purpose (or no longer
+    are). The user confirms: dropping records means they never reach Events. Afterwards survey_feed marks those
+    kinds and gives their locations expect='none', and step_records counts such a record as clean when it
+    produces no Event (and flags it if it produces one). Translate them with a drop rule in the mapping
+    (build_translation_xslt), so they don't reach the 'no mapping matched' warning.
+    """
+    record = await _load_record(ctx, build, feed)
+    state = read_state(record.get('documentation')) if record else None
+    if not state:
+        raise ToolError(f"No survey of '{feed}' in build '{build}': run survey_feed with build first")
+    try:
+        signatures = resolve(state, shapes)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    if handling == 'drop' and not reason.strip():
+        raise ToolError("Give the reason for leaving these records untranslated (the user's words)")
+    total = sum(s['count'] for s in state['shapes'].values()) or 1
+    counts = {s: state['shapes'][s]['count'] for s in signatures}
+    verb = 'Leave untranslated (no Events)' if handling == 'drop' else 'Translate again'
+    details = {'feed': feed, 'build': build, 'reason': reason,
+               'kinds': [f"{s} ({counts[s]} records seen, {round(100 * counts[s] / total, 1)}%)" for s in signatures]}
+    gate = await consent_from(ctx).require(ctx, 'confirmation', 'set_shape_handling',
+                                           f"{verb}: {len(signatures)} kind(s) of event in feed '{feed}'", details,
+                                           confirmation_id)
+    if gate:
+        return gate
+    set_handling(state, signatures, handling, reason.strip(), datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+    record['documentation'] = render(state)
+    await gateway_from(ctx).put_doc(record)
+    left = dropped(state)
+    return {'feed': feed, 'handling': handling, 'shapes': signatures,
+            'left_untranslated': [{'shape': s, 'reason': r} for s, r in left.items()],
+            # The survey's examples of these kinds, to step with step_records.
+            'locations': [{**e['location'], 'shape': s, **({'expect': 'none'} if handling == 'drop' else {})}
+                          for s in signatures for e in state['shapes'][s]['examples']],
+            'hint': ("Add a drop rule for these kinds to the mapping (EventRule with drop=true and conditions that "
+                     "match them), regenerate, and step_records over the survey's locations: those records should "
+                     "produce no Event." if handling == 'drop' else
+                     "Add rules to translate these kinds, regenerate and step_records over their locations.")}
+
+
 def _hint(saturated: bool, new_shapes: list, known: list[str]) -> str:
     translate = ("Translate every shape and check it with step_records(pipeline, locations, draft_code): the feed's "
                  "own records are stepped where they are.")
@@ -231,4 +291,4 @@ def _hint(saturated: bool, new_shapes: list, known: list[str]) -> str:
             "signature so far, until saturated.")
 
 
-ALL_TOOLS = [survey_feed]
+ALL_TOOLS = [survey_feed, set_shape_handling]

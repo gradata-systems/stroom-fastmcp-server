@@ -71,6 +71,9 @@ def authenticate(verb: str) -> list[dict]:
 V1 = [rule('login', 'login', authenticate('Logon')), rule('logout', 'logout', authenticate('Logoff')),
       rule('file read', 'file_read', [{'path': 'EventDetail/View/File/Path', 'field': 'path'}])]
 V2 = V1 + [rule('password change', 'passwd_change', authenticate('ChangePassword'))]
+# The user chooses to leave file reads untranslated.
+V3 = [r for r in V2 if r['name'] != 'file read'] + [
+    {'name': 'file read', 'drop': True, 'when': [{'field': 'action', 'equals': 'file_read'}]}]
 
 
 async def xslt_for(ctx, rules: list[dict]) -> str:
@@ -197,6 +200,24 @@ async def main():
         broad = await stepping.step_sample(ctx, pipeline['uuid'], ids, records_per_stream=2)
         p2.check(broad['verdict'] == 'clean' and broad['records_stepped'] == 2 * len(ids),
                  f"{broad['records_stepped']} records, 2 from each stream, step clean")
+
+        print('\n### 6b. the user leaves one kind of event untranslated')
+        marked = await p2.agreed(sampling.set_shape_handling, ctx=ctx, build=build, feed=source, shapes=['action=file_read'],
+                                 handling='drop', reason='file reads are audited elsewhere')
+        drop_locs = marked['locations']
+        p2.check(len(marked['shapes']) == 1 and drop_locs and all(l['expect'] == 'none' for l in drop_locs),
+                 f"recorded, with {len(drop_locs)} example location(s) to step expecting no Event")
+        still = await stepping.step_records(ctx, pipeline['uuid'], drop_locs)
+        p2.check(still['shapes_not_clean'] == marked['shapes'] and 'left untranslated' in str(still['groups']),
+                 'the current translation still writes Events for them, and is flagged')
+        await translation.update_xslt(ctx, xslt['uuid'], await xslt_for(ctx, V3))
+        rest = [l for l in every if l['shape'] not in marked['shapes']]
+        after = await stepping.step_records(ctx, pipeline['uuid'], rest + drop_locs)
+        p2.check(after['verdict'] == 'clean' and not after['shapes_not_clean']
+                 and after['left_untranslated_as_intended'] == len(drop_locs),
+                 f"with a drop rule every location steps clean, {after['left_untranslated_as_intended']} left untranslated")
+        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['documentation']
+        p2.check('left untranslated: file reads are audited elsewhere' in record, 'the survey doc shows the choice and why')
 
         print('\n### 7. a big single-line stream is read from its head only')
         big_feed = f'SRC-BIG-{stamp}'

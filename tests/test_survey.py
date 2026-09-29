@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from utils.survey import Shapes, mask, sample_text, split_records
 
@@ -146,3 +147,21 @@ def test_survey_doc_round_trips_and_merges():
     assert merged['streams_read'] == [1, 2, 4] and merged['saturated'] and len(merged['surveys']) == 2
     assert 'the feed looks covered' in render(merged)
     assert read_state('no state here') is None
+
+
+def test_kinds_left_untranslated_are_recorded_and_shown():
+    from utils.surveydoc import dropped, read_state, render, resolve, set_handling
+    state = {'feed': 'F', 'format': 'json array', 'streams_read': [1], 'surveys': [], 'saturated': True,
+             'shapes': {'fields:a | loggerName=org.jgroups.TCP': {'count': 3, 'streams': [1], 'examples': []},
+                        'fields:a | loggerName=org.keycloak.events': {'count': 1, 'streams': [1], 'examples': []}}}
+    signatures = resolve(state, ['org.jgroups'])
+    assert signatures == ['fields:a | loggerName=org.jgroups.TCP']
+    with pytest.raises(ValueError, match='matches 2 kinds'):
+        resolve(state, ['loggerName='])
+    set_handling(state, signatures, 'drop', 'cluster chatter', 'now')
+    assert dropped(state) == {'fields:a | loggerName=org.jgroups.TCP': 'cluster chatter'}
+    markdown = render(state)
+    assert 'left untranslated: cluster chatter' in markdown and '1 kind(s) are left untranslated' in markdown
+    assert dropped(read_state(markdown)) == dropped(state)  # survives the round trip through the doc
+    set_handling(state, signatures, 'translate', '', 'later')
+    assert dropped(state) == {}

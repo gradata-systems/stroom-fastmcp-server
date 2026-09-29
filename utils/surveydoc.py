@@ -2,8 +2,9 @@
 
 The doc shows which kinds of event the feed holds (counts, shares, streams, examples with where they are),
 and ends with a fenced JSON block that survey_feed reads back to carry on where the last survey stopped:
-which streams were read and which shapes are known. Example records are stored as they are; who can read
-them is down to the permissions on the folder the doc lives in, as for the feed's data.
+which streams were read, which shapes are known, and which kinds the user chose to leave untranslated
+(set_shape_handling). Example records are stored as they are; who can read them is down to the permissions
+on the folder the doc lives in, as for the feed's data.
 """
 import json
 import re
@@ -26,6 +27,35 @@ def read_state(markdown: str | None) -> dict[str, Any] | None:
         return json.loads(match.group(1))
     except ValueError:
         return None
+
+
+def resolve(state: dict[str, Any], names: list[str]) -> list[str]:
+    """Shape signatures for the names given: exact signatures, or text found in exactly one signature."""
+    out = []
+    for name in names:
+        if name in state['shapes']:
+            out.append(name)
+            continue
+        hits = [s for s in state['shapes'] if name in s]
+        if len(hits) != 1:
+            raise ValueError(f"'{name}' matches {len(hits)} kinds of event in the survey; give the exact signature")
+        out.append(hits[0])
+    return list(dict.fromkeys(out))
+
+
+def set_handling(state: dict[str, Any], signatures: list[str], handling: str, reason: str, at: str) -> None:
+    """Record that these kinds are left untranslated (drop), or are translated again (translate)."""
+    kept = state.setdefault('handling', {})
+    for signature in signatures:
+        if handling == 'drop':
+            kept[signature] = {'handling': 'drop', 'reason': reason, 'at': at}
+        else:
+            kept.pop(signature, None)
+
+
+def dropped(state: dict[str, Any] | None) -> dict[str, str]:
+    """Signature -> reason, for the kinds of event the user chose to leave untranslated."""
+    return {s: h['reason'] for s, h in ((state or {}).get('handling') or {}).items() if h.get('handling') == 'drop'}
 
 
 def merge(state: dict[str, Any] | None, result: dict[str, Any], shapes: dict[str, dict[str, Any]],
@@ -63,6 +93,7 @@ def _cell(text: str, width: int = 120) -> str:
 def render(state: dict[str, Any]) -> str:
     shapes = sorted(state['shapes'].items(), key=lambda kv: -kv[1]['count'])
     total = sum(s['count'] for _, s in shapes) or 1
+    drop = dropped(state)
     span = state.get('time_range') or {}
     last = state['surveys'][-1] if state['surveys'] else {}
     lines = [f"# {doc_name(state['feed'])}", '',
@@ -70,15 +101,18 @@ def render(state: dict[str, Any]) -> str:
              f"{sum(s['records'] for s in state['surveys'])} records in {len(state['streams_read'])} streams"
              + (f", created {span.get('oldest')} to {span.get('newest')}" if span else '') + '. '
              + ('The last survey found nothing new: the feed looks covered.' if state.get('saturated')
-                else 'Not saturated yet: more streams may show more kinds of event.'), '',
+                else 'Not saturated yet: more streams may show more kinds of event.')
+             + (f" {len(drop)} kind(s) are left untranslated by choice (Handling)." if drop else ''), '',
              f"Last survey: {last.get('at')}. Examples are the feed's own records; where each one is (stream:part:record) "
              "is given so it can be stepped. Streams expire under retention, so older locations may be gone.", '',
              '## Kinds of event', '',
-             '| # | Shape | Records | Share | Streams | Example |', '| --- | --- | --- | --- | --- | --- |']
+             '| # | Shape | Records | Share | Streams | Handling | Example |',
+             '| --- | --- | --- | --- | --- | --- | --- |']
     for n, (signature, shape) in enumerate(shapes, 1):
         example = shape['examples'][0]['text'] if shape['examples'] else ''
+        handling = f"left untranslated: {_cell(drop[signature], 60)}" if signature in drop else 'translate'
         lines.append(f"| {n} | {_cell(signature, 90)} | {shape['count']} | {round(100 * shape['count'] / total, 1)}% | "
-                     f"{len(shape['streams'])} | {_cell(example, 100)} |")
+                     f"{len(shape['streams'])} | {handling} | {_cell(example, 100)} |")
     lines += ['', '## Examples', '']
     for n, (signature, shape) in enumerate(shapes, 1):
         lines.append(f"**{n}. {signature}**")

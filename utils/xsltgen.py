@@ -72,6 +72,8 @@ class EventRule(BaseModel):
                                                                     "(put such a rule last).")
     fields: list[FieldMapping] = Field(default_factory=list, description="Fields for this kind of event; they "
                                                                           "override common fields with the same path.")
+    drop: bool = Field(False, description="True: records matching this rule are left untranslated on purpose "
+                                          "(no Event, no warning), e.g. kinds set_shape_handling marked drop. No fields.")
 
 
 class TranslationMapping(BaseModel):
@@ -332,7 +334,10 @@ class _Generator:
         m = self.m
         if m.input == 'xml' and not (m.root and m.record):
             self._note(self.problems, "xml input needs root and record, e.g. root='logons', record='logon'")
-        trees = [(rule, self.tree(rule)) for rule in m.events]
+        for rule in m.events:
+            if rule.drop and rule.fields:
+                self._note(self.problems, f"[{rule.name}] a drop rule writes no Event, so it takes no fields")
+        trees = [(rule, None if rule.drop else self.tree(rule)) for rule in m.events]
         catch_all = [r.name for r in m.events[:-1] if not r.when]
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
@@ -355,10 +360,15 @@ class _Generator:
             test = ' and '.join(f'({self.condition(c)})' for c in rule.when)
             holder = (etree.SubElement(body, f'{{{XSL}}}when', test=test) if test
                       else etree.SubElement(body, f'{{{XSL}}}otherwise')) if conditional else body
-            self.emit(etree.SubElement(holder, f'{{{EVT}}}Event'), root)
-            summary.append({'event': rule.name, 'when': [self.condition(c) for c in rule.when] or 'every record',
-                            'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
-                                              for e in m.common + rule.fields})})
+            if rule.drop:
+                holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
+                summary.append({'event': rule.name, 'when': [self.condition(c) for c in rule.when] or 'every record',
+                                'dropped': True})
+            else:
+                self.emit(etree.SubElement(holder, f'{{{EVT}}}Event'), root)
+                summary.append({'event': rule.name, 'when': [self.condition(c) for c in rule.when] or 'every record',
+                                'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
+                                                  for e in m.common + rule.fields})})
             if not test and conditional:
                 break
         if conditional and all(rule.when for rule in m.events) and m.unmatched == 'warn':

@@ -199,6 +199,10 @@ pipeline once the user approves.{_docs(source_docs)}"""
 3. survey_feed again with the same build: it carries on from the survey doc (streams read, shapes known). New
    shapes: add rules, regenerate, and step_records over every location so far. Repeat until a survey's coverage
    says covered, or every stream has been read. Until then, say plainly that the feed is not covered yet.
+   Kinds that may not be worth translating (housekeeping, debug, noise): show them with their share and ask the
+   user. Never drop records on your own judgement. If the user agrees, set_shape_handling handling=drop with their
+   reason (they confirm it), add a drop rule for those kinds to the mapping (drop=true, conditions that match them),
+   and step_records: their locations expect no Event and count as clean when none is written.
 4. Broad check: step_sample over three of the surveyed streams (newest, oldest, middle) with records_per_stream=200,
    to catch variants the examples did not show; fix and step again until clean. Then tell the user which kinds of
    event the pipeline covers and their share of the data.

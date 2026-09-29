@@ -222,6 +222,8 @@ class RecordLocation(BaseModel):
     part: int = 0
     record: int
     shape: str | None = Field(None, description="The survey shape this record is an example of, if any.")
+    expect: Literal['event', 'none'] = Field('event', description="none: a kind the user chose to leave "
+                                                                  "untranslated (survey_feed sets it), so no Event is right.")
 
 
 _EVENT = re.compile(r'<(?:[\w.-]+:)?Event[\s>/]')
@@ -255,21 +257,31 @@ async def step_records(
         found = _markers(result, key) + _empty_output(result, output_element, key)
         output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
         events = len(_EVENT.findall(output))
-        if events == 0 and not found:
+        if loc.expect == 'none':
+            # Left untranslated by choice: the no-elements check doesn't apply, but an Event does.
+            found = [f for f in found if not f['message'].startswith('Output contains no XML elements')]
+            if events:
+                found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
+                              'message': f'The record produced {events} Event(s), but its kind is left untranslated'})
+        elif events == 0 and not found:
             found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
                           'message': 'The record produced no Event'})
         markers += found
-        records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found)})
+        records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found),
+                        **({'expect': 'none'} if loc.expect == 'none' else {})})
 
     summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records))
     for group in summary['groups']:
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
     missing = [r['record'] for r in records if r.get('found') is False]
-    uncovered = sorted({r['shape'] for r in records if r.get('shape') and (r.get('events') == 0 or r.get('errors'))})
+    uncovered = sorted({r['shape'] for r in records if r.get('shape') and (
+        r.get('errors') or (r.get('events') == 0 and r.get('expect') != 'none'))})
     result = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records) - len(missing),
               'records_with_errors': sum(1 for r in records if r.get('errors')), 'records_not_found': missing,
-              'shapes_not_clean': uncovered, 'draft_code_used': sorted(draft_code or {}), **summary,
+              'shapes_not_clean': uncovered,
+              'left_untranslated_as_intended': sum(1 for r in records if r.get('expect') == 'none' and not r.get('errors')),
+              'draft_code_used': sorted(draft_code or {}), **summary,
               'records': records[:100]}
     if not uncovered:
         await remember_clean(ctx, pipeline_uuid, draft_code, result)

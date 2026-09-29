@@ -131,3 +131,28 @@ def test_each_field_needs_exactly_one_source():
 def test_helpers():
     assert literal("o'neil") == "'o''neil'"
     assert pattern_problem("yyyy-MM-dd'T'HH:mm:ss.SSSX") is None and pattern_problem('dd/MMM/yyyy:HH:mm:ss Z') is None
+
+
+def test_drop_rules_leave_records_untranslated_without_a_warning():
+    rules = [{'name': 'keepalive', 'drop': True, 'when': [{'field': 'action', 'equals': 'keepalive'}]},
+             {'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON}]
+    # With warnings on, keepalive records are caught by their own rule before the warning.
+    warned = generate(mapping(events=rules, unmatched='warn'), SCHEMA, '4.1.0')['xslt']
+    assert warned.index('left untranslated on purpose') < warned.index("stroom:log('WARN'")
+    # Stroom's own functions only compile inside Stroom, so run it without the warning.
+    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    assert result['events'][0] == {'event': 'keepalive', 'when': ["data[@name='action']/@value = 'keepalive'"],
+                                   'dropped': True}
+    events = transform(result['xslt'], RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert len(events.findall('{event-logging:3}Event')) == 1  # the keepalive record wrote nothing
+    assert 'keepalive: left untranslated on purpose' in result['xslt']
+
+
+def test_a_drop_rule_takes_no_fields():
+    rules = [{'name': 'noise', 'drop': True, 'when': [{'field': 'action', 'equals': 'x'}],
+              'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}]},
+             {'name': 'logon', 'fields': LOGON}]
+    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    assert not result['ok'] and any('takes no fields' in p for p in result['problems'])
