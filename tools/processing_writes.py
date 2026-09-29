@@ -110,7 +110,8 @@ async def _events_source(ctx: Context, pipeline: dict[str, Any], source_uuid: st
     if not source_uuid:
         raise ToolError("Indexing Events needs source_pipeline_uuid: the events pipeline this server built that "
                         "produced them. The filter only selects Events from that pipeline.")
-    source = await _managed_pipeline(ctx, source_uuid)
+    source = await stroom.get_doc('Pipeline', source_uuid)
+    await guard_from(ctx).check_built({'type': 'Pipeline', 'uuid': source_uuid, 'name': source.get('name')})
     if await _is_indexing(stroom, source_uuid):
         raise ToolError(f"'{source['name']}' is an indexing pipeline, not the events pipeline that produced the Events")
     foreign = sorted(m['id'] for m in metas if m.get('pipelineUuid') != source_uuid)

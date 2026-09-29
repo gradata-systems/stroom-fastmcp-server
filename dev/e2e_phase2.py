@@ -244,6 +244,9 @@ async def promotion(ctx, csv: dict, stamp: str):
     check(len(result['promoted']) >= 5, f"promoted: {result['promoted']}")
     info = await stroom.post('/explorer/v2/info', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid']})
     check(info['explorerNode']['uuid'] == csv['pipeline']['uuid'], 'pipeline kept its UUID')
+    tags = (await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'],
+                                                             'name': csv['pipeline']['name']})).get('tags') or []
+    check('mcp-generated' in tags and 'mcp-managed' not in tags, f"promoted pipeline keeps mcp-generated only: {tags}")
 
     fix_build = f'e2e-fix-{stamp}'
     copy = await agreed(pipeline_writes.copy_pipeline, ctx=ctx, build=fix_build, source_uuid=csv['pipeline']['uuid'],
@@ -263,6 +266,14 @@ async def promotion(ctx, csv: dict, stamp: str):
     print(f"    {result['promoted']}")
     now = (await stroom.get_doc('XSLT', csv['xslt']['uuid']))['data']
     check('Interactive user logon' in now, 'working copy written back over the production XSLT')
+    backups = []
+    for _ in range(10):  # explorer search indexes new docs after a short delay
+        backups = [v['docRef'] for v in (await stroom.find_documents(f"{csv['xslt']['name']} backup*", ['XSLT'], 10)).get('values') or []]
+        if backups:
+            break
+        await asyncio.sleep(2)
+    backup_tags = [(await stroom.post('/explorer/v2/getFromDocRef', b)).get('tags') or [] for b in backups]
+    check(backups and all('mcp-generated' in tags for tags in backup_tags), f"the backup copy is tagged mcp-generated: {backup_tags}")
 
 
 async def main():

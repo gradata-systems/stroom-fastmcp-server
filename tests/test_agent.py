@@ -245,23 +245,34 @@ def test_await_enable_shows_the_pipeline_link():
     assert 'User on the indexing filter: enable it for me' in final['request']
 
 
-def test_existing_feed_routing_surveys_until_nothing_new():
+def test_existing_feed_steps_in_place_until_nothing_new_then_hands_over():
     assert g.start({'mode': 'onboard_existing_feed'}) == 'survey'
-    assert g.after_survey({'raw_stream_ids': [5]}) == 'draft_translation' and g.after_survey({}) == 'ask_for_help'
+    assert g.after_survey({'survey': {'locations': [{'stream': 5, 'part': 0, 'record': 0}]}}) == 'draft_translation'
+    assert g.after_survey({}) == 'ask_for_help'
     existing = {'mode': 'onboard_existing_feed', 'step_verdict': 'clean'}
     assert g.after_step({**existing, 'survey': {'saturated': False}}) == 'resurvey'
-    assert g.after_step({**existing, 'survey': {'saturated': True}}) == 'process_sample'
+    # no processing in this mode: once covered, document and promote
+    assert g.after_step({**existing, 'survey': {'saturated': True}}) == 'document'
     assert g.after_resurvey({'survey': {'new_shapes': 2}}) == 'draft_translation'
-    assert g.after_resurvey({'survey': {'new_shapes': 0, 'saturated': True}}) == 'process_sample'
+    assert g.after_resurvey({'survey': {'new_shapes': 0, 'saturated': True}}) == 'document'
     assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': 1}}) == 'resurvey'
-    assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': g.MAX_SURVEYS}}) == 'process_sample'
+    assert g.after_resurvey({'survey': {'new_shapes': 0}, 'attempts': {'resurvey': g.MAX_SURVEYS}}) == 'document'
+    assert g.after_step({'mode': 'onboard', 'step_verdict': 'clean'}) == 'process_sample'
 
 
-def test_harvest_picks_up_the_survey_and_the_test_feed():
+def test_harvest_picks_up_the_survey_and_its_locations():
     update = harvest([
         tool_message('survey_feed', {'feed': 'SRC', 'oldest_stream_read': 102, 'saturated': False, 'new_shapes': 1,
-                                     'shapes': [{'signature': 'fields:a | action=login', 'count': 5, 'example': '{}'}]}),
-        tool_message('create_feed', {'name': 'SRC-MCP-TEST', 'uuid': 'f'}),
+                                     'shapes': [{'signature': 'fields:a | action=login', 'count': 5, 'example': '{}'}],
+                                     'locations': [{'stream': 105, 'part': 0, 'record': 0, 'shape': 'fields:a | action=login'}]}),
+        tool_message('step_records', {'verdict': 'clean', 'groups': []}),
     ])
     assert update['survey']['signatures'] == ['fields:a | action=login'] and update['survey']['oldest_stream_read'] == 102
-    assert update['test_feed'] == 'SRC-MCP-TEST'
+    assert update['survey']['locations'][0]['stream'] == 105 and update['step_verdict'] == 'clean'
+    assert 'test_feed' not in update
+
+
+def test_the_handover_is_part_of_documenting_an_existing_feed():
+    prompt = g._prompt('document', {'mode': 'onboard_existing_feed', 'survey': {'feed': 'SRC'}})
+    assert "processing that feed is the user's to start" in prompt and 'index_event_data' in prompt
+    assert 'index_event_data' not in g._prompt('document', {'mode': 'onboard'})

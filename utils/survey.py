@@ -169,16 +169,20 @@ class Shapes:
         bucket.append(tokens)
         return f"text:{program}|{' '.join(tokens)}"
 
-    def add(self, chunk: Chunk, index: int, stream_id: int) -> bool:
-        """Count a record; True if it started a shape not seen before (known ones included)."""
+    def add(self, chunk: Chunk, index: int, stream_id: int, part: int = 0) -> bool:
+        """Count a record; True if it started a shape not seen before (known ones included).
+
+        Examples keep where the record is (stream, part, record index), so it can be stepped in place.
+        """
         signature = self.signature(chunk, index)
         new = signature not in self.shapes
         shape = self._add_shape(signature)
         shape['count'] += 1
         if stream_id not in shape['streams']:
             shape['streams'].append(stream_id)
-        if len(shape['examples']) < self.examples and chunk.records[index] not in shape['examples']:
-            shape['examples'].append(chunk.records[index])
+        text = chunk.records[index]
+        if len(shape['examples']) < self.examples and all(e['text'] != text for e in shape['examples']):
+            shape['examples'].append({'text': text, 'location': {'stream': stream_id, 'part': part, 'record': index}})
         return new
 
 

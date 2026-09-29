@@ -6,7 +6,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from security.guard import MANAGED, build_tag, guard_from
+from security.guard import GENERATED, MANAGED, build_tag, guard_from
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
@@ -130,6 +130,7 @@ async def promote_build(
             await stroom.request('PUT', '/explorer/v2/move', {'explorerNodes': [node], 'destinationFolder': folder,
                                                               'permissionInheritance': 'DESTINATION'})
             # Now production content: the agent may no longer change it directly.
+            # mcp-generated stays, so it is still known as the server's own.
             await guard.untag([{k: doc[k] for k in ('type', 'uuid', 'name')}], [MANAGED, build_tag(build)])
             done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
         else:
@@ -144,10 +145,13 @@ async def promote_build(
             backups = await guard.build_folder('backups')
             original_node = await stroom.post('/explorer/v2/getFromDocRef',
                                               {'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']})
-            await stroom.post('/explorer/v2/copy', {
+            copied = await stroom.post('/explorer/v2/copy', {
                 'explorerNodes': [original_node], 'destinationFolder': {k: v for k, v in backups.items() if not k.startswith('_')},
                 'permissionInheritance': 'DESTINATION', 'allowRename': True,
                 'docName': f"{original['name']} backup {datetime.now(timezone.utc):%Y%m%d%H%M%S}"})
+            backup_refs = [n.get('docRef', n) for n in (copied or {}).get('explorerNodes') or []]
+            if backup_refs:
+                await guard.tag([{k: r[k] for k in ('type', 'uuid', 'name')} for r in backup_refs], [GENERATED])
             for key in fields:
                 if key in copy_doc:
                     original[key] = copy_doc[key]

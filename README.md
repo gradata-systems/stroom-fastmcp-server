@@ -4,7 +4,7 @@ MCP server that lets a chat client or agent take a raw data sample and build wor
 content for it: a feed, an event-logging translation pipeline, and an indexing (Lucene or Elasticsearch)
 pipeline, stepped and verified before anything is promoted. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 58 tools:
+Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 59 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -14,7 +14,7 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 58 tool
 | Translation | `create_text_converter`, `update_text_converter`, `create_xslt`, `update_xslt` |
 | Pipelines | `create_pipeline`*, `copy_pipeline`*, `set_pipeline_property` |
 | Streams and errors | `find_streams`, `get_stream_children`, `read_stream`, `get_stream_attributes`, `summarise_errors`, `summarise_events` |
-| Stepping | `step_pipeline`, `step_sample`, `compare_outputs` (with unsaved draft code) |
+| Stepping | `step_pipeline`, `step_sample`, `step_records` (chosen records in place), `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
@@ -26,7 +26,8 @@ Status: Phase 4 (LangGraph agent in `agent/`, see below). The server has 58 tool
 
 \* needs the user's confirmation, \*\* needs approval: asked through MCP elicitation where the client supports it,
 otherwise returned as an id to pass back. Everything is written under `MCP Workspace/<build>` and tagged
-`mcp-managed`; only tagged docs can be changed, and promotion moves them into place.
+`mcp-managed` and `mcp-generated`; only `mcp-managed` docs can be changed, and promotion moves them into place,
+removing `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
 
 Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
 - Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards their Keycloak

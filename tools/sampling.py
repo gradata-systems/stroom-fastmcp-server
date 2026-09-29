@@ -8,7 +8,7 @@ from pydantic import Field
 
 from tools.streams import _term, read_records
 from utils.stroom import gateway_from
-from utils.survey import Chunk, Shapes, sample_text, share, split_records
+from utils.survey import Chunk, Shapes, share, split_records
 
 CHARS_PER_STREAM = 2_000_000
 
@@ -31,9 +31,10 @@ async def survey_feed(
     Sample a feed's streams, newest first, and group their records into shapes (kinds of event): by fields
     and event-naming values for structured data, by masked message templates for syslog and other text.
     Stops when quiet_streams streams in a row show nothing new (saturated) or at the limits. Returns each
-    shape with its count, share and examples, and a sample holding a few examples of each (new) shape in
-    the feed's own format, to upload to a test feed in the build and translate. Call again with
-    before_stream_id and known_signatures to look further back for kinds of event not seen yet. Reads only.
+    shape with its count, share and examples, and where each example is (stream, part, record), so the
+    translation can be stepped on the feed's own records with step_records: nothing is copied or processed.
+    Call again with before_stream_id and known_signatures to look further back for kinds of event not seen
+    yet. Reads only.
     """
     stroom = gateway_from(ctx)
     terms = [_term('Feed', feed), _term('Type', stream_type)]
@@ -43,7 +44,7 @@ async def survey_feed(
                if r['meta'].get('status') != 'DELETED']
     if not streams and before_stream_id:
         return {'feed': feed, 'streams_read': [], 'records_read': 0, 'oldest_stream_read': None, 'saturated': True,
-                'shapes': [], 'new_shapes': 0, 'sample': None, 'sample_order': [],
+                'shapes': [], 'new_shapes': 0, 'locations': [],
                 'hint': "No older streams: the whole feed has been surveyed."}
     if not streams:
         raise ToolError(f"No {stream_type} streams in feed '{feed}'" + (f" older than {before_stream_id}" if before_stream_id else ''))
@@ -53,7 +54,7 @@ async def survey_feed(
     for meta in streams:
         parts, _ = await read_records(stroom, meta['id'], 0, 100, None, CHARS_PER_STREAM)
         new_here = 0
-        for text in parts:
+        for part, text in enumerate(parts):
             try:
                 chunk = split_records(text, max_records - records_read)
             except Exception as e:  # a part this detector cannot split
@@ -64,7 +65,7 @@ async def survey_feed(
                 continue
             fmt, first_chunk = fmt or chunk.format, first_chunk or chunk
             for index in range(len(chunk.records)):
-                new = shapes.add(chunk, index, meta['id'])
+                new = shapes.add(chunk, index, meta['id'], part)
                 new_here += new
                 records_read += 1
         for shape in shapes.shapes.values():
@@ -78,8 +79,8 @@ async def survey_feed(
 
     found = sorted((s for s in shapes.shapes.values() if s['count']), key=lambda s: -s['count'])
     new_shapes = [s for s in found if not s['known']]
-    in_sample = new_shapes if known_signatures else found
-    examples = [(s['signature'], e) for s in in_sample for e in s['examples']]
+    to_step = new_shapes if known_signatures else found
+    locations = [{**e['location'], 'shape': s['signature']} for s in to_step for e in s['examples']]
     read_ids = [p['stream'] for p in per_stream if 'stream' in p]
     saturated = quiet >= quiet_streams
     return {
@@ -88,10 +89,10 @@ async def survey_feed(
         'per_stream': per_stream,
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],
                     'share_percent': share(counts, s['signature']), 'streams': s['streams'][:10],
-                    'example': s['examples'][0][:500] if s['examples'] else None} for s in found][:60],
+                    'example': s['examples'][0]['text'][:500] if s['examples'] else None,
+                    'locations': [e['location'] for e in s['examples']]} for s in found][:60],
         'new_shapes': len(new_shapes),
-        'sample': sample_text(first_chunk, [e for _, e in examples]) if examples else None,
-        'sample_order': [sig for sig, _ in examples],
+        'locations': locations,
         'hint': _hint(saturated, new_shapes, known_signatures, read_ids),
     }
 
@@ -100,8 +101,8 @@ def _hint(saturated: bool, new_shapes: list, known: list[str], read_ids: list[in
     if known and not new_shapes:
         return ("No new kinds of event in these streams." + (" The feed looks covered." if saturated else
                 " Look further back with before_stream_id=oldest_stream_read if the feed is older."))
-    return ("Upload `sample` to a test feed in the build (create_feed '<FEED>-MCP-TEST', upload_sample) and "
-            "translate every shape; step_sample it. Then call again with before_stream_id=oldest_stream_read and "
+    return ("Translate every shape and check it with step_records(pipeline, locations, draft_code): the feed's own "
+            "records are stepped where they are. Then call again with before_stream_id=oldest_stream_read and "
             "known_signatures=[every signature so far] to look for kinds of event these streams did not show.")
 
 

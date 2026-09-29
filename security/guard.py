@@ -11,7 +11,10 @@ from fastmcp.exceptions import ToolError
 
 from utils.stroom import StroomGateway
 
+# The agent may change these; the tag comes off when a build is promoted.
 MANAGED = 'mcp-managed'
+# On everything the server creates, for good: find it in Stroom by this tag, promoted or not.
+GENERATED = 'mcp-generated'
 _BUILD = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
 
 
@@ -40,7 +43,7 @@ class WriteGuard:
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': 'Folder', 'docName': name, 'destinationFolder': _strip(parent),
             'permissionInheritance': 'DESTINATION'})
-        await self.tag([_ref(node)], [MANAGED])
+        await self.tag([_ref(node)], [MANAGED, GENERATED])
         return {**node, '_path': f"{parent.get('_path')}/{name}"}
 
     async def build_folder(self, build: str) -> dict[str, Any]:
@@ -84,7 +87,7 @@ class WriteGuard:
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': doc_type, 'docName': name, 'destinationFolder': _strip(folder),
             'permissionInheritance': 'DESTINATION'})
-        await self.tag([_ref(node)], [MANAGED, build_tag(build), *(extra_tags or [])])
+        await self.tag([_ref(node)], [MANAGED, GENERATED, build_tag(build), *(extra_tags or [])])
         return _ref(node)
 
     async def tags(self, ref: dict[str, Any]) -> list[str]:
@@ -97,6 +100,13 @@ class WriteGuard:
             raise ToolError(f"{ref.get('type')} '{ref.get('name') or ref.get('uuid')}' was not created by this server. "
                             "Make a working copy in a build (copy_pipeline) and change that instead; "
                             "promote_build writes it back after approval.")
+        return tags
+
+    async def check_built(self, ref: dict[str, Any]) -> list[str]:
+        """A doc this server generated, whether still in the workspace or promoted."""
+        tags = await self.tags(ref)
+        if GENERATED not in tags and MANAGED not in tags:
+            raise ToolError(f"{ref.get('type')} '{ref.get('name') or ref.get('uuid')}' was not built by this server")
         return tags
 
     async def tag(self, refs: list[dict[str, Any]], tags: list[str]) -> None:

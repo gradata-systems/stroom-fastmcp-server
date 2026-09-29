@@ -34,8 +34,7 @@ class BuildState(TypedDict, total=False):
     template_check: dict[str, Any]    # the last check_index_template result
     template_choice: str              # accept | changed | change_pipeline | change_template
     filter_ready: dict[str, Any]      # an Elasticsearch indexing filter created disabled: id, link
-    survey: dict[str, Any]            # onboard_existing_feed: source feed, shapes seen, how far back, saturated
-    test_feed: str                    # the build's feed that survey samples are uploaded to
+    survey: dict[str, Any]            # onboard_existing_feed: feed, shapes, where their examples are, how far back
     attempts: dict[str, int]
     notes: list[str]                  # short progress notes shown to the user
     last_node: str
@@ -61,9 +60,8 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
                                 'saturated': data.get('saturated'), 'new_shapes': data.get('new_shapes'),
                                 'signatures': [s['signature'] for s in data.get('shapes') or []],
                                 'shapes': [{k: s.get(k) for k in ('signature', 'count', 'example')}
-                                           for s in data.get('shapes') or []][:30]}
-        elif name == 'create_feed' and data.get('name'):
-            update['test_feed'] = data['name']
+                                           for s in data.get('shapes') or []][:30],
+                                'locations': data.get('locations') or []}
         elif name == 'draft_index_mapping' and data.get('plan'):
             update['field_plan'] = data['plan']
         elif name == 'propose_index_template' and data.get('dev_tools'):
@@ -83,7 +81,7 @@ def harvest(messages: list[BaseMessage]) -> dict[str, Any]:
             update['indexing_pipeline' if name == 'create_indexing_pipeline' else 'translation_pipeline'] = data['uuid']
             if data.get('backend'):
                 update['backend'] = data['backend']
-        elif name == 'step_sample' and 'verdict' in data:
+        elif name in ('step_sample', 'step_records') and 'verdict' in data:
             update['step_verdict'] = data['verdict']
             update['last_findings'] = [
                 {k: g.get(k) for k in ('class', 'severity', 'element', 'count', 'examples', 'records')}

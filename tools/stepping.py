@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from tools.pipelines import merge_layers, own_elements
 from utils.stroom import StroomGateway, gateway_from
@@ -174,6 +174,62 @@ async def step_sample(
     return result
 
 
+class RecordLocation(BaseModel):
+    stream: int
+    part: int = 0
+    record: int
+    shape: str | None = Field(None, description="The survey shape this record is an example of, if any.")
+
+
+_EVENT = re.compile(r'<(?:[\w.-]+:)?Event[\s>/]')
+
+
+async def step_records(
+        ctx: Context,
+        pipeline_uuid: PipelineUuid,
+        locations: Annotated[list[RecordLocation], Field(
+            description="Records to step where they are, e.g. survey_feed's locations: {stream, part, record}.")],
+        draft_code: DraftCode = None,
+) -> dict[str, Any]:
+    """
+    Step chosen records of existing streams, in place, and return one verdict for them all, like
+    step_sample: error groups triaged, and per record the events it produced and its errors. Use it with
+    survey_feed's locations to check a translation against every kind of event a feed holds, without copying
+    or processing anything. A record that produces no event is flagged.
+    """
+    stroom = gateway_from(ctx)
+    pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    output_element = pipeline.default_outputs()[-1]
+    markers: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for loc in [RecordLocation.model_validate(x) for x in locations[:stroom.settings.max_sample_records]]:
+        where = {'metaId': loc.stream, 'partIndex': loc.part, 'recordIndex': loc.record}
+        key = record_key(loc.stream, where)
+        result = await _step(stroom, pipeline, loc.stream, 'REFRESH', where, draft_code)
+        if not result.get('foundRecord'):
+            records.append({'record': key, 'shape': loc.shape, 'found': False})
+            continue
+        found = _markers(result, key) + _empty_output(result, output_element, key)
+        output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
+        events = len(_EVENT.findall(output))
+        if events == 0 and not found:
+            found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
+                          'message': 'The record produced no Event'})
+        markers += found
+        records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found)})
+
+    summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records))
+    for group in summary['groups']:
+        group['records'] = sorted({m['record'] for m in markers
+                                   if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
+    missing = [r['record'] for r in records if r.get('found') is False]
+    uncovered = sorted({r['shape'] for r in records if r.get('shape') and (r.get('events') == 0 or r.get('errors'))})
+    return {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records) - len(missing),
+            'records_with_errors': sum(1 for r in records if r.get('errors')), 'records_not_found': missing,
+            'shapes_not_clean': uncovered, 'draft_code_used': sorted(draft_code or {}), **summary,
+            'records': records[:100]}
+
+
 def _field_values(xml: str) -> dict[str, list[str]]:
     """Every value in an output document keyed by a readable path, e.g. 'Event/EventSource/User/Id'.
 
@@ -265,4 +321,4 @@ async def compare_outputs(
             'unchanged': not by_path}
 
 
-ALL_TOOLS = [step_pipeline, step_sample, compare_outputs]
+ALL_TOOLS = [step_pipeline, step_sample, step_records, compare_outputs]

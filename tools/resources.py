@@ -180,20 +180,18 @@ pipeline once the user approves.{_docs(source_docs)}"""
 
     @mcp.prompt(description="Build an events pipeline for a feed that already holds data.")
     def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
-        return f"""Build an events pipeline, then indexing, for the existing feed "{feed}" from the data it already holds.
+        return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only.
 
 1. survey_feed feed={feed}: it samples the newest streams and groups records into kinds of event (shapes), with
-   counts and examples. Not every kind appears in every stream.
-2. start_build. Create a test feed '{feed}-MCP-TEST' in the build with the source feed's encoding, and upload the
-   survey's sample to it. Never process the source feed: its streams are only read and stepped.
-3. Draft the text converter if needed and the translation with build_translation_xslt, one rule per shape, then
-   create_pipeline and step_sample the test feed's streams until clean.
-4. survey_feed again with before_stream_id=oldest_stream_read and known_signatures=every signature so far. New
-   shapes: upload their sample to the test feed, add rules, regenerate, step all test streams. Repeat until a
-   survey is saturated or finds no older streams, then tell the user which kinds of event the pipeline covers
-   and their share of the data.
-5. Continue as onboard_data_source from processing: process the test feed's streams, stage 2, documentation,
-   promotion. Processing the source feed itself is the user's decision at promotion.
+   counts, examples and where each example is. Not every kind appears in every stream. start_build.
+2. Draft the text converter if needed and the translation with build_translation_xslt, one rule per shape, then
+   create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped
+   where they are. Create no feed, upload nothing and process nothing.
+3. survey_feed again with before_stream_id=oldest_stream_read and known_signatures=every signature so far. New
+   shapes: add rules, regenerate, and step_records over every location so far. Repeat until a survey is saturated
+   or finds no older streams, then tell the user which kinds of event the pipeline covers and their share of the data.
+4. write_documentation and promote_build. Processing the source feed with the promoted pipeline is the user's to
+   start; once its Events exist, index_event_data builds the indexing.
 
 {_RULES}{_docs(source_docs)}"""
 

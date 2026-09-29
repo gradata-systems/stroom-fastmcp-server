@@ -128,13 +128,12 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 
 **Build a pipeline for a feed that already holds data**
 
-The user names an existing Raw Events feed instead of giving a sample. Not every kind of event shows up in every stream, so the agent samples stream after stream until more streams add nothing new.
+The user names an existing Raw Events feed instead of giving a sample. Not every kind of event shows up in every stream, so the agent samples stream after stream until more streams add nothing new. It only reads and steps: no feed is created, nothing is uploaded or processed, so there are no filters or streams to clean up.
 
-1. **Survey.** `survey_feed` reads the feed's newest streams and groups their records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples.
-2. **Work on a copy.** The survey returns a sample holding a few examples of each shape, in the feed's own format. It goes to a test feed in the build (`<FEED>-MCP-TEST`, with the source feed's encoding); the source feed's streams are only read and stepped, never processed.
-3. **Translate every shape.** The mapping gets one rule per shape (`build_translation_xslt`), and the pipeline steps the test streams until clean. Records no rule matches are logged, not dropped, so a missed shape shows up in stepping.
-4. **Look further back.** The agent surveys again from the oldest stream it read, passing the signatures it already knows, so only new shapes come back with a sample. Each new sample goes to the test feed, the mapping gains rules, and every test stream is stepped again. This repeats until a survey is saturated or there are no older streams, and the agent reports which kinds of event the pipeline covers and their share of the data.
-5. **Continue as onboarding.** Processing, stage 2, documentation and promotion run on the test feed's streams as for a new source. Whether the promoted pipeline then processes the source feed is the user's decision at promotion.
+1. **Survey.** `survey_feed` reads the feed's newest streams and groups their records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples, with where each example is (stream, part, record).
+2. **Translate every shape, stepping in place.** The mapping gets one rule per shape (`build_translation_xslt`), and `step_records` steps the translation on the survey's locations, the feed's own records, until clean. Records no rule matches are logged, not dropped, so a missed shape shows up.
+3. **Look further back.** The agent surveys again from the oldest stream it read, passing the signatures it already knows, so only new shapes come back. The mapping gains rules and every location found so far is stepped again. This repeats until a survey is saturated or there are no older streams, and the agent reports which kinds of event the pipeline covers and their share of the data.
+4. **Document, promote, hand over.** The translation is documented and promoted on approval. Processing the source feed with it is the user's to start; once its Events exist, `index_event_data` builds the indexing, since an indexing pipeline can only be stepped and filled from real Events streams.
 
 **Fix a reported pipeline issue**
 
@@ -275,7 +274,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-58 tools in 12 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+59 tools in 12 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -349,7 +348,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `survey_feed` | Sample an existing feed's streams, newest first, and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples, and a sample of the (new) shapes in the feed's own format for a test feed. Continues further back with `before_stream_id` and `known_signatures` | `meta/v1/find`, `data/v1/fetch` |
+| `survey_feed` | Sample an existing feed's streams, newest first, and group records into shapes (kinds of event) until more streams add nothing new; returns each shape's count, share and examples with their locations (stream, part, record) for `step_records`. Continues further back with `before_stream_id` and `known_signatures` | `meta/v1/find`, `data/v1/fetch` |
 
 **Diagnosis** (`tools/diagnosis.py`, read-only)
 
@@ -376,6 +375,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | --- | --- | --- |
 | `step_pipeline` | Step one record (first, last, or a record index) with optional draft code per element; returns the chosen elements' input and output and every element's errors, triaged | `stepping/v1/step` |
 | `step_sample` | Step every record of the sample streams to completion (capped by `max_sample_records`, default 500); one compact verdict per record, errors triaged | `stepping/v1/step` |
+| `step_records` | Step chosen records of existing streams in place (e.g. `survey_feed`'s locations: stream, part, record) with optional draft code; one verdict like `step_sample`, plus which shapes did not step clean. Nothing is copied or processed | `stepping/v1/step` |
 | `compare_outputs` | Step the same records through two pipelines, or one pipeline with current and draft code, and diff each record's output (event XML or index document); reports fields added, removed and changed | `stepping/v1/step` |
 
 Stepping holds no session between calls: each step is a fresh request from the last record's location, and a session id only polls a step that is still running (Stroom drops it when the step completes). So there is nothing to release afterwards.
@@ -429,7 +429,7 @@ Resources carry the reference knowledge the model needs but should not have to d
 | `index_event_data` | `events_feed`, `index_pattern` | Stage 2 only, against an existing Events feed |
 | `create_discovery_index` | `feed?`, `sample?`, `timestamp_field?` | Index raw structured data directly for exploration, without an event-logging translation |
 | `evaluate_events_pipeline` | `pipeline`, `sample_size?`, `source_docs?` | Report on what a pipeline does, its data and event types, schema conformance and suggested fixes, returned in the chat and saved as its Documentation doc |
-| `onboard_existing_feed` | `feed`, `source_docs?` | Build the events pipeline from the data a feed already holds: survey its streams for kinds of event, translate them from samples in a test feed, look further back until nothing new turns up, then index as for a new source |
+| `onboard_existing_feed` | `feed`, `source_docs?` | Build the events pipeline from the data a feed already holds by stepping only: survey its streams for kinds of event, step the translation on those records in place, look further back until nothing new turns up, then document, promote and hand over |
 | `fix_pipeline_issue` | `stream_id`, `issue`, `event_id?` | Locate a reported event, confirm the problem, prove a fix, then apply it or give the manual steps, as the user chooses |
 
 **Where the knowledge comes from.** The XSD and examples are vendored into `knowledge/` from the [event-logging-schema](https://github.com/gchq/event-logging-schema) repo at a pinned tag. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/), each under about 4,000 tokens, with links to the full page.
@@ -449,7 +449,7 @@ The agent may create freely inside its workspace, but anything that processes pr
 
 All work happens in the workspace; promotion is the approval-gated step that puts it in place. `promote_build` proposes a destination for each doc from where sibling content lives, e.g. `System/Feeds/Events/<Source>` for the feed, events pipeline, XSLT and text converter, and `System/Elastic Indices/<Source>` for the indexing pipeline, XSLT, Elastic Index doc, dashboard and Documentation docs. The user confirms the destinations, then approves the move.
 
-- New docs and new versions are moved with `explorer/v2/move`. UUIDs do not change, so processor filters, pipeline references and dashboard queries keep working. Promoted docs lose the agent's tags, so any later change goes through a working copy.
+- New docs and new versions are moved with `explorer/v2/move`. UUIDs do not change, so processor filters, pipeline references and dashboard queries keep working. Promoted docs lose `mcp-managed` and the build tag, so any later change goes through a working copy, but keep `mcp-generated`.
 - A change to an existing production doc is made on a working copy in the workspace. On promotion the server backs up the production doc to `MCP Workspace/backups/`, writes the copy's content into it and removes the copy.
 - Processor filters on workspace pipelines stay scoped to sample stream ids; widening them to the whole feed is part of the promotion approval.
 - Anything not promoted stays in the workspace, tagged for a person to clear.
@@ -593,7 +593,7 @@ class BuildState(TypedDict):
 
 `create_discovery_index` runs `onboard_feed` or takes an existing feed, skips stage 1 and `research_conventions`, and enters at `select_indexing_template` with discovery-stage templates; `draft_indexing` drafts the near-identity XSLT and the permissive template, and the rest of stage 2 runs unchanged.
 
-`onboard_existing_feed` starts at `survey` (survey the feed, start the build, create the test feed, upload the survey's sample), then runs `draft_translation` and `step_and_validate` as in onboarding. When stepping is clean and the survey is not saturated, `resurvey` looks further back with the known signatures: new shapes go back to `draft_translation` with their sample uploaded, and a survey with nothing new moves on (to `process_sample` once saturated, or after at most 6 surveys). The kinds of event seen so far travel in the state, so the drafting step sees every shape it has to translate.
+`onboard_existing_feed` starts at `survey` (survey the feed and start the build), then runs `draft_translation` and `step_and_validate`, which step the survey's locations with `step_records`. When stepping is clean and the survey is not saturated, `resurvey` looks further back with the known signatures: new shapes go back to `draft_translation`, and a survey with nothing new moves on (to `document` and `promote` once saturated, or after at most 6 surveys). The kinds of event and their locations travel in the state, so the drafting step sees every shape it has to translate. The `document` step also hands over: what the translation covers, and that processing the source feed, then `index_event_data`, are next.
 
 `fix_pipeline_issue` runs `locate_issue` (locate the event, plan and confirm the problem), then `draft_fix`, which loops until `summarise_fix` says the fix is ready. A `draft_fix` attempt that proposes no fix means the issue did not reproduce, so the graph asks the user instead of looping. `offer_fix` interrupts with the diff and asks whether to apply it: yes runs `apply_fix` (copy, update, compare, document, promote, as in `update_events_pipeline`); no runs `explain_fix`, which returns the manual steps and the diff.
 
@@ -619,7 +619,9 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - **Superseded outputs** need no tool: Stroom marks a pipeline's earlier outputs for a stream deleted when it processes that stream again (verified locally). The server itself deletes no streams.
 - **Moving from v1 to v2** of an index (aliases, data views, disabling or retiring v1) is the user's.
 - **Elasticsearch indexing** runs only through the Stroom indexing pipeline. The agent suggests the index template and checks the user's changes against the pipeline; once the user confirms they have committed it, the indexing filter is pre-created disabled and the user enables it after reviewing the pipeline through a direct link.
-- **Indexing input**: indexing filters select only Events produced by the events pipeline this server built for the source (a `Pipeline` condition), never Events from elsewhere. `index_event_data` on an existing production Events feed therefore needs that pipeline brought into a build first.
+- **Indexing input**: indexing filters select only Events produced by an events pipeline this server generated (a `Pipeline` condition), never Events from elsewhere. A promoted pipeline still counts, through its `mcp-generated` tag, so `index_event_data` works on the Events of a pipeline the agent built and promoted.
+- **Tags**: everything the server creates is tagged `mcp-generated`, for good, including promotion backups. `mcp-managed` (and the build tag) mark what the agent may still change and come off at promotion. A production doc that a working copy is written back over is not tagged: it was not generated.
+- **Existing feeds are stepped, not copied**: `onboard_existing_feed` steps the feed's own records where they are and ends with the translation promoted; processing the source feed is the user's to start.
 
 **Open questions**
 
@@ -632,7 +634,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [ ] Sample-scoped filters have no task limit (`maxProcessingTasks` 0); should they use 1, like reprocessing?
 - [ ] `promote_build` does not yet widen sample filters to the whole feed, and a promoted pipeline is no longer the agent's to process. Should promotion create the feed-wide filter (from the promotion time) under the same approval?
 - [ ] Should translation pipelines only process streams from feeds in the build (their Events output lands in the input's feed), with production records copied into a test feed first?
-- [ ] Indexing an existing production Events feed (`index_event_data`) conflicts with indexing only Events from an events pipeline the agent built: allow a confirmed exception, or bring that pipeline into a build first?
+- [ ] Indexing an existing Events feed whose pipeline the agent did not generate (`index_event_data`): allow a confirmed exception, or bring that pipeline into a build first?
 
 **Risks**
 
