@@ -54,22 +54,6 @@ oidc:
     configMapName: ""
     key: ca.crt
 
-# Elasticsearch, for reading index templates only (checking a template against an indexing pipeline).
-# Optional: indexing itself goes through Stroom, and templates are written by the user.
-elasticsearch:
-  url: ""
-  # API key with read access to index and component templates.
-  apiKey:
-    # Used to create a Secret when existingSecret is empty. Prefer existingSecret.
-    value: ""
-    existingSecret: ""
-    existingSecretKey: api-key
-  templatePatterns: [stroom-*]
-  ca:
-    secretName: ""
-    configMapName: ""
-    key: ca.crt
-
 # Seals the state carried between the rounds of a form. Not needed for one replica (a per-process key
 # is used); required for several, which must share the keys. Each key is at least 32 characters; the
 # first seals and all unseal, so rotate with [old, new], then [new, old], then [new].

@@ -19,7 +19,6 @@ import e2e_phase2 as p2  # noqa: E402
 from tools import builds, indexing, pipeline_writes, processing_writes, stepping, templates, translation  # noqa: E402
 from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
-from utils.elastic import ElasticTemplates  # noqa: E402
 from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
 
 check, agreed = p2.check, p2.agreed
@@ -107,7 +106,7 @@ async def main():
                            event_logging_version=p2.VERSION, conventions_dir=ROOT / 'conventions')
     stroom = p2.StroomGateway(settings)
     ctx = p2.SimpleNamespace(lifespan_context={
-        'stroom': stroom, 'elastic': ElasticTemplates(settings), 'rules': p2.ErrorRules.load(ROOT / 'error_rules.yaml'),
+        'stroom': stroom, 'rules': p2.ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': p2.AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     stamp = time.strftime('%H%M%S')
     try:

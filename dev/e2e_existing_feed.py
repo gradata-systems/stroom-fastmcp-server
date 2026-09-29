@@ -125,7 +125,7 @@ async def main():
     settings = p2.target_settings()
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
-        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'), 'elastic': None,
+        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     stamp = p2.STAMP
     try:

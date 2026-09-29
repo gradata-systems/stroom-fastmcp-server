@@ -237,12 +237,11 @@ async def _template_gate(ctx: Context, destination: dict[str, Any], confirmation
     index = destination['index name']
     if not index:
         raise ToolError("This Elasticsearch indexing pipeline has no indexName set")
-    written = {**destination, 'seen from this server': await _template_check(ctx, index)}
     return await consent_from(ctx).require(
         ctx, 'confirmation', 'processing:index_template',
         f"Have you committed the index template for Elasticsearch index '{index}' (cluster "
         f"{destination['cluster']})? The indexing filter is then created disabled, for you to enable.",
-        {k: v for k, v in written.items() if v is not None}, confirmation_id)
+        {k: v for k, v in destination.items() if v is not None}, confirmation_id)
 
 
 def _ready_to_enable(stroom: StroomGateway, pipeline: dict[str, Any], created: dict[str, Any],
@@ -253,18 +252,6 @@ def _ready_to_enable(stroom: StroomGateway, pipeline: dict[str, Any], created: d
                      f"enable, with this link to review the pipeline (its Processors tab holds the filter): {link}. "
                      f"Once they have enabled it (or ask you to, with set_processor_filter_enabled), "
                      f"wait_for_processing and verify.")}
-
-
-async def _template_check(ctx: Context, index_name: str) -> str | None:
-    """What this server can see of the index template, when it has Elasticsearch access."""
-    elastic = ctx.lifespan_context.get('elastic')
-    if not (elastic and elastic.configured):
-        return None
-    try:
-        matched = await elastic.simulate(index_name)
-    except ToolError as e:
-        return f"could not check: {e}"
-    return "a template matches this index" if matched else "NO template matches this index yet"
 
 
 async def create_processor_filter(

@@ -97,7 +97,7 @@ SETTINGS = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_
 
 
 def ctx():
-    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SETTINGS), 'elastic': None})
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SETTINGS)})
 
 
 async def test_proposed_template_targets_the_pipelines_index_and_links_to_it():
@@ -123,5 +123,5 @@ async def test_check_reports_changes_and_unchecked_component_templates():
         with pytest.raises(ToolError, match='not valid JSON'):
             await indexing.check_index_template(ctx(), 'p1', '{', [8])
     assert not result['compatible'] and result['template_name'] == 'ecs-acme'
-    assert result['notes'][0] == "composed_of ['ecs-base'] not checked: this server has no Elasticsearch access"
+    assert result['notes'][0].startswith("composed_of ['ecs-base'] not checked")
     assert 'Show the user pipeline_changes' in result['hint']

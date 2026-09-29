@@ -1,7 +1,6 @@
 {{- $stroom := .Values.stroom }}
 {{- $oidc := .Values.oidc }}
-{{- $es := .Values.elasticsearch }}
-{{- range $name, $ca := dict "stroom" $stroom.ca "oidc" $oidc.ca "elasticsearch" $es.ca }}
+{{- range $name, $ca := dict "stroom" $stroom.ca "oidc" $oidc.ca }}
 {{- if and $ca.secretName $ca.configMapName }}
 {{- fail (printf "set only one of %s.ca.secretName and %s.ca.configMapName" $name $name) }}
 {{- end }}
@@ -10,7 +9,6 @@
 {{- if not (hasPrefix "https://" $publicBaseUrl) }}
 {{- fail "publicBaseUrl must be an https:// URL" }}
 {{- end }}
-{{- $esKeySecret := include "stroom-mcp.esApiKeySecretName" . }}
 {{- $rsSecret := include "stroom-mcp.requestStateSecretName" . }}
 {{- if and (gt (int .Values.replicaCount) 1) (not $rsSecret) }}
 {{- fail "replicaCount > 1 needs requestState.existingSecret (or requestState.keys) so every replica can read forms another one sent" }}
@@ -108,23 +106,6 @@ spec:
             - name: STROOM_MCP_OIDC_CA_CERTS
               value: /etc/stroom-mcp/oidc-ca/{{ $oidc.ca.key }}
             {{- end }}
-            {{- if $es.url }}
-            - name: STROOM_MCP_ES_URL
-              value: {{ $es.url | quote }}
-            - name: STROOM_MCP_ES_TEMPLATE_PATTERNS
-              value: {{ toJson $es.templatePatterns | quote }}
-            {{- if $esKeySecret }}
-            - name: STROOM_MCP_ES_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $esKeySecret }}
-                  key: {{ include "stroom-mcp.esApiKeySecretKey" . }}
-            {{- end }}
-            {{- if or $es.ca.secretName $es.ca.configMapName }}
-            - name: STROOM_MCP_ES_CA_CERTS
-              value: /etc/stroom-mcp/es-ca/{{ $es.ca.key }}
-            {{- end }}
-            {{- end }}
             {{- if $rsSecret }}
             - name: STROOM_MCP_REQUEST_STATE_KEYS
               valueFrom:
@@ -219,11 +200,6 @@ spec:
               mountPath: /etc/stroom-mcp/oidc-ca
               readOnly: true
             {{- end }}
-            {{- if and $es.url (or $es.ca.secretName $es.ca.configMapName) }}
-            - name: es-ca
-              mountPath: /etc/stroom-mcp/es-ca
-              readOnly: true
-            {{- end }}
             {{- if or .Values.accessPolicy .Values.errorRules }}
             - name: config
               mountPath: /etc/stroom-mcp/config
@@ -247,9 +223,6 @@ spec:
         {{- end }}
         {{- with include "stroom-mcp.caVolume" (dict "name" "stroom-ca" "ca" $stroom.ca) | trim }}{{ . | nindent 8 }}{{ end }}
         {{- with include "stroom-mcp.caVolume" (dict "name" "oidc-ca" "ca" $oidc.ca) | trim }}{{ . | nindent 8 }}{{ end }}
-        {{- if $es.url }}
-        {{- with include "stroom-mcp.caVolume" (dict "name" "es-ca" "ca" $es.ca) | trim }}{{ . | nindent 8 }}{{ end }}
-        {{- end }}
         {{- if or .Values.accessPolicy .Values.errorRules }}
         - name: config
           configMap:

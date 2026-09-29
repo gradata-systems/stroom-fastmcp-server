@@ -51,12 +51,6 @@ class Settings(BaseSettings):
     # Template pipeline sources (and, later, write scope).
     access_policy_file: Path = Path('access_policy.yaml')
 
-    # Elasticsearch, for index templates only (optional; Stroom-side indexing works without it).
-    es_url: str | None = None
-    es_api_key: SecretStr | None = None
-    # CA that signed Elasticsearch's HTTPS certificate, trusted in addition to the system CAs.
-    es_ca_certs: Path | None = None
-    es_template_patterns: list[str] = ['stroom-*']
     # Field convention profiles (*.yaml) and the one used when the user names none.
     conventions_dir: Path = Path('conventions')
     default_convention: str | None = None

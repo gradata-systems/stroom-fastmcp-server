@@ -8,7 +8,7 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 | --- | --- | --- |
 | Template | `Indexing`: `IndexingFilter` with property `index` | e.g. `Events to Elasticsearch`: `ElasticIndexingFilter` with `cluster` and `indexName` |
 | XSLT output | `records:2` | `xpath-functions` JSON XML |
-| Fields | On the index doc (`set_index_fields`) | An index template in Elasticsearch |
+| Fields | On the index doc (`set_index_fields`) | An index template, drafted by `propose_index_template` and committed to Elasticsearch by the user |
 
 ## Lucene XSLT output
 

@@ -52,14 +52,15 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   `statelessHttp: true` or `service.sessionAffinity: ClientIP`. Forms (confirmations and approvals) carry sealed
   state between rounds; several replicas must share the sealing keys: `requestState.existingSecret` (keys
   comma-separated, each at least 32 characters). The chart refuses `replicaCount` > 1 without them.
-- **Elasticsearch** (optional): `elasticsearch.url` and an API key that can read index and component
-  templates, used only to check a template the user changed against the indexing pipeline. Indexing always
-  goes through Stroom, and templates are written by the user.
+- **Elasticsearch**: nothing to configure. The server never connects to Elasticsearch: indexing, index
+  doc fields, connection tests and test searches all go through Stroom, which uses its own Elastic Cluster docs.
+  The server drafts index templates and checks the user's version against the pipeline; the user commits them.
 - **Environment files**: `accessPolicy` (where template pipelines are looked for), `errorRules` (error
   triage) and `conventions` (field convention profiles) replace the image's copies when set.
 - **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
   token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider.
-- **Audit**: one JSON line per tool call on stdout (with the user), for the cluster's log shipping.
+- **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, Stroom request, confirmation,
+  approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md).
 
 ## Container
 
@@ -111,11 +112,7 @@ brackets.
 | `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
 | `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
-| `ES_URL` | | Elasticsearch, for reading templates [`elasticsearch.url`] |
-| `ES_API_KEY` | | API key for it [`elasticsearch.apiKey`] |
-| `ES_CA_CERTS` | | CA for its certificate, added to the system CAs [`elasticsearch.ca`] |
-| `ES_TEMPLATE_PATTERNS` | `["stroom-*"]` | Templates the server may read (JSON list) [`elasticsearch.templatePatterns`] |
-| `AUDIT_LOG_FILE` | stdout | Audit JSON lines [`extraEnv`] |
+| `AUDIT_LOG_FILE` | stdout | Audit JSON lines ([AUDIT.md](AUDIT.md)) [`extraEnv`] |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
 

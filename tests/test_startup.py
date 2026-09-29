@@ -67,7 +67,3 @@ def test_request_state_keys_are_comma_separated(monkeypatch, value, expected):
     keys = Settings(stroom_url='https://stroom.invalid').request_state_keys
     assert [k.get_secret_value() for k in keys] == expected
 
-
-def test_template_patterns_parse_as_the_chart_sets_them(monkeypatch):
-    monkeypatch.setenv('STROOM_MCP_ES_TEMPLATE_PATTERNS', '["stroom-*", "ecs-*"]')
-    assert Settings(stroom_url='https://stroom.invalid').es_template_patterns == ['stroom-*', 'ecs-*']

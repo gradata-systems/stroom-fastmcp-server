@@ -3,8 +3,7 @@
 name: stroom-flat
 description: Flat field names derived from event-logging paths (UserId, HostName, EventTime)
 structure: flat
-reference_index_docs: []        # Lucene index docs whose fields are authoritative
-reference_templates: []         # Elasticsearch templates whose mappings are authoritative
+reference_index_docs: []        # Index or Elastic Index docs whose fields are authoritative
 required_fields: {StreamId: id, EventId: id, EventTime: date}
 field_map:
   EventTime/TimeCreated: {name: EventTime, type: date}

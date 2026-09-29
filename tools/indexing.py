@@ -4,7 +4,7 @@ import json
 import time
 import uuid as uuidlib
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import yaml
 from fastmcp import Context
@@ -19,17 +19,12 @@ from tools.stepping import _outputs, _Pipeline
 from tools.streams import summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
-from utils.elastic import ElasticTemplates, flatten_mapping
 from utils.fieldplan import Backend, FieldPlan, PlannedField
 from utils.stroom import doc_link, gateway_from
 from utils.templatecheck import compare, json_xml_documents, parse_template
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 INDEX_TYPE = {'lucene': 'Index', 'elasticsearch': 'ElasticIndex'}
-
-
-def _es(ctx: Context) -> ElasticTemplates:
-    return ctx.lifespan_context['elastic']
 
 
 def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
@@ -48,14 +43,15 @@ async def get_field_conventions(
     """
     Field naming conventions for indexes. Without a name (and no configured default) this lists the profiles
     and returns needs_guidance: the agent must ask the user which convention to follow, point at reference
-    templates or index docs, or describe one. It never picks a convention itself. With a name it returns the
-    profile's field map plus the fields and types of its reference index docs (Lucene) and templates (ES).
+    index docs, or describe one. It never picks a convention itself. With a name it returns the profile's field
+    map plus the fields and types of its reference index docs (Lucene Index or Elastic Index docs, read
+    through Stroom).
     """
     profiles = _conventions(ctx)
     name = name or gateway_from(ctx).settings.default_convention
     if not name:
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
-                'hint': "Ask the user which convention to use, which existing index docs or templates to follow, "
+                'hint': "Ask the user which convention to use, which existing index docs to follow, "
                         "or how fields should be named. Do not assume one."}
     if name not in profiles:
         raise ToolError(f"No convention profile '{name}'. Profiles: {', '.join(profiles) or 'none'}")
@@ -70,14 +66,6 @@ async def get_field_conventions(
                 fields = await stroom.post('/dataSource/v1/findFields', {
                     'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
                 reference[f"{ref['type']} {doc_name}"] = {f['fldName']: f['fldType'] for f in fields.get('values') or []}
-    es = _es(ctx)
-    for pattern in profile.get('reference_templates') or []:
-        if not es.configured:
-            reference[f'template {pattern}'] = {'(unavailable)': 'Elasticsearch is not configured'}
-            continue
-        for template in await es.index_templates(pattern):
-            mapping = ((template['index_template'].get('template') or {}).get('mappings') or {}).get('properties')
-            reference[f"template {template['name']}"] = flatten_mapping(mapping)
     return {'name': name, 'profile': profile, 'reference_fields': reference}
 
 
@@ -124,50 +112,6 @@ async def draft_index_mapping(
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again."}
 
 
-async def list_index_templates(
-        ctx: Context, pattern: Annotated[str, Field(description="Template name pattern, e.g. 'ecs-*'.")] = '*',
-) -> dict[str, Any]:
-    """Elasticsearch: index templates matching a pattern, with their index patterns, priority and field types."""
-    templates = await _es(ctx).index_templates(pattern)
-    return {'templates': [{'name': t['name'], 'index_patterns': t['index_template'].get('index_patterns'),
-                           'priority': t['index_template'].get('priority'),
-                           'composed_of': t['index_template'].get('composed_of'),
-                           'fields': flatten_mapping(((t['index_template'].get('template') or {}).get('mappings') or {})
-                                                     .get('properties'))} for t in templates]}
-
-
-async def simulate_index_template(
-        ctx: Context, index_name: Annotated[str, Field(description="Index or data stream name to simulate.")],
-) -> dict[str, Any]:
-    """Elasticsearch: the mapping an index of this name would get from the templates that match it."""
-    body = await _es(ctx).simulate(index_name)
-    if not body:
-        return {'index_name': index_name, 'matched': False}
-    return {'index_name': index_name, 'matched': True,
-            'fields': flatten_mapping(((body.get('template') or {}).get('mappings') or {}).get('properties')),
-            'overlapping': body.get('overlapping')}
-
-
-async def put_index_template(
-        ctx: Context,
-        plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
-        template_name: Annotated[str, Field(description="Template name, within the allowed patterns.")],
-        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
-) -> dict[str, Any]:
-    """Elasticsearch: create or update an index template from the field plan. Needs approval."""
-    if plan.backend != 'elasticsearch':
-        raise ToolError("put_index_template is for Elasticsearch; Lucene fields are set with set_index_fields")
-    rendered = plan.elastic_template(template_name)
-    details = {'template': template_name, 'index_patterns': rendered['body']['index_patterns'],
-               'fields': {f.name: f.type for f in plan.fields}}
-    gate = await consent_from(ctx).require(ctx, 'approval', 'put_index_template',
-                                           f"Put Elasticsearch index template '{template_name}'", details, approval_id)
-    if gate:
-        return gate
-    await _es(ctx).put_index_template(template_name, rendered['body'])
-    return {'template': template_name, 'saved': True}
-
-
 async def set_index_fields(
         ctx: Context,
         index_uuid: Annotated[str, Field(description="A Lucene Index doc this server created.")],
@@ -175,7 +119,8 @@ async def set_index_fields(
 ) -> dict[str, Any]:
     """Lucene: add the plan's fields to the index doc (keywords as TEXT with the KEYWORD analyzer)."""
     if plan.backend != 'lucene':
-        raise ToolError("set_index_fields is for Lucene; Elasticsearch fields come from put_index_template")
+        raise ToolError("set_index_fields is for Lucene; Elasticsearch fields come from the index template the user commits "
+                        "(propose_index_template)")
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Index', index_uuid)
     ref = {'type': 'Index', 'uuid': index_uuid, 'name': doc.get('name')}
@@ -443,18 +388,11 @@ async def _documents(ctx: Context, pipeline_uuid: str, stream_ids: list[int], ca
     return docs
 
 
-async def _component_mappings(ctx: Context, body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _component_notes(body: dict[str, Any]) -> list[str]:
+    """This server doesn't read Elasticsearch, so fields from component templates can't be checked."""
     names = body.get('composed_of') or []
-    if not names:
-        return [], []
-    elastic = _es(ctx)
-    if not (elastic and elastic.configured):
-        return [], [f"composed_of {names} not checked: this server has no Elasticsearch access"]
-    found = {c['name']: c for n in names for c in await elastic.component_templates(n)}
-    missing = [n for n in names if n not in found]
-    return ([((found[n].get('component_template') or {}).get('template') or {}).get('mappings') or {}
-             for n in names if n in found],
-            [f"component templates {missing} do not exist in Elasticsearch"] if missing else [])
+    return [f"composed_of {names} not checked: fields from those component templates aren't seen here; ask the "
+            f"user whether they map any field the pipeline writes"] if names else []
 
 
 async def propose_index_template(
@@ -506,10 +444,9 @@ async def check_index_template(
     except ValueError as e:
         raise ToolError(str(e)) from e
     destination = await _destination(ctx, pipeline_uuid)
-    components, notes = await _component_mappings(ctx, body)
     result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
-                     destination['index name'], components)
-    result['notes'] = notes + result['notes']
+                     destination['index name'])
+    result['notes'] = _component_notes(body) + result['notes']
     result.update({'template_name': name, 'index': destination['index name'], 'cluster': destination['cluster'],
                    'pipeline_link': doc_link(gateway_from(ctx).settings, 'Pipeline', pipeline_uuid),
                    'hint': ("Compatible: ask the user to commit it, then create_processor_filter." if result['compatible']
@@ -518,6 +455,6 @@ async def check_index_template(
     return result
 
 
-ALL_TOOLS = [get_field_conventions, draft_index_mapping, list_index_templates, simulate_index_template,
-             propose_index_template, check_index_template, put_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
+ALL_TOOLS = [get_field_conventions, draft_index_mapping,
+             propose_index_template, check_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
              test_elastic_index, create_verification_dashboard, run_test_searches]

@@ -6,7 +6,7 @@ pipeline, stepped and verified before anything is promoted. It works with any MC
 in; it includes no agent or model of its own. See [docs/DESIGN.md](docs/DESIGN.md).
 
 Status: 0.2.0, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
-The server has 61 tools:
+The server has 58 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -24,7 +24,7 @@ The server has 61 tools:
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
 | Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
-| Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `list_index_templates`, `simulate_index_template`, `put_index_template`**, `test_elastic_index` |
+| Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the
@@ -58,6 +58,8 @@ that issues JWT access tokens works; Keycloak is the worked example.
   pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. `get_instructions` returns
   them, and `start_build` and `build_translation_xslt` hand them back too, so a model that skips the step still sees
   them.
+- **Audited.** Every tool call, Stroom request, confirmation, approval and refusal is logged as a JSON line with the
+  user behind it: [docs/AUDIT.md](docs/AUDIT.md).
 
 Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
 - Reprocessing is allowed while developing a pipeline in the workspace: `reprocess_streams` takes at most 10 streams
@@ -79,8 +81,9 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   (`set_shape_handling`), dropped by an explicit rule in the mapping, and checked as producing no Event.
 
 Configuration: field conventions in `conventions/*.yaml`, error triage rules in `error_rules.yaml`, template sources in
-`access_policy.yaml`. Elasticsearch (template reads, for checking a template against a pipeline) is optional:
-`STROOM_MCP_ES_URL`. Every setting is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#settings).
+`access_policy.yaml`. Every setting is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#settings).
+The server has no Elasticsearch connection or credentials of its own: everything that touches Elasticsearch goes
+through Stroom (its Elastic Cluster and Elastic Index docs and its indexing filter), as the user.
 
 ## Running
 

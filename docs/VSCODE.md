@@ -108,7 +108,7 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
 - Confirmations and approvals appear as forms that you answer; the model never holds the answer.
 - Standing instructions from `AGENTS` docs in Stroom apply whoever connects; a workspace `AGENTS.md` can add
   your own on top.
-- 61 tools stay within VS Code's per-request limit, but with other servers enabled you may want to switch some
+- 58 tools stay within VS Code's per-request limit, but with other servers enabled you may want to switch some
   groups off in the tools picker.
 
 ## What was checked locally (`dev/e2e_oauth.py`)

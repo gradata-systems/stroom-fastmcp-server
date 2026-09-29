@@ -79,21 +79,6 @@ def read_mapping(mappings: dict[str, Any]) -> Mapping:
     return out
 
 
-def merge_mappings(*mappings: dict[str, Any]) -> dict[str, Any]:
-    """Component templates first, then the template's own mappings, as Elasticsearch composes them."""
-    merged: dict[str, Any] = {'properties': {}}
-
-    def deep(target: dict, source: dict) -> None:
-        for key, value in source.items():
-            if isinstance(value, dict) and isinstance(target.get(key), dict):
-                deep(target[key], value)
-            else:
-                target[key] = value
-    for m in mappings:
-        deep(merged, m or {})
-    return merged
-
-
 def json_xml_documents(xml: str) -> list[dict[str, Any]]:
     """Documents from an indexing XSLT's output: <array> of <map>, or a single <map>."""
     try:
@@ -168,8 +153,7 @@ def _fits(spec: dict[str, Any], kind: str, text: str) -> str | None:
     return None
 
 
-def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | None,
-            component_mappings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | None) -> dict[str, Any]:
     blocking, changes, notes = [], [], []
     patterns = body.get('index_patterns') or []
     patterns = [patterns] if isinstance(patterns, str) else patterns
@@ -179,8 +163,7 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
         changes.append({'field': None, 'problem': f"template does not cover index '{index_name}'",
                         'change': f"change index_patterns to include '{index_name}*', or set the indexing pipeline's "
                                   f"indexName to an index they match"})
-    mapping = read_mapping(merge_mappings(*(component_mappings or []),
-                                          (body.get('template') or {}).get('mappings') or {}))
+    mapping = read_mapping((body.get('template') or {}).get('mappings') or {})
     for path, spec in mapping.fields.items():
         fmt = spec.get('format')
         if spec.get('type') in ('date', 'date_nanos') and fmt and any(

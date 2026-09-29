@@ -24,7 +24,6 @@ from security.policy import AccessPolicy  # noqa: E402
 from tools import (diagnosis, explorer, generation, instructions, pipelines, processing, sampling,  # noqa: E402
                    stepping, streams, templates, translation, validation, indexing, feeds)
 from utils.consent import ConsentStore  # noqa: E402
-from utils.elastic import ElasticTemplates  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
 from utils.xsltgen import TranslationMapping  # noqa: E402
@@ -79,8 +78,7 @@ async def main(feed: str):
     stroom = ReadOnlyGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
-        'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False),
-        'elastic': ElasticTemplates(settings)})
+        'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     try:
         print('\n### templates and documents')
         found = await check('find_pipeline_templates translation', templates.find_pipeline_templates(ctx, 'translation'),

@@ -29,7 +29,7 @@ def layers(elastic: bool) -> list[dict]:
 @pytest.fixture
 async def ctx():
     stroom = StroomGateway(SETTINGS)
-    yield SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False), 'elastic': None})
+    yield SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False)})
     await stroom.close()
 
 

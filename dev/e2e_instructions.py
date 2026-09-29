@@ -42,7 +42,7 @@ async def main():
                         stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
-        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'), 'elastic': None,
+        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     stamp = time.strftime('%H%M%S')
     created = []

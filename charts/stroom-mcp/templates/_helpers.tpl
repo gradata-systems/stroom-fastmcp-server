@@ -35,19 +35,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
-{{/* The Secret this chart creates for values given inline (ES API key, request-state keys). */}}
+{{/* The Secret this chart creates for values given inline (request-state keys). */}}
 {{- define "stroom-mcp.secretName" -}}
 {{- printf "%s-secrets" (include "stroom-mcp.fullname" .) }}
-{{- end }}
-
-{{/* ES API key: the user's own Secret, or the chart's. Empty when there is none. */}}
-{{- define "stroom-mcp.esApiKeySecretName" -}}
-{{- $key := .Values.elasticsearch.apiKey }}
-{{- if $key.existingSecret }}{{ $key.existingSecret }}{{ else if $key.value }}{{ include "stroom-mcp.secretName" . }}{{ end }}
-{{- end }}
-
-{{- define "stroom-mcp.esApiKeySecretKey" -}}
-{{- if .Values.elasticsearch.apiKey.existingSecret }}{{ .Values.elasticsearch.apiKey.existingSecretKey }}{{ else }}es-api-key{{ end }}
 {{- end }}
 
 {{/* Request-state keys: the user's own Secret, or the chart's. Empty when there are none. */}}

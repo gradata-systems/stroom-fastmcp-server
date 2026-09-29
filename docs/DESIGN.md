@@ -5,7 +5,7 @@ As of 2026-09-29. Kept in step with the shared design doc
 
 ## Overview
 
-The Stroom MCP server lets an agent, whatever runs it, take a sample of raw data, or a feed that already holds data, and turn it into working Stroom content: a feed, a translation pipeline that emits [GCHQ event-logging](https://github.com/gchq/event-logging-schema) XML, and an indexing pipeline that sends those events to Elasticsearch. It is standalone: it talks to Stroom and Elasticsearch directly and needs no other MCP server. It borrows its structure from the Elasticsearch FastMCP server project but does not call it. It includes no agent or model: any MCP client that can sign the user in drives it (see Clients), and the rules that must hold are enforced by the server, not by a client.
+The Stroom MCP server lets an agent, whatever runs it, take a sample of raw data, or a feed that already holds data, and turn it into working Stroom content: a feed, a translation pipeline that emits [GCHQ event-logging](https://github.com/gchq/event-logging-schema) XML, and an indexing pipeline that sends those events to Elasticsearch. It is standalone: it talks only to Stroom, reaches Elasticsearch through Stroom, and needs no other MCP server. It borrows its structure from the Elasticsearch FastMCP server project but does not call it. It includes no agent or model: any MCP client that can sign the user in drives it (see Clients), and the rules that must hold are enforced by the server, not by a client.
 
 **Goals**
 
@@ -56,14 +56,14 @@ flowchart TD
 3. **Choose a template, draft the translation pipeline.** The XSLT is generated from a field mapping (`build_translation_xslt`) rather than written by hand, wherever a mapping can express it. Search for translation-stage template pipelines (`find_pipeline_templates`), see how existing children specialise them, and learn what shared elements such as user decoration expect. Create a child of the chosen template, supplying only the source-specific `TextConverter` (Data Splitter or XML Fragment) and `XSLT`. Stroom's standard Event Data (Text) or Event Data (XML) pipelines are the fallback. The user confirms the chosen template before the child is created. Field mappings and event types follow the field dictionary and event catalogue when there are source notes.
 4. **Step every sample record to completion.** `/api/stepping/v1/step` accepts a `code` map that overrides element code for the session, so the agent tries XSLT revisions without saving them. It steps every record of the sample, not a subset; each step returns per-element input, output and error indicators, and any blocking error sends it back to step 3. Stepping errors are triaged with the same rules as Error streams, so benign decoration warnings do not hold it up.
 5. **Save and process the sample.** When every record steps clean, save the docs and create a processor filter on the sample stream ids. This run only produces the `Events` stream that stage 2 needs; before stage 2 the agent checks that every raw sample stream has exactly one child Events stream, with records, and that the counts match the stepped records. More than one means the raw stream was processed twice (overlapping filters or a stray reprocess), which would give the indexing stage duplicate events, so the agent reports it and asks which to keep. A raw stream with no Events means processing failed despite clean stepping (a failed task, a fatal error, a filter that missed the stream), so the agent reads that stream's task status and Error stream, fixes the cause and reprocesses it (`reprocess_streams`), or asks the user. Beyond this gate, stage 1 Error streams are not iterated on.
-6. **Draft the index template.** Read existing index and component templates from Elasticsearch, apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference templates, and draft a new template.
+6. **Draft the index template.** Apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference index docs (their fields read through Stroom), and draft a new template.
 7. **Choose a template, build the indexing pipeline.** Search for indexing-stage templates the same way; a local one may already set the Elastic cluster, batch size and shared enrichment. Inherit from it (fallback: Indexing (Elasticsearch)). The indexing filter's `cluster` property must point at an existing Elastic Cluster doc: the agent takes the one that existing Elastic Index docs and indexing pipelines for similar data already use (`find_elastic_clusters`) and checks it with `elasticCluster/v1/testCluster`. It never creates a cluster doc, since that holds credentials; if none fits, it asks. The cluster, the indexing template, the field convention and the destination index or data stream name (with its version) are proposed together at the start of stage 2, and the user confirms or corrects them before anything is drafted or created. The child's XSLT emits the `xpath-functions` JSON-XML `array`/`map` form with `StreamId`, `EventId` and `@timestamp`.
 8. **Step Events through it.** Step the cooked Events and compare each stepped document's fields and value shapes with the draft template. Fix the XSLT or the template on a mismatch.
 9. **Agree the template, then hand over the filter.**
    - The agent suggests the index template once the indexing pipeline steps clean (`propose_index_template`). It is rendered from the field plan for the pipeline's own destination index, as a Kibana Dev Tools request, and already checked against the documents the pipeline writes.
    - If the user sends back a changed template, `check_index_template` steps the candidate indexing pipeline and checks every document field against it. It checks that `index_patterns` cover the pipeline's index and that values fit the mapped types, including date formats and IPs. It also checks the `dynamic` setting for unmapped fields, fields mapped as values that the pipeline writes as objects (or the reverse), `@timestamp` for data streams, and fields the template renamed or added.
    - When the template does not fit, the agent lists the pipeline changes it needs (e.g. rename `user.name` to `user.id` in the indexing XSLT) and asks whether to make them or change the template instead.
-   - The user commits the template; `put_index_template` is used only if they ask and the server has Elasticsearch access. Events reach Elasticsearch only through the Stroom indexing pipeline.
+   - The user commits the template; the server has no Elasticsearch access of its own. Events reach Elasticsearch only through the Stroom indexing pipeline.
    - When the user confirms they have committed the template for the named index and cluster, `create_processor_filter` pre-creates the indexing filter **disabled**. The agent tells the user it is ready to enable and gives a direct link to the pipeline (`<stroom>/?action=open-doc&docType=Pipeline&docUuid=<uuid>`, the form Stroom's "Copy Link to Clipboard" uses) so they can review it and enable the filter on its Processors tab. It continues once they have, or enables it on request with approval.
 10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
 11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace: a query on that index and a table with a minimal field set (`StreamId`, `EventId`, the time field and a few key fields from the template). Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; and a time-range search around the sample timestamps. Each must return the expected records, which checks the mapping and the way people will actually search it. A failed search sends the agent back to step 7.
@@ -150,7 +150,7 @@ A user reports that something came out wrong, often one event type that is not t
 
 ## Architecture
 
-The server copies the ES MCP server's shape: FastMCP over streamable HTTP, OIDC auth, audit middleware, a lifespan-managed gateway per backend, and tools that return compact, budgeted JSON with hints the model can act on. The one new idea is a **write guard**, because this server creates and changes content.
+The server copies the ES MCP server's shape: FastMCP over streamable HTTP, OIDC auth, audit middleware, a lifespan-managed Stroom gateway, and tools that return compact, budgeted JSON with hints the model can act on. The one new idea is a **write guard**, because this server creates and changes content.
 
 ```mermaid
 flowchart TB
@@ -158,16 +158,15 @@ flowchart TB
     kc[OIDC provider, e.g. Keycloak<br/>issues user tokens with<br/>aud = stroom-mcp and stroom]
     subgraph server[Stroom FastMCP server, standalone]
         mw[Middleware<br/>OIDC token verifier<br/>AuditMiddleware<br/>WriteGuard: workspace folder, approvals]
-        tools[Tools and resources<br/>feeds, pipelines, XSLT<br/>processing, streams, errors<br/>stepping, validation<br/>ES templates, schema resources]
-        gw[Gateways<br/>StroomGateway: the caller's own token<br/>ElasticsearchGateway: templates only, optional]
+        tools[Tools and resources<br/>feeds, pipelines, XSLT<br/>processing, streams, errors<br/>stepping, validation<br/>index template drafts and checks, schema resources]
+        gw[StroomGateway<br/>the caller's own token]
     end
     stroom[Stroom v7.13<br/>/api REST incl. dashboard search, /stroom/datafeed]
-    es[Elasticsearch<br/>index and component templates<br/>event indices, verified via Stroom dashboard searches]
+    es[Elasticsearch<br/>event indices, templates committed by the user<br/>reached only through Stroom]
     kc -- access token --> client
     client -- MCP over HTTP, bearer token --> server
     server -- as the user --> stroom
-    server -- templates, API key, optional --> es
-    stroom -- indexes --> es
+    stroom -- indexes, tests, searches --> es
 ```
 
 **Identity.** The server acts as the user who asked. Stroom 7.x trusts the same OpenID Connect provider (Keycloak, Entra ID, Okta, ...), and the clients' tokens carry both audiences (`aud` includes the MCP server's audience and `stroom`, e.g. through a Keycloak audience mapper; with a provider that issues one audience per token, Stroom accepts the server's audience instead), so the server forwards the caller's token unchanged on every Stroom call, including `/stroom/datafeed` uploads. Stroom applies that user's own document permissions and audits changes under their name. There is no shared API key and no token exchange. A token without Stroom's audience in `aud` is refused with a message saying so, and a token that expires during a long call (such as `wait_for_processing`) asks the client to refresh and call again. A Stroom API key is used only with `dev_no_auth`, which is refused unless the server listens on localhost. For uploads to work, Stroom's receiver must accept OIDC tokens (`receive` token authentication enabled).
@@ -176,7 +175,7 @@ flowchart TB
 
 **Asking the user.** Confirmations and approvals are forms the user answers, so the model never holds the answer. On MCP 2026-07-28 connections, which have no server-initiated requests, the tool returns an input-required result with the form, and the client repeats the call with the answer (SEP-2322); the sealed request state names the exact request and user, and the gates already passed in the call. On earlier connections the server sends the elicitation during the call. A client that cannot answer forms gets a one-time id bound to the request and user instead.
 
-**Elasticsearch.** Only template reads (and, if the user asks, a template write) go direct to Elasticsearch, with an API key limited to the allowed template patterns; the connection is optional. Indexed documents are verified through Stroom searches. Documents reach Elasticsearch through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
+**Elasticsearch.** The server never connects to Elasticsearch and holds no Elasticsearch credentials. Everything goes through Stroom, as the user: index doc fields (`dataSource/v1/findFields`), connection tests (`elasticIndex/v1/testIndex`, `elasticCluster/v1/testCluster`) and searches that verify indexed documents. Index templates are drafted and checked by the server and committed by the user. Documents reach Elasticsearch through Stroom's own `ElasticIndexingFilter` and Elastic Cluster doc; the server never bulk-writes events.
 
 **Stroom API details.** Explorer calls (`fetchExplorerNodes`, `find`) must send `filter.requiredPermissions: ["VIEW"]`, as the Stroom UI does, and `find` needs a name filter (`*` or `type:Pipeline`); without them Stroom returns nothing below System. Docs are matched by UUID, because names held in inherited references go stale when a doc is renamed.
 
@@ -210,7 +209,6 @@ stroom-fastmcp-server/
     policy.py             # access policy (template sources)
   utils/
     stroom.py             # StroomGateway: forwards the caller's token, error mapping
-    elastic.py            # Elasticsearch templates, within the allowed patterns
     consent.py            # confirmations and approvals: forms, elicitation or ids
     schemas.py  eventschema.py   # event-logging XSD from Stroom; element order, required parts, choices
     xsltgen.py            # translation XSLT from a field mapping
@@ -224,7 +222,7 @@ stroom-fastmcp-server/
 
 **Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in `docs/DEPLOYMENT.md`.
 
-**Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom, the identity provider and Elasticsearch are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and the identity provider, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
+**Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom and the identity provider are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and the identity provider, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
 
 **Dependencies**: `fastmcp`, `httpx`, `pydantic`, `pydantic-settings`, `lxml` (XSD validation, XSLT well-formedness, incremental parsing), `pyyaml`; dev: `pytest`, `pytest-asyncio`, `respx`, `saxonche` (running generated XSLT in tests).
 
@@ -233,7 +231,7 @@ stroom-fastmcp-server/
 ```yaml
 name: ecs
 description: Elastic Common Schema 8.x, as used by ecs-* indices
-reference_templates: [ecs-*]        # existing templates whose mappings are authoritative
+reference_index_docs: [ECS-Base]   # existing Index or Elastic Index docs whose fields are authoritative
 structure: nested                    # nested objects or flattened dotted keys
 required_fields: {'@timestamp': date, StreamId: long, EventId: long}
 field_map:                           # optional: event-logging path -> index field
@@ -242,7 +240,7 @@ field_map:                           # optional: event-logging path -> index fie
 type_overrides: {'*.ip': ip}
 ```
 
-Selection order: the profile the user names in the conversation, else `STROOM_MCP_DEFAULT_CONVENTION`, else none. With none, `get_field_conventions` returns `needs_guidance`, and the agent asks the user to pick a profile, point at reference templates, or describe the convention. A described convention goes into the field plan as explicit fields (`draft_index_mapping`'s `extra_fields`); one worth keeping is added as a profile by whoever runs the server (the chart's `conventions`). The agent never falls back to ECS or any other scheme on its own.
+Selection order: the profile the user names in the conversation, else `STROOM_MCP_DEFAULT_CONVENTION`, else none. With none, `get_field_conventions` returns `needs_guidance`, and the agent asks the user to pick a profile, point at reference index docs, or describe the convention. A described convention goes into the field plan as explicit fields (`draft_index_mapping`'s `extra_fields`); one worth keeping is added as a profile by whoever runs the server (the chart's `conventions`). The agent never falls back to ECS or any other scheme on its own.
 
 **Pipeline templates.** Before drafting either pipeline, the agent looks for an existing pipeline to inherit from. A local template often carries shared elements a new source should reuse, not copy: user decoration XSLTs, reference data lookups, schema filter settings, indexing properties. Discovery uses three signals, in order:
 
@@ -286,7 +284,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-61 tools in 14 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+58 tools in 14 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -408,13 +406,10 @@ Stepping holds no session between calls: each step is a fresh request from the l
 
 | Tool | Purpose | Backend |
 | --- | --- | --- |
-| `list_index_templates` | Elasticsearch: index and component templates matching a pattern, with index patterns and priorities | ES `_index_template`, `_component_template` |
-| `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference templates or index docs; returns `needs_guidance` when none is selected | ES templates, `index/v2/findFields` |
+| `get_field_conventions` | List convention profiles, or return the selected one with field-to-type maps from its reference index docs (Lucene or Elastic); returns `needs_guidance` when none is selected | `dataSource/v1/findFields` |
 | `draft_index_mapping` | Local: turn stepped documents and the field convention into a field plan (name, logical type), rendered for the build's backend as an Elasticsearch index template or a Lucene field list; can start from a baseline with the version bumped; flags conflicts | none |
-| `simulate_index_template` | Elasticsearch: show the effective mapping for an index name | ES `_index_template/_simulate_index` |
 | `propose_index_template` | Elasticsearch: the template to suggest to the user for the candidate indexing pipeline's own index, as JSON and a Dev Tools request, self-checked against the pipeline's documents, with a link to the pipeline | `fetchPipelineLayers`, `stepping/v1/step` |
-| `check_index_template` | Elasticsearch: check a user's changed template against the documents the candidate indexing pipeline writes; returns compatible or not, blocking issues, and each pipeline change needed | `stepping/v1/step`, ES `_component_template` when configured |
-| `put_index_template` **W A** | Elasticsearch: create or update a template in the allowed name pattern, only when the user asks (normally the user writes it) | ES `_index_template` |
+| `check_index_template` | Elasticsearch: check a user's changed template against the documents the candidate indexing pipeline writes; returns compatible or not, blocking issues, and each pipeline change needed | `stepping/v1/step`; fields from `composed_of` component templates are noted as unchecked |
 | `set_index_fields` **W** | Lucene: set a Lucene index doc's fields from the field plan (a keyword becomes `TEXT` with the `KEYWORD` analyzer) | `index/v2/addField`, `updateField`, `findFields` |
 | `find_elastic_clusters` | Elasticsearch: cluster docs with their connection URLs (never credentials), the index docs and pipelines that use each, and their settings; optional connection test | `explorer/v2/find`, `elasticCluster/v1`, `elasticIndex/v1`, `elasticCluster/v1/testCluster` |
 | `create_index_doc` **W** | The build's index doc: an Elastic Index doc on an existing Elastic Cluster, or a Lucene Index doc in a volume group, with settings copied from sibling index docs | `explorer/v2/create`, `elasticIndex/v1` or `index/v2`, `dataSource/v1/findFields` |
@@ -460,7 +455,6 @@ The agent may create freely inside its workspace, but anything that processes pr
 
 - Workspace (`STROOM_MCP_WORKSPACE_FOLDER`): everything the server creates or changes is built under `MCP Workspace/<build-name>/`, including new versions and working copies of production docs. Nothing reaches its destination until the user approves promotion (`promote_build`). Updates are allowed only to docs the server created and has not yet promoted, tracked by explorer tags: `mcp-managed`, `mcp-generated` and `mcp-build-<build>`. Stroom's own permissions still apply, since every call is made as the user.
 - `access_policy.yaml`: where template pipelines are looked for, per stage.
-- Elasticsearch templates (`STROOM_MCP_ES_TEMPLATE_PATTERNS`, default `stroom-*`): the template names the server may read or, when the user asks, write.
 - No delete tools in v1, and no Elastic Cluster docs are created or changed, since they hold credentials. Abandoned builds are left tagged for a person to clear.
 
 **Workspace and promotion**
@@ -481,7 +475,7 @@ Before acting, the tool asks for the user's approval with a plain-language summa
 
 **Confirmations**
 
-Approvals guard actions; confirmations fix the key details those actions use. Both are asked through MCP elicitation when the client supports it, so the user answers the server directly rather than through the model; otherwise the tool returns an id with a summary for the client to show. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. A confirmation is bound to the exact request and user: answered in a form, the call carries on; otherwise the tool returns a `confirmation_id` for the repeated call. `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_index_doc`, `set_shape_handling` and `put_index_template` do not act without one covering the values they set.
+Approvals guard actions; confirmations fix the key details those actions use. Both are asked through MCP elicitation when the client supports it, so the user answers the server directly rather than through the model; otherwise the tool returns an id with a summary for the client to show. The agent proposes each detail with where it came from and any alternatives, and the user confirms or corrects it. A confirmation is bound to the exact request and user: answered in a form, the call carries on; otherwise the tool returns a `confirmation_id` for the repeated call. `create_feed`, `create_pipeline`, `create_indexing_pipeline`, `copy_pipeline`, `create_index_doc` and `set_shape_handling` do not act without one covering the values they set.
 
 | Detail | Confirmed at | Proposed from |
 | --- | --- | --- |
@@ -514,7 +508,7 @@ The stage 2 details come in one prompt because they depend on each other: the te
 | Stepped output valid against event-logging XSD | `validate_events` after each `step_pipeline` | no, returned as errors |
 | Event quality rules | `check_event_quality` | no, warnings |
 | Indexing output has `StreamId`, `EventId`, `@timestamp` | `step_sample` on indexing pipelines | yes, before filter creation |
-| Document fields match the draft template's types | `draft_index_mapping` conflict report | yes, before `put_index_template` |
+| Document fields match the draft template's types | `draft_index_mapping` conflict report | yes, before the template is proposed to the user |
 
 **Error triage**
 
@@ -538,7 +532,7 @@ Rules live in `error_rules.yaml` (message regex, element, severity, class) so an
 
 Names follow the environment's versioned conventions, learned from sibling content and confirmed with the user. In the reference environment, feeds and events pipelines carry a version (`Fortigate-FG60F-V1.2`, `Keycloak-V1.2-Events`, XSLT `Fortigate-FG60F-Events-V1.2`), indexing pipelines are `<Source> - Indexing`, and indices are `ecs-<source>-v<n>`. Test feeds add `-MCP-TEST`, the verification dashboard takes the index's name with a `-VERIFY` suffix, and Documentation docs take the name of the pipeline they document.
 
-**Audit**: JSON lines with the user: `tool_call` (tool, arguments, outcome), `stroom_request` (method, path, status, ms), `access_denied`, and each confirmation and approval (action, details, requested, granted or declined, and how: form, elicitation or id).
+**Audit**: JSON lines with the user: `tool_call` (tool, arguments, outcome), `stroom_request` (method, path, status, ms), `es_request`, `access_denied` (rejected tokens with the check they failed, writes the guard refused, and Stroom's 401s and 403s), and each confirmation and approval (action, details, requested, granted or declined, and how: form, elicitation or id). Events and fields: `docs/AUDIT.md`.
 
 ## Clients
 
@@ -552,7 +546,7 @@ The server includes no agent. The agent is whatever the user runs: a chat client
 | Prompts (optional) | The workflows, e.g. as slash commands | Eight prompts; a client without prompt support can send the same text |
 | Resources (optional) | Reference guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
 | Patience with long calls | Processing takes time | `wait_for_processing` returns at its timeout with a hint to call again |
-| Room for 61 tools | Some clients cap tools per request | Tool groups a client can switch off (e.g. Elasticsearch on a Lucene-only instance) |
+| Room for 58 tools | Some clients cap tools per request | Tool groups a client can switch off (e.g. Elasticsearch on a Lucene-only instance) |
 
 **For agent frameworks.** Replies are made to be routed on in code rather than by the model: gates come back as a `status` with an id, and verdicts are fields: stepping `verdict` (clean, review, blocking) and `shapes_not_clean`, the processing `gate` (pass or fail), survey `saturated` and `coverage`, and `before_promotion` from `list_build`. A framework can loop on those (e.g. draft, step, fix until clean) with the model only writing the mapping and explaining results, and keep its own state in the build: the survey doc and the build folder carry what a later session needs to carry on.
 
@@ -601,7 +595,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | `savePipelineJson` format is undocumented | Round-trip existing pipelines in the spike; build JSON from a fetched template, never from scratch |
 | Model writes plausible but wrong XSLT | Schema and quality validation on every step; attempt limits; few-shot examples from existing translations |
 | Feed-wide filters process far more than the sample | Sample-id filters by default; approval, task limits and time bounds for anything wider |
-| Template drift from the selected convention | `get_field_conventions` conflict report blocks `put_index_template` |
+| Template drift from the selected convention | `draft_index_mapping` conflict report, and `check_index_template` against the user's template |
 
 **Delivery phases**
 

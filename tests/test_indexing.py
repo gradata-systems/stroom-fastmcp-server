@@ -1,17 +1,13 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
-import respx
 from fastmcp.exceptions import ToolError
 from saxonche import PySaxonProcessor
 
-from config import Settings
 from tools import indexing
-from utils.elastic import ElasticTemplates, flatten_mapping
 from utils.fieldplan import FieldPlan, PlannedField
+from utils.templatecheck import read_mapping
 
 EVENTS = """<Events xmlns="event-logging:3"><Event StreamId="7" EventId="2">
 <EventTime><TimeCreated>2026-09-28T10:00:00.000Z</TimeCreated></EventTime>
@@ -38,7 +34,8 @@ def test_elastic_plan_renders_a_nested_template_and_a_json_xml_xslt():
     assert plan.required() == []
     template = plan.elastic_template('stroom-acme-v1')
     assert template['body']['index_patterns'] == ['stroom-acme-v1*']
-    assert flatten_mapping(template['body']['template']['mappings']['properties']) == {
+    fields = read_mapping(template['body']['template']['mappings']).fields
+    assert {path: f['type'] for path, f in fields.items() if f['type'] != 'object'} == {
         'StreamId': 'long', 'EventId': 'long', '@timestamp': 'date', 'user.name': 'keyword',
         'event.outcome': 'boolean', 'source.ip': 'ip'}
     output = run(plan.xslt())
@@ -63,35 +60,6 @@ def test_plan_reports_missing_required_fields():
     assert set(plan.required()) == {"Missing required field 'StreamId'", "Missing required field 'EventId'",
                                     "The time field 'when' is not in the plan",
                                     "Elasticsearch data streams need '@timestamp'"}
-
-
-ES_SETTINGS = Settings(_env_file=None, stroom_url='https://s', dev_no_auth=True, stroom_api_key='k', oidc_issuer_url='https://kc/r',
-                       oidc_audience='a', public_base_url='https://m', es_url='https://es:9200', es_api_key='esk')
-
-
-@respx.mock
-async def test_elastic_templates_reads_and_guards_writes():
-    es = ElasticTemplates(ES_SETTINGS)
-    route = respx.get('https://es:9200/_index_template/ecs-*').mock(return_value=httpx.Response(200, json={
-        'index_templates': [{'name': 'ecs-keycloak', 'index_template': {'index_patterns': ['ecs-keycloak-*'],
-                             'template': {'mappings': {'properties': {'user': {'properties': {'name': {'type': 'keyword'}}}}}}}}]}))
-    templates = await es.index_templates('ecs-*')
-    assert templates[0]['name'] == 'ecs-keycloak'
-    assert route.calls.last.request.headers['Authorization'] == 'ApiKey esk'
-    with pytest.raises(ToolError, match='outside the allowed patterns'):
-        await es.put_index_template('ecs-keycloak', {})
-    put = respx.put('https://es:9200/_index_template/stroom-acme-v1').mock(return_value=httpx.Response(200, json={'acknowledged': True}))
-    await es.put_index_template('stroom-acme-v1', {'index_patterns': ['stroom-acme-v1*']})
-    assert json.loads(put.calls.last.request.content) == {'index_patterns': ['stroom-acme-v1*']}
-    await es.close()
-
-
-async def test_template_tools_explain_when_elasticsearch_is_not_configured():
-    ctx = SimpleNamespace(lifespan_context={'elastic': ElasticTemplates(Settings(
-        _env_file=None, stroom_url='https://s', dev_no_auth=True, stroom_api_key='k', oidc_issuer_url='https://kc/r',
-        oidc_audience='a', public_base_url='https://m'))})
-    with pytest.raises(ToolError, match='not configured'):
-        await indexing.list_index_templates(ctx, '*')
 
 
 async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_cluster():
