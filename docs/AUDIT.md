@@ -9,6 +9,30 @@ Stroom records the changes too, under the user's own name, because every call fo
 This log adds what Stroom can't see: which tool made the change, what the user agreed to first, and what
 the server refused. Ship it somewhere the people being investigated can't modify it.
 
+## Rotation
+
+The server doesn't rotate or expire the audit log itself; that is left to what runs it.
+
+- **stdout** (the default): the container runtime rotates container logs (in Kubernetes, the kubelet's
+  `containerLogMaxSize` and `containerLogMaxFiles`), so ship them to a log store before they rotate away.
+- **A file**: rotate it with `logrotate` or similar, by moving the file aside. The server notices the file
+  has been moved or deleted and reopens it by name before the next event, so nothing is lost or written to
+  the old file. Don't use `copytruncate`: events written during the copy are lost. For example:
+
+  ```
+  /var/log/stroom-mcp/audit.jsonl {
+      daily
+      rotate 90
+      compress
+      delaycompress
+      missingok
+      notifempty
+  }
+  ```
+
+  Keep one server process per file. Reopening relies on the operating system reporting that the file was
+  moved, which works on Linux and in containers but not on Windows.
+
 ## Events
 
 | Event | When | Key fields |

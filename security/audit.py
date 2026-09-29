@@ -6,6 +6,7 @@ back to a person. See docs/AUDIT.md.
 """
 import json
 import logging
+import logging.handlers
 import sys
 import time
 import uuid
@@ -26,8 +27,12 @@ _call_id: ContextVar[str | None] = ContextVar('audit_call_id', default=None)
 
 
 def configure_audit_log(path: Path | None) -> None:
-    """Send audit events to `path` (JSON lines) or stdout, separately from application logs."""
-    handler = logging.FileHandler(path, encoding='utf-8') if path else logging.StreamHandler(sys.stdout)
+    """Send audit events to `path` (JSON lines) or stdout, separately from application logs.
+
+    The file is reopened when it has been moved or deleted, so logrotate (without copytruncate) can rotate it
+    and no event is lost or written to the old file.
+    """
+    handler = logging.handlers.WatchedFileHandler(path, encoding='utf-8') if path else logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter('%(message)s'))
     audit_logger.handlers[:] = [handler]
     audit_logger.setLevel(logging.INFO)
