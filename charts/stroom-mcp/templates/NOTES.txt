@@ -14,7 +14,7 @@ Point the DNS name in publicBaseUrl at the load balancer address:
 {{- end }}
 {{- if and .Values.tls.enabled .Values.tls.certManager.enabled }}
 
-The certificate is loaded at startup; restart the deployment after cert-manager renews it, or
+The certificate is loaded at startup; restart the pods after cert-manager renews it, or
 annotate it for a reloader via deploymentAnnotations.
 {{- end }}
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.statelessHttp) (ne .Values.service.sessionAffinity "ClientIP") }}

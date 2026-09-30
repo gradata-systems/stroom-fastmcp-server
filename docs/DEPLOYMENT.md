@@ -44,7 +44,7 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
 
 - **TLS**: on by default. `tls.existingSecret` (a `kubernetes.io/tls` Secret) or `tls.certManager` (the
   certificate is issued for the host of `publicBaseUrl` unless `dnsNames` are given). The server reads the
-  certificate at startup, so restart after renewal, or annotate the deployment for a reloader. `tls.enabled:
+  certificate at startup, so restart the pods after renewal, or annotate the workload for a reloader. `tls.enabled:
   false` only when an ingress or mesh terminates TLS; the server then sets `STROOM_MCP_TLS_TERMINATED_UPSTREAM`.
 - **Service**: ClusterIP by default; a LoadBalancer can pass TLS straight through (`service.type`,
   `loadBalancerIP`, `loadBalancerSourceRanges`).
@@ -59,8 +59,25 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   triage) and `conventions` (field convention profiles) replace the image's copies when set.
 - **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
   token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider.
-- **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, Stroom request, confirmation,
-  approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md).
+- **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, resource read, Stroom request,
+  confirmation, approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md). To write
+  it to a file instead, set `audit.file.enabled`. The file is on an `emptyDir` and lost with the pod, unless you
+  also set `audit.file.persistence.enabled`. The chart then deploys a StatefulSet rather than a Deployment, giving
+  each replica (`stroom-mcp-0`, `stroom-mcp-1`, ...) its own PersistentVolumeClaim, so each keeps its file across
+  restarts and rollouts:
+
+  ```yaml
+  audit:
+    file:
+      enabled: true
+      persistence:
+        enabled: true
+        size: 5Gi
+        storageClassName: standard
+  ```
+
+  Turning persistence on or off for an existing release replaces the workload, restarting every pod. The claims
+  outlive the release; delete them yourself when the audit files are no longer needed.
 
 ## Container
 
@@ -112,7 +129,7 @@ brackets.
 | `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
 | `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
-| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([AUDIT.md](AUDIT.md#rotation)) [`extraEnv`] |
+| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([AUDIT.md](AUDIT.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
 

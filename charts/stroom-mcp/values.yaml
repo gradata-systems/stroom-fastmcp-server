@@ -99,6 +99,27 @@ errorRules: ""
 # as YAML text or as a map, e.g. --set-file 'conventions.ecs\.yaml=conventions/ecs.yaml'.
 conventions: {}
 
+# Audit trail of every tool call, resource read, Stroom request, confirmation, approval and refusal, as
+# JSON lines (see docs/AUDIT.md). By default it goes to stdout, for the cluster's log shipper to collect.
+audit:
+  file:
+    # Write it to a file instead, e.g. for a sidecar or node agent that ships it.
+    enabled: false
+    # Absolute path. Its directory is where the volume below is mounted.
+    path: /var/log/stroom-mcp/audit.jsonl
+    # Without persistence the file is on an emptyDir, which is lost with the pod. With it, the server
+    # runs as a StatefulSet instead of a Deployment, so that each replica (<fullname>-0, -1, ...)
+    # keeps its own claim, and its file, across restarts and rollouts. Turning it on or off for an
+    # existing release replaces the Deployment or StatefulSet, restarting every pod. Claims are kept
+    # when replicas are removed or the release is uninstalled; delete them yourself. The claim
+    # settings can't be changed once created.
+    persistence:
+      enabled: false
+      size: 1Gi
+      # Empty: the cluster's default storage class.
+      storageClassName: ""
+      accessModes: [ReadWriteOnce]
+
 # The server terminates TLS itself, so a LoadBalancer service can pass traffic straight through.
 tls:
   # false only when TLS is terminated in front of the server (an ingress or mesh); the server then
@@ -194,7 +215,7 @@ podDisruptionBudget:
   enabled: false
   minAvailable: 1
 
-# Additional STROOM_MCP_* settings or anything else, e.g. [{name: STROOM_MCP_AUDIT_LOG_FILE, value: ...}].
+# Additional STROOM_MCP_* settings or anything else, e.g. [{name: FASTMCP_LOG_LEVEL, value: DEBUG}].
 extraEnv: []
 extraEnvFrom: []
 extraVolumes: []

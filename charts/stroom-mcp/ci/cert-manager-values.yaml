@@ -1,4 +1,5 @@
-# Rendered in CI: cert-manager certificate, overridden policy, rules and conventions, several replicas.
+# Rendered in CI: cert-manager certificate, overridden policy, rules and conventions, several replicas,
+# audit log on a claim per replica (StatefulSet).
 publicBaseUrl: https://stroom-mcp.example.com
 stroom: {url: https://stroom.example.com}
 oidc: {issuerUrl: https://keycloak.example.com/realms/stroom}
@@ -17,3 +18,8 @@ errorRules: |
 conventions:
   mini.yaml: {name: mini, description: CI profile, structure: flat, field_map: {}}
 build: {defaultConvention: mini}
+# Audit log on a claim per replica, which makes the workload a StatefulSet.
+audit:
+  file:
+    enabled: true
+    persistence: {enabled: true, size: 5Gi}

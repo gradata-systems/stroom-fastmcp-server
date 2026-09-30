@@ -1,5 +1,8 @@
-# Rendered in CI: TLS terminated in front of the server.
+# Rendered in CI: TLS terminated in front of the server, audit log written to a file.
 publicBaseUrl: https://stroom-mcp.example.com
 stroom: {url: https://stroom.example.com}
 oidc: {issuerUrl: https://keycloak.example.com/realms/stroom}
 tls: {enabled: false}
+audit:
+  file:
+    enabled: true

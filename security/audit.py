@@ -1,8 +1,8 @@
 """Structured audit trail: one JSON object per line on the 'audit' logger.
 
-Records every tool call, every Stroom and Elasticsearch request, every confirmation and approval, and
-every refusal with the identity that caused it, so content the agent creates or changes can be traced
-back to a person. See docs/AUDIT.md.
+Records every tool call and resource read, every Stroom and Elasticsearch request, every confirmation and
+approval, and every refusal with the identity that caused it, so content the agent creates or changes can be
+traced back to a person. See docs/AUDIT.md.
 """
 import json
 import logging
@@ -22,7 +22,7 @@ from fastmcp.tools import ToolResult
 
 audit_logger = logging.getLogger('audit')
 
-# Correlates the tool_call event with the stroom_request events it triggered.
+# Correlates the tool_call or resource_read event with the stroom_request events it triggered.
 _call_id: ContextVar[str | None] = ContextVar('audit_call_id', default=None)
 
 
@@ -65,25 +65,35 @@ def audit(event: str, **fields: Any) -> None:
 
 
 class AuditMiddleware(Middleware):
-    """Records every tool call with its arguments, outcome and duration."""
+    """Records every tool call with its arguments, and every resource read (such as a guide) with its URI, each
+    with its outcome and duration."""
 
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        reset = _call_id.set(uuid.uuid4().hex)
-        started = time.perf_counter()
-        tool, arguments = context.message.name, context.message.arguments
-        try:
-            result = await call_next(context)
-        except Exception as e:
-            audit('tool_call', tool=tool, arguments=arguments, outcome='error', error=str(e),
-                  duration_ms=round((time.perf_counter() - started) * 1000))
-            raise
-        else:
-            audit('tool_call', tool=tool, arguments=arguments, outcome='success',
-                  duration_ms=round((time.perf_counter() - started) * 1000))
-            return result
-        finally:
-            _call_id.reset(reset)
+        return await _audited(context, call_next, 'tool_call',
+                              tool=context.message.name, arguments=context.message.arguments)
+
+    async def on_read_resource(self, context: MiddlewareContext[mt.ReadResourceRequestParams],
+                               call_next: CallNext[mt.ReadResourceRequestParams, Any]) -> Any:
+        return await _audited(context, call_next, 'resource_read', uri=str(context.message.uri))
+
+
+async def _audited(context: MiddlewareContext[Any], call_next: CallNext[Any, Any], event: str, **fields: Any) -> Any:
+    """Run the request, then record `event` with `fields`, the outcome and the duration. Audit events for the
+    requests it makes share its call_id."""
+    reset = _call_id.set(uuid.uuid4().hex)
+    started = time.perf_counter()
+    try:
+        result = await call_next(context)
+    except Exception as e:
+        audit(event, **fields, outcome='error', error=str(e),
+              duration_ms=round((time.perf_counter() - started) * 1000))
+        raise
+    else:
+        audit(event, **fields, outcome='success', duration_ms=round((time.perf_counter() - started) * 1000))
+        return result
+    finally:
+        _call_id.reset(reset)

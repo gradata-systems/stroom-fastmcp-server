@@ -15,7 +15,8 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 
 - **stdout** (the default): the container runtime rotates container logs (in Kubernetes, the kubelet's
   `containerLogMaxSize` and `containerLogMaxFiles`), so ship them to a log store before they rotate away.
-- **A file**: rotate it with `logrotate` or similar, by moving the file aside. The server notices the file
+- **A file**: in Kubernetes, the chart's `audit.file` settings write it to a volume, optionally a claim per
+  replica ([DEPLOYMENT.md](DEPLOYMENT.md#kubernetes-helm)). Rotate it with `logrotate` or similar, by moving the file aside. The server notices the file
   has been moved or deleted and reopens it by name before the next event, so nothing is lost or written to
   the old file. Don't use `copytruncate`: events written during the copy are lost. For example:
 
@@ -38,6 +39,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 | Event | When | Key fields |
 |---|---|---|
 | `tool_call` | every tool invocation, when it finishes | `tool`, `arguments`, `outcome` (`success` or `error`), `error`, `duration_ms` |
+| `resource_read` | every resource read, such as a guide or convention profile, when it finishes | `uri`, `outcome`, `error`, `duration_ms` |
 | `stroom_request` | every Stroom REST request, and every sample upload to the datafeed | `method`, `path`, `outcome` (`success` or `error`), `status`, `error`, `took_ms`; uploads add `feed` and `bytes` |
 | `confirmation` | a change the user confirms first, e.g. `create_feed`, `create_pipeline`, `copy_pipeline` | `action`, `details`, `outcome`, `via` or `id` |
 | `approval` | a change that needs the user's approval, e.g. `promote_build`, `create_processor_filter`, `reprocess_streams`, `set_processor_filter_enabled` | `action`, `details`, `outcome`, `via` or `id` |
@@ -89,7 +91,7 @@ Every event also carries:
 - `sub`, `username` and `client_id`: who called, from the access token. `username` is
   `preferred_username`, or else `upn` (Entra ID), or else `email`; `client_id` is `azp`, the client the
   user signed in with. All three are null with `dev_no_auth`.
-- `call_id`: links a `tool_call` to the events it caused (null for `invalid_token`)
+- `call_id`: links a `tool_call` or `resource_read` to the events it caused (null for `invalid_token`)
 
 ## Example
 

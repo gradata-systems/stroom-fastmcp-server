@@ -1,5 +1,17 @@
 {{- $stroom := .Values.stroom }}
 {{- $oidc := .Values.oidc }}
+{{- $audit := .Values.audit.file }}
+{{- if and $audit.persistence.enabled (not $audit.enabled) }}
+{{- fail "audit.file.persistence.enabled requires audit.file.enabled" }}
+{{- end }}
+{{- /* A persistent audit log needs a claim per replica, which only a StatefulSet provides. */}}
+{{- $statefulSet := $audit.persistence.enabled }}
+{{- if and $audit.enabled (not (hasPrefix "/" $audit.path)) }}
+{{- fail "audit.file.path must be an absolute path" }}
+{{- end }}
+{{- if and $audit.enabled (eq (dir $audit.path) "/") }}
+{{- fail "audit.file.path must be in a directory other than /" }}
+{{- end }}
 {{- range $name, $ca := dict "stroom" $stroom.ca "oidc" $oidc.ca }}
 {{- if and $ca.secretName $ca.configMapName }}
 {{- fail (printf "set only one of %s.ca.secretName and %s.ca.configMapName" $name $name) }}
@@ -15,7 +27,7 @@
 {{- end }}
 {{- $portName := include "stroom-mcp.portName" . }}
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ ternary "StatefulSet" "Deployment" $statefulSet }}
 metadata:
   name: {{ include "stroom-mcp.fullname" . }}
   labels:
@@ -26,6 +38,11 @@ metadata:
   {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if $statefulSet }}
+  serviceName: {{ include "stroom-mcp.fullname" . }}
+  # Replicas are independent; start and stop them together rather than one by one.
+  podManagementPolicy: Parallel
+  {{- end }}
   selector:
     matchLabels:
       {{- include "stroom-mcp.selectorLabels" . | nindent 6 }}
@@ -149,6 +166,10 @@ spec:
             - name: STROOM_MCP_CONVENTIONS_DIR
               value: /etc/stroom-mcp/conventions
             {{- end }}
+            {{- if $audit.enabled }}
+            - name: STROOM_MCP_AUDIT_LOG_FILE
+              value: {{ $audit.path | quote }}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - name: STROOM_MCP_TLS_CERTFILE
               value: /etc/stroom-mcp/tls/tls.crt
@@ -210,6 +231,10 @@ spec:
               mountPath: /etc/stroom-mcp/conventions
               readOnly: true
             {{- end }}
+            {{- if $audit.enabled }}
+            - name: audit
+              mountPath: {{ dir $audit.path }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -233,6 +258,10 @@ spec:
           configMap:
             name: {{ include "stroom-mcp.fullname" . }}-conventions
         {{- end }}
+        {{- if and $audit.enabled (not $statefulSet) }}
+        - name: audit
+          emptyDir: {}
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -252,3 +281,19 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+  {{- if $statefulSet }}
+  volumeClaimTemplates:
+    - metadata:
+        name: audit
+        labels:
+          {{- include "stroom-mcp.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml $audit.persistence.accessModes | nindent 10 }}
+        {{- with $audit.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $audit.persistence.size }}
+  {{- end }}

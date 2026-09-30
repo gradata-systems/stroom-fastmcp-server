@@ -58,8 +58,8 @@ that issues JWT access tokens works; Keycloak is the worked example.
   pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. `get_instructions` returns
   them, and `start_build` and `build_translation_xslt` hand them back too, so a model that skips the step still sees
   them.
-- **Audited.** Every tool call, Stroom request, confirmation, approval and refusal is logged as a JSON line with the
-  user behind it: [docs/AUDIT.md](docs/AUDIT.md).
+- **Audited.** Every tool call, resource read, Stroom request, confirmation, approval and refusal is logged as a
+  JSON line with the user behind it: [docs/AUDIT.md](docs/AUDIT.md).
 
 Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-delivery)):
 - Reprocessing is allowed while developing a pipeline in the workspace: `reprocess_streams` takes at most 10 streams
