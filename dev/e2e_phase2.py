@@ -213,8 +213,9 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     doc = await builds.write_documentation(ctx, build, pipeline['uuid'],
                                            f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the Phase 2 test.\n",
                                            'Created')
-    check(doc['type'] == 'Documentation', 'documentation written')
-    return {'build': build, 'feed': feed_name, 'raw': raw, 'pipeline': pipeline, 'xslt': x}
+    text = (await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])).get('documentation') or ''
+    check('Phase 2 test' in text and '## Change log' in text, f"documentation written with its text: {len(text)} chars")
+    return {'build': build, 'feed': feed_name, 'raw': raw, 'pipeline': pipeline, 'xslt': x, 'doc': doc}
 
 
 async def field_fix(ctx, csv: dict):
@@ -254,15 +255,8 @@ async def promotion(ctx, csv: dict, stamp: str):
         # Keep the run inside the workspace on a shared instance.
         dest = (await guard_from(ctx).build_folder(f'e2e-promoted-{stamp}'))['_path']
     else:
-        system = next(r for r in (await stroom.post('/explorer/v2/fetchExplorerNodes', {
-            'openItems': [], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None, 'showAlerts': False,
-            'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
-                       'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
-                       'recentItems': None}}))['rootNodes'] if r['type'] == 'System')
-        dest_name = f'E2E Promoted {stamp}'
-        await stroom.post('/explorer/v2/create', {'docType': 'Folder', 'docName': dest_name, 'destinationFolder': system,
-                                                  'permissionInheritance': 'DESTINATION'})
-        dest = f'System/{dest_name}'
+        # Neither folder exists yet: promotion creates both, after approval.
+        dest = f'System/E2E Promoted {stamp}/Events'
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
     ref = {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'], 'name': csv['pipeline']['name']}
     stepped = [t for t in (await stroom.post('/explorer/v2/getFromDocRef', ref)).get('tags') or [] if t.startswith('mcp-stepped-')]
@@ -274,6 +268,14 @@ async def promotion(ctx, csv: dict, stamp: str):
     result = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations=everything)
     check('promoted_with_warnings' not in result, 'promoted without warnings')
     check(len(result['promoted']) >= 5, f"promoted: {result['promoted']}")
+    if not LIVE:
+        check(result['promoted'][:2] == [f'created folder System/E2E Promoted {stamp}',
+                                         f'created folder System/E2E Promoted {stamp}/Events'],
+              f"missing destination folders created first: {result['promoted'][:2]}")
+    text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('documentation') or ''
+    check('Phase 2 test' in text, f"promoted documentation keeps its text: {len(text)} chars")
+    check("removed the build's workspace folder, now empty" in result['promoted']
+          and await guard_from(ctx).build_folder(csv['build'], create=False) is None, 'the emptied build folder is removed')
     made = result.get('processing_filters') or []
     check([(f['pipeline'], f['feed'], f['enabled']) for f in made] == [(csv['pipeline']['name'], csv['feed'], False)],
           f"promotion pre-creates the pipeline's filter for its feed, disabled: {made}")
@@ -305,6 +307,8 @@ async def promotion(ctx, csv: dict, stamp: str):
           f"the working copy's changed code was compared but never stepped clean: {before}")
     result = await agreed(builds.promote_build, ctx=ctx, build=fix_build, destinations={})
     print(f"    {result['promoted']}")
+    check(await guard_from(ctx).build_folder(fix_build, create=False) is None,
+          'the fix build folder is removed once its working copies are written back')
     check(result.get('promoted_with_warnings') == before, 'promotion carried the warning the user approved with')
     now = (await stroom.get_doc('XSLT', csv['xslt']['uuid']))['data']
     check('Interactive user logon' in now, 'working copy written back over the production XSLT')

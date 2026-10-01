@@ -136,10 +136,13 @@ async def record_source_notes(
     if references:
         lines += ['## Sources', ''] + [f'- {r}' for r in references]
     stroom = gateway_from(ctx)
-    ref = await guard_from(ctx).create('Documentation', f'{source} source notes', build)
-    doc = await stroom.get_doc('Documentation', ref['uuid'])
-    doc['documentation'] = '\n'.join(lines) + '\n'
-    doc = await stroom.put_doc(doc)
+
+    async def write(ref: dict[str, Any]) -> dict[str, Any]:
+        doc = await stroom.get_doc('Documentation', ref['uuid'])
+        doc['documentation'] = '\n'.join(lines) + '\n'
+        return await stroom.put_doc(doc)
+
+    doc = await guard_from(ctx).create_filled('Documentation', f'{source} source notes', build, write)
     return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'fields': len(fields),
             'events': len(events)}
 

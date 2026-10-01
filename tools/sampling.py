@@ -213,11 +213,16 @@ async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, 
         return result
     stroom = gateway_from(ctx)
     merged = merge(state, result, shapes, examples)
+
+    async def write(ref: dict[str, Any]) -> dict[str, Any]:
+        doc = record if record is not None else await stroom.get_doc('Documentation', ref['uuid'])
+        doc['documentation'] = render(merged)
+        return await stroom.put_doc(doc)
+
     if record is None:
-        ref = await guard_from(ctx).create('Documentation', doc_name(result['feed']), build)
-        record = await stroom.get_doc('Documentation', ref['uuid'])
-    record['documentation'] = render(merged)
-    saved = await stroom.put_doc(record)
+        saved = await guard_from(ctx).create_filled('Documentation', doc_name(result['feed']), build, write)
+    else:
+        saved = await write(record)
     result['survey_doc'] = {'type': 'Documentation', 'uuid': saved['uuid'], 'name': saved['name'],
                             'kinds_of_event': len(merged['shapes']), 'streams_read_in_total': len(merged['streams_read'])}
     return result

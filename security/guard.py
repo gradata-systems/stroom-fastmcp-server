@@ -4,7 +4,9 @@ Creates land in `<workspace>/<build>/`; updates are allowed only on documents ta
 `mcp-managed`. Changing anything else (a production XSLT, say) goes through a working copy that
 `promote_build` writes back after approval and a backup.
 """
+import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -16,6 +18,7 @@ from utils.stroom import StroomGateway
 MANAGED = 'mcp-managed'
 # On everything the server creates, for good: find it in Stroom by this tag, promoted or not.
 GENERATED = 'mcp-generated'
+logger = logging.getLogger(__name__)
 _BUILD = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
 
 
@@ -32,39 +35,84 @@ class WriteGuard:
         self._stroom = stroom
         self.workspace = workspace
 
-    async def _child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any]:
+    async def find_child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any] | None:
         found = await self._stroom.find_documents(name, ['Folder'], 200)
         for value in found.get('values') or []:
             ref = value['docRef']
             if ref.get('type') == 'Folder' and ref.get('name') == name:
-                node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
                 parent_path = (value.get('path') or '').replace(' / ', '/')
                 if parent_path == parent.get('_path'):
+                    node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
                     return {**node, '_path': f"{parent_path}/{name}"}
+        return None
+
+    async def create_folder(self, parent: dict[str, Any], name: str, tags: list[str]) -> dict[str, Any]:
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': 'Folder', 'docName': name, 'destinationFolder': _strip(parent),
             'permissionInheritance': 'DESTINATION'})
-        await self.tag([_ref(node)], [MANAGED, GENERATED])
+        await self.tag([_ref(node)], tags)
         return {**node, '_path': f"{parent.get('_path')}/{name}"}
 
-    async def build_folder(self, build: str) -> dict[str, Any]:
-        """The build's folder node, creating the workspace and build folders if needed."""
-        if not _BUILD.match(build):
-            raise ToolError("Build names are 2 to 64 letters, digits, '.', '_' or '-', e.g. 'keycloak-v1.3'")
+    async def _child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any]:
+        return await self.find_child_folder(parent, name) or await self.create_folder(parent, name, [MANAGED, GENERATED])
+
+    async def system_node(self) -> dict[str, Any]:
         roots = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
             'openItems': [], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None, 'showAlerts': False,
             'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
                        'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
                        'recentItems': None}})
-        system = {**next(r for r in roots['rootNodes'] if r['type'] == 'System'), '_path': 'System'}
-        workspace = await self._child_folder(system, self.workspace)
-        folder = await self._child_folder(workspace, build)
+        return {**next(r for r in roots['rootNodes'] if r['type'] == 'System'), '_path': 'System'}
+
+    async def resolve_folder(self, path: str) -> tuple[dict[str, Any], list[str]]:
+        """The deepest folder that exists along an explorer path such as 'System/Feeds/Events/Acme', and the
+        names below it that don't exist yet (empty when the whole path does). Creates nothing."""
+        parts = folder_parts(path)
+        node = await self.system_node()
+        for n, name in enumerate(parts[1:], start=1):
+            child = await self.find_child_folder(node, name)
+            if child is None:
+                return node, parts[n:]
+            node = child
+        return node, []
+
+    async def build_folder(self, build: str, create: bool = True) -> dict[str, Any] | None:
+        """The build's folder node, creating the workspace and build folders if needed; with create=False,
+        None when there is none (reads mustn't bring back a folder that promotion removed)."""
+        if not _BUILD.match(build):
+            raise ToolError("Build names are 2 to 64 letters, digits, '.', '_' or '-', e.g. 'keycloak-v1.3'")
+        system = await self.system_node()
+        child = self._child_folder if create else self.find_child_folder
+        workspace = await child(system, self.workspace)
+        folder = workspace and await child(workspace, build)
+        if folder is None:
+            return None
         return {**folder, '_open': [system['uniqueKey'], workspace['uniqueKey'], folder['uniqueKey']]}
 
     async def folder_contents(self, build: str) -> list[dict[str, Any]]:
         """The documents in a build folder, read from the explorer tree (the search index lags new docs)."""
-        folder = await self.build_folder(build)
-        tree = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
+        folder, node = await self._build_node(build)
+        if folder is None:
+            return []
+        return [{'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
+                 'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder']
+
+    async def remove_build_folder_if_empty(self, build: str) -> bool:
+        """Delete a build's folder once nothing at all is left in it, subfolders included. Stroom deletes a
+        folder with everything in it, so it must both list no children and be flagged a leaf (L)."""
+        folder, node = await self._build_node(build)
+        if folder is None or not node or node.get('children') or 'L' not in (node.get('nodeFlags') or []):
+            return False
+        await self._stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [_ref(folder)]})
+        return True
+
+    async def _build_node(self, build: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """The build's folder and its explorer node, opened so that its children are listed; (None, {}) when
+        the build has no folder."""
+        folder = await self.build_folder(build, create=False)
+        if folder is None:
+            return None, {}
+        tree =await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
             'openItems': folder['_open'], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None,
             'showAlerts': False, 'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None,
                                             'nodeFlags': None, 'requiredPermissions': ['VIEW'], 'nameFilter': None,
@@ -78,9 +126,7 @@ class WriteGuard:
                 if hit:
                     return hit
             return None
-        node = find(tree['rootNodes']) or {}
-        return [{'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
-                 'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder']
+        return folder, find(tree['rootNodes']) or {}
 
     async def create(self, doc_type: str, name: str, build: str, extra_tags: list[str] | None = None) -> dict[str, Any]:
         """Create an empty document in the build folder and tag it as the agent's."""
@@ -90,6 +136,21 @@ class WriteGuard:
             'permissionInheritance': 'DESTINATION'})
         await self.tag([_ref(node)], [MANAGED, GENERATED, build_tag(build), *(extra_tags or [])])
         return _ref(node)
+
+    async def create_filled(self, doc_type: str, name: str, build: str,
+                            fill: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+        """Create a document and fill it with fill(ref). Stroom creates documents empty, so if filling fails
+        the document is deleted again rather than left behind empty, and the error is raised."""
+        ref = await self.create(doc_type, name, build)
+        try:
+            return await fill(ref)
+        except Exception:
+            try:
+                await self._stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [ref]})
+            except Exception:
+                logger.warning("Couldn't delete the empty %s '%s' (%s) after filling it failed",
+                               doc_type, name, ref['uuid'])
+            raise
 
     async def tags(self, ref: dict[str, Any]) -> list[str]:
         node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
@@ -117,6 +178,14 @@ class WriteGuard:
 
     async def untag(self, refs: list[dict[str, Any]], tags: list[str]) -> None:
         await self._stroom.request('DELETE', '/explorer/v2/removeTags', {'docRefs': refs, 'tags': tags})
+
+
+def folder_parts(path: str) -> list[str]:
+    """An explorer path's folder names, starting with System; 'System / Feeds' and 'System/Feeds/' both work."""
+    parts = [p.strip() for p in path.replace(' / ', '/').split('/') if p.strip()]
+    if not parts or parts[0] != 'System':
+        raise ToolError(f"Destination '{path}' must be an explorer path starting with System/")
+    return parts
 
 
 def _ref(node: dict[str, Any]) -> dict[str, Any]:

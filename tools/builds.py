@@ -7,12 +7,12 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from security.guard import GENERATED, MANAGED, build_tag, guard_from
+from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from
 from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
 from tools.stepping import stepped_clean, stepped_tags
 from utils.consent import consent_from
-from utils.stroom import StroomGateway, gateway_from
+from utils.stroom import gateway_from
 
 Build = Annotated[str, Field(description="Build name, e.g. 'keycloak-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
@@ -81,36 +81,27 @@ async def write_documentation(
     Create or update the Documentation doc for a pipeline in the build (same name as the pipeline). An update
     replaces the body and keeps the change log, adding a line. Promoted with the pipeline.
     """
+    body = markdown.split('## Change log')[0].rstrip()
+    if not body.strip():
+        raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
     stroom = gateway_from(ctx)
-    guard = guard_from(ctx)
     pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
+    stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    async def write(ref: dict[str, Any]) -> dict[str, Any]:
+        doc = await stroom.get_doc('Documentation', ref['uuid'])
+        old = doc.get('documentation') or ''
+        log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
+        doc['documentation'] = f"{body}\n\n{log.rstrip()}\n- {stamp}: {change}\n"
+        return await stroom.put_doc(doc)
+
     existing = next((d for d in await _build_docs(ctx, build)
                      if d['type'] == 'Documentation' and d['name'] == pipeline['name']), None)
     if existing:
-        doc = await stroom.get_doc('Documentation', existing['uuid'])
-        old = doc.get('documentation') or ''
-        log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
+        doc = await write(existing)
     else:
-        ref = await guard.create('Documentation', pipeline['name'], build)
-        doc = await stroom.get_doc('Documentation', ref['uuid'])
-        log = '## Change log\n'
-    stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    body = markdown.split('## Change log')[0].rstrip()
-    doc['documentation'] = f"{body}\n\n{log.rstrip()}\n- {stamp}: {change}\n"
-    doc = await stroom.put_doc(doc)
+        doc = await guard_from(ctx).create_filled('Documentation', pipeline['name'], build, write)
     return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing)}
-
-
-async def _folder_node(stroom: StroomGateway, path: str) -> dict[str, Any]:
-    parts = [p for p in path.replace(' / ', '/').split('/') if p]
-    if not parts or parts[0] != 'System':
-        raise ToolError(f"Destination '{path}' must be an explorer path starting with System/")
-    name, parent = parts[-1], '/'.join(parts[:-1])
-    found = await stroom.find_documents(name, ['Folder'], 200)
-    for value in found.get('values') or []:
-        if value['docRef'].get('name') == name and (value.get('path') or '').replace(' / ', '/') == parent:
-            return await stroom.post('/explorer/v2/getFromDocRef', value['docRef'])
-    raise ToolError(f"Folder '{path}' does not exist; ask the user to create it or choose another")
 
 
 async def promote_build(
@@ -124,8 +115,10 @@ async def promote_build(
 ) -> dict[str, Any]:
     """
     Promote a build out of the workspace, after approval. New documents and new versions are moved to their
-    destination folders (UUIDs are kept, so filters and references keep working). A working copy is written
-    back over its original after the original is backed up to <workspace>/backups, then the copy is deleted.
+    destination folders (UUIDs are kept, so filters and references keep working); destination folders that
+    don't exist yet are listed in the approval and created first. A working copy is written back over its
+    original after the original is backed up to <workspace>/backups, then the copy is deleted. The build's
+    workspace folder is removed afterwards if nothing is left in it.
     """
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
@@ -143,12 +136,22 @@ async def promote_build(
             target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
-            plan.append({'doc': doc, 'action': 'move', 'target': target})
+            plan.append({'doc': doc, 'action': 'move', 'target': '/'.join(folder_parts(target))})
+    # Every destination is resolved before approval, so a missing folder can't stop a promotion halfway.
+    folders: dict[str, dict[str, Any]] = {}       # path -> folder node, for those that exist
+    creating: list[str] = []                      # paths to create, each after its parent
+    for target in dict.fromkeys(p['target'] for p in plan if p['action'] == 'move'):
+        node, missing = await guard.resolve_folder(target)
+        folders[node['_path']] = node
+        for n in range(1, len(missing) + 1):
+            path = '/'.join([node['_path'], *missing[:n]])
+            if path not in creating:
+                creating.append(path)
     moving = [p['doc'] for p in plan if p['action'] == 'move' and p['doc']['type'] == 'Pipeline']
     surveys = [d['name'][:-len(' - Survey')] for d in docs if d['type'] == 'Documentation' and d['name'].endswith(' - Survey')]
     processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], surveys)
-    details = {'build': build, 'plan': [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}"
-                                        for p in plan]}
+    details = {'build': build, 'plan': [f"create folder {path}" for path in creating]
+               + [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}" for p in plan]}
     warnings = await build_checks(ctx, docs)
     if warnings:
         # Shown in the approval, so the user decides with them in view.
@@ -163,6 +166,11 @@ async def promote_build(
 
     started_ms = int(time.time() * 1000)
     done = []
+    for path in creating:
+        parent, name = path.rsplit('/', 1)
+        # Production folders, so not managed: only generated, to show the server made them.
+        folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
+        done.append(f"created folder {path}")
     order = {'write back': 0, 'move': 1, 'discard': 2}
     for step in sorted(plan, key=lambda p: order[p['action']]):
         doc = step['doc']
@@ -171,7 +179,7 @@ async def promote_build(
             done.append(f"deleted working-copy pipeline '{doc['name']}'")
         elif step['action'] == 'move':
             node = await stroom.post('/explorer/v2/getFromDocRef', {k: doc[k] for k in ('type', 'uuid', 'name')})
-            folder = await _folder_node(stroom, step['target'])
+            folder = {k: v for k, v in folders[step['target']].items() if not k.startswith('_')}
             await stroom.request('PUT', '/explorer/v2/move', {'explorerNodes': [node], 'destinationFolder': folder,
                                                               'permissionInheritance': 'DESTINATION'})
             # Now production content: the agent may no longer change it directly.
@@ -205,7 +213,9 @@ async def promote_build(
             await stroom.put_doc(original)
             await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
             done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
-    filters = await create_promotion_filters(ctx, processing, started_ms)
+    if await guard.remove_build_folder_if_empty(build):
+        done.append("removed the build's workspace folder, now empty")
+    filters =await create_promotion_filters(ctx, processing, started_ms)
     result: dict[str, Any] = {'build': build, 'promoted': done}
     if warnings:
         result['promoted_with_warnings'] = warnings
