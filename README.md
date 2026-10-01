@@ -5,7 +5,7 @@ Stroom content for it: a feed, an event-logging translation pipeline, and an ind
 pipeline, stepped and verified before anything is promoted. It works with any MCP client that can sign the user
 in; it includes no agent or model of its own. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: 0.4.0, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+Status: 0.5.0, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 The server has 58 tools:
 
 | Group | Tools |
