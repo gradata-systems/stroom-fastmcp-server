@@ -3,9 +3,13 @@
 The model says which input field (or constant) goes to which event-logging path, per event type. This
 module writes the XSLT: the right input namespace, one template per record, elements in schema order,
 time conversion with stroom:format-date, value maps, and guards so empty inputs leave elements out rather
-than writing empty ones. Mistakes the schema can catch (unknown paths, invalid constants, two alternatives
+than writing empty ones. Elements that come out the same in several places (EventTime, EventSource, ...)
+are written once, as named templates. Each template reads the input fields it uses into variables holding
+their non-blank values, so a selector appears once per template and guards are just `$user or $host`. Mistakes the schema can catch (unknown paths, invalid constants, two alternatives
 of a choice) come back as problems per mapping entry instead of as XSLT for the model to debug.
 """
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -125,6 +129,8 @@ class _Generator:
         self.m, self.schema = mapping, schema
         self.problems: list[str] = []
         self.warnings: list[str] = []
+        self._names: dict[str, str] = {}          # selector -> variable name, the same in every template
+        self._scope: dict[str, str] = {}          # variables the template being written uses: name -> select
 
     def _note(self, bucket: list[str], message: str) -> None:
         if message not in bucket:
@@ -140,30 +146,56 @@ class _Generator:
             return '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
         return field_name
 
-    def condition(self, c: Condition) -> str:
-        src = self.source(c.field, c.xpath)
+    def ref(self, field_name: str | None, xpath: str | None, label: str) -> str:
+        """A variable holding the input's non-blank values, declared at the top of the template being written,
+        so each selector appears once per template. Named after the field, or for an xpath after `label`."""
+        raw = self.source(field_name, xpath)
+        if raw not in self._names:
+            base = re.sub(r'[^\w.-]', '_', label if xpath is not None else field_name)
+            base = base if base[:1].isalpha() or base[:1] == '_' else '_' + base
+            taken = set(self._names.values())
+            self._names[raw] = base if base not in taken else next(
+                f'{base}-{n}' for n in range(2, 1000) if f'{base}-{n}' not in taken)
+        name = self._names[raw]
+        wrap = xpath is not None or self.m.input == 'xml'
+        self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
+        return '$' + name
+
+    def has(self, field_name: str | None, xpath: str | None, label: str) -> str:
+        """Test that the input has a value. Fields select nodes, which are true when present; an xpath may give
+        a number or boolean, which XPath would test by its value, so that needs exists()."""
+        v = self.ref(field_name, xpath, label)
+        return v if xpath is None else f'exists({v})'
+
+    def condition(self, c: Condition, raw: bool = False) -> str:
+        """The rule's test; raw: with the input's own selectors, for the summary returned to the model."""
+        src = self.source(c.field, c.xpath) if raw else self.ref(c.field, c.xpath, 'condition')
         if c.equals is not None:
             return f"{src} = {literal(c.equals)}"
         if c.one_of is not None:
             return f"{src} = ({', '.join(literal(v) for v in c.one_of)})"
         if c.matches is not None:
             return f"exists({src}[matches(., {literal(c.matches)})])"
-        test = f"exists({src}[normalize-space(.)])"
+        test = f"exists({src}[normalize-space(.)])" if raw else self.has(c.field, c.xpath, 'condition')
         return test if c.present else f"not({test})"
 
     # --- values ---
+    @staticmethod
+    def label(entry: FieldMapping) -> str:
+        return '-'.join(entry.path.strip('/').split('/')[-2:])
+
     def leaf_test(self, entry: FieldMapping) -> str | None:
         if entry.value is not None:
             return None
         if entry.default is not None:
             return None
-        src = self.source(entry.field, entry.xpath)
         if entry.map:
+            src = self.ref(entry.field, entry.xpath, self.label(entry))
             return f"{src} = ({', '.join(literal(k) for k in entry.map)})"
-        return f"exists({src}[normalize-space(.)])"
+        return self.has(entry.field, entry.xpath, self.label(entry))
 
     def value_expr(self, entry: FieldMapping) -> str:
-        src = self.source(entry.field, entry.xpath)
+        src = self.ref(entry.field, entry.xpath, self.label(entry))
         if entry.map:
             expr = literal(entry.default) if entry.default is not None else "''"
             for key, out in reversed(list(entry.map.items())):
@@ -179,7 +211,7 @@ class _Generator:
         else:
             expr = src
         if entry.default is not None:
-            return f"if (exists({src}[normalize-space(.)])) then {expr} else {literal(entry.default)}"
+            return f"if ({self.has(entry.field, entry.xpath, self.label(entry))}) then {expr} else {literal(entry.default)}"
         return expr
 
     def write_value(self, element: etree._Element, entry: FieldMapping) -> None:
@@ -308,7 +340,7 @@ class _Generator:
             return None
         return ' or '.join(dict.fromkeys(tests))
 
-    def emit(self, parent: etree._Element, node: _Node, enclosing: str | None = None) -> None:
+    def emit(self, parent: etree._Element, node: _Node, enclosing: str | None = None, inline: bool = False) -> None:
         items = [(k.child.index, 0, n, k) for n, k in enumerate(node.kids.values())] + \
                 [(c.index, 1, n, (c, e)) for n, (c, e) in enumerate(node.data)]
         for _, is_data, _, item in sorted(items, key=lambda i: i[:3]):
@@ -321,14 +353,101 @@ class _Generator:
                     element.set('Value', entry.value)
                 else:
                     etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=self.value_expr(entry))
-                continue
-            test = self.test_of(item)
-            holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
-            element = etree.SubElement(holder, f'{{{EVT}}}{item.child.name}')
-            if item.leaf is not None:
-                self.write_value(element, item.leaf)
+            elif not inline and self.shareable(item) and self.key(item) in self.shared:
+                etree.SubElement(parent, f'{{{XSL}}}call-template', name=self.template_for(item))
             else:
-                self.emit(element, item, test or enclosing)
+                self.emit_element(parent, item, enclosing, inline)
+
+    def emit_element(self, parent: etree._Element, node: _Node, enclosing: str | None, inline: bool) -> None:
+        # Working out the guard reads every field below; declare them only if the guard is written.
+        outer, self._scope = self._scope, {}
+        test = self.test_of(node)
+        used, self._scope = self._scope, outer
+        if test and test != enclosing:
+            for name, select in used.items():
+                self._scope.setdefault(name, select)
+        holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
+        element = etree.SubElement(holder, f'{{{EVT}}}{node.child.name}')
+        if node.leaf is not None:
+            self.write_value(element, node.leaf)
+        else:
+            self.emit(element, node, test or enclosing, inline)
+
+    # --- named templates for fragments that repeat ---
+    @staticmethod
+    def shareable(node: _Node) -> bool:
+        """Elements with children, or leaves read from the record; constant leaves aren't worth a template."""
+        return node.leaf is None or node.leaf.value is None
+
+    def key(self, node: _Node) -> str:
+        """The node's path and the node written out in full with its guard, so equal keys mean the same element
+        with the same output for any record. Only the same path is shared: an EventSource/Client/IPAddress and a
+        Destination/Device/IPAddress read from one field stay apart, as they mean different things."""
+        if id(node) not in self._keys:
+            holder = etree.Element('fragment')
+            self.in_scope(holder, lambda: self.emit_element(holder, node, None, inline=True))
+            self._keys[id(node)] = node.path + '\n' + etree.tostring(holder, encoding='unicode')
+        return self._keys[id(node)]
+
+    def in_scope(self, template: etree._Element, write) -> None:
+        """Run write() for a template's body, then declare the variables it used at the top of the template."""
+        outer, self._scope = self._scope, {}
+        try:
+            write()
+            for n, (name, select) in enumerate(self._scope.items()):
+                template.insert(n, etree.Element(f'{{{XSL}}}variable', name=name, select=select))
+        finally:
+            self._scope = outer
+
+    def choose_shared(self, roots: list[tuple[str, _Node]]) -> None:
+        """Pick the fragments to write once as named templates: the largest that still occurs more than once,
+        counting a template's body once however often it is called, until none repeats."""
+        self._keys: dict[int, str] = {}
+        self.shared: dict[str, None] = {}
+        self.users: dict[str, list[str]] = {}
+
+        def walk(node: _Node, rule: str, counts: Counter, seen: set[str] | None) -> None:
+            for kid in node.kids.values():
+                if not self.shareable(kid):
+                    continue
+                k = self.key(kid)
+                counts[k] += 1
+                if seen is None:
+                    self.users.setdefault(k, [])
+                    if rule not in self.users[k]:
+                        self.users[k].append(rule)
+                elif k in self.shared:
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                walk(kid, rule, counts, seen)
+
+        for rule, root in roots:
+            walk(root, rule, Counter(), None)
+        while True:
+            counts: Counter = Counter()
+            seen: set[str] = set()
+            for rule, root in roots:
+                walk(root, rule, counts, seen)
+            repeated = [k for k, n in counts.items() if n > 1 and k not in self.shared]
+            if not repeated:
+                return
+            self.shared[max(repeated, key=len)] = None
+
+    def template_for(self, node: _Node) -> str:
+        k = self.key(node)
+        if k not in self._templates:
+            # The element's name, or as much of its path as tells it apart, e.g. Authenticate-User; variants
+            # of one path are numbered.
+            taken = {name for name, _ in self._templates.values()}
+            parts = node.path.split('/')[1:]
+            names = ['-'.join(parts[-n:]) for n in range(1, len(parts) + 1)]
+            name = next((n for n in names if n not in taken), None) or next(
+                f'{names[-1]}-{n}' for n in range(2, 1000) if f'{names[-1]}-{n}' not in taken)
+            template = etree.Element(f'{{{XSL}}}template', name=name)
+            self._templates[k] = (name, template)
+            self.in_scope(template, lambda: self.emit_element(template, node, None, inline=False))
+        return self._templates[k][0]
 
     def stylesheet(self, version: str) -> tuple[str, list[dict]]:
         m = self.m
@@ -352,29 +471,39 @@ class _Generator:
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')
         etree.SubElement(events, f'{{{XSL}}}apply-templates', select=m.record or DEFAULT_RECORD.get(m.input, ''),
                          mode='event')
+        self.choose_shared([(rule.name, root) for rule, root in trees if root is not None])
+        self._templates: dict[str, tuple[str, etree._Element]] = {}
         record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='event')
         conditional = any(rule.when for rule in m.events)
-        body = etree.SubElement(record_template, f'{{{XSL}}}choose') if conditional else record_template
         summary = []
-        for rule, root in trees:
-            test = ' and '.join(f'({self.condition(c)})' for c in rule.when)
-            holder = (etree.SubElement(body, f'{{{XSL}}}when', test=test) if test
-                      else etree.SubElement(body, f'{{{XSL}}}otherwise')) if conditional else body
-            if rule.drop:
-                holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
-                summary.append({'event': rule.name, 'when': [self.condition(c) for c in rule.when] or 'every record',
-                                'dropped': True})
-            else:
-                self.emit(etree.SubElement(holder, f'{{{EVT}}}Event'), root)
-                summary.append({'event': rule.name, 'when': [self.condition(c) for c in rule.when] or 'every record',
-                                'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
-                                                  for e in m.common + rule.fields})})
-            if not test and conditional:
-                break
-        if conditional and all(rule.when for rule in m.events) and m.unmatched == 'warn':
-            otherwise = etree.SubElement(body, f'{{{XSL}}}otherwise')
-            etree.SubElement(otherwise, f'{{{XSL}}}sequence',
-                             select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
+
+        def write_rules() -> None:
+            body = etree.SubElement(record_template, f'{{{XSL}}}choose') if conditional else record_template
+            for rule, root in trees:
+                test = ' and '.join(f'({self.condition(c)})' for c in rule.when)
+                holder = (etree.SubElement(body, f'{{{XSL}}}when', test=test) if test
+                          else etree.SubElement(body, f'{{{XSL}}}otherwise')) if conditional else body
+                when = [self.condition(c, raw=True) for c in rule.when] or 'every record'
+                if rule.drop:
+                    holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
+                    summary.append({'event': rule.name, 'when': when, 'dropped': True})
+                else:
+                    self.emit(etree.SubElement(holder, f'{{{EVT}}}Event'), root)
+                    summary.append({'event': rule.name, 'when': when,
+                                    'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
+                                                      for e in m.common + rule.fields})})
+                if not test and conditional:
+                    break
+            if conditional and all(rule.when for rule in m.events) and m.unmatched == 'warn':
+                otherwise = etree.SubElement(body, f'{{{XSL}}}otherwise')
+                etree.SubElement(otherwise, f'{{{XSL}}}sequence',
+                                 select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
+
+        self.in_scope(record_template, write_rules)
+        # Called with the record as context, so they read its fields just as the event rules do.
+        for k, (name, template) in self._templates.items():
+            sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))
+            sheet.append(template)
         text = etree.tostring(sheet, pretty_print=True, xml_declaration=True, encoding='UTF-8').decode('utf-8')
         return text, summary
 

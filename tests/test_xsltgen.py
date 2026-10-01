@@ -63,6 +63,50 @@ def test_generated_xslt_writes_valid_events_in_schema_order():
     assert [etree.QName(c).localname for c in logon.find('.//e:Authenticate', ns)] == ['Action', 'User', 'Outcome', 'Data']
 
 
+def test_elements_repeated_across_rules_are_written_once_as_named_templates():
+    xslt = generate(mapping(), SCHEMA, '4.1.0')['xslt']
+    sheet = etree.fromstring(xslt.encode())
+    ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
+    named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
+    assert set(named) == {'EventTime', 'EventSource'}
+    assert len(sheet.findall('.//e:EventSource', ns)) == 1
+    assert len(sheet.findall(".//xsl:call-template[@name='EventSource']", ns)) == 2
+    assert '<!-- EventSource: logon, other -->' in xslt
+    # One rule: nothing repeats, so everything stays inline.
+    single = generate(mapping(events=[{'name': 'logon', 'fields': LOGON}]), SCHEMA, '4.1.0')['xslt']
+    assert 'call-template' not in single
+
+
+def test_only_the_same_element_at_the_same_path_is_shared():
+    # EventSource/User and Authenticate/User come out alike (both read user), but they mean different things.
+    logoff = [f if f['path'] != 'EventDetail/Authenticate/Action' else {**f, 'value': 'Logoff'} for f in LOGON]
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON},
+             {'name': 'logoff', 'when': [{'field': 'action', 'equals': 'logout'}], 'fields': logoff}]
+    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
+    sheet = etree.fromstring(result['xslt'].encode())
+    named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
+    assert named['User'].find('.//e:User', ns) is not None  # Authenticate/User, called from both rules
+    assert named['EventSource'].find(".//xsl:call-template[@name='User']", ns) is None
+    assert named['EventSource'].find('.//e:User', ns) is not None
+    events = transform(result['xslt'], RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert events.findtext('.//{event-logging:3}Authenticate/{event-logging:3}User/{event-logging:3}Id') == "o'neil"
+
+
+def test_each_template_reads_its_fields_once_into_variables():
+    xslt = generate(mapping(), SCHEMA, '4.1.0')['xslt']
+    xsl = '{http://www.w3.org/1999/XSL/Transform}'
+    for template in etree.fromstring(xslt.encode()).iter(f'{xsl}template'):
+        variables = [v.get('name') for v in template.findall(f'{xsl}variable')]
+        assert len(variables) == len(set(variables))
+        body = ''.join(etree.tostring(c, encoding='unicode') for c in template if c.tag != f'{xsl}variable')
+        assert 'data[@name=' not in body  # selectors only in the declarations
+        assert all(f'${v}' in body for v in variables), variables  # and nothing declared needlessly
+    assert '<xsl:if test="$user">' in xslt
+    assert "test=\"($action = 'login')\"" in xslt
+
+
 def test_json_keys_and_xml_paths_address_the_record():
     json_mapping = mapping(input='json', common=BASE[:4] + [{'path': 'EventSource/User/Id', 'field': 'user.name'},
                                                             {'path': 'EventSource/Device/HostName', 'field': 'host'}])
@@ -81,7 +125,8 @@ def test_json_keys_and_xml_paths_address_the_record():
 def test_time_formats_become_stroom_format_date():
     common = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': "yyyy-MM-dd'T'HH:mm:ss", 'timezone': 'UTC'}] + BASE[1:]
     xslt = generate(mapping(common=common), SCHEMA, '4.1.0')['xslt']
-    assert "stroom:format-date(data[@name='time']/@value[1], 'yyyy-MM-dd''T''HH:mm:ss', 'UTC')" in xslt
+    assert '''<xsl:variable name="time" select="data[@name='time']/@value[normalize-space(.)]"/>''' in xslt
+    assert "stroom:format-date($time[1], 'yyyy-MM-dd''T''HH:mm:ss', 'UTC')" in xslt
     epoch = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': 'epoch_s'}] + BASE[1:]
     assert 'xs:integer(xs:decimal(' in generate(mapping(common=epoch), SCHEMA, '4.1.0')['xslt']
 
@@ -120,7 +165,7 @@ def test_unmatched_records_are_logged_when_every_rule_has_conditions():
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'one_of': ['login', 'logon']}], 'fields': LOGON}]
     xslt = generate(mapping(events=rules, unmatched='warn'), SCHEMA, '4.1.0')['xslt']
     assert "stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))" in xslt
-    assert "data[@name='action']/@value = ('login', 'logon')" in xslt
+    assert "$action = ('login', 'logon')" in xslt
 
 
 def test_each_field_needs_exactly_one_source():
