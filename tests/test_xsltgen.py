@@ -317,13 +317,20 @@ def test_field_mapping_takes_type_id_and_description_from_the_sample():
     logoff = [f if f['path'] != 'EventDetail/Authenticate/Action' else {**f, 'value': 'Logoff'} for f in LOGON]
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}],
               'fields': LOGON + [{'path': 'EventDetail/Description', 'field': 'result'}]},
-             {'name': 'logoff', 'when': [{'field': 'action', 'equals': 'logout'}], 'fields': logoff},
+             {'name': 'logoff', 'when': [{'field': 'action', 'equals': 'logout'}],
+              'fields': logoff + [{'path': 'EventSource/Client/IPAddress', 'field': 'ip'}]},
              {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
                                           {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
     m = mapping(events=rules)
     result = generate(m, SCHEMA, '4.1.0')
     events = sampled_events([etree.tostring(transform(result['xslt'], RECORDS), encoding='unicode')])
-    text = field_mapping_markdown(m, SCHEMA, events).split('### Event types')[1]
+    source, text = field_mapping_markdown(m, SCHEMA, events).split('### Event types')
+    # EventSource values are the sample's too: every value seen, the kinds that had it when not all did, and
+    # elements no sampled event got.
+    assert '| `EventSource/System/Name` | The name of the system. | "Acme VPN" |' in source
+    assert '| "unknown"<br>"ws01" |' in source  # HostName: the default for the login record, then keepalive's
+    assert '''| "o'neil"<br>(logon) |''' in source  # only the login record has a user
+    assert '| `EventSource/Client/IPAddress` | ' in source and '| (not in the sample) |' in source
     assert 'Values are those written for the 2 events of the sample' in text
     rows = [line.split(' | ')[:3] for line in text.splitlines() if line.startswith('| **')]
     # The login record is the logon rule's (Action Logon), the keepalive the catch-all's; logoff wasn't sampled.

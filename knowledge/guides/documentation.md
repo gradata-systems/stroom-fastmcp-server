@@ -25,13 +25,14 @@ editing the tables by hand. Computed values name fields, not selectors: `normali
 tables:
 
 1. **EventSource**: one row per element of `EventSource` (and `EventTime`), with columns XPath, Description (the
-   event-logging schema's own description of the element) and Value. An element only some kinds of event have
-   names those kinds.
+   event-logging schema's own description of the element) and Value: the values the sample's events got, up to
+   three, then how many more. An element only some kinds of event have names those kinds; one no sampled event
+   got shows "(not in the sample)".
 2. **Event types**: one row per rule and TypeId written for the sample, with columns Source (the rule and the
    records it covers), TypeId, Description (the values seen, up to three), and EventDetail: every other element
    below `EventDetail` of one event with that TypeId, a line each as `XPath="value"`. A rule nothing in the
    sample reached shows "(not in the sample)", with its elements from the mapping (`XPath="{input}"`): widen the
    sample, or say so under Open items.
 
-In the EventSource table, values read: `field` for an input field, `expression` for a computed one, "text" for
-a constant, with the time format, value map (`A → B`) or default after it.
+A rule the sample didn't reach is described from the mapping instead: a constant in quotes, an input in braces
+(`XPath="{username}"`), with any value map (`A → B`) or default.

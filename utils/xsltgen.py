@@ -31,8 +31,8 @@ EVT = 'event-logging:3'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
 DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/array'}
 DEFAULT_RECORD = {'data_splitter': 'record', 'json': 'map'}
-# Descriptions listed per TypeId in the documentation's Event types table.
-DOC_DESCRIPTIONS_SHOWN = 3
+# Values listed per element (EventSource table) or per TypeId (Descriptions) in the documentation.
+DOC_VALUES_SHOWN = 3
 # A value map used by one element with at most this many keys is written inline, as an if.
 INLINE_MAP_KEYS = 3
 # A field read fewer times than this in a template is written where it's used, not held in a variable: an
@@ -745,8 +745,9 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
         fields.update({(e.path.strip('/'), e.data_name): e for e in rule.fields})
         effective[rule.name] = fields
 
-    # EventSource and EventTime: one row per element, with each distinct value and, when not every kind of
-    # event has it, which kinds do.
+    attributed = _attribute(rules, effective, observed) if observed is not None else None
+    # EventSource and EventTime: one row per element. Sampled, the values the events got; from the mapping, how
+    # each is written. Either way, when not every kind of event has an element, which kinds do.
     rows: dict[tuple, dict[str, list[str]]] = {}
     entries: dict[tuple, FieldMapping] = {}
     for rule in rules:
@@ -754,22 +755,38 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
             if k[0].split('/')[0] in ('EventSource', 'EventTime'):
                 rows.setdefault(k, {}).setdefault(_value(entry), []).append(rule.name)
                 entries.setdefault(k, entry)
-    lines = ['### EventSource', '', 'Common to every kind of event; where only some kinds have an element, they are named.',
-             '', '| XPath | Description | Value |',
-             '| --- | --- | --- |']
+    seen: dict[tuple, dict[str, list[str]]] = {}      # element -> value -> kinds of event, in sample order
+    for rule, event in attributed or []:
+        for k, value in _leaves(event, ('EventTime', 'EventSource')).items():
+            kinds = seen.setdefault(k, {}).setdefault(value, [])
+            if rule not in kinds:
+                kinds.append(rule)
+    sampled_kinds = list(dict.fromkeys(rule for rule, _ in attributed or []))
+    lines = ['### EventSource', '']
+    if attributed is not None:
+        lines += [f'Values are those written for the {len(observed)} events of the sample. Where only some kinds of '
+                  'event have an element, they are named.', '']
+    else:
+        lines += ['Common to every kind of event; where only some kinds have an element, they are named.', '']
+    lines += ['| XPath | Description | Value |', '| --- | --- | --- |']
     for k in sorted(rows, key=lambda k: key(entries[k])):
-        values = rows[k]
-        if len(values) == 1 and len(next(iter(values.values()))) == len(rules):
-            value = next(iter(values))
+        if attributed is not None:
+            values = seen.get(k) or {}
+            kinds = list(dict.fromkeys(r for rs in values.values() for r in rs))
+            value = _shown(list(values), quote=True) or '(not in the sample)'
+            if values and len(kinds) < len(sampled_kinds):
+                value += f"\n({', '.join(kinds)})"
+        elif len(rows[k]) == 1 and len(next(iter(rows[k].values()))) == len(rules):
+            value = next(iter(rows[k]))
         else:
-            value = '\n'.join(f"{v} ({', '.join(names)})" for v, names in values.items())
+            value = '\n'.join(f"{v} ({', '.join(names)})" for v, names in rows[k].items())
         try:
             description = schema.describe(schema.resolve(k[0]))
         except ValueError:
             description = ''
         lines.append(_row(f'`{xpath(entries[k])}`', description, value))
 
-    sampled = _by_rule_and_type_id(rules, effective, observed) if observed is not None else None
+    sampled = _by_rule_and_type_id(attributed) if attributed is not None else None
     lines += ['', '### Event types', '']
     if sampled is not None:
         lines += [f'Values are those written for the {len(observed)} events of the sample: EventDetail shows one '
@@ -794,13 +811,11 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
             continue
         if not sampled.get(rule.name):
             lines.append(_row(source, '(not in the sample)', '', mapped))
-        for type_id, seen in (sampled.get(rule.name) or {}).items():
-            shown = seen['descriptions'][:DOC_DESCRIPTIONS_SHOWN]
-            more = len(seen['descriptions']) - len(shown)
+        for type_id, found in (sampled.get(rule.name) or {}).items():
             example = '\n'.join(_assignment(path.removeprefix('EventDetail/') + (f"[@Name='{name}']/@Value" if name else ''),
-                                            value) for (path, name), value in seen['example'].items()
+                                            value) for (path, name), value in found['example'].items()
                                 if path not in ('EventDetail/TypeId', 'EventDetail/Description'))
-            lines.append(_row(source, type_id, '\n'.join(shown) + (f'\n… and {more} more' if more else ''), example))
+            lines.append(_row(source, type_id, _shown(found['descriptions']), example))
     return '\n'.join(lines) + '\n'
 
 
@@ -810,9 +825,9 @@ def _assignment(path: str, value: str, braces: bool = False) -> str:
     return f'`{path}="{{{value}}}"`' if braces else f'`{path}="{value}"`'
 
 
-def _leaves(event: etree._Element) -> dict[tuple[str, str | None], str]:
-    """An output event's EventDetail values keyed as the mapping keys them: (path, None) for an element,
-    (path to Data, Name) for a Data element."""
+def _leaves(event: etree._Element, sections: tuple[str, ...] = ('EventDetail',)) -> dict[tuple[str, str | None], str]:
+    """An output event's values in the given top-level sections, keyed as the mapping keys them: (path, None)
+    for an element, (path to Data, Name) for a Data element."""
     found: dict[tuple[str, str | None], str] = {}
 
     def walk(node: etree._Element, path: str) -> None:
@@ -825,34 +840,48 @@ def _leaves(event: etree._Element) -> dict[tuple[str, str | None], str]:
             found[(here, None)] = (node.text or '').strip()
         for child in children:
             walk(child, here)
-    for detail in (c for c in event if isinstance(c.tag, str) and etree.QName(c).localname == 'EventDetail'):
-        for child in (c for c in detail if isinstance(c.tag, str)):
-            walk(child, 'EventDetail')
+    for section in (c for c in event if isinstance(c.tag, str) and etree.QName(c).localname in sections):
+        for child in (c for c in section if isinstance(c.tag, str)):
+            walk(child, etree.QName(section).localname)
     return found
 
 
-def _by_rule_and_type_id(rules: list[EventRule], effective: dict[str, dict], observed: list[etree._Element]
-                         ) -> dict[str, dict[str, dict]]:
-    """rule -> TypeId -> {'descriptions': those seen with it, in order of first appearance, 'example': the
-    EventDetail values of the first such event}. An event belongs to the first
-    rule (in the mapping's order, as the XSLT tries them) whose EventDetail elements include all the event's and
-    whose constants agree with it, e.g. Authenticate/Action Logon or Logoff."""
-    out: dict[str, dict[str, list[str]]] = {}
+def _attribute(rules: list[EventRule], effective: dict[str, dict], observed: list[etree._Element]
+               ) -> list[tuple[str, etree._Element]]:
+    """(rule, event) for each sampled event. An event belongs to the first rule (in the mapping's order, as the
+    XSLT tries them) whose EventDetail elements include all the event's and whose constants agree with it, e.g.
+    Authenticate/Action Logon or Logoff. Events no rule explains are left out."""
+    out = []
     for event in observed:
         leaves = _leaves(event)
         for rule in rules:
             fields = effective[rule.name]
-            if not set(leaves) <= set(fields):
-                continue
-            if any(e.value is not None and k in leaves and leaves[k] != e.value for k, e in fields.items()):
-                continue
-            seen = out.setdefault(rule.name, {}).setdefault(leaves.get(('EventDetail/TypeId', None), ''),
-                                                            {'descriptions': [], 'example': leaves})
-            description = leaves.get(('EventDetail/Description', None), '')
-            if description and description not in seen['descriptions']:
-                seen['descriptions'].append(description)
-            break
+            if set(leaves) <= set(fields) and not any(
+                    e.value is not None and k in leaves and leaves[k] != e.value for k, e in fields.items()):
+                out.append((rule.name, event))
+                break
     return out
+
+
+def _by_rule_and_type_id(attributed: list[tuple[str, etree._Element]]) -> dict[str, dict[str, dict]]:
+    """rule -> TypeId -> {'descriptions': those seen with it, in order of first appearance, 'example': the
+    EventDetail values of the first such event}."""
+    out: dict[str, dict[str, dict]] = {}
+    for rule, event in attributed:
+        leaves = _leaves(event)
+        seen = out.setdefault(rule, {}).setdefault(leaves.get(('EventDetail/TypeId', None), ''),
+                                                   {'descriptions': [], 'example': leaves})
+        description = leaves.get(('EventDetail/Description', None), '')
+        if description and description not in seen['descriptions']:
+            seen['descriptions'].append(description)
+    return out
+
+
+def _shown(values: list[str], quote: bool = False) -> str:
+    """Up to DOC_VALUES_SHOWN values, a line each, then how many more."""
+    shown = [f'"{v}"' if quote else v for v in values[:DOC_VALUES_SHOWN]]
+    more = len(values) - DOC_VALUES_SHOWN
+    return '\n'.join(shown + ([f'… and {more} more'] if more > 0 else []))
 
 
 def sampled_events(outputs: list[str]) -> list[etree._Element]:
