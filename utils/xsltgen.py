@@ -4,11 +4,15 @@ The model says which input field (or constant) goes to which event-logging path,
 module writes the XSLT: the right input namespace, one template per record, elements in schema order,
 time conversion with stroom:format-date, value maps, and guards so empty inputs leave elements out rather
 than writing empty ones. Elements that come out the same in several places (EventTime, EventSource, ...)
-are written once, as named templates. Each template reads the input fields it uses into variables holding
-their non-blank values, so a selector appears once per template and guards are just `$user or $host`.
-Value maps are declared once each as stylesheet-level xsl:map variables and read with the lookup operator,
-$result-to-Success?($result), which gives nothing rather than an error for an empty input. Mistakes the schema can catch (unknown paths, invalid constants, two alternatives
-of a choice) come back as problems per mapping entry instead of as XSLT for the model to debug.
+are written once, as named templates. A field read several times in a template (in enclosing guards as well
+as its own element) goes into a variable holding its non-blank values, declared in the rule that uses it, so
+guards read `$src_ip or $src_port`; one read only by its element stays inline. Value maps shared by several
+elements, or too long to read as an if, are declared once as xsl:map variables and read with the lookup
+operator, $action_to_success?($action), which gives nothing rather than an error for an empty input. Names
+and these thresholds follow the mapping's style, which a style guide in the AGENTS docs can set.
+
+Mistakes the schema can catch (unknown paths, invalid constants, two alternatives of a choice) come back as
+problems per mapping entry instead of as XSLT for the model to debug.
 """
 import re
 from collections import Counter
@@ -27,6 +31,11 @@ EVT = 'event-logging:3'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
 DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/array'}
 DEFAULT_RECORD = {'data_splitter': 'record', 'json': 'map'}
+# A value map used by one element with at most this many keys is written inline, as an if.
+INLINE_MAP_KEYS = 3
+# A field read fewer times than this in a template is written where it's used, not held in a variable: an
+# element's own guard and value are two reads, so a variable needs a third, such as an enclosing guard.
+VARIABLE_MIN_READS = 3
 # Pattern letters of Java's SimpleDateFormat and DateTimeFormatter; any other letter must be quoted.
 _PATTERN_LETTERS = set('GuyDMLdQqYwWEecFaHkKhmsSAnNVzOXxZp')
 
@@ -82,6 +91,38 @@ class EventRule(BaseModel):
                                           "(no Event, no warning), e.g. kinds set_shape_handling marked drop. No fields.")
 
 
+class XsltStyle(BaseModel):
+    """How the XSLT is written. Take these from a style guide in the standing instructions (AGENTS docs) when
+    one says how XSLT should look; otherwise leave the defaults."""
+    naming: Literal['snake_case', 'camelCase', 'PascalCase', 'kebab-case'] = Field(
+        'snake_case', description="Names of variables and named templates, e.g. client_ip and event_source.")
+    variable_min_reads: int = Field(VARIABLE_MIN_READS, ge=1, description=(
+        "Read a field into a variable only when a template reads it at least this many times; fewer are written "
+        "where they're used. An element's guard and value are two reads. 1: always use variables."))
+    inline_map_max_keys: int = Field(INLINE_MAP_KEYS, ge=0, description=(
+        "A value map used by one element with at most this many keys is written inline as an if; longer or "
+        "shared maps are declared once as an xsl:map. 0: always an xsl:map."))
+
+
+def style_name(text: str, naming: str) -> str:
+    """text (a field name, a path such as 'Authenticate-User', or 'src_ip') in the naming style, as an
+    XML name: 'EventSource' -> event_source, eventSource, EventSource or event-source."""
+    words = [w.lower() for w in re.findall(r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+', text)] or ['field']
+    if naming == 'camelCase':
+        name = words[0] + ''.join(w.capitalize() for w in words[1:])
+    elif naming == 'PascalCase':
+        name = ''.join(w.capitalize() for w in words)
+    else:
+        name = ('-' if naming == 'kebab-case' else '_').join(words)
+    return name if not name[0].isdigit() else '_' + name
+
+
+def unique_name(base: str, taken: set[str], naming: str) -> str:
+    """base, or base with a number (event_source_2, eventSource2) when that is taken."""
+    sep = {'snake_case': '_', 'kebab-case': '-'}.get(naming, '')
+    return base if base not in taken else next(f'{base}{sep}{n}' for n in range(2, 1000) if f'{base}{sep}{n}' not in taken)
+
+
 class TranslationMapping(BaseModel):
     input: Literal['data_splitter', 'json', 'xml'] = Field(
         description="What the XSLT reads: data_splitter (Event Data (Text)), json (JSONParser), xml (the source XML).")
@@ -94,6 +135,29 @@ class TranslationMapping(BaseModel):
     events: list[EventRule] = Field(min_length=1, description="Event kinds, tried in order; the first whose "
                                                               "conditions hold is written.")
     unmatched: Literal['warn', 'skip'] = Field('warn', description="Records no rule matches: log a warning, or skip.")
+    style: XsltStyle = Field(default_factory=XsltStyle, description="How the XSLT is written: naming, and when "
+                                                                    "to use variables and xsl:maps.")
+
+
+def is_call(expr: str) -> bool:
+    """Whether an XPath expression is one function call, such as concat(a, '-', b), which a predicate can
+    follow without brackets; 'a or b' or 'x | y' would need them."""
+    start = re.match(r'[\w:.-]+\(', expr.strip())
+    if not start:
+        return False
+    text, depth, quote = expr.strip(), 0, None
+    for n, ch in enumerate(text[start.end() - 1:], start.end() - 1):
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in '\'"':
+            quote = ch
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return n == len(text) - 1
+    return False
 
 
 def literal(text: str) -> str:
@@ -132,8 +196,16 @@ class _Generator:
         self.problems: list[str] = []
         self.warnings: list[str] = []
         self._names: dict[str, str] = {}          # selector -> variable name, the same in every template
+        self._xpath_names: set[str] = set()      # those holding an xpath entry rather than a field
         self._scope: dict[str, str] = {}          # variables the template being written uses: name -> select
         self._maps: dict[tuple, str] = {}         # value map items -> name of the stylesheet variable holding it
+        # A value map becomes an xsl:map when several elements use it or it is too long to read as an if.
+        paths: dict[tuple, set[str]] = {}
+        for entry in mapping.common + [f for rule in mapping.events for f in rule.fields]:
+            if entry.map:
+                paths.setdefault(tuple(entry.map.items()), set()).add(entry.path.strip('/'))
+        self._xsl_maps = {items for items, used in paths.items()
+                          if len(used) > 1 or len(items) > mapping.style.inline_map_max_keys}
 
     def _note(self, bucket: list[str], message: str) -> None:
         if message not in bucket:
@@ -154,13 +226,13 @@ class _Generator:
         so each selector appears once per template. Named after the field, or for an xpath after `label`."""
         raw = self.source(field_name, xpath)
         if raw not in self._names:
-            base = re.sub(r'[^\w.-]', '_', label if xpath is not None else field_name)
-            base = base if base[:1].isalpha() or base[:1] == '_' else '_' + base
-            taken = set(self._names.values()) | set(self._maps.values())
-            self._names[raw] = base if base not in taken else next(
-                f'{base}-{n}' for n in range(2, 1000) if f'{base}-{n}' not in taken)
+            naming = self.m.style.naming
+            base = style_name(label if xpath is not None else field_name, naming)
+            self._names[raw] = unique_name(base, set(self._names.values()) | set(self._maps.values()), naming)
         name = self._names[raw]
-        wrap = xpath is not None or self.m.input == 'xml'
+        if xpath is not None:
+            self._xpath_names.add(name)
+        wrap = (xpath is not None and not is_call(raw)) or self.m.input == 'xml'
         self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
         return '$' + name
 
@@ -189,14 +261,17 @@ class _Generator:
 
     def map_ref(self, entry: FieldMapping, src: str) -> str:
         """A stylesheet-level variable holding the entry's value map, declared once however many elements use
-        it. Named after the input and the first element it fills, e.g. $action-to-Success."""
+        it. Named after the input and the first element it fills, e.g. $action_to_success."""
         items = tuple(entry.map.items())
         if items not in self._maps:
-            base = f"{src[1:]}-to-{entry.path.strip('/').split('/')[-1]}"
-            taken = set(self._names.values()) | set(self._maps.values())
-            self._maps[items] = base if base not in taken else next(
-                f'{base}-{n}' for n in range(2, 1000) if f'{base}-{n}' not in taken)
+            naming = self.m.style.naming
+            base = style_name(f"{src[1:]}-to-{entry.path.strip('/').split('/')[-1]}", naming)
+            self._maps[items] = unique_name(base, set(self._names.values()) | set(self._maps.values()), naming)
         return '$' + self._maps[items]
+
+    def as_xsl_map(self, entry: FieldMapping) -> bool:
+        """Whether the entry's value map is declared as an xsl:map rather than written inline as an if."""
+        return tuple(entry.map.items()) in self._xsl_maps
 
     def leaf_test(self, entry: FieldMapping) -> str | None:
         if entry.value is not None:
@@ -205,15 +280,29 @@ class _Generator:
             return None
         if entry.map:
             src = self.ref(entry.field, entry.xpath, self.label(entry))
-            return f"exists({self.map_ref(entry, src)}?({src}))"
+            if self.as_xsl_map(entry):
+                return f"exists({self.map_ref(entry, src)}?({src}))"
+            return f"{src} = ({', '.join(literal(k) for k in entry.map)})"
         return self.has(entry.field, entry.xpath, self.label(entry))
 
     def value_expr(self, entry: FieldMapping) -> str:
         src = self.ref(entry.field, entry.xpath, self.label(entry))
-        if entry.map:
+        if entry.map and self.as_xsl_map(entry):
             # The lookup operator takes any number of keys, so an empty input gives no value rather than an error.
             lookup = f"{self.map_ref(entry, src)}?({src})"
             return f"({lookup}, {literal(entry.default)})[1]" if entry.default is not None else f"{lookup}[1]"
+        if entry.map:
+            items = list(entry.map.items())
+            if entry.default is not None:
+                expr = literal(entry.default)
+            else:
+                # Without a default the element is only written when the input is one of the keys, so the
+                # last key needs no test of its own.
+                *items, (_, last) = items
+                expr = literal(last)
+            for key, out in reversed(items):
+                expr = f"if ({src} = {literal(key)}) then {literal(out)} else {expr}"
+            return expr
         fmt, tz = entry.time_format, entry.timezone
         if fmt == 'epoch_ms':
             expr = f"stroom:format-date(string({src}[1]))"
@@ -402,6 +491,42 @@ class _Generator:
             self._keys[id(node)] = node.path + '\n' + etree.tostring(holder, encoding='unicode')
         return self._keys[id(node)]
 
+    def tidy_variables(self, template: etree._Element) -> None:
+        """Keep a variable only where it helps. Every field is first read into one at the top of the template;
+        a field read fewer than style.variable_min_reads times goes back inline, and a variable whose reads all sit
+        in one rule (one xsl:when) is declared at the start of that rule instead of the top."""
+        branches = [b for b in template.iterfind(f'{{{XSL}}}choose/*')]
+        homes = {el: branch for branch in branches for el in branch.iter() if el is not branch}
+        raw = {name: selector for selector, name in self._names.items()}
+        placed: Counter = Counter()
+        for variable in template.findall(f'{{{XSL}}}variable'):
+            name, select = variable.get('name'), variable.get('select')
+            pattern = re.compile(r'\$' + re.escape(name) + r'(?![\w.-])')
+            reads = [(el, attr) for el in template.iter() if el is not variable
+                     for attr in ('test', 'select') if pattern.search(el.get(attr) or '')]
+            if sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
+                template.remove(variable)
+                plain = raw[name] if name not in self._xpath_names or is_call(raw[name]) else f'({raw[name]})'
+
+                def inline(m: re.Match) -> str:
+                    # Only a test of whether the field has a value needs blank values filtered out. A value
+                    # (after its guard, or after 'then'), a comparison and a [1] read the selector as it is.
+                    after, before = m.string[m.end():], m.string[:m.start()].rstrip()
+                    if not before and not after and attr == 'select' or after.startswith('[') \
+                            or re.match(r'\s*!?=', after) or before.endswith('then'):
+                        return plain
+                    return select
+
+                for el, attr in reads:
+                    el.set(attr, pattern.sub(inline, el.get(attr)))
+                continue
+            rules = {homes.get(el) for el, _ in reads}
+            if len(rules) == 1 and None not in rules:
+                # A rule's own test sits on its xsl:when, outside the branch, so it counts as the template's.
+                branch = rules.pop()
+                branch.insert(placed[branch], variable)
+                placed[branch] += 1
+
     def in_scope(self, template: etree._Element, write) -> None:
         """Run write() for a template's body, then declare the variables it used at the top of the template."""
         outer, self._scope = self._scope, {}
@@ -450,13 +575,13 @@ class _Generator:
     def template_for(self, node: _Node) -> str:
         k = self.key(node)
         if k not in self._templates:
-            # The element's name, or as much of its path as tells it apart, e.g. Authenticate-User; variants
+            # The element's name, or as much of its path as tells it apart, e.g. authenticate_user; variants
             # of one path are numbered.
+            naming = self.m.style.naming
             taken = {name for name, _ in self._templates.values()}
             parts = node.path.split('/')[1:]
-            names = ['-'.join(parts[-n:]) for n in range(1, len(parts) + 1)]
-            name = next((n for n in names if n not in taken), None) or next(
-                f'{names[-1]}-{n}' for n in range(2, 1000) if f'{names[-1]}-{n}' not in taken)
+            names = [style_name('-'.join(parts[-n:]), naming) for n in range(1, len(parts) + 1)]
+            name = next((n for n in names if n not in taken), None) or unique_name(names[-1], taken, naming)
             template = etree.Element(f'{{{XSL}}}template', name=name)
             self._templates[k] = (name, template)
             self.in_scope(template, lambda: self.emit_element(template, node, None, inline=False))
@@ -513,6 +638,9 @@ class _Generator:
                                  select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
 
         self.in_scope(record_template, write_rules)
+        self.tidy_variables(record_template)
+        for _, template in self._templates.values():
+            self.tidy_variables(template)
         for n, (items, name) in enumerate(self._maps.items()):
             variable = etree.Element(f'{{{XSL}}}variable', name=name, **{'as': 'map(xs:string, xs:string)'})
             entries = etree.SubElement(variable, f'{{{XSL}}}map')

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -68,10 +69,10 @@ def test_elements_repeated_across_rules_are_written_once_as_named_templates():
     sheet = etree.fromstring(xslt.encode())
     ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
     named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
-    assert set(named) == {'EventTime', 'EventSource'}
+    assert set(named) == {'event_time', 'event_source'}
     assert len(sheet.findall('.//e:EventSource', ns)) == 1
-    assert len(sheet.findall(".//xsl:call-template[@name='EventSource']", ns)) == 2
-    assert '<!-- EventSource: logon, other -->' in xslt
+    assert len(sheet.findall(".//xsl:call-template[@name='event_source']", ns)) == 2
+    assert '<!-- event_source: logon, other -->' in xslt
     # One rule: nothing repeats, so everything stays inline.
     single = generate(mapping(events=[{'name': 'logon', 'fields': LOGON}]), SCHEMA, '4.1.0')['xslt']
     assert 'call-template' not in single
@@ -86,28 +87,63 @@ def test_only_the_same_element_at_the_same_path_is_shared():
     ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
     sheet = etree.fromstring(result['xslt'].encode())
     named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
-    assert named['User'].find('.//e:User', ns) is not None  # Authenticate/User, called from both rules
-    assert named['EventSource'].find(".//xsl:call-template[@name='User']", ns) is None
-    assert named['EventSource'].find('.//e:User', ns) is not None
+    assert named['user'].find('.//e:User', ns) is not None  # Authenticate/User, called from both rules
+    assert named['event_source'].find(".//xsl:call-template[@name='user']", ns) is None
+    assert named['event_source'].find('.//e:User', ns) is not None
     events = transform(result['xslt'], RECORDS)
     assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
     assert events.findtext('.//{event-logging:3}Authenticate/{event-logging:3}User/{event-logging:3}Id') == "o'neil"
 
 
-def test_each_template_reads_its_fields_once_into_variables():
-    xslt = generate(mapping(), SCHEMA, '4.1.0')['xslt']
-    xsl = '{http://www.w3.org/1999/XSL/Transform}'
-    for template in etree.fromstring(xslt.encode()).iter(f'{xsl}template'):
-        variables = [v.get('name') for v in template.findall(f'{xsl}variable')]
-        assert len(variables) == len(set(variables))
-        body = ''.join(etree.tostring(c, encoding='unicode') for c in template if c.tag != f'{xsl}variable')
-        assert 'data[@name=' not in body  # selectors only in the declarations
-        assert all(f'${v}' in body for v in variables), variables  # and nothing declared needlessly
-    assert '<xsl:if test="$user">' in xslt
-    assert "test=\"($action = 'login')\"" in xslt
+XSL_NS = '{http://www.w3.org/1999/XSL/Transform}'
 
 
-def test_value_maps_are_declared_once_as_xsl_maps():
+def variable_reads(xslt: str) -> list[tuple[str, int]]:
+    """(name, reads in its scope) for every variable declared in a template or a rule."""
+    found = []
+    for scope in etree.fromstring(xslt.encode()).iter(f'{XSL_NS}template', f'{XSL_NS}when', f'{XSL_NS}otherwise'):
+        text = etree.tostring(scope, encoding='unicode')
+        found += [(v.get('name'), len(re.findall(rf"\${re.escape(v.get('name'))}(?![\w.-])", text)))
+                  for v in scope.findall(f'{XSL_NS}variable')]
+    return found
+
+
+def test_variables_only_for_fields_read_often_and_declared_where_used():
+    # user is read by Authenticate/User and by the session Data: four reads, all in the logon rule.
+    logon = LOGON + [{'path': 'EventDetail/Authenticate/Data', 'data_name': 'account', 'field': 'user'}]
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': logon},
+             {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                                          {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
+    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    xslt = result['xslt']
+    assert all(reads >= 3 for _, reads in variable_reads(xslt)), variable_reads(xslt)
+    sheet = etree.fromstring(xslt.encode())
+    record = sheet.find(f"{XSL_NS}template[@mode='event']")
+    # action is read by the rules' tests and the other rule: the template's; user only by the logon rule.
+    assert [v.get('name') for v in record.findall(f'{XSL_NS}variable')] == ['action']
+    assert [v.get('name') for v in record.findall(f'{XSL_NS}choose/{XSL_NS}when/{XSL_NS}variable')] == ['user']
+    # A field read only by its own element stays where it is used, with a short guard.
+    assert """<xsl:if test="data[@name='sid']/@value[normalize-space(.)]">""" in xslt
+    assert """<xsl:attribute name="Value" select="data[@name='sid']/@value"/>""" in xslt
+    events = transform(xslt, RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert events.find(".//{event-logging:3}Data[@Name='account']").get('Value') == "o'neil"
+
+
+def test_style_sets_names_and_when_to_use_variables():
+    style = {'naming': 'camelCase', 'variable_min_reads': 1, 'inline_map_max_keys': 0}
+    xslt = generate(mapping(style=style), SCHEMA, '4.1.0')['xslt']
+    sheet = etree.fromstring(xslt.encode())
+    assert {t.get('name') for t in sheet.findall(f'{XSL_NS}template[@name]')} == {'eventTime', 'eventSource'}
+    assert {v.get('name') for v in sheet.findall(f'{XSL_NS}variable')} == {'resultToSuccess'}  # always xsl:map
+    body = etree.tostring(sheet.find(f"{XSL_NS}template[@mode='event']"), encoding='unicode')
+    assert '$sid' in body and "data[@name='sid']/@value[normalize-space(.)]" in body  # one read is enough
+    assert VALIDATOR.validate(transform(xslt, RECORDS))
+    with pytest.raises(ValidationError):
+        mapping(style={'naming': 'SCREAMING'})
+
+
+def test_shared_or_long_value_maps_are_declared_once_as_xsl_maps():
     result_map = {'ok': 'true', 'fail': 'false'}
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON + [
                  {'path': 'EventDetail/Authenticate/Data', 'data_name': 'outcome', 'field': 'result', 'map': result_map}]},
@@ -121,11 +157,11 @@ def test_value_maps_are_declared_once_as_xsl_maps():
     sheet = etree.fromstring(xslt.encode())
     maps = {v.get('name'): {e.get('key'): e.get('select') for e in v.iterfind('xsl:map/xsl:map-entry', ns)}
             for v in sheet.findall('xsl:variable', ns)}
-    # Success and the outcome Data use the same map, so it is declared once.
-    assert maps == {'result-to-Success': {"'ok'": "'true'", "'fail'": "'false'"},
-                    'action-to-Data': {"'login'": "'Logon'"}}
-    assert xslt.count('$result-to-Success?($result)') == 4  # guard and value of Outcome/Success and of the Data
-    assert "($action-to-Data?($action), 'Other')[1]" in xslt
+    # Success and the outcome Data use the same map, so it is declared once; the one-key map used once
+    # reads better inline.
+    assert maps == {'result_to_success': {"'ok'": "'true'", "'fail'": "'false'"}}
+    assert xslt.count('$result_to_success?($result)') == 4  # guard and value of Outcome/Success and of the Data
+    assert "if ($action = 'login') then 'Logon' else 'Other'" in xslt
     events = transform(xslt, RECORDS)
     assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
     logon, other = events.findall('e:Event', ns)
@@ -153,8 +189,7 @@ def test_json_keys_and_xml_paths_address_the_record():
 def test_time_formats_become_stroom_format_date():
     common = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': "yyyy-MM-dd'T'HH:mm:ss", 'timezone': 'UTC'}] + BASE[1:]
     xslt = generate(mapping(common=common), SCHEMA, '4.1.0')['xslt']
-    assert '''<xsl:variable name="time" select="data[@name='time']/@value[normalize-space(.)]"/>''' in xslt
-    assert "stroom:format-date($time[1], 'yyyy-MM-dd''T''HH:mm:ss', 'UTC')" in xslt
+    assert "stroom:format-date(data[@name='time']/@value[1], 'yyyy-MM-dd''T''HH:mm:ss', 'UTC')" in xslt
     epoch = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': 'epoch_s'}] + BASE[1:]
     assert 'xs:integer(xs:decimal(' in generate(mapping(common=epoch), SCHEMA, '4.1.0')['xslt']
 
@@ -193,7 +228,7 @@ def test_unmatched_records_are_logged_when_every_rule_has_conditions():
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'one_of': ['login', 'logon']}], 'fields': LOGON}]
     xslt = generate(mapping(events=rules, unmatched='warn'), SCHEMA, '4.1.0')['xslt']
     assert "stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))" in xslt
-    assert "$action = ('login', 'logon')" in xslt
+    assert "data[@name='action']/@value = ('login', 'logon')" in xslt  # one read: no variable
 
 
 def test_each_field_needs_exactly_one_source():

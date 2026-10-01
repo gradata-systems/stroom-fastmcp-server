@@ -54,6 +54,20 @@ schema does not allow, alternatives used together and missing required elements 
 in the mapping. Use `xpath` for a computed value, and write XSLT by hand only for what a mapping cannot
 express, such as unpacking embedded JSON or reference lookups.
 
+## Style
+
+The mapping's `style` decides how the XSLT reads. Take it from an XSLT style section in the standing instructions
+(AGENTS docs) when there is one; otherwise leave the defaults:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `naming` | `snake_case` | Variables and named templates: `client_ip`, `event_source`, `action_to_success`. Also `camelCase`, `PascalCase`, `kebab-case`. |
+| `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable, declared in the one rule that uses it, or at the top when several do. Fewer reads stay inline. 1: always variables. |
+| `inline_map_max_keys` | 3 | A value map used by one element with at most this many keys is written inline as an `if`; longer or shared ones become one `xsl:map`. 0: always `xsl:map`. |
+
+Elements that come out the same in several rules (EventTime, EventSource, ...) are written once as named
+templates, whatever the style.
+
 ## Reuse
 
 Existing pipelines `xsl:import` shared XSLTs by document name (e.g. `IP Lookup`) and keep field

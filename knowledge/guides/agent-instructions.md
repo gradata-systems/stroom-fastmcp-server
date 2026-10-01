@@ -34,7 +34,14 @@ Short, concrete rules the agent can apply and you can check:
 ## Naming
 - Feeds and events pipelines: <Vendor>-<Product>-V<major>.<minor>, e.g. Fortigate-FG60F-V1.2.
 - Elasticsearch indices: ecs-<source>-v<n>.
+
+## XSLT style
+- Variables and named templates in camelCase.
+- Always declare value maps as xsl:map.
 ```
+
+An XSLT style section is applied through the translation mapping's `style` (naming, and when to use variables and
+xsl:maps; see the XSLT guide), so generated XSLT follows it without hand edits.
 
 The name the server looks for is `AGENTS` unless `STROOM_MCP_INSTRUCTIONS_DOC_NAME` says otherwise. Anyone who can
 edit a folder can edit its `AGENTS` doc, so set folder permissions accordingly.
