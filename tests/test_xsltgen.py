@@ -123,7 +123,7 @@ def test_variables_only_for_fields_read_often_and_declared_where_used():
     assert [v.get('name') for v in record.findall(f'{XSL_NS}variable')] == ['action']
     assert [v.get('name') for v in record.findall(f'{XSL_NS}choose/{XSL_NS}when/{XSL_NS}variable')] == ['user']
     # A field read only by its own element stays where it is used, with a short guard.
-    assert """<xsl:if test="data[@name='sid']/@value[normalize-space(.)]">""" in xslt
+    assert """<xsl:if test="normalize-space(data[@name='sid']/@value)">""" in xslt
     assert """<xsl:attribute name="Value" select="data[@name='sid']/@value"/>""" in xslt
     events = transform(xslt, RECORDS)
     assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]

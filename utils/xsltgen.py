@@ -507,15 +507,20 @@ class _Generator:
             if sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
                 template.remove(variable)
                 plain = raw[name] if name not in self._xpath_names or is_call(raw[name]) else f'({raw[name]})'
+                # A Data Splitter or JSON field has one value per record, so its test reads naturally as
+                # normalize-space(field); an XML path or an xpath may give several, which normalize-space()
+                # would refuse, so those keep the predicate.
+                single = name not in self._xpath_names and self.m.input in ('data_splitter', 'json')
+                has_value = f'normalize-space({raw[name]})' if single else select
 
                 def inline(m: re.Match) -> str:
-                    # Only a test of whether the field has a value needs blank values filtered out. A value
+                    # Only a test of whether the field has a value needs blank values left out. A value
                     # (after its guard, or after 'then'), a comparison and a [1] read the selector as it is.
                     after, before = m.string[m.end():], m.string[:m.start()].rstrip()
                     if not before and not after and attr == 'select' or after.startswith('[') \
                             or re.match(r'\s*!?=', after) or before.endswith('then'):
                         return plain
-                    return select
+                    return has_value
 
                 for el, attr in reads:
                     el.set(attr, pattern.sub(inline, el.get(attr)))
