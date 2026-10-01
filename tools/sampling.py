@@ -10,6 +10,7 @@ from pydantic import Field
 from security.guard import guard_from
 from tools.streams import _term
 from utils.consent import consent_from
+from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
 from utils.survey import Shapes, share, split_records
 from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
@@ -93,9 +94,9 @@ async def survey_feed(
         stream_type: Annotated[str, Field(description="Stream type to sample.")] = 'Raw Events',
         max_streams: Annotated[int, Field(ge=1, le=50, description="Streams to read in this call, spread over the "
                                                                   "feed's lifetime.")] = 10,
-        skip_stream_ids: Annotated[list[int], Field(
+        skip_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
             description="Streams already read (streams_read from earlier calls): this call picks others.")] = [],
-        known_signatures: Annotated[list[str], Field(
+        known_signatures: Annotated[list[str], ONE_OR_MORE, Field(
             description="Shape signatures from earlier calls; locations then only cover new shapes.")] = [],
         quiet_streams: Annotated[int, Field(ge=1, le=50, description="Stop after this many streams in a row add no "
                                                                      "new shape.")] = 4,
@@ -232,7 +233,7 @@ async def set_shape_handling(
         ctx: Context,
         build: Annotated[str, Field(description="The build holding the feed's survey doc.")],
         feed: Annotated[str, Field(description="The surveyed feed.")],
-        shapes: Annotated[list[str], Field(description="Kinds of event: their signatures from survey_feed, or text "
+        shapes: Annotated[list[str], ONE_OR_MORE, Field(description="Kinds of event: their signatures from survey_feed, or text "
                                                        "found in exactly one signature, e.g. 'loggerName=org.jgroups'.")],
         handling: Annotated[Literal['drop', 'translate'], Field(
             description="drop: the pipeline deliberately writes no Event for these records; translate: undo that.")],

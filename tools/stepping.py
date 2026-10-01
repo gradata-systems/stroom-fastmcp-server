@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
+from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
 from utils.triage import from_stored_error, triage
 
@@ -164,7 +165,7 @@ async def step_pipeline(
             description="Zero-based record index within the part, or 'first' / 'last'.")] = 'first',
         part: Annotated[int, Field(ge=0, description="Zero-based part of a multi-part stream (locate_event gives it).")] = 0,
         draft_code: DraftCode = None,
-        show: Annotated[list[str] | None, Field(
+        show: Annotated[list[str] | None, ONE_OR_MORE, Field(
             description="Element ids whose input and output to return. Defaults to the pipeline's own "
                         "XSLT steps.")] = None,
 ) -> dict[str, Any]:
@@ -200,7 +201,7 @@ async def step_pipeline(
 async def step_sample(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        stream_ids: Annotated[list[int], Field(description="Sample streams to step through, every record.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Sample streams to step through, every record.")],
         draft_code: DraftCode = None,
         max_records: Annotated[int | None, Field(
             ge=1, description="Stop after this many records (default: the server's max_sample_records).")] = None,
@@ -370,7 +371,7 @@ async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[
 async def compare_outputs(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        stream_ids: Annotated[list[int], Field(description="Streams whose records to compare.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Streams whose records to compare.")],
         draft_code: DraftCode = None,
         other_pipeline_uuid: Annotated[str | None, Field(
             description="Compare against this pipeline instead of draft code, e.g. a v2 copy.")] = None,

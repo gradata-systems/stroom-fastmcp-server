@@ -20,6 +20,7 @@ from tools.streams import summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
 from utils.fieldplan import Backend, FieldPlan, PlannedField
+from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from
 from utils.templatecheck import compare, json_xml_documents, parse_template
 
@@ -74,7 +75,7 @@ async def draft_index_mapping(
         backend: Annotated[Backend, Field(description="From the chosen indexing template (find_pipeline_templates).")],
         index_name: Annotated[str, Field(description="Lucene index doc name, or ES index / data stream name.")],
         convention: Annotated[str, Field(description="Convention profile the user chose (get_field_conventions).")],
-        events_stream_ids: Annotated[list[int], Field(description="Events streams from stage 1, to see which "
+        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams from stage 1, to see which "
                                                                   "event-logging paths are actually populated.")],
         extra_fields: Annotated[list[PlannedField], Field(
             description="Fields the user asked for beyond the convention's map.")] = [],
@@ -274,7 +275,7 @@ async def create_verification_dashboard(
         name: Annotated[str, Field(description="Dashboard name, e.g. the index name with a -VERIFY suffix.")],
         index_uuid: Annotated[str, Field(description="The index doc to query.")],
         backend: Backend,
-        fields: Annotated[list[str], Field(description="Minimal field set: StreamId, EventId, the time field and a "
+        fields: Annotated[list[str], ONE_OR_MORE, Field(description="Minimal field set: StreamId, EventId, the time field and a "
                                                        "few key fields.")],
 ) -> dict[str, Any]:
     """A workspace dashboard with a query on the index doc and a table of the given fields, for run_test_searches."""
@@ -331,7 +332,7 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
 async def run_test_searches(
         ctx: Context,
         dashboard_uuid: Annotated[str, Field(description="A verification dashboard.")],
-        stream_ids: Annotated[list[int], Field(description="Events streams that were indexed.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams that were indexed.")],
         expected_documents: Annotated[int, Field(description="Events records in those streams.")],
         exact: Annotated[list[dict[str, str]], Field(
             description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
@@ -399,7 +400,7 @@ async def propose_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
         plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
-        events_stream_ids: Annotated[list[int], Field(description="Events streams to check the template against.")],
+        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to check the template against.")],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
 ) -> dict[str, Any]:
@@ -430,7 +431,7 @@ async def check_index_template(
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
         template: Annotated[str, Field(description="The template as the user gave it: a Dev Tools request "
                                                    "(PUT _index_template/name {...}), the JSON body, or GET output.")],
-        events_stream_ids: Annotated[list[int], Field(description="Events streams to step the pipeline over.")],
+        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
 ) -> dict[str, Any]:
     """

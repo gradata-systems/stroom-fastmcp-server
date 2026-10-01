@@ -20,6 +20,7 @@ from security.guard import guard_from
 from tools.pipelines import merge_layers
 from tools.processing import processing_status
 from utils.consent import consent_from
+from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, doc_link, gateway_from
 
 STREAM_STORE = {'type': 'StreamStore', 'uuid': '0', 'name': 'StreamStore'}
@@ -257,7 +258,7 @@ def _ready_to_enable(stroom: StroomGateway, pipeline: dict[str, Any], created: d
 async def create_processor_filter(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
-        stream_ids: Annotated[list[int] | None, Field(
+        stream_ids: Annotated[list[int] | None, ONE_OR_MORE, Field(
             description="Process exactly these streams (the sample). The default and safest scope.")] = None,
         feed: Annotated[str | None, Field(description="Or process a whole feed's streams of stream_type.")] = None,
         stream_type: Annotated[str, Field(description="Stream type to process with a feed scope.")] = 'Raw Events',
@@ -358,7 +359,7 @@ async def _outputs(stroom: StroomGateway, raw_id: int, pipeline_uuid: str,
 async def reprocess_streams(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server built, after a change.")],
-        stream_ids: Annotated[list[int], Field(description="Streams it already processed, to process again.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Streams it already processed, to process again.")],
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
         confirmation_id: Annotated[str | None, Field(
@@ -414,7 +415,7 @@ async def reprocess_streams(
 async def wait_for_processing(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The pipeline that is processing.")],
-        stream_ids: Annotated[list[int], Field(description="Input streams to wait for.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Input streams to wait for.")],
         timeout_seconds: Annotated[int, Field(ge=5, le=900)] = 180,
         expect_events: Annotated[bool, Field(
             description="True for translation pipelines (one Events stream per input); False for indexing "

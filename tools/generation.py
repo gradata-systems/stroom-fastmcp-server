@@ -6,6 +6,7 @@ from pydantic import Field
 
 from tools.instructions import applicable_instructions
 from utils.eventschema import EventSchema
+from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
@@ -26,13 +27,13 @@ async def build_translation_xslt(
                                                                  "event-logging path, per kind of event.")],
         schema_version: Annotated[str | None, Field(
             description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
-        feeds: Annotated[list[str], Field(description="Feeds the translation is for, so the standing "
+        feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
                                                       "instructions for their folders are included.")] = [],
         pipeline_uuid: Annotated[str | None, Field(
             description="With stream_ids: step this pipeline with the generated XSLT over the sample (nothing is "
                         "saved), so field_mapping gives the TypeId and Description values the events actually get. "
                         "Do this before write_documentation.")] = None,
-        stream_ids: Annotated[list[int], Field(description="Sample streams to step for field_mapping.")] = [],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Sample streams to step for field_mapping.")] = [],
         max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 200,
 ) -> dict[str, Any]:
     """

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from security.guard import guard_from
 from utils.consent import consent_from
+from utils.params import ONE_OR_MORE
 from utils.profile import profile
 from utils.stroom import gateway_from, set_body_text
 
@@ -116,7 +117,7 @@ async def record_source_notes(
         summary: Annotated[str, Field(description="What the documentation says about the source, in a few lines.")],
         fields: Annotated[list[FieldNote], Field(description="Field dictionary condensed from the documentation.")] = [],
         events: Annotated[list[EventNote], Field(description="Event catalogue condensed from the documentation.")] = [],
-        references: Annotated[list[str], Field(description="Titles or links of the documents used.")] = [],
+        references: Annotated[list[str], ONE_OR_MORE, Field(description="Titles or links of the documents used.")] = [],
 ) -> dict[str, Any]:
     """
     Save the field dictionary and event catalogue condensed from user-supplied vendor documentation or

@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from tools.pipelines import own_elements
+from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
 from utils.triage import from_stored_error, triage
 
@@ -199,7 +200,7 @@ def _leaf_paths(event: etree._Element) -> set[str]:
 
 async def summarise_events(
         ctx: Context,
-        stream_ids: Annotated[list[int], Field(description="Events streams to profile.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to profile.")],
         max_events: Annotated[int, Field(ge=1, le=2000)] = 200,
 ) -> dict[str, Any]:
     """

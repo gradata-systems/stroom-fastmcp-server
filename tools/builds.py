@@ -12,6 +12,7 @@ from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
 from tools.stepping import stepped_clean, stepped_tags
 from utils.consent import consent_from
+from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name, e.g. 'keycloak-v1.3'.")]
@@ -21,9 +22,9 @@ _COPY_OF = 'mcp-copy-of-'
 async def start_build(
         ctx: Context,
         build: Build,
-        feeds: Annotated[list[str], Field(description="Feeds the build is for, if known, so the standing "
+        feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feeds the build is for, if known, so the standing "
                                                       "instructions for their folders are included.")] = [],
-        folders: Annotated[list[str], Field(description="Folders the work will be promoted to, if known.")] = [],
+        folders: Annotated[list[str], ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
 ) -> dict[str, Any]:
     """
     Create (or find) the build's workspace folder. Every write tool creates documents there. Returns the

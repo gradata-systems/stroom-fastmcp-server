@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastmcp import Context
 from pydantic import Field
 
+from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, gateway_from
 
 MAX_CHARS = 20_000
@@ -37,10 +38,10 @@ async def _folder_of(ctx: Context, name: str, doc_type: str, uuid: str | None = 
 
 async def get_instructions(
         ctx: Context,
-        folders: Annotated[list[str], Field(
+        folders: Annotated[list[str], ONE_OR_MORE, Field(
             description="Folders the work touches, e.g. 'System/Feeds/Events/Keycloak' (where the feed or pipeline "
                         "lives, or where it will be promoted to).")] = [],
-        feeds: Annotated[list[str], Field(description="Feed names the work touches; their folders are used.")] = [],
+        feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feed names the work touches; their folders are used.")] = [],
         docs: Annotated[list[dict[str, str]], Field(
             description="Documents the work touches, each {type, name, uuid?}, e.g. a pipeline being updated.")] = [],
 ) -> dict[str, Any]:
