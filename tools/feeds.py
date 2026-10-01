@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from security.guard import guard_from
 from utils.consent import consent_from
 from utils.profile import profile
-from utils.stroom import gateway_from
+from utils.stroom import gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 
@@ -139,7 +139,7 @@ async def record_source_notes(
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
-        doc['documentation'] = '\n'.join(lines) + '\n'
+        set_body_text(doc, '\n'.join(lines) + '\n')
         return await stroom.put_doc(doc)
 
     doc = await guard_from(ctx).create_filled('Documentation', f'{source} source notes', build, write)

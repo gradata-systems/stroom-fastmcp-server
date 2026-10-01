@@ -23,7 +23,7 @@ class FakeStroom:
         return {'values': [{'docRef': {'type': 'Feed', 'uuid': 'f', 'name': name}, 'path': FEEDS[name]}] if name in FEEDS else []}
 
     async def get_doc(self, doc_type, uuid):
-        return {'documentation': DOCS[uuid][1]}
+        return {'data': DOCS[uuid][1]}  # the body, as typed in the Stroom UI
 
 
 def ctx():

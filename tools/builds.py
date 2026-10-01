@@ -12,7 +12,7 @@ from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
 from tools.stepping import stepped_clean, stepped_tags
 from utils.consent import consent_from
-from utils.stroom import gateway_from
+from utils.stroom import body_text, gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name, e.g. 'keycloak-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
@@ -90,9 +90,9 @@ async def write_documentation(
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
-        old = doc.get('documentation') or ''
+        old = body_text(doc)
         log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
-        doc['documentation'] = f"{body}\n\n{log.rstrip()}\n- {stamp}: {change}\n"
+        set_body_text(doc, f"{body}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
         return await stroom.put_doc(doc)
 
     existing = next((d for d in await _build_docs(ctx, build)

@@ -31,7 +31,7 @@ async def agents_doc(stroom: StroomGateway, folder: dict, text: str) -> dict:
                                                      'destinationFolder': folder, 'permissionInheritance': 'DESTINATION'})
     ref = node.get('docRef', node)
     doc = await stroom.get_doc('Documentation', ref['uuid'])
-    doc['documentation'] = text
+    doc['data'] = text  # the body, as typed in the Stroom UI
     await stroom.put_doc(doc)
     return {'type': 'Documentation', 'uuid': ref['uuid'], 'name': 'AGENTS'}
 

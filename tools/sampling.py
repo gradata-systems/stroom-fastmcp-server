@@ -10,7 +10,7 @@ from pydantic import Field
 from security.guard import guard_from
 from tools.streams import _term
 from utils.consent import consent_from
-from utils.stroom import StroomGateway, gateway_from
+from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
 from utils.survey import Shapes, share, split_records
 from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
 
@@ -123,7 +123,7 @@ async def survey_feed(
     """
     stroom = gateway_from(ctx)
     record = await _load_record(ctx, build, feed) if build else None
-    state = read_state(record.get('documentation')) if record else None
+    state = read_state(body_text(record)) if record else None
     if state:
         skip_stream_ids = sorted(set(skip_stream_ids) | set(state['streams_read']))
         known_signatures = list(dict.fromkeys(known_signatures + list(state['shapes'])))
@@ -216,7 +216,7 @@ async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, 
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = record if record is not None else await stroom.get_doc('Documentation', ref['uuid'])
-        doc['documentation'] = render(merged)
+        set_body_text(doc, render(merged))
         return await stroom.put_doc(doc)
 
     if record is None:
@@ -248,7 +248,7 @@ async def set_shape_handling(
     (build_translation_xslt), so they don't reach the 'no mapping matched' warning.
     """
     record = await _load_record(ctx, build, feed)
-    state = read_state(record.get('documentation')) if record else None
+    state = read_state(body_text(record)) if record else None
     if not state:
         raise ToolError(f"No survey of '{feed}' in build '{build}': run survey_feed with build first")
     try:
@@ -268,7 +268,7 @@ async def set_shape_handling(
     if gate:
         return gate
     set_handling(state, signatures, handling, reason.strip(), datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
-    record['documentation'] = render(state)
+    set_body_text(record, render(state))
     await gateway_from(ctx).put_doc(record)
     left = dropped(state)
     return {'feed': feed, 'handling': handling, 'shapes': signatures,

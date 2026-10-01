@@ -24,6 +24,20 @@ RESOURCES = {
 }
 
 
+def body_text(doc: dict[str, Any]) -> str:
+    """The text of a Documentation doc: its body (data), which the Stroom UI shows and edits. Falls back to
+    the Documentation tab (documentation), where 0.6.0 and earlier wrote it, and where people sometimes write."""
+    return doc.get('data') or doc.get('documentation') or ''
+
+
+def set_body_text(doc: dict[str, Any], text: str) -> None:
+    """Write a Documentation doc's body. Text an earlier version of the server put in the Documentation tab
+    instead (the body empty) is moved, not left behind as a stale copy."""
+    if not doc.get('data') and doc.get('documentation'):
+        doc['documentation'] = None
+    doc['data'] = text
+
+
 def doc_link(settings: Settings, doc_type: str, uuid: str) -> str:
     """A URL that opens the document in the Stroom UI, as the explorer's 'Copy Link to Clipboard' makes."""
     base = (settings.stroom_ui_url or settings.stroom_url).rstrip('/')

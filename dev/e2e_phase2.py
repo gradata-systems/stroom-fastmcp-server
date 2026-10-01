@@ -213,8 +213,11 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     doc = await builds.write_documentation(ctx, build, pipeline['uuid'],
                                            f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the Phase 2 test.\n",
                                            'Created')
-    text = (await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])).get('documentation') or ''
-    check('Phase 2 test' in text and '## Change log' in text, f"documentation written with its text: {len(text)} chars")
+    stored = await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])
+    text = stored.get('data') or ''
+    # The body (data) is what the Stroom UI shows; documentation is the Documentation tab.
+    check('Phase 2 test' in text and '## Change log' in text and not stored.get('documentation'),
+          f"documentation written to the doc's body: {len(text)} chars")
     return {'build': build, 'feed': feed_name, 'raw': raw, 'pipeline': pipeline, 'xslt': x, 'doc': doc}
 
 
@@ -272,7 +275,7 @@ async def promotion(ctx, csv: dict, stamp: str):
         check(result['promoted'][:2] == [f'created folder System/E2E Promoted {stamp}',
                                          f'created folder System/E2E Promoted {stamp}/Events'],
               f"missing destination folders created first: {result['promoted'][:2]}")
-    text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('documentation') or ''
+    text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('data') or ''
     check('Phase 2 test' in text, f"promoted documentation keeps its text: {len(text)} chars")
     check("removed the build's workspace folder, now empty" in result['promoted']
           and await guard_from(ctx).build_folder(csv['build'], create=False) is None, 'the emptied build folder is removed')

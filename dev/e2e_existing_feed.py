@@ -187,7 +187,7 @@ async def main():
         third = await sampling.survey_feed(ctx, source, build=build)
         p2.check(third['saturated'] and third['new_shapes'] == 0 and not third['streams_read'],
                  f"the feed is covered: {third['hint']}")
-        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['documentation']
+        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['data']
         state = sampling.read_state(record)
         p2.check(sorted(state['streams_read']) == ids and len(state['shapes']) == 4 and state['saturated'],
                  f"the survey doc records all {len(ids)} streams and 4 kinds of event")
@@ -214,7 +214,7 @@ async def main():
         p2.check(after['verdict'] == 'clean' and not after['shapes_not_clean']
                  and after['left_untranslated_as_intended'] == len(drop_locs),
                  f"with a drop rule every location steps clean, {after['left_untranslated_as_intended']} left untranslated")
-        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['documentation']
+        record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['data']
         p2.check('left untranslated: file reads are audited elsewhere' in record, 'the survey doc shows the choice and why')
 
         print('\n### 7. a big single-line stream is read from its head only')

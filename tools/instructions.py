@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from fastmcp import Context
 from pydantic import Field
 
-from utils.stroom import gateway_from
+from utils.stroom import body_text, gateway_from
 
 MAX_CHARS = 20_000
 
@@ -77,7 +77,7 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
     for ref, folder in sorted(candidates, key=lambda c: (len(c[1]), '/'.join(c[1]))):
         scope = '/'.join(folder) or '(root)'
         if len(folder) <= 1 or any(applies(folder, t) for t in targets):
-            text = (await stroom.get_doc('Documentation', ref['uuid'])).get('documentation') or ''
+            text = body_text(await stroom.get_doc('Documentation', ref['uuid']))
             room = max(0, MAX_CHARS - used)
             used += min(len(text), room)
             applying.append({'folder': scope, 'uuid': ref['uuid'],

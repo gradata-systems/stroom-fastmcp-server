@@ -75,9 +75,9 @@ async def test_a_document_whose_filling_fails_is_deleted_not_left_empty():
                                                             'name': 'ACME-VPN-Events'}]}) in stroom.requests
 
     async def ok(ref):
-        return {**ref, 'documentation': '# ACME'}
+        return {**ref, 'data': '# ACME'}
 
-    assert (await guard.create_filled('Documentation', 'ACME-VPN-Events', 'acme-v1', ok))['documentation'] == '# ACME'
+    assert (await guard.create_filled('Documentation', 'ACME-VPN-Events', 'acme-v1', ok))['data'] == '# ACME'
 
 
 @pytest.mark.parametrize('node, removed', [
