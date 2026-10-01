@@ -72,9 +72,11 @@ async def write_documentation(
         ctx: Context,
         build: Build,
         pipeline_uuid: Annotated[str, Field(description="The pipeline documented.")],
-        markdown: Annotated[str, Field(description="The full documentation, using the sections in stroom://guide "
-                                                   "(Purpose and data, Processing, Field mapping, Output, Conformance, "
-                                                   "Open items). The change log is added by the tool.")],
+        markdown: Annotated[str, Field(description="The full documentation, with the sections in "
+                                                   "stroom://guide/documentation (Purpose and data, Processing, Field "
+                                                   "mapping, Output, Conformance, Open items). For Field mapping use "
+                                                   "field_mapping from build_translation_xslt as it is. The change log "
+                                                   "is added by the tool.")],
         change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")],
 ) -> dict[str, Any]:
     """

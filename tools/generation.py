@@ -36,7 +36,8 @@ async def build_translation_xslt(
     order with empty inputs left out. Fix any problems in the mapping and call again; then step_sample with
     draft_code={'<xslt element>': xslt}. Saves nothing. The standing instructions (AGENTS docs) that apply
     come back with the result: check the mapping follows them, and set mapping.style from any XSLT style
-    section in them (naming, variables, xsl:maps).
+    section in them (naming, variables, xsl:maps). field_mapping is the Field mapping section of the
+    pipeline's documentation, written from the same mapping: use it as it is in write_documentation.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
     result = generate(mapping, await event_schema(ctx, version), version)

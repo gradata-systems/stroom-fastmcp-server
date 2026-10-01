@@ -664,4 +664,107 @@ def generate(mapping: TranslationMapping, schema: EventSchema, version: str) -> 
     gen = _Generator(mapping, schema)
     xslt, summary = gen.stylesheet(version)
     return {'ok': not gen.problems, 'problems': gen.problems, 'warnings': gen.warnings, 'events': summary,
-            'xslt': None if gen.problems else xslt}
+            'xslt': None if gen.problems else xslt,
+            'field_mapping': None if gen.problems else field_mapping_markdown(mapping, schema)}
+
+
+# --- the Field mapping section of the pipeline's documentation ---
+
+def _cell(text: str) -> str:
+    return text.replace('|', '\\|').replace('\n', '<br>')
+
+
+def _row(*cells: str) -> str:
+    return '| ' + ' | '.join(_cell(c) for c in cells) + ' |'
+
+
+def _value(entry: FieldMapping) -> str:
+    """What an element is written from, for a reader: a constant, a field, a computed value, and how it's
+    converted."""
+    if entry.value is not None:
+        return f'"{entry.value}"'
+    text = f'`{entry.field}`' if entry.field is not None else f'`{entry.xpath}`'
+    if entry.time_format:
+        text += f" ({entry.time_format}{', ' + entry.timezone if entry.timezone else ''})"
+    elif entry.timezone:
+        text += f' ({entry.timezone})'
+    if entry.map:
+        text += ': ' + ', '.join(f'{k} → {v}' for k, v in entry.map.items())
+        if entry.default is not None:
+            text += f'; otherwise {entry.default}'
+    elif entry.default is not None:
+        text += f', or "{entry.default}" when empty'
+    return text
+
+
+def _condition(c: Condition) -> str:
+    src = f'`{c.field}`' if c.field is not None else f'`{c.xpath}`'
+    if c.equals is not None:
+        return f'{src} = {c.equals}'
+    if c.one_of is not None:
+        return f"{src} in {', '.join(c.one_of)}"
+    if c.matches is not None:
+        return f'{src} matches `{c.matches}`'
+    return f'{src} {"present" if c.present else "empty"}'
+
+
+def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema) -> str:
+    """The Field mapping section of a pipeline's documentation: a table of the EventSource (and EventTime)
+    elements every event carries, with the schema's description of each, then one row per kind of event with
+    the source records it covers, its TypeId and Description, and each EventDetail element's XPath and value."""
+    def key(entry: FieldMapping) -> tuple:
+        try:
+            order = tuple(c.index for c in schema.resolve(entry.path.strip('/')))
+        except ValueError:
+            order = (999,)
+        return order, entry.data_name or ''
+
+    def xpath(entry: FieldMapping, below: str = '') -> str:
+        path = entry.path.strip('/').removeprefix(below)
+        return path + (f"[@Name='{entry.data_name}']/@Value" if entry.data_name else '')
+
+    rules = [r for r in mapping.events if not r.drop]
+    effective = {}
+    for rule in rules:
+        fields = {(e.path.strip('/'), e.data_name): e for e in mapping.common}
+        fields.update({(e.path.strip('/'), e.data_name): e for e in rule.fields})
+        effective[rule.name] = fields
+
+    # EventSource and EventTime: one row per element, with each distinct value and, when not every kind of
+    # event has it, which kinds do.
+    rows: dict[tuple, dict[str, list[str]]] = {}
+    entries: dict[tuple, FieldMapping] = {}
+    for rule in rules:
+        for k, entry in effective[rule.name].items():
+            if k[0].split('/')[0] in ('EventSource', 'EventTime'):
+                rows.setdefault(k, {}).setdefault(_value(entry), []).append(rule.name)
+                entries.setdefault(k, entry)
+    lines = ['### EventSource', '', 'Common to every kind of event; where only some kinds have an element, they are named.',
+             '', '| XPath | Description | Value |',
+             '| --- | --- | --- |']
+    for k in sorted(rows, key=lambda k: key(entries[k])):
+        values = rows[k]
+        if len(values) == 1 and len(next(iter(values.values()))) == len(rules):
+            value = next(iter(values))
+        else:
+            value = '\n'.join(f"{v} ({', '.join(names)})" for v, names in values.items())
+        try:
+            description = schema.describe(schema.resolve(k[0]))
+        except ValueError:
+            description = ''
+        lines.append(_row(f'`{xpath(entries[k])}`', description, value))
+
+    lines += ['', '### Event types', '', '| Source | TypeId | Description | EventDetail |', '| --- | --- | --- | --- |']
+    for rule in mapping.events:
+        source = f'**{rule.name}**\n' + (' and '.join(_condition(c) for c in rule.when) or 'any other record')
+        if rule.drop:
+            lines.append(_row(source, '', 'Left untranslated on purpose', ''))
+            continue
+        fields = effective[rule.name]
+        type_id = fields.get(('EventDetail/TypeId', None))
+        description = fields.get(('EventDetail/Description', None))
+        detail = sorted((e for (path, _), e in fields.items() if path.startswith('EventDetail/')
+                         and path not in ('EventDetail/TypeId', 'EventDetail/Description')), key=key)
+        cell = '\n\n'.join(f"`{xpath(e, 'EventDetail/')}`\n{_value(e)}" for e in detail)
+        lines.append(_row(source, _value(type_id) if type_id else '', _value(description) if description else '', cell))
+    return '\n'.join(lines) + '\n'

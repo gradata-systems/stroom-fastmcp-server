@@ -283,3 +283,27 @@ def test_v352_objects_from_a_repeating_choice_are_alternatives_not_all_required(
     empty = [{'path': 'EventDetail/TypeId', 'value': 'FileRead'}, {'path': 'EventDetail/View/Outcome/Success', 'value': 'true'}]
     problems = generate(mapping(events=[{'name': 'view', 'fields': empty}]), SCHEMA_352, '3.5.2')['problems']
     assert any('EventDetail/View needs one of' in p and 'File' in p for p in problems), problems
+
+
+def test_field_mapping_tables_for_the_documentation():
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'one_of': ['login', 'logon']}],
+              'fields': LOGON + [{'path': 'EventSource/Client/IPAddress', 'field': 'ip'}]},
+             {'name': 'keepalive', 'drop': True, 'when': [{'field': 'action', 'equals': 'keepalive'}]},
+             {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                                          {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
+    text = generate(mapping(events=rules), SCHEMA, '4.1.0')['field_mapping']
+    source, events = text.split('### Event types')
+    rows = [line for line in source.splitlines() if line.startswith('| `')]
+    # Schema order, the schema's description, constants quoted, defaults, and which kinds have an element.
+    assert [r.split(' | ')[0] for r in rows] == [
+        '| `EventTime/TimeCreated`', '| `EventSource/System/Name`', '| `EventSource/System/Environment`',
+        '| `EventSource/Generator`', '| `EventSource/Device/HostName`', '| `EventSource/Client/IPAddress`',
+        '| `EventSource/User/Id`']
+    assert '| `EventSource/System/Name` | The name of the system. | "Acme VPN" |' in source
+    assert '| `host`, or "unknown" when empty |' in source
+    assert '| `ip` (logon) |' in source
+    assert ('| **logon**<br>`action` in login, logon | "Logon" |  | `Authenticate/Action`<br>"Logon"<br><br>'
+            '`Authenticate/User/Id`<br>`user`<br><br>`Authenticate/Outcome/Success`<br>`result`: ok → true, '
+            "fail → false<br><br>`Authenticate/Data[@Name='session']/@Value`<br>`sid` |") in events
+    assert '| **keepalive**<br>`action` = keepalive |  | Left untranslated on purpose |  |' in events
+    assert '| **other**<br>any other record | `action` |' in events

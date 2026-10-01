@@ -5,6 +5,7 @@ have (with suggestions), and to check constants against enumerations, so a model
 input field goes where.
 """
 import difflib
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,6 +119,20 @@ class EventSchema:
             for child in group if group is not None else []:
                 if child.tag in (_q('sequence'), _q('choice'), _q('all')):
                     self._particle(child, out, choice, optional)
+
+    def describe(self, chain: list[Child]) -> str:
+        """The schema's description of the last element of a path (as resolve() gives it): the first sentence
+        of its own documentation, else its parent's (User for User/Id), else its type's."""
+        def first_sentence(node) -> str:
+            doc = node.find(f"{_q('annotation')}/{_q('documentation')}") if node is not None else None
+            text = ' '.join((doc.text or '').split()) if doc is not None else ''
+            # A sentence ends at a full stop before a capital, not at 'e.g.' or 'i.e.'.
+            return re.split(r'(?<!e\.g)(?<!i\.e)\.\s+(?=[A-Z])', text)[0].rstrip('.') + '.' if text else ''
+
+        last = self._resolve(chain[-1].decl)
+        candidates = [last] + ([self._resolve(chain[-2].decl)] if len(chain) > 1 else []) \
+            + [self._complex(last), self._simple_type(last)]
+        return next((s for s in map(first_sentence, candidates) if s), '')
 
     # --- leaves ---
     def is_leaf(self, decl: etree._Element) -> bool:
