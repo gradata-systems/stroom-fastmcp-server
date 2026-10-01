@@ -107,6 +107,34 @@ def test_each_template_reads_its_fields_once_into_variables():
     assert "test=\"($action = 'login')\"" in xslt
 
 
+def test_value_maps_are_declared_once_as_xsl_maps():
+    result_map = {'ok': 'true', 'fail': 'false'}
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON + [
+                 {'path': 'EventDetail/Authenticate/Data', 'data_name': 'outcome', 'field': 'result', 'map': result_map}]},
+             {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                                          {'path': 'EventDetail/Unknown/Data', 'data_name': 'kind', 'field': 'action',
+                                           'map': {'login': 'Logon'}, 'default': 'Other'}]}]
+    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    xslt = result['xslt']
+    ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
+    sheet = etree.fromstring(xslt.encode())
+    maps = {v.get('name'): {e.get('key'): e.get('select') for e in v.iterfind('xsl:map/xsl:map-entry', ns)}
+            for v in sheet.findall('xsl:variable', ns)}
+    # Success and the outcome Data use the same map, so it is declared once.
+    assert maps == {'result-to-Success': {"'ok'": "'true'", "'fail'": "'false'"},
+                    'action-to-Data': {"'login'": "'Logon'"}}
+    assert xslt.count('$result-to-Success?($result)') == 4  # guard and value of Outcome/Success and of the Data
+    assert "($action-to-Data?($action), 'Other')[1]" in xslt
+    events = transform(xslt, RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    logon, other = events.findall('e:Event', ns)
+    assert logon.findtext('.//e:Authenticate/e:Outcome/e:Success', namespaces=ns) == 'false'
+    assert logon.find(".//e:Authenticate/e:Data[@Name='outcome']", ns).get('Value') == 'false'
+    # keepalive isn't a key: the default
+    assert other.find(".//e:Unknown/e:Data[@Name='kind']", ns).get('Value') == 'Other'
+
+
 def test_json_keys_and_xml_paths_address_the_record():
     json_mapping = mapping(input='json', common=BASE[:4] + [{'path': 'EventSource/User/Id', 'field': 'user.name'},
                                                             {'path': 'EventSource/Device/HostName', 'field': 'host'}])

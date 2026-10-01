@@ -5,7 +5,9 @@ module writes the XSLT: the right input namespace, one template per record, elem
 time conversion with stroom:format-date, value maps, and guards so empty inputs leave elements out rather
 than writing empty ones. Elements that come out the same in several places (EventTime, EventSource, ...)
 are written once, as named templates. Each template reads the input fields it uses into variables holding
-their non-blank values, so a selector appears once per template and guards are just `$user or $host`. Mistakes the schema can catch (unknown paths, invalid constants, two alternatives
+their non-blank values, so a selector appears once per template and guards are just `$user or $host`.
+Value maps are declared once each as stylesheet-level xsl:map variables and read with the lookup operator,
+$result-to-Success?($result), which gives nothing rather than an error for an empty input. Mistakes the schema can catch (unknown paths, invalid constants, two alternatives
 of a choice) come back as problems per mapping entry instead of as XSLT for the model to debug.
 """
 import re
@@ -131,6 +133,7 @@ class _Generator:
         self.warnings: list[str] = []
         self._names: dict[str, str] = {}          # selector -> variable name, the same in every template
         self._scope: dict[str, str] = {}          # variables the template being written uses: name -> select
+        self._maps: dict[tuple, str] = {}         # value map items -> name of the stylesheet variable holding it
 
     def _note(self, bucket: list[str], message: str) -> None:
         if message not in bucket:
@@ -153,7 +156,7 @@ class _Generator:
         if raw not in self._names:
             base = re.sub(r'[^\w.-]', '_', label if xpath is not None else field_name)
             base = base if base[:1].isalpha() or base[:1] == '_' else '_' + base
-            taken = set(self._names.values())
+            taken = set(self._names.values()) | set(self._maps.values())
             self._names[raw] = base if base not in taken else next(
                 f'{base}-{n}' for n in range(2, 1000) if f'{base}-{n}' not in taken)
         name = self._names[raw]
@@ -184,6 +187,17 @@ class _Generator:
     def label(entry: FieldMapping) -> str:
         return '-'.join(entry.path.strip('/').split('/')[-2:])
 
+    def map_ref(self, entry: FieldMapping, src: str) -> str:
+        """A stylesheet-level variable holding the entry's value map, declared once however many elements use
+        it. Named after the input and the first element it fills, e.g. $action-to-Success."""
+        items = tuple(entry.map.items())
+        if items not in self._maps:
+            base = f"{src[1:]}-to-{entry.path.strip('/').split('/')[-1]}"
+            taken = set(self._names.values()) | set(self._maps.values())
+            self._maps[items] = base if base not in taken else next(
+                f'{base}-{n}' for n in range(2, 1000) if f'{base}-{n}' not in taken)
+        return '$' + self._maps[items]
+
     def leaf_test(self, entry: FieldMapping) -> str | None:
         if entry.value is not None:
             return None
@@ -191,16 +205,15 @@ class _Generator:
             return None
         if entry.map:
             src = self.ref(entry.field, entry.xpath, self.label(entry))
-            return f"{src} = ({', '.join(literal(k) for k in entry.map)})"
+            return f"exists({self.map_ref(entry, src)}?({src}))"
         return self.has(entry.field, entry.xpath, self.label(entry))
 
     def value_expr(self, entry: FieldMapping) -> str:
         src = self.ref(entry.field, entry.xpath, self.label(entry))
         if entry.map:
-            expr = literal(entry.default) if entry.default is not None else "''"
-            for key, out in reversed(list(entry.map.items())):
-                expr = f"if ({src} = {literal(key)}) then {literal(out)} else {expr}"
-            return expr
+            # The lookup operator takes any number of keys, so an empty input gives no value rather than an error.
+            lookup = f"{self.map_ref(entry, src)}?({src})"
+            return f"({lookup}, {literal(entry.default)})[1]" if entry.default is not None else f"{lookup}[1]"
         fmt, tz = entry.time_format, entry.timezone
         if fmt == 'epoch_ms':
             expr = f"stroom:format-date(string({src}[1]))"
@@ -500,6 +513,12 @@ class _Generator:
                                  select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
 
         self.in_scope(record_template, write_rules)
+        for n, (items, name) in enumerate(self._maps.items()):
+            variable = etree.Element(f'{{{XSL}}}variable', name=name, **{'as': 'map(xs:string, xs:string)'})
+            entries = etree.SubElement(variable, f'{{{XSL}}}map')
+            for key, out in items:
+                etree.SubElement(entries, f'{{{XSL}}}map-entry', key=literal(key), select=literal(out))
+            sheet.insert(n, variable)
         # Called with the record as context, so they read its fields just as the event rules do.
         for k, (name, template) in self._templates.items():
             sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))
