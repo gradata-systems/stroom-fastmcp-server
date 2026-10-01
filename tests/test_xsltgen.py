@@ -7,7 +7,8 @@ from pydantic import ValidationError
 from saxonche import PySaxonProcessor
 
 from utils.eventschema import EventSchema
-from utils.xsltgen import TranslationMapping, generate, literal, pattern_problem
+from utils.xsltgen import (TranslationMapping, field_mapping_markdown, generate, literal, pattern_problem,
+                           sampled_events)
 
 XSD = (Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes()
 SCHEMA = EventSchema.parse(XSD)
@@ -302,8 +303,32 @@ def test_field_mapping_tables_for_the_documentation():
     assert '| `EventSource/System/Name` | The name of the system. | "Acme VPN" |' in source
     assert '| `host`, or "unknown" when empty |' in source
     assert '| `ip` (logon) |' in source
-    assert ('| **logon**<br>`action` in login, logon | "Logon" |  | `Authenticate/Action`<br>"Logon"<br><br>'
-            '`Authenticate/User/Id`<br>`user`<br><br>`Authenticate/Outcome/Success`<br>`result`: ok → true, '
-            "fail → false<br><br>`Authenticate/Data[@Name='session']/@Value`<br>`sid` |") in events
+    # Without a sample, each EventDetail element as XPath="value": constants as they are, inputs in braces.
+    assert ('| **logon**<br>`action` in login, logon | "Logon" |  | `Authenticate/Action="Logon"`<br>'
+            '`Authenticate/User/Id="{user}"`<br>`Authenticate/Outcome/Success="{result: ok → true, fail → false}"`'
+            "<br>`Authenticate/Data[@Name='session']/@Value=\"{sid}\"` |") in events
     assert '| **keepalive**<br>`action` = keepalive |  | Left untranslated on purpose |  |' in events
     assert '| **other**<br>any other record | `action` |' in events
+
+
+def test_field_mapping_takes_type_id_and_description_from_the_sample():
+    logoff = [f if f['path'] != 'EventDetail/Authenticate/Action' else {**f, 'value': 'Logoff'} for f in LOGON]
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}],
+              'fields': LOGON + [{'path': 'EventDetail/Description', 'field': 'result'}]},
+             {'name': 'logoff', 'when': [{'field': 'action', 'equals': 'logout'}], 'fields': logoff},
+             {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                                          {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
+    m = mapping(events=rules)
+    result = generate(m, SCHEMA, '4.1.0')
+    events = sampled_events([etree.tostring(transform(result['xslt'], RECORDS), encoding='unicode')])
+    text = field_mapping_markdown(m, SCHEMA, events).split('### Event types')[1]
+    assert 'Values are those written for the 2 events of the sample' in text
+    rows = [line.split(' | ')[:3] for line in text.splitlines() if line.startswith('| **')]
+    # The login record is the logon rule's (Action Logon), the keepalive the catch-all's; logoff wasn't sampled.
+    assert rows == [['| **logon**<br>`action` = login', 'Logon', 'fail'],
+                    ['| **logoff**<br>`action` = logout', '(not in the sample)', ''],
+                    ['| **other**<br>any other record', 'keepalive', '']]
+    # EventDetail is one sampled event of the row's TypeId, element by element.
+    assert ('''| `Authenticate/Action="Logon"`<br>`Authenticate/User/Id="o'neil"`<br>`Authenticate/Outcome/Success="false"`'''
+            "<br>`Authenticate/Data[@Name='session']/@Value=\"s1\"` |") in text
+    assert "| keepalive |  | `Unknown/Data[@Name='action']/@Value=\"keepalive\"` |" in text

@@ -18,15 +18,19 @@ that changed; the tool keeps the change log and adds a line to it.
 ## Field mapping (events pipelines)
 
 `build_translation_xslt` returns this section as `field_mapping`, written from the same mapping as the XSLT, so
-the two agree. Use it as it is, under `## Field mapping`; regenerate it when the mapping changes rather than
-editing the tables by hand. It has two tables:
+the two agree. Before writing the documentation, call it with the pipeline (`pipeline_uuid`) and its sample
+streams (`stream_ids`): it steps the generated XSLT over them, nothing saved, so the TypeId and Description
+columns hold the values the events actually get. Use the result as it is, under `## Field mapping`; regenerate
+it when the mapping changes rather than editing the tables by hand. It has two tables:
 
 1. **EventSource**: one row per element of `EventSource` (and `EventTime`), with columns XPath, Description (the
    event-logging schema's own description of the element) and Value. An element only some kinds of event have
    names those kinds.
-2. **Event types**: one row per kind of event, with columns Source (the rule and the records it covers), TypeId,
-   Description, and EventDetail: for each element below `EventDetail`, its XPath and then its value on the next
-   line.
+2. **Event types**: one row per rule and TypeId written for the sample, with columns Source (the rule and the
+   records it covers), TypeId, Description (the values seen, up to three), and EventDetail: every other element
+   below `EventDetail` of one event with that TypeId, a line each as `XPath="value"`. A rule nothing in the
+   sample reached shows "(not in the sample)", with its elements from the mapping (`XPath="{input}"`): widen the
+   sample, or say so under Open items.
 
-Values read: `field` for an input field, `expression` for a computed one, "text" for a constant, with the time
-format, value map (`A → B`) or default after it.
+In the EventSource table, values read: `field` for an input field, `expression` for a computed one, "text" for
+a constant, with the time format, value map (`A → B`) or default after it.
