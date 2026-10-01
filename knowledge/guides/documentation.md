@@ -17,11 +17,12 @@ that changed; the tool keeps the change log and adds a line to it.
 
 ## Field mapping (events pipelines)
 
-`build_translation_xslt` returns this section as `field_mapping`, written from the same mapping as the XSLT, so
-the two agree. Before writing the documentation, call it with the pipeline (`pipeline_uuid`) and its sample
-streams (`stream_ids`): it steps the generated XSLT over them, nothing saved, so the TypeId and Description
-columns hold the values the events actually get. Use the result as it is, under `## Field mapping`; regenerate
-it when the mapping changes rather than editing the tables by hand. It has two tables:
+`build_translation_xslt` returns this section as `field_mapping` when called with the pipeline (`pipeline_uuid`)
+and its sample streams (`stream_ids`): it steps the XSLT it generates over them, nothing saved, so the tables
+agree with the XSLT and hold the values the events actually get. Without them it returns no table, only what it
+needs. Use the result as it is, under `## Field mapping`; regenerate it when the mapping changes rather than
+editing the tables by hand. Computed values name fields, not selectors: `normalize-space(username)`. It has two
+tables:
 
 1. **EventSource**: one row per element of `EventSource` (and `EventTime`), with columns XPath, Description (the
    event-logging schema's own description of the element) and Value. An element only some kinds of event have

@@ -666,8 +666,7 @@ def generate(mapping: TranslationMapping, schema: EventSchema, version: str) -> 
     gen = _Generator(mapping, schema)
     xslt, summary = gen.stylesheet(version)
     return {'ok': not gen.problems, 'problems': gen.problems, 'warnings': gen.warnings, 'events': summary,
-            'xslt': None if gen.problems else xslt,
-            'field_mapping': None if gen.problems else field_mapping_markdown(mapping, schema)}
+            'xslt': None if gen.problems else xslt}
 
 
 # --- the Field mapping section of the pipeline's documentation ---
@@ -680,12 +679,23 @@ def _row(*cells: str) -> str:
     return '| ' + ' | '.join(_cell(c) for c in cells) + ' |'
 
 
+_DATA_SPLITTER_FIELD = re.compile(r"(?:data\[@name='([^']*)'\]/)+@value")
+_JSON_FIELD = re.compile(r"\*\[@key='[^']*'\](?:/\*\[@key='[^']*'\])*")
+
+
+def readable(expr: str) -> str:
+    """An xpath with its field selectors written as the field names, for a reader:
+    normalize-space(data[@name='username']/@value) -> normalize-space(username)."""
+    expr = _DATA_SPLITTER_FIELD.sub(lambda m: '/'.join(re.findall(r"data\[@name='([^']*)'\]", m.group(0))), expr)
+    return _JSON_FIELD.sub(lambda m: '.'.join(re.findall(r"@key='([^']*)'", m.group(0))), expr)
+
+
 def _value(entry: FieldMapping) -> str:
     """What an element is written from, for a reader: a constant, a field, a computed value, and how it's
     converted."""
     if entry.value is not None:
         return f'"{entry.value}"'
-    text = f'`{entry.field}`' if entry.field is not None else f'`{entry.xpath}`'
+    text = f'`{entry.field}`' if entry.field is not None else f'`{readable(entry.xpath)}`'
     if entry.time_format:
         text += f" ({entry.time_format}{', ' + entry.timezone if entry.timezone else ''})"
     elif entry.timezone:
@@ -700,7 +710,7 @@ def _value(entry: FieldMapping) -> str:
 
 
 def _condition(c: Condition) -> str:
-    src = f'`{c.field}`' if c.field is not None else f'`{c.xpath}`'
+    src = f'`{c.field}`' if c.field is not None else f'`{readable(c.xpath)}`'
     if c.equals is not None:
         return f'{src} = {c.equals}'
     if c.one_of is not None:

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from saxonche import PySaxonProcessor
 
 from utils.eventschema import EventSchema
-from utils.xsltgen import (TranslationMapping, field_mapping_markdown, generate, literal, pattern_problem,
+from utils.xsltgen import (TranslationMapping, field_mapping_markdown, generate, literal, pattern_problem, readable,
                            sampled_events)
 
 XSD = (Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes()
@@ -292,7 +292,9 @@ def test_field_mapping_tables_for_the_documentation():
              {'name': 'keepalive', 'drop': True, 'when': [{'field': 'action', 'equals': 'keepalive'}]},
              {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
                                           {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
-    text = generate(mapping(events=rules), SCHEMA, '4.1.0')['field_mapping']
+    # generate() gives no table: the tool returns one only from a sampled run.
+    assert 'field_mapping' not in generate(mapping(events=rules), SCHEMA, '4.1.0')
+    text = field_mapping_markdown(mapping(events=rules), SCHEMA)
     source, events = text.split('### Event types')
     rows = [line for line in source.splitlines() if line.startswith('| `')]
     # Schema order, the schema's description, constants quoted, defaults, and which kinds have an element.
@@ -332,3 +334,13 @@ def test_field_mapping_takes_type_id_and_description_from_the_sample():
     assert ('''| `Authenticate/Action="Logon"`<br>`Authenticate/User/Id="o'neil"`<br>`Authenticate/Outcome/Success="false"`'''
             "<br>`Authenticate/Data[@Name='session']/@Value=\"s1\"` |") in text
     assert "| keepalive |  | `Unknown/Data[@Name='action']/@Value=\"keepalive\"` |" in text
+
+
+def test_expressions_in_the_documentation_name_fields_not_selectors():
+    common = BASE[:5] + [{'path': 'EventSource/User/Id', 'xpath': "normalize-space(data[@name='user']/@value)"}]
+    rules = [{'name': 'logon', 'when': [{'xpath': "concat(data[@name='action']/@value, '-', data[@name='a']/data[@name='b']/@value)",
+                                         'equals': 'login-x'}], 'fields': LOGON}]
+    text = field_mapping_markdown(mapping(common=common, events=rules), SCHEMA)
+    assert '| `normalize-space(user)` |' in text
+    assert "`concat(action, '-', a/b)` = login-x" in text
+    assert readable("*[@key='user']/*[@key='name']") == 'user.name'

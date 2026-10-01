@@ -43,10 +43,9 @@ async def build_translation_xslt(
     order with empty inputs left out. Fix any problems in the mapping and call again; then step_sample with
     draft_code={'<xslt element>': xslt}. Saves nothing. The standing instructions (AGENTS docs) that apply
     come back with the result: check the mapping follows them, and set mapping.style from any XSLT style
-    section in them (naming, variables, xsl:maps). field_mapping is the Field mapping section of the
-    pipeline's documentation, written from the same mapping: use it as it is in write_documentation, from a
-    call with pipeline_uuid and stream_ids so its TypeId and Description columns hold the values the sample
-    produces rather than how they are computed.
+    section in them (naming, variables, xsl:maps). With pipeline_uuid and stream_ids it also returns
+    field_mapping, the Field mapping section of the pipeline's documentation: the mapping, with the TypeId,
+    Description and EventDetail values the sample produces. Use it as it is in write_documentation.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
     schema = await event_schema(ctx, version)
@@ -60,6 +59,15 @@ async def build_translation_xslt(
         events = sampled_events(list(outputs.values()))
         result['field_mapping'] = field_mapping_markdown(mapping, schema, events)
         result['field_mapping_sample'] = {'records': len(outputs), 'events': len(events), 'element': element}
+        if not events:
+            result['field_mapping_sample']['warning'] = ("The sample produced no events, so the event types table "
+                                                         "has no values: check stream_ids are the pipeline's input.")
+    elif result['ok']:
+        # A table from the mapping alone would show how values are computed, not what they are; it was being
+        # copied into documentation as it was. Only a sampled run gives one.
+        result['field_mapping'] = None
+        result['field_mapping_needs'] = ("pipeline_uuid and stream_ids: call again with the pipeline and its sample "
+                                         "streams before write_documentation, for the values the events get.")
     result['hint'] = ("Fix the problems in the mapping (not the XSLT) and call again." if not result['ok'] else
                       "Step it: step_sample(pipeline, streams, draft_code={'translationFilter': xslt}) (use the "
                       "pipeline's XSLT element id). Fix issues in the mapping and regenerate; save with create_xslt.")
