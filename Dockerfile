@@ -10,7 +10,8 @@ FROM python:3.12-slim
 RUN useradd --system --uid 10001 --no-create-home --home-dir /nonexistent stroom-mcp
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
-COPY main.py main_tools.py config.py access_policy.yaml error_rules.yaml ./
+# pyproject.toml gives the server its version (utils/version.py).
+COPY main.py main_tools.py config.py pyproject.toml access_policy.yaml error_rules.yaml ./
 COPY conventions/ conventions/
 COPY knowledge/ knowledge/
 COPY security/ security/

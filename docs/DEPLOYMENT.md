@@ -58,7 +58,8 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
 - **Environment files**: `accessPolicy` (where template pipelines are looked for), `errorRules` (error
   triage) and `conventions` (field convention profiles) replace the image's copies when set.
 - **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
-  token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider.
+  token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider; it answers `ok` and
+  the running version, e.g. `ok 0.8.2`, which MCP clients also see in the server's `serverInfo`.
 - **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, resource read, Stroom request,
   confirmation, approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md). To write
   it to a file instead, set `audit.file.enabled`. The file is on an `emptyDir` and lost with the pod, unless you
@@ -140,5 +141,5 @@ brackets.
 `.github/workflows/ci.yml`: unit tests; `helm lint --strict` and a render of each `charts/stroom-mcp/ci/*-values.yaml`,
 and checks the chart refuses to render without its required settings or a certificate; builds the image and
 checks it refuses to start without TLS, then, run read-only with no capabilities and a self-signed
-certificate, answers `/healthz` with `ok` and an unauthenticated `POST /mcp` with 401 naming the issuer. Pushes
+certificate, answers `/healthz` with `ok` and the version from `pyproject.toml` and an unauthenticated `POST /mcp` with 401 naming the issuer. Pushes
 to master and tags publish the image; a `v<version>` tag matching `Chart.yaml` publishes the chart.

@@ -93,7 +93,7 @@ uv run python main.py
 ```
 
 TLS is required: the server refuses to start without a certificate unless a proxy in front terminates TLS
-(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` for probes.
+(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` and the version (e.g. `ok 0.8.2`) for probes.
 
 For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without sign-in and calls Stroom with
 `STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the

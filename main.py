@@ -15,6 +15,7 @@ from tools import resources
 from utils.consent import ConsentStore
 from utils.stroom import StroomGateway
 from utils.triage import ErrorRules
+from utils.version import SERVER_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -68,15 +69,16 @@ request_state_security = (
     RequestStateSecurity(keys=[k.get_secret_value() for k in settings.request_state_keys], audience='stroom')
     if settings.request_state_keys else None)
 
-mcp = FastMCP("stroom", lifespan=lifespan, auth=auth, middleware=[AuditMiddleware()],
+# The version is reported to clients in serverInfo, and on /healthz.
+mcp = FastMCP("stroom", version=SERVER_VERSION, lifespan=lifespan, auth=auth, middleware=[AuditMiddleware()],
               request_state_security=request_state_security)
 
 
 @mcp.custom_route('/healthz', methods=['GET'], include_in_schema=False)
 async def healthz(request: Request) -> Response:
     """Liveness and readiness probe. Unauthenticated, and deliberately independent of Stroom, the OIDC provider and
-    Elasticsearch so an outage there doesn't restart every replica."""
-    return PlainTextResponse('ok')
+    Elasticsearch so an outage there doesn't restart every replica. Says which version is running."""
+    return PlainTextResponse(f'ok {SERVER_VERSION}')
 
 
 for tool in (t for module in TOOL_MODULES for t in module.ALL_TOOLS):

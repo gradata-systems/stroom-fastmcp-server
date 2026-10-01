@@ -92,7 +92,8 @@ jobs:
             curl -sf --cacert tls/tls.crt https://localhost:8443/healthz && break
             sleep 1
           done
-          test "$(curl -s --cacert tls/tls.crt https://localhost:8443/healthz)" = ok
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "$(curl -s --cacert tls/tls.crt https://localhost:8443/healthz)" = "ok $version"
           test "$(curl -s -o /dev/null -w '%{http_code}' --cacert tls/tls.crt -X POST https://localhost:8443/mcp)" = 401
           curl -sf --cacert tls/tls.crt https://localhost:8443/.well-known/oauth-protected-resource/mcp \
             | grep -q 'keycloak.invalid/realms/ci'

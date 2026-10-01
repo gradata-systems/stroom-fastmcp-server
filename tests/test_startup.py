@@ -19,10 +19,11 @@ BASE = {
 }
 
 
-def start(**env) -> subprocess.CompletedProcess:
-    """Import main (which builds the server but doesn't serve) with only these STROOM_MCP_ settings."""
+def start(code: str = 'import main', **env) -> subprocess.CompletedProcess:
+    """Import main (which builds the server but doesn't serve) with only these STROOM_MCP_ settings, or run code
+    that does."""
     clean = {k: v for k, v in os.environ.items() if not k.startswith('STROOM_MCP_')}
-    return subprocess.run([sys.executable, '-c', 'import main'], cwd=ROOT, env={**clean, **BASE, **env},
+    return subprocess.run([sys.executable, '-c', code], cwd=ROOT, env={**clean, **BASE, **env},
                           capture_output=True, text=True, timeout=60)
 
 
