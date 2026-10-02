@@ -44,7 +44,12 @@ the pipeline's `JSONParser`.
 
 ## Generating instead of writing
 
-`build_translation_xslt` writes the translation from a mapping, so the XSLT itself need not be written by hand:
+Start with `draft_translation_mapping` on the sample files: it returns a valid mapping with the input kind, the
+obvious homes for fields by name (time and its pattern, host, client and server addresses and ports, user, event
+type, message), a rule per kind of event and every other field as `Data`, with notes on what is still to decide
+(the action element per kind, System Name and Environment, a time zone). Edit that; never send the field
+inventory as the mapping. `build_translation_xslt` then writes the translation from the mapping, so the XSLT
+itself need not be written by hand:
 
 ```json
 {"input": "data_splitter",

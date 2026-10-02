@@ -62,8 +62,10 @@ the parser's output in its namespace (records:2 for a Data Splitter; http://www.
 Text formats: write the Data Splitter with build_data_splitter from a spec (delimited, regex, key=value, syslog with a
 parsed body), which runs it on the sample and shows the records and field names; never by hand first.
 
-Translation: write the XSLT with build_translation_xslt from a mapping, not by hand, and pass it the sample (and the
-splitter spec) so fields no record has and time formats the values do not fit are caught before stepping. Sources:
+Translation: start from draft_translation_mapping (a valid mapping drafted from the sample: decide the action element
+per kind of event, the system name and environment), then build_translation_xslt with the edited mapping, the sample
+(and the splitter spec) so fields no record has and time formats the values do not fit are caught before stepping;
+never write XSLT by hand, and never send the field inventory as the mapping. Sources:
 field, any_of (first of several names), value, xpath, lookup (reference data); modifiers: transform (lower, upper,
 trim, strip_domain, domain, digits), dictionary, map, default, time_format. Values the record does not carry come
 from reference data (find_reference_data; build_reference_xslt and a Reference Data pipeline for new tables; the
@@ -124,13 +126,14 @@ Stage 1, events:
    stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
    every kind gets a rule and step_records can check each. Values the records do not carry (a user's department, a
    host's site): find_reference_data for maps the environment loads, or build the reference data (reference-data guide).
-4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter from a spec, with the sample, until
-   every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON and single-document XML
-   need none: the JSONParser or XMLParser reads them. Build the XSLT with build_translation_xslt (feeds=[the feed],
-   sample=all the files, splitter=the spec) from a mapping: which input field or constant goes to which event-logging
-   path, one rule per kind of event, time patterns from profile_sample, any_of where files name a field differently,
-   extract for text fields holding several values, lookup or dictionary for values from reference data,
-   json_layout from profile_sample for JSON. Fix reported problems in the mapping and regenerate; hand-edit only
+4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample text infers the
+   spec and runs it until every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON
+   and single-document XML need none: the JSONParser or XMLParser reads them. draft_translation_mapping with all the
+   files gives a mapping to edit (its notes say what to decide: the action element per kind of event, System Name,
+   Environment, a time zone); then build_translation_xslt (feeds=[the feed], sample=all the files, splitter=the
+   spec) with it: which input field or constant goes to which event-logging path, one rule per kind of event,
+   any_of where files name a field differently, extract for text fields holding several values, lookup or
+   dictionary for values from reference data. Fix reported problems in the mapping and regenerate; hand-edit only
    what a mapping cannot express. step_sample with draft_code over every sample stream until the verdict is clean;
    step_pipeline on single records to debug.
 5. save_text_converter (if any) / save_xslt with mapping=the mapping (kept with the XSLT, so the documentation

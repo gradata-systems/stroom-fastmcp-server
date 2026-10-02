@@ -13,6 +13,7 @@ from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
 from pydantic import ValidationError
 
+from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
 from utils.samples import check_sample
 from utils.localcheck import check_mapping, sample_records
@@ -32,8 +33,9 @@ async def event_schema(ctx: Context, version: str) -> EventSchema:
 
 async def build_translation_xslt(
         ctx: Context,
-        mapping: Annotated[TranslationMapping, Field(description="Which input field or constant goes to which "
-                                                                 "event-logging path, per kind of event.")],
+        mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any], Field(
+            description="The translation mapping: {input, common: [{path, field|value|...}], events: [{name, when, fields}]}. "
+                        "Start from draft_translation_mapping and edit it. A field inventory is not a mapping.")],
         schema_version: Annotated[str | None, Field(
             description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
         feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
@@ -67,6 +69,22 @@ async def build_translation_xslt(
     (save_xslt mapping=...), stepped over the sample streams.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
+    if not isinstance(mapping, TranslationMapping):
+        try:
+            mapping = TranslationMapping.model_validate(mapping)
+        except ValidationError as e:
+            problems = [f"{'.'.join(str(p) for p in x['loc'])}: {x['msg']}" for x in e.errors()[:4]]
+            looks_like_inventory = isinstance(mapping, list) and mapping and all(isinstance(x, dict) and 'field' in x for x in mapping)
+            if sample is not None:
+                draft = draft_mapping(sample if isinstance(sample, list) else [sample])
+                return {'status': 'needs_mapping', 'ok': False,
+                        'problems': ["mapping is a list of fields, not a translation mapping" if looks_like_inventory else
+                                     "mapping is not a translation mapping"] + problems,
+                        'draft_mapping': draft['mapping'], 'splitter': draft['splitter'], 'notes': draft['notes'],
+                        'hint': "Edit draft_mapping (the notes say what to decide) and call build_translation_xslt again "
+                                "with it as mapping, the same sample, and the splitter if there is one."}
+            raise ToolError("mapping is not a translation mapping: " + '; '.join(problems) + ". Get a starting one from "
+                            "draft_translation_mapping(samples=the file texts) and edit it.") from e
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
@@ -212,4 +230,34 @@ async def build_reference_xslt(
     return result
 
 
-ALL_TOOLS = [build_translation_xslt, build_data_splitter, build_reference_xslt]
+async def draft_translation_mapping(
+        ctx: Context,
+        samples: Annotated[dict[str, str] | list[str] | str, Field(description="The sample files' text (every line), by "
+                                                                            "file name or as a list; not paths.")],
+        source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall': names the system and generator "
+                                                      "until the user confirms them.")] = '',
+        system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,
+        environment: Annotated[str | None, Field(description="EventSource/System/Environment, if the user has said, e.g. Prod.")] = None,
+) -> dict[str, Any]:
+    """
+    A starting translation mapping drafted from the sample, to edit rather than write from nothing: the input
+    kind and layout from the profile, the obvious event-logging homes for fields by name (time with its
+    pattern, host, client and server addresses and ports, user, event type, message), one rule per kind of
+    event the naming field shows (Authenticate for logon and logoff kinds, Unknown with Data for the rest, to
+    replace with the right action element), every other field carried as Data, and notes on what is left to
+    decide. For text formats the Data Splitter spec comes with it. Then build_translation_xslt with the edited
+    mapping, the sample and the splitter.
+    """
+    result = draft_mapping(samples, source_name, system_name, environment)
+    version = gateway_from(ctx).settings.event_logging_version
+    try:
+        checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)
+        result['schema_check'] = {'ok': checked['ok'], 'problems': checked['problems'], 'warnings': checked['warnings'][:6]}
+    except ToolError as e:
+        result['schema_check'] = {'ok': None, 'note': str(e)}
+    result['hint'] = ("Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
+                      "time zone), then build_translation_xslt(mapping=this mapping, sample=the texts, splitter=this splitter).")
+    return result
+
+
+ALL_TOOLS = [build_translation_xslt, build_data_splitter, build_reference_xslt, draft_translation_mapping]

@@ -22,7 +22,7 @@ The server has 58 tools:
 | Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream, or in given sample streams), `set_shape_handling`* (kinds the user leaves untranslated) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `check_events` (schema and quality rules) |
-| Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema and the sample), `build_data_splitter` (a Data Splitter from a spec, run on the sample), `build_reference_xslt` (reference-data maps from a mapping) |
+| Generation | `draft_translation_mapping` (a starting mapping from the sample), `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema and the sample), `build_data_splitter` (a Data Splitter from a spec, run on the sample), `build_reference_xslt` (reference-data maps from a mapping) |
 | Reference data | `find_reference_data` (maps, feeds and loaders the environment has), `update_pipeline` (properties, references) |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`* (with the plan's fields), `create_indexing_pipeline`*, `verify_index` (dashboard and test searches) |
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `create_index_doc` |
