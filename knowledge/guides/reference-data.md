@@ -35,7 +35,7 @@ How it fits together:
    `wait_for_processing output_type='Reference'`): the pipeline writes `Reference` streams.
 3. **The events pipeline names the feed** as a pipeline reference on its translation step, loaded by the
    standard `Reference Loader` pipeline: `create_pipeline references=[{"feed": "ACME-USERS", "loader_pipeline":
-   "Reference Loader"}]`, or `set_pipeline_references` on a pipeline that exists. Without this the lookups find
+   "Reference Loader"}]`, or `update_pipeline (references=...)` on a pipeline that exists. Without this the lookups find
    nothing and stepping shows a lookup warning on every record.
 4. **The translation looks keys up**: `{"path": "EventSource/User/UserDetails/Organisation", "lookup": {"map":
    "USER_TO_DEPARTMENT", "field": "user", "path": "department"}}`. `path` names an element inside the value
@@ -45,12 +45,12 @@ How it fits together:
 
 `find_reference_data` lists what the environment already loads: each map, its key and value shape, the feeds
 and pipeline that load it, the loader to name, and which pipelines use it. Reuse those before creating new
-reference data; `list_template_children` shows how sibling pipelines attach them.
+reference data; `describe_template` shows how sibling pipelines attach them.
 
 ## Dictionaries
 
-A Dictionary doc is plain text, one entry per line. `create_dictionary` makes one in the build (and
-`update_dictionary` changes it); the generated XSLT reads it at run time, so later edits apply without
+A Dictionary doc is plain text, one entry per line. `save_dictionary` makes one in the build (and
+`save_dictionary (uuid=...)` changes it); the generated XSLT reads it at run time, so later edits apply without
 regenerating:
 
 - `key=value` lines and `{"path": "...", "field": "code", "dictionary": "Vendor codes"}` give the value for a

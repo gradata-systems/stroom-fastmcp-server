@@ -1,7 +1,7 @@
 """Tools for finding and reading streams, and triaging their errors."""
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context
 from lxml import etree
@@ -238,5 +238,40 @@ async def summarise_events(
             if count >= max_events else None}
 
 
-ALL_TOOLS = [find_streams, get_stream_children, read_stream, get_stream_attributes, summarise_errors,
-             summarise_events]
+async def describe_stream(ctx: Context, stream_id: StreamId) -> dict[str, Any]:
+    """
+    A stream's family and attributes: the streams produced from it (the Events and Error streams from a Raw
+    Events stream, with a count per type; exactly one Events child per processed raw stream is expected), and
+    the attributes a raw stream carries (its receipt headers such as Feed, RemoteAddress, ReceivedTime or
+    custom ones), usable in XSLT as stroom:meta('Name').
+    """
+    children = await get_stream_children(ctx, stream_id)
+    result = {'stream_id': stream_id, 'children': children['children'], 'children_by_type': children['by_type']}
+    try:
+        result['attributes'] = (await get_stream_attributes(ctx, stream_id)).get('attributes')
+    except ToolError as e:   # an Events or Error stream has no receipt headers of its own
+        result['attributes_note'] = str(e)
+    return result
+
+
+async def summarise_streams(
+        ctx: Context,
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Streams to summarise.")],
+        kind: Annotated[Literal['errors', 'events'], Field(
+            description="errors: the error markers of Error streams (or the Error children of raw or Events "
+                        "streams), grouped and triaged as blocking, review or benign; events: what Events streams "
+                        "hold, by EventDetail type, TypeId and Action, and how often each path is populated.")],
+        max_events: Annotated[int, Field(ge=1, le=2000, description="events: how many to read.")] = 200,
+) -> dict[str, Any]:
+    """
+    Summarise streams: their errors (grouped by severity, element and message, each group triaged, the
+    pipeline's own elements told from inherited ones) or their events (counts per EventDetail type, TypeId
+    and Action with an example of each, and how often each event-logging path is populated). Use it to
+    document what a pipeline produces, to triage an Error stream, or to find fields rarely filled.
+    """
+    if kind == 'events':
+        return await summarise_events(ctx, stream_ids, max_events)
+    return {'streams': {stream_id: await summarise_errors(ctx, stream_id) for stream_id in stream_ids}}
+
+
+ALL_TOOLS = [find_streams, describe_stream, read_stream, summarise_streams]

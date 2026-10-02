@@ -36,7 +36,7 @@ the pipeline's `JSONParser`.
 | --- | --- |
 | `stroom:format-date(value, 'pattern')` | Parse a timestamp into `yyyy-MM-ddTHH:mm:ss.SSSZ`. A third argument gives the input time zone (e.g. `'+10:00'`); the five-argument form also sets the output pattern and zone. A value that does not match logs a WARNING and returns empty, which then fails the schema. |
 | `stroom:lookup('map', key)` | Reference data lookup through a reference loader attached to the XSLT element. |
-| `stroom:meta('Name')` | A receipt header of the source stream, e.g. `Feed`, `ReceivedTime`, `RemoteAddress`, or a custom one. See `get_stream_attributes`. |
+| `stroom:meta('Name')` | A receipt header of the source stream, e.g. `Feed`, `ReceivedTime`, `RemoteAddress`, or a custom one. See `describe_stream`. |
 | `stroom:feed-name()`, `stroom:stream-id()`, `stroom:record-no()` | Where the record came from. |
 | `stroom:dictionary('Name')` | Text of a Dictionary doc, e.g. a field mapping table. |
 | `json-to-xml(string)` | Parse JSON held in a string field into `map`/`array` elements. |
@@ -152,7 +152,7 @@ templates, whatever the style.
 ## Reuse
 
 Existing pipelines `xsl:import` shared XSLTs by document name (e.g. `IP Lookup`) and keep field
-mappings in Dictionary docs. Find them with `find_similar_translations` and `list_template_children`
+mappings in Dictionary docs. Find them with `find_documents (content=...)` and `describe_template`
 before writing new code, and check imports resolve with `check_xslt`.
 
 ## Checking a draft

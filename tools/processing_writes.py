@@ -454,9 +454,9 @@ async def wait_for_processing(
         per_stream.append({'input': raw, 'events': events, 'errors': errors, **({'output_type': output_type} if output_type != 'Events' else {})})
         if not expect_events:
             if errors:
-                problems.append(f"Stream {raw} produced Error stream(s) {errors}: summarise_errors {raw}")
+                problems.append(f"Stream {raw} produced Error stream(s) {errors}: summarise_streams (kind=errors) {raw}")
         elif len(events) == 0:
-            problems.append(f"Stream {raw} produced no {output_type} stream: check processing_status and summarise_errors "
+            problems.append(f"Stream {raw} produced no {output_type} stream: check processing_status and summarise_streams (kind=errors) "
                             f"{raw} (failed task, fatal error, or a filter that missed it)")
         elif len(events) > 1:
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "

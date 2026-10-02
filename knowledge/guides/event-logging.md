@@ -1,6 +1,6 @@
 # Event-logging schema: working guide
 
-Namespace `event-logging:3`. The authority is the XSD installed in Stroom: use `validate_events`,
+Namespace `event-logging:3`. The authority is the XSD installed in Stroom: use `check_events`,
 which picks the version from the document's `xsi:schemaLocation` (e.g.
 `file://event-logging-v3.5.2.xsd`). Use the version the environment's pipelines already target.
 
@@ -30,7 +30,7 @@ Element order matters: the XSD is a sequence. A misplaced element fails validati
 "Invalid content was found starting with element X. One of Y is expected", which names the element
 that should come next.
 
-## Rules the quality check applies (`check_event_quality`)
+## Rules the quality check applies (`check_events`)
 
 - `TimeCreated` is UTC in `yyyy-MM-ddTHH:mm:ss.SSSZ`. `stroom:format-date(value, pattern)` produces it.
 - `System/Name`, `System/Environment`, `Generator` and `TypeId` are set.

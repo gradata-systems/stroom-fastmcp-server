@@ -162,4 +162,4 @@ async def describe_pipeline(uuid: PipelineUuid, ctx: Context) -> dict[str, Any]:
     }
 
 
-ALL_TOOLS = [describe_pipeline]
+ALL_TOOLS = []   # describe_pipeline is reached through describe_document

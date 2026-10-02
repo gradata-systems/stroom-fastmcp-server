@@ -18,15 +18,15 @@ that changed; the tool keeps the change log and adds a line to it.
 ## Field mapping: generated, never typed
 
 `write_documentation` writes this section itself. It reads the mapping (or index plan) kept with the pipeline's
-XSLT, which `create_xslt` and `update_xslt` store when given `mapping=` (or `index_plan=`), steps it over the
+XSLT, which `save_xslt` stores when given `mapping=` (or `index_plan=`), steps it over the
 `stream_ids` you pass (the sample raw streams for an events pipeline, the Events streams for an indexing
 pipeline), and puts the result in place of whatever the markdown has under `## Field mapping`. So:
 
-- Save every generated XSLT with its mapping (`create_xslt mapping=...`). Without it, an events pipeline's doc
+- Save every generated XSLT with its mapping (`save_xslt mapping=...`). Without it, an events pipeline's doc
   must bring its own `## Field mapping` section, and the tool refuses one that does not.
 - Pass `stream_ids` to `write_documentation`. `build_translation_xslt` with `pipeline_uuid` and `stream_ids`
   returns the same section as `field_mapping`, to read before writing the rest of the document.
-- Change the mapping and regenerate rather than editing the XSLT: `list_build` reports an XSLT that is no
+- Change the mapping and regenerate rather than editing the XSLT: `build_status` reports an XSLT that is no
   longer what its mapping generates, and a documentation whose Field mapping predates the current mapping or
   XSLT (a digest marks the section).
 

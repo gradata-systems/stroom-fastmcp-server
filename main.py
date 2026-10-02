@@ -82,6 +82,8 @@ async def healthz(request: Request) -> Response:
     return PlainTextResponse(f'ok {SERVER_VERSION}')
 
 
+from tools.plan import annotate_tools
+annotate_tools(TOOL_MODULES)
 for tool in (t for module in TOOL_MODULES for t in module.ALL_TOOLS):
     mcp.tool(tool)
 resources.register(mcp, settings.conventions_dir)

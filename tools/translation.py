@@ -97,7 +97,7 @@ async def update_text_converter(
 Mapping = Annotated[TranslationMapping | None, Field(
     description="The mapping build_translation_xslt generated this code from. Kept with the XSLT (in its description), "
                 "so write_documentation regenerates the Field mapping section from it and later changes start from the "
-                "mapping; list_build reports an XSLT edited by hand since.")]
+                "mapping; build_status reports an XSLT edited by hand since.")]
 IndexPlan = Annotated[FieldPlan | None, Field(
     description="For an indexing XSLT: the field plan draft_index_mapping drafted it from, kept with the XSLT for the "
                 "documentation.")]
@@ -206,4 +206,73 @@ async def update_dictionary(
     return {**_summary(await stroom.put_doc(doc, version)), 'entries': sum(1 for l in text.splitlines() if l.strip())}
 
 
-ALL_TOOLS = [create_text_converter, update_text_converter, create_xslt, update_xslt, create_dictionary, update_dictionary]
+Uuid = Annotated[str | None, Field(description="To change an existing document this server created: its UUID. "
+                                              "Omit to create a new one in the build.")]
+
+
+async def save_text_converter(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Document name, following the environment's naming (new documents).")],
+        converter_type: Annotated[Literal['DATA_SPLITTER', 'XML_FRAGMENT'], Field(
+            description="DATA_SPLITTER for text (CSV, syslog, key=value); XML_FRAGMENT: the wrapper for XML "
+                        "fragments (several root elements), read by an XMLFragmentParser. JSON and single-document "
+                        "XML sources take no text converter: their template's parser reads them.")],
+        code: Annotated[str, Field(description="The complete converter definition, e.g. a <dataSplitter> document.")],
+        uuid: Uuid = None,
+        version: Version = None,
+) -> dict[str, Any]:
+    """
+    Save a text converter: create it in the build (see stroom://guide/data-splitter; build_data_splitter writes
+    one from a spec), or with uuid replace the code of one this server created. For templates whose parser
+    needs one (DSParser.textConverter, xmlFragmentParser.textConverter); not for JSON, which the JSONParser
+    parses with no converter.
+    """
+    if uuid:
+        return await update_text_converter(ctx, uuid, code, version)
+    return await create_text_converter(ctx, build, name, converter_type, code)
+
+
+async def save_xslt(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Document name, following the environment's naming (new documents).")],
+        code: Annotated[str, Field(description="The complete XSLT.")],
+        mapping: Mapping = None,
+        index_plan: IndexPlan = None,
+        uuid: Uuid = None,
+        version: Version = None,
+) -> dict[str, Any]:
+    """
+    Save an XSLT: create it in the build, or with uuid replace the code of one this server created (including
+    working copies of production XSLTs; prove the change with step_sample and draft_code first). It is checked
+    with check_xslt and not saved if that fails. Give the mapping (or index plan) it was generated from: it is
+    kept with the XSLT, and the pipeline's documentation is generated from it.
+    """
+    if uuid:
+        return await update_xslt(ctx, uuid, code, version, mapping, index_plan)
+    return await create_xslt(ctx, build, name, code, mapping, index_plan)
+
+
+async def save_dictionary(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Dictionary name, as the mapping's `dictionary` / `in_dictionary` name it.")],
+        text: Annotated[str, Field(description="One entry per line: key=value lines for a value map, or plain lines "
+                                               "for a list. Blank lines and whitespace round keys and values are ignored.")],
+        description: Annotated[str, Field(description="What the entries are and where they came from.")] = '',
+        uuid: Uuid = None,
+        version: Version = None,
+) -> dict[str, Any]:
+    """
+    Save a Dictionary doc: a small static table a translation reads at run time with stroom:dictionary() (the
+    mapping's `dictionary` for key=value lines, `in_dictionary` for a list). Create it in the build, or with
+    uuid replace the entries of one this server created. Data that changes or is large belongs in reference
+    data instead (find_reference_data).
+    """
+    if uuid:
+        return await update_dictionary(ctx, uuid, text, version)
+    return await create_dictionary(ctx, build, name, text, description)
+
+
+ALL_TOOLS = [save_text_converter, save_xslt, save_dictionary]

@@ -8,7 +8,7 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 | --- | --- | --- |
 | Template | `Indexing`: `IndexingFilter` with property `index` | e.g. `Events to Elasticsearch`: `ElasticIndexingFilter` with `cluster` and `indexName` |
 | XSLT output | `records:2` | `xpath-functions` JSON XML |
-| Fields | On the index doc (`set_index_fields`) | An index template, drafted by `propose_index_template` and committed to Elasticsearch by the user |
+| Fields | On the index doc (`create_index_doc` with the plan) | An index template, drafted by `propose_index_template` and committed to Elasticsearch by the user |
 
 Events the index must not hold (heartbeats, a monitoring account) are left out at this step: give
 `draft_index_mapping` `drop_when` XPath tests on an Event, e.g. `"EventDetail/TypeId = 'Heartbeat'"`; the drafted
@@ -50,6 +50,6 @@ indexed. Field names and types follow the environment's field convention.
 
 ## Verifying
 
-Verify through Stroom, not by querying the backend: `create_verification_dashboard`, then
-`run_test_searches` for the sample stream ids, an exact match on each key field, and a time range.
+Verify through Stroom, not by querying the backend: `verify_index` makes the dashboard once and runs the test
+searches: the sample stream ids, an exact match on each key field, and a time range.
 Shard or document counts are not a reliable signal until the index is flushed.

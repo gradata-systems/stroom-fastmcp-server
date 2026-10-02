@@ -143,11 +143,11 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
             'references_in_use': sorted(used.values(), key=lambda u: u['feed'] or ''),
             'loaders': loaders, 'reference_data_template': template,
             'hint': ("A mapping entry {lookup: {map, field}} reads a map; the pipeline must name the map's feed and loader "
-                     "as a reference (create_pipeline references=[{feed, loader_pipeline}] or set_pipeline_references). "
+                     "as a reference (create_pipeline references=[{feed, loader_pipeline}] or update_pipeline (references=...)). "
                      "No map for what you need: build the reference data (create_feed stream_type='Raw Reference', "
                      "upload_sample stream_type='Raw Reference', build_reference_xslt, create_pipeline from the "
                      "Reference Data template, process, wait_for_processing output_type='Reference'), or keep a small "
-                     "static table in a Dictionary (create_dictionary) and use `dictionary` in the mapping.")}
+                     "static table in a Dictionary (save_dictionary) and use `dictionary` in the mapping.")}
 
 
 ALL_TOOLS = [find_reference_data]

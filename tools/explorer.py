@@ -30,11 +30,27 @@ async def find_documents(
         types: Annotated[list[DocType] | None, Field(
             description="Document types to include, e.g. ['Pipeline', 'XSLT']. All types when omitted.")] = None,
         limit: Annotated[int, Field(ge=1, le=500, description="Maximum number of documents to return.")] = 100,
+        content: Annotated[str | None, Field(
+            description="Instead of the name, text the documents' content must contain, e.g. a vendor name, a source "
+                        "field or an event id in XSLTs: finds existing translations of similar sources to learn from.")] = None,
 ) -> dict[str, Any]:
     """
-    Find Stroom documents by name and type, returning each one's type, UUID, name and folder path.
-    Start here to locate feeds, pipelines, XSLTs, template pipelines or existing Elastic indices.
+    Find Stroom documents by name and type (or by text in their content), returning each one's type, UUID,
+    name and folder path. Start here to locate feeds, pipelines, XSLTs, template pipelines or existing
+    Elastic indices, and, with content, translations of similar sources to reuse ideas from.
     """
+    if content:
+        body = await gateway_from(ctx).post('/explorer/v2/findInContent', {
+            'filter': {'matchType': 'CONTAINS', 'pattern': content, 'caseSensitive': False},
+            'pageRequest': {'offset': 0, 'length': limit * 3}})
+        matches = []
+        for value in body.get('values') or []:
+            match = value.get('docContentMatch') or {}
+            ref = match.get('docRef') or {}
+            if not types or ref.get('type') in types:
+                matches.append({'type': ref.get('type'), 'uuid': ref.get('uuid'), 'name': ref.get('name'),
+                                'path': (value.get('path') or '').replace(' / ', '/'), 'sample': (match.get('sample') or '')[:300]})
+        return {'content': content, 'documents': matches[:limit]}
     body = await gateway_from(ctx).find_documents(name, list(types) if types else None, limit)
     documents = [{**v['docRef'], 'path': v.get('path')} for v in body.get('values', [])]
     if types:
@@ -62,4 +78,26 @@ async def get_document(
     return _redact(doc)
 
 
-ALL_TOOLS = [find_documents, get_document]
+async def describe_document(
+        ctx: Context,
+        type: Annotated[DocType, Field(description="Document type, as returned by find_documents.")],
+        uuid: Annotated[str, Field(description="Document UUID, as returned by find_documents.")],
+) -> dict[str, Any]:
+    """
+    A document's full content by type and UUID (XSLT, TextConverter and Documentation content verbatim in
+    'data'; cluster credentials redacted), with what the server can say about it: for a Pipeline, how Stroom
+    runs it (template chain, effective elements and properties and which layer set each, reference data,
+    what it removes from its template); for an XSLT, what the translation does (each output element's
+    source, the input fields read, imports, dictionaries and lookups).
+    """
+    from tools.pipelines import describe_pipeline
+    from tools.validation import describe_translation
+    doc = await get_document(ctx, type, uuid)
+    if type == 'Pipeline':
+        doc['pipeline'] = await describe_pipeline(uuid, ctx)
+    elif type == 'XSLT':
+        doc['translation'] = await describe_translation(ctx, xslt=doc.get('data') or '')
+    return doc
+
+
+ALL_TOOLS = [find_documents, describe_document]

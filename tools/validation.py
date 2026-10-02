@@ -367,4 +367,22 @@ async def describe_translation(
     return {'xslt': name, 'mapping_counts': dict(kinds), **result}
 
 
-ALL_TOOLS = [check_xslt, validate_events, check_event_quality, describe_translation]
+async def check_events(
+        ctx: Context,
+        events_xml: EventsXml,
+        schema_version: Annotated[str | None, Field(
+            description="Event-logging version to validate against, e.g. '3.5.2'. Defaults to the version the "
+                        "document declares in xsi:schemaLocation, else the configured version.")] = None,
+) -> dict[str, Any]:
+    """
+    Check event XML both ways: against the event-logging XSD held in this Stroom instance (each error with
+    its line, element path and message), and against the quality rules beyond the schema (TimeCreated a full
+    UTC timestamp; System Name, Environment, Generator, Device and TypeId present; exactly one action under
+    EventDetail; no empty elements), per rule with the events failing it and examples.
+    """
+    schema = await validate_events(ctx, events_xml, schema_version)
+    quality = await check_event_quality(ctx, events_xml)
+    return {'ok': schema['valid'] and quality['ok'], 'schema': schema, 'quality': quality}
+
+
+ALL_TOOLS = [check_xslt, check_events]

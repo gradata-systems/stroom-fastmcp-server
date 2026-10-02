@@ -10,24 +10,24 @@ The server has 58 tools:
 
 | Group | Tools |
 | --- | --- |
-| Explorer and pipelines | `find_documents`, `get_document`, `describe_pipeline` |
-| Templates | `find_pipeline_templates`, `list_template_children`, `describe_template_contract`, `find_similar_translations` |
+| Explorer and pipelines | `find_documents` (by name, type or content), `describe_document` (content plus how Stroom runs a pipeline or what an XSLT does) |
+| Templates | `find_pipeline_templates`, `describe_template` (children and contract) |
 | Samples and feeds | `profile_sample`, `create_feed`*, `upload_sample`, `record_source_notes` |
-| Translation | `create_text_converter`, `update_text_converter`, `create_xslt`, `update_xslt` |
-| Pipelines | `create_pipeline`*, `copy_pipeline`*, `set_pipeline_property` |
-| Streams and errors | `find_streams`, `get_stream_children`, `read_stream`, `get_stream_attributes`, `summarise_errors`, `summarise_events` |
+| Translation | `save_text_converter`, `save_xslt` (with the mapping), `save_dictionary`; `uuid=` replaces an existing one |
+| Pipelines | `create_pipeline`*, `copy_pipeline`*, `update_pipeline` |
+| Streams and errors | `find_streams`, `describe_stream` (children and attributes), `read_stream`, `summarise_streams` (errors triaged, or events by type and path) |
 | Stepping | `step_pipeline`, `step_sample`, `step_records` (chosen records in place), `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Standing instructions | `get_instructions` (AGENTS Documentation docs in Stroom, by folder) |
 | Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream, or in given sample streams), `set_shape_handling`* (kinds the user leaves untranslated) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
-| Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
+| Validation | `check_xslt`, `check_events` (schema and quality rules) |
 | Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema and the sample), `build_data_splitter` (a Data Splitter from a spec, run on the sample), `build_reference_xslt` (reference-data maps from a mapping) |
-| Reference data | `find_reference_data` (maps, feeds and loaders the environment has), `set_pipeline_references`, `create_dictionary`, `update_dictionary` |
-| Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
-| Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `test_elastic_index` |
+| Reference data | `find_reference_data` (maps, feeds and loaders the environment has), `update_pipeline` (properties, references) |
+| Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`* (with the plan's fields), `create_indexing_pipeline`*, `verify_index` (dashboard and test searches) |
+| Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `create_index_doc` |
 | Plan | `start_onboarding` (profile every file, create the build, return the plan), `build_status` (each step's state from the build; every write tool's result carries `next`) |
-| Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
+| Builds | `start_build`, `build_status`, `write_documentation`, `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the
 model never holds the answer; a client without forms gets an id to pass back once the user has agreed.
@@ -54,7 +54,7 @@ that issues JWT access tokens works; Keycloak is the worked example.
 - **In a workspace.** Everything is written under `MCP Workspace/<build>` and tagged `mcp-managed` and
   `mcp-generated`. Only `mcp-managed` docs can be changed; promotion moves them into place and removes
   `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
-- **Checked before promotion.** `list_build` and the promotion approval show what a build's pipelines still lack:
+- **Checked before promotion.** `build_status` and the promotion approval show what a build's pipelines still lack:
   a clean step of their current code (recorded as `mcp-stepped-*` tags on the pipeline), documentation whose Field
   mapping matches the current mapping and XSLT, and an XSLT that is still what its mapping generates.
 - **Documented from the mapping.** The mapping an XSLT was generated from is kept with it; `write_documentation`

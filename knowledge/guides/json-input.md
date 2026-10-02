@@ -1,7 +1,7 @@
 # JSON input
 
 JSON is parsed by the `JSONParser` element of the Event Data (JSON) template. It needs no text converter: a
-Data Splitter is for text, and a converter holding a `<jsonParser>` element parses nothing (`create_text_converter`
+Data Splitter is for text, and a converter holding a `<jsonParser>` element parses nothing (`save_text_converter`
 refuses one). The parser turns JSON into XML in the namespace `http://www.w3.org/2013/XSL/json` (not the
 `xpath-functions` namespace that `json-to-xml()` uses):
 
@@ -30,7 +30,7 @@ all in one `map`, which is what makes JSON lines (one object per line, or concat
 | One JSON array, default left | `true` | `/map` | `/map/array/map` | the same; the generated XSLT matches both |
 
 `profile_sample` reports which (`parser_properties`, `xslt_input`), and `build_translation_xslt` returns the
-setting to apply as `pipeline_properties`. Check `describe_pipeline` for the value a template's children use.
+setting to apply as `pipeline_properties`. Check `describe_document` for the value a template's children use.
 
 ## Addressing fields
 
@@ -82,4 +82,4 @@ prefix:
 
 (Braces in a `regex` attribute are doubled because the attribute is an attribute value template.)
 Some environments do this in a separate XSLT step before the translation (e.g. `innerJsonFilter`);
-`list_template_children` shows whether sibling pipelines do.
+`describe_template` shows whether sibling pipelines do.

@@ -55,7 +55,7 @@ Scope = Literal['record', 'item']
 class Lookup(BaseModel):
     """Reference data: what stroom:lookup() finds for a key in a map a reference loader provides (find_reference_data
     lists the maps). The pipeline must name the loader as a pipeline reference (create_pipeline references, or
-    set_pipeline_references); a key the map lacks gives no value, so the element is left out (or `default`)."""
+    update_pipeline (references=...)); a key the map lacks gives no value, so the element is left out (or `default`)."""
     map: str = Field(description="The map name, e.g. 'USER_TO_DEPARTMENT'.")
     field: str | None = Field(None, description="Input field holding the key (or a name from extract).")
     xpath: str | None = Field(None, description="Or an XPath giving the key.")
@@ -85,7 +85,7 @@ class FieldMapping(BaseModel):
     xpath: str | None = Field(None, description="Advanced: an XPath expression relative to the record.")
     lookup: Lookup | None = Field(None, description="The value reference data holds for a key field.")
     dictionary: str | None = Field(None, description="With field (the key): the value a Dictionary doc of this name "
-                                                     "gives it, one key=value per line (create_dictionary). Keys "
+                                                     "gives it, one key=value per line (save_dictionary). Keys "
                                                      "the dictionary lacks give no value, or `default`.")
     transform: Transform | None = Field(None, description="Applied to the input value first: lower, upper, trim, "
                                                           "strip_domain (DOMAIN\\user or user@domain -> user), domain "
@@ -988,7 +988,7 @@ class _Generator:
         if self.reference_maps:
             self._note(self.warnings, f"Lookups read reference map(s) {sorted(self.reference_maps)}: the pipeline needs "
                                       f"the feed that loads each as a pipeline reference (create_pipeline references, or "
-                                      f"set_pipeline_references); find_reference_data lists the maps and their feeds.")
+                                      f"update_pipeline (references=...)); find_reference_data lists the maps and their feeds.")
         # Called with the record as context, so they read its fields just as the event rules do.
         for k, (name, template) in self._templates.items():
             sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))

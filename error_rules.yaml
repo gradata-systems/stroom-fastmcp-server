@@ -9,7 +9,7 @@ rules:
 
   - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
   - {message: 'No effective stream', class: blocking,
-     reason: "No reference data is in effect at the lookup time: the reference feed is not attached (set_pipeline_references), or its stream's effective time is after the events (upload_sample effective_time)"}
+     reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time)"}
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}
   - {own: true, severity: [ERROR], class: blocking, reason: "Error in this pipeline's own element"}
   - {own: false, severity: [ERROR], class: review, reason: 'Error in an inherited element; check whether our output causes it'}

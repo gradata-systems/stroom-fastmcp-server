@@ -110,7 +110,7 @@ async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
     if not regenerated['ok']:
         return f"the mapping kept with its XSLT no longer generates: {regenerated['problems'][:2]}"
     if normalise_xslt(regenerated['xslt']) != normalise_xslt(kept['xslt'].get('data') or ''):
-        return ("its XSLT differs from what its mapping generates (edited by hand): change the mapping and update_xslt "
+        return ("its XSLT differs from what its mapping generates (edited by hand): change the mapping and save_xslt (uuid=...) "
                 "with mapping=..., or accept that the documentation says so")
     return None
 
@@ -195,8 +195,8 @@ async def write_documentation(
         from tools.templates import _shape
         if (await _shape(stroom, pipeline_uuid))['stage'] == 'translation':
             raise ToolError("An events pipeline's documentation needs a '## Field mapping' section. Its XSLT keeps no "
-                            "mapping (it was not saved with create_xslt mapping=...), so write the section from "
-                            "describe_translation and a stepped sample, or save the XSLT again with its mapping and the "
+                            "mapping (it was not saved with save_xslt mapping=...), so write the section from "
+                            "describe_document and a stepped sample, or save the XSLT again with its mapping and the "
                             "section is generated here")
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
@@ -341,4 +341,4 @@ async def promote_build(
     return result
 
 
-ALL_TOOLS = [start_build, list_build, write_documentation, promote_build]
+ALL_TOOLS = [start_build, write_documentation, promote_build]   # list_build is reached through build_status

@@ -30,21 +30,21 @@ TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'u
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
     ('samples', 'Upload every sample file as its own stream', 'upload_sample'),
-    ('converter', 'Text converter for the format (Data Splitter from a spec, or the XML fragment wrapper)', 'build_data_splitter, create_text_converter'),
-    ('translation', 'Translation XSLT from a mapping, saved with its mapping', 'build_translation_xslt, create_xslt mapping=...'),
+    ('converter', 'Text converter for the format (Data Splitter from a spec, or the XML fragment wrapper)', 'build_data_splitter, save_text_converter'),
+    ('translation', 'Translation XSLT from a mapping, saved with its mapping', 'build_translation_xslt, save_xslt mapping=...'),
     ('pipeline', 'Events pipeline as a child of the right template', 'find_pipeline_templates stage=translation, create_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams (draft_code first)'),
     ('processed', 'Sample streams processed into Events', 'create_processor_filter, wait_for_processing'),
-    ('validated', 'Events validated against the schema and the quality rules', 'validate_events, check_event_quality'),
+    ('validated', 'Events validated against the schema and the quality rules', 'check_events'),
     ('documented', 'Events pipeline documented, with its Field mapping generated', 'write_documentation stream_ids=...'),
 ]
 STAGE_2 = [
     ('index', 'Index doc for the agreed backend, convention and name', 'get_field_conventions, draft_index_mapping, create_index_doc'),
-    ('indexing_pipeline', 'Indexing pipeline from the plan (XSLT saved with index_plan)', 'create_xslt index_plan=..., create_indexing_pipeline'),
-    ('indexed', 'Events indexed and found by the verification searches', 'create_processor_filter, wait_for_processing, create_verification_dashboard, run_test_searches'),
+    ('indexing_pipeline', 'Indexing pipeline from the plan (XSLT saved with index_plan)', 'save_xslt index_plan=..., create_indexing_pipeline'),
+    ('indexed', 'Events indexed and found by the verification searches', 'create_processor_filter, wait_for_processing, verify_index'),
     ('index_documented', 'Indexing pipeline documented', 'write_documentation stream_ids=<Events streams>'),
 ]
-FINISH = [('promoted', 'Promoted beside sibling sources, filters handed over disabled', 'list_build, promote_build')]
+FINISH = [('promoted', 'Promoted beside sibling sources, filters handed over disabled', 'build_status, promote_build')]
 
 
 def checklist() -> list[dict[str, str]]:
@@ -153,6 +153,7 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
     nxt = pending[0] if pending else None
     return {
         'build': build,
+        'documents': docs,
         'sample': fmt,
         'feeds': [d['name'] for d in by_type.get('Feed', [])],
         'sample_streams': {t: [m['id'] for m in ms] for t, ms in streams.items()},
@@ -162,7 +163,7 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'before_promotion': checks,
         'steps': steps,
         'next': {'step': nxt['step'], 'do': nxt['what'], 'tools': nxt['tools']} if nxt else
-                {'step': 'promoted', 'do': 'Everything is in place: list_build, then promote_build with the user\'s approval',
+                {'step': 'promoted', 'do': 'Everything is in place: build_status, then promote_build with the user\'s approval',
                  'tools': 'promote_build'},
     }
 
@@ -227,7 +228,7 @@ async def start_onboarding(
         'build': name, 'folder': folder['_path'], 'source': source_name,
         'profile': profiled,
         'parser': parser, 'template': f"{template} (confirm with find_pipeline_templates stage=translation)",
-        'text_converter': ('needed: build_data_splitter from a spec, then create_text_converter' if fmt in TEXT_FORMATS else
+        'text_converter': ('needed: build_data_splitter from a spec, then save_text_converter' if fmt in TEXT_FORMATS else
                            'needed: the XML fragment wrapper (profile text_converter)' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),
         'plan': plan,
@@ -235,10 +236,43 @@ async def start_onboarding(
         'done': False,
         'standing_instructions': await applicable_instructions(ctx, folders, []),
         'hint': ("Propose the feed name from sibling feeds and create_feed; upload each file as its own stream; then the "
-                 "converter (if needed), build_translation_xslt with the sample, create_xslt with the mapping, the "
+                 "converter (if needed), build_translation_xslt with the sample, save_xslt with the mapping, the "
                  "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
                  "build_status shows what remains at any point."),
     }
+
+
+# The plan step each core tool implements, put first in its description so a client that picks tools by
+# similarity to the prompt pulls the whole onboarding chain for an "onboard these logs" request.
+STEP_OF = {
+    'start_onboarding': 'start', 'build_status': 'any step', 'start_build': 'start',
+    'create_feed': 'feed', 'upload_sample': 'samples', 'profile_sample': 'start',
+    'build_data_splitter': 'converter', 'save_text_converter': 'converter',
+    'build_translation_xslt': 'translation', 'save_xslt': 'translation',
+    'find_pipeline_templates': 'pipeline', 'describe_template': 'pipeline', 'create_pipeline': 'pipeline',
+    'step_sample': 'stepped', 'step_pipeline': 'stepped', 'step_records': 'stepped',
+    'create_processor_filter': 'processed', 'wait_for_processing': 'processed',
+    'check_events': 'validated', 'write_documentation': 'documented',
+    'get_field_conventions': 'index', 'draft_index_mapping': 'index', 'create_index_doc': 'index',
+    'create_indexing_pipeline': 'indexing_pipeline', 'verify_index': 'indexed', 'promote_build': 'promoted',
+}
+
+
+def annotate_tools(modules) -> None:
+    """Prefix each core tool's description with its onboarding plan step, e.g. 'Onboarding step 5 of 14, the
+    events pipeline: ...'. Done once, before registration."""
+    steps = [s['step'] for s in checklist()]
+    for module in modules:
+        for tool in module.ALL_TOOLS:
+            step = STEP_OF.get(tool.__name__)
+            doc = (tool.__doc__ or '').strip()
+            if not step or doc.startswith('Onboarding'):
+                continue
+            if step in steps:
+                label = f"Onboarding step {steps.index(step) + 1} of {len(steps)} ({step}): "
+            else:
+                label = "Onboarding, any step: " if step == 'any step' else "Onboarding start: "
+            tool.__doc__ = label + doc
 
 
 ALL_TOOLS = [start_onboarding, build_status]

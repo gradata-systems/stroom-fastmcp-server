@@ -114,8 +114,8 @@ def _set_property(data: dict[str, Any], element: str, name: str, value: dict[str
 
 
 async def _own_documents(ctx: Context, build: str, properties: list[PropertyValue], allowed: bool) -> None:
-    """The XSLT and text converter a child supplies must be the build's own (made with create_xslt /
-    create_text_converter), not another source's or a library's: those are inherited from the template."""
+    """The XSLT and text converter a child supplies must be the build's own (made with save_xslt /
+    save_text_converter), not another source's or a library's: those are inherited from the template."""
     if allowed:
         return
     guard = guard_from(ctx)
@@ -127,8 +127,8 @@ async def _own_documents(ctx: Context, build: str, properties: list[PropertyValu
         if MANAGED not in tags or build_tag(build) not in tags:
             raise ToolError(f"{prop.element}.{prop.name}: {prop.doc_type} {prop.doc_uuid} is not a document of build "
                             f"'{build}'. A new pipeline's translation is written for its own source: "
-                            f"build_translation_xslt from a mapping and create_xslt (mapping=...) in the build, and a text "
-                            f"converter with build_data_splitter and create_text_converter. Shared libraries are "
+                            f"build_translation_xslt from a mapping and save_xslt (mapping=...) in the build, and a text "
+                            f"converter with build_data_splitter and save_text_converter. Shared libraries are "
                             f"xsl:imported or inherited from the template, not set on the child. If the user says this "
                             f"existing document is the right one, call again with reuse_existing_docs=true.")
 
@@ -345,4 +345,30 @@ async def set_pipeline_references(
             'added': len(added)}
 
 
-ALL_TOOLS = [create_pipeline, copy_pipeline, set_pipeline_property, set_pipeline_references]
+async def update_pipeline(
+        ctx: Context,
+        pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
+        properties: Annotated[list[PropertyValue], Field(description="Element properties to set, e.g. "
+                                                                    "schemaFilter.schemaGroup or jsonParser.addRootObject.")] = [],
+        references: Annotated[list[PipelineReference], Field(description="Reference data to attach (added to any "
+                                                                        "the pipeline already has), for stroom:lookup().")] = [],
+) -> dict[str, Any]:
+    """
+    Change a pipeline this server created: set element properties, and attach reference data (feed and loader
+    pipeline, from find_reference_data) so its XSLT's lookups find the maps.
+    """
+    if not properties and not references:
+        raise ToolError("Give properties to set, references to attach, or both")
+    result: dict[str, Any] = {'uuid': pipeline_uuid, 'set': [], 'reference_data': None}
+    for prop in properties:
+        outcome = await set_pipeline_property(ctx, pipeline_uuid, prop)
+        result['name'], result['type'] = outcome['name'], 'Pipeline'
+        result['set'].append(outcome['set'])
+    if references:
+        outcome = await set_pipeline_references(ctx, pipeline_uuid, references)
+        result['name'], result['type'] = outcome['name'], 'Pipeline'
+        result['reference_data'] = outcome['reference_data']
+    return result
+
+
+ALL_TOOLS = [create_pipeline, copy_pipeline, update_pipeline]

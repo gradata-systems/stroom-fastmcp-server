@@ -143,7 +143,7 @@ async def record_source_notes(
     """
     Save the field dictionary and event catalogue condensed from user-supplied vendor documentation or
     annotated samples, as a Documentation doc '<source> source notes' in the build. Drafting uses these for
-    field meanings and event types; later updates and evaluations can read them back with get_document.
+    field meanings and event types; later updates and evaluations can read them back with describe_document.
     """
     lines = [f'# {source} source notes', '', summary.strip(), '']
     if fields:

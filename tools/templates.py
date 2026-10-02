@@ -246,4 +246,21 @@ async def find_similar_translations(
     return {'text': text, 'xslts': matches[:limit]}
 
 
-ALL_TOOLS = [find_pipeline_templates, list_template_children, describe_template_contract, find_similar_translations]
+async def describe_template(
+        ctx: Context,
+        template_uuid: Annotated[str, Field(description="UUID of a template pipeline (find_pipeline_templates).")],
+) -> dict[str, Any]:
+    """
+    How this environment uses a template, before making a child of it: the pipelines that inherit from it,
+    each with what it overrides (properties set, elements removed or re-linked, reference data added) and
+    the feeds it covers, as examples; and the template's contract, what a child's output must contain for
+    the shared elements (a decoration XSLT, say) to work: the elements and expressions they read, the schema
+    group and the output stream type.
+    """
+    children = await list_template_children(ctx, template_uuid)
+    contract = await describe_template_contract(ctx, template_uuid)
+    return {'template_uuid': template_uuid, 'children': children['children'],
+            **{k: v for k, v in contract.items() if k != 'template_uuid'}}
+
+
+ALL_TOOLS = [find_pipeline_templates, describe_template]

@@ -117,7 +117,7 @@ async def draft_index_mapping(
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
-                    "XSLT with create_xslt index_plan=plan, so write_documentation generates the Field mapping section."}
+                    "XSLT with save_xslt index_plan=plan, so write_documentation generates the Field mapping section."}
 
 
 async def set_index_fields(
@@ -127,7 +127,7 @@ async def set_index_fields(
 ) -> dict[str, Any]:
     """Lucene: add the plan's fields to the index doc (keywords as TEXT with the KEYWORD analyzer)."""
     if plan.backend != 'lucene':
-        raise ToolError("set_index_fields is for Lucene; Elasticsearch fields come from the index template the user commits "
+        raise ToolError("create_index_doc (plan=...) is for Lucene; Elasticsearch fields come from the index template the user commits "
                         "(propose_index_template)")
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Index', index_uuid)
@@ -184,11 +184,15 @@ async def create_index_doc(
         index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
         cluster_uuid: Annotated[str | None, Field(description="Elasticsearch: an existing Elastic Cluster doc.")] = None,
         volume_group: Annotated[str, Field(description="Lucene: the index volume group.")] = 'Default Volume Group',
+        plan: Annotated[FieldPlan | None, Field(description="Lucene: the field plan from draft_index_mapping; its fields "
+                                                           "are added to the index doc (keywords as TEXT with the KEYWORD "
+                                                           "analyzer). Elasticsearch fields come from the index template.")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Create the build's index doc: a Lucene Index in a volume group, or an Elastic Index doc on an existing
-    Elastic Cluster doc pointing at the index or data stream. The user confirms the backend, name and target.
+    Create the build's index doc: a Lucene Index in a volume group with the plan's fields, or an Elastic
+    Index doc on an existing Elastic Cluster doc pointing at the index or data stream, tested against the
+    cluster. The user confirms the backend, name and target.
     """
     stroom = gateway_from(ctx)
     if backend == 'elasticsearch':
@@ -213,8 +217,16 @@ async def create_index_doc(
         doc.update(clusterRef={'type': 'ElasticCluster', 'uuid': cluster_uuid, 'name': cluster.get('name')},
                    indexName=index_name, timeField=time_field)
     doc = await stroom.put_doc(doc)
+    extra: dict[str, Any] = {}
+    if backend == 'lucene' and plan is not None:
+        extra['fields'] = await set_index_fields(ctx, doc['uuid'], plan)
+    elif backend == 'elasticsearch':
+        try:
+            extra['test'] = await test_elastic_index(ctx, doc['uuid'])
+        except ToolError as e:
+            extra['test'] = {'error': str(e)}
     from tools.plan import with_next
-    return await with_next(ctx, build, {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target})
+    return await with_next(ctx, build, {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target, **extra})
 
 
 async def _events_available(ctx: Context, build: str, events_stream_ids: list[int]) -> None:
@@ -315,7 +327,7 @@ async def create_verification_dashboard(
         fields: Annotated[list[str], ONE_OR_MORE, Field(description="Minimal field set: StreamId, EventId, the time field and a "
                                                        "few key fields.")],
 ) -> dict[str, Any]:
-    """A workspace dashboard with a query on the index doc and a table of the given fields, for run_test_searches."""
+    """A workspace dashboard with a query on the index doc and a table of the given fields, for verify_index."""
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
     source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
@@ -448,7 +460,7 @@ async def propose_index_template(
     send back their changed version (check that with check_index_template). Writes nothing.
     """
     if plan.backend != 'elasticsearch':
-        raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with set_index_fields")
+        raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with create_index_doc (plan=...)")
     destination = await _destination(ctx, pipeline_uuid)
     index = destination['index name']
     name = template_name or index
@@ -493,6 +505,36 @@ async def check_index_template(
     return result
 
 
-ALL_TOOLS = [get_field_conventions, draft_index_mapping,
-             propose_index_template, check_index_template, set_index_fields, find_elastic_clusters, create_index_doc, create_indexing_pipeline,
-             test_elastic_index, create_verification_dashboard, run_test_searches]
+async def verify_index(
+        ctx: Context,
+        build: Build,
+        index_uuid: Annotated[str, Field(description="The index doc that was indexed into.")],
+        backend: Backend,
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams that were indexed.")],
+        expected_documents: Annotated[int, Field(description="Events records in those streams.")],
+        fields: Annotated[list[str], ONE_OR_MORE, Field(description="Minimal field set for the dashboard: StreamId, EventId, "
+                                                       "the time field and a few key fields.")],
+        exact: Annotated[list[dict[str, str]], Field(
+            description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
+                        "each must return at least one row.")] = [],
+        time_range: Annotated[dict[str, Any] | None, Field(
+            description="{'field': ..., 'from': ISO, 'to': ISO, 'expected': n}")] = None,
+        dashboard_name: Annotated[str | None, Field(description="Defaults to the index name with a -VERIFY suffix.")] = None,
+        retries: Annotated[int, Field(ge=0, le=20, description="Retries while the index catches up.")] = 6,
+) -> dict[str, Any]:
+    """
+    Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc
+    (created once per build, with a table of the given fields), then the test searches: the sample stream
+    ids, an exact match on each key field, and a time range. Passes when every check returns what it should.
+    """
+    stroom = gateway_from(ctx)
+    index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
+    name = dashboard_name or f"{index.get('name')}-VERIFY"
+    existing = next((d for d in await guard_from(ctx).folder_contents(build) if d['type'] == 'Dashboard' and d['name'] == name), None)
+    dashboard = existing or await create_verification_dashboard(ctx, build, name, index_uuid, backend, fields)
+    searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries)
+    return {'dashboard': {'uuid': dashboard['uuid'], 'name': name}, **searched}
+
+
+ALL_TOOLS = [get_field_conventions, draft_index_mapping, propose_index_template, check_index_template,
+             find_elastic_clusters, create_index_doc, create_indexing_pipeline, verify_index]

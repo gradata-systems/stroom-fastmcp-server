@@ -96,7 +96,7 @@ async def locate_event(
         'events_stream': found['events'], 'translation_docs': docs}
     if event_id is None:
         result['hint'] = ("Give event_id to pin down the record, or find the event type in the Events stream "
-                          "(summarise_events) and step_pipeline the raw stream's records.")
+                          "(summarise_streams (kind=events)) and step_pipeline the raw stream's records.")
         return result
     if not found['events']:
         raise ToolError(f"Raw stream {found['raw']} has no Events stream from this pipeline to find event {event_id} in")
