@@ -1,4 +1,5 @@
 """Local validation of XSLT and event XML: well-formedness, schema, quality and field mapping."""
+import difflib
 import re
 from collections import Counter
 from typing import Annotated, Any
@@ -13,19 +14,39 @@ from utils.stroom import gateway_from
 
 XSL = 'http://www.w3.org/1999/XSL/Transform'
 EVT = 'event-logging:3'
-# Stroom's XSLT extension functions (namespace 'stroom'); an unknown name is usually a typo.
+JSON_NS = 'http://www.w3.org/2013/XSL/json'
+FN_NS = 'http://www.w3.org/2005/xpath-functions'
+# Stroom's XSLT extension functions (namespace 'stroom'), as its function library registers them. Anything else
+# fails to compile when the pipeline runs, so an unknown name is refused here with the nearest real one.
 STROOM_FUNCTIONS = {
-    'bitmap-lookup', 'cidr-to-numeric-ip', 'classification', 'col-from', 'col-to', 'current-time', 'current-user',
-    'dec-to-bin', 'dec-to-hex', 'dec-to-oct', 'decode-url', 'dictionary', 'encode-url', 'feed-attribute',
-    'feed-name', 'fetch-json', 'format-date', 'generate-url', 'get', 'hash', 'hex-to-dec', 'hex-to-oct',
-    'hex-to-string', 'host-address', 'host-name', 'http-call', 'ip-in-cidr', 'json-to-xml', 'line-from',
-    'line-to', 'link', 'log', 'lookup', 'meta', 'meta-keys', 'numeric-ip', 'parse-uri', 'part-no',
-    'pipeline-name', 'put', 'random', 'record-no', 'search-id', 'source', 'source-id', 'stream-id',
+    'add-meta', 'ask-ai', 'bitmap-lookup', 'cidr-to-numeric-ip', 'cidr-to-numeric-ip-range', 'classification',
+    'col-from', 'col-to', 'cosine-similarity', 'current-time', 'current-unixTime', 'current-user', 'dec-to-bin',
+    'dec-to-hex', 'dec-to-oct', 'decode-url', 'dictionary', 'encode-url', 'feed-attribute', 'feed-name',
+    'fetch-json', 'format-date', 'format-dateTime', 'from-unixTime', 'generate-url', 'get', 'hash', 'hex-to-dec',
+    'hex-to-oct', 'hex-to-string', 'host-address', 'host-name', 'http-call', 'ip-in-cidr', 'json-to-xml',
+    'line-from', 'line-to', 'link', 'log', 'lookup', 'manifest', 'manifest-for-id', 'meta', 'meta-attribute',
+    'meta-keys', 'meta-stream', 'meta-stream-for-id', 'numeric-ip', 'parent-for-id', 'parent-id',
+    'parse-dateTime', 'parse-uri', 'part-no', 'pipeline-name', 'plan-b-lookup', 'pointIsInsideXYPolygon', 'put',
+    'random', 'record-no', 'search-id', 'source', 'source-id', 'split-document', 'stream-id', 'to-unixTime',
 }
-_STROOM_CALL = re.compile(r'\bstroom:([a-z][a-z0-9-]*)\s*\(')
+_STROOM_CALL = re.compile(r'\bstroom:([A-Za-z][A-Za-z0-9-]*)\s*\(')
 _ISO_TIME = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$')
 # EventDetail children that describe the event rather than being its action.
 _DETAIL_META = {'TypeId', 'Description', 'Classification', 'Purpose'}
+# Element names that, in a pipeline, only ever come from one parser or stream type, each in its own namespace.
+# Written bare in a match or select with no xpath-default-namespace they select nothing: the XSLT's output is
+# empty text, and processing writes nowhere.
+_INPUT_NAMESPACES = {
+    'records:2': {'records', 'record', 'data'},
+    EVT: {'Events', 'Event'},
+    JSON_NS: {'map', 'array', 'string', 'number', 'boolean', 'null'},
+}
+_XPATH_ATTRS = ('match', 'select', 'test', 'group-by', 'use')
+_LITERAL = re.compile(r"""'[^']*'|"[^"]*\"""")
+# A bare element-name step: not an attribute, variable, prefixed name, function, map/array constructor or axis.
+_NAME_STEP = re.compile(r'(?<![\w.:@$-])([A-Za-z_][\w.-]*)(?!\s*[:({]|[\w.-])')
+_ELEMENT_AXIS = re.compile(r'\b(?:child|descendant|self|descendant-or-self|following-sibling|preceding-sibling|parent'
+                           r'|ancestor|ancestor-or-self|following|preceding)::')
 
 XsltText = Annotated[str, Field(description="Full XSLT document text.")]
 EventsXml = Annotated[str, Field(description="An <Events> document, e.g. step output or a record from read_stream.")]
@@ -38,12 +59,138 @@ def _parse(text: str, what: str) -> etree._Element:
         raise ToolError(f"{what} is not well-formed XML: {e}") from e
 
 
-async def check_xslt(ctx: Context, xslt: XsltText) -> dict[str, Any]:
+def _function_problems(xslt: str, root: etree._Element) -> tuple[list[str], set[str]]:
+    calls = set(_STROOM_CALL.findall(xslt))
+    errors = []
+    if calls and 'stroom' not in (root.nsmap or {}):
+        errors.append('stroom: functions are used but xmlns:stroom="stroom" is not declared')
+    for name in sorted(calls - STROOM_FUNCTIONS):
+        close = difflib.get_close_matches(name, sorted(STROOM_FUNCTIONS), n=2, cutoff=0.6)
+        message = f"stroom:{name}() is not a Stroom function and will not compile"
+        if 'json' in name.lower():
+            message += (": JSON held in a string is parsed with json-to-xml(text), an XPath function with no prefix "
+                        "(its output is in the xpath-functions namespace); raw JSON input is parsed by the pipeline's "
+                        "JSONParser element, not in XSLT")
+        elif close:
+            message += f"; did you mean {' or '.join(f'stroom:{c}()' for c in close)}?"
+        errors.append(message)
+    return errors, calls
+
+
+def _default_namespace(node: etree._Element) -> str | None:
+    """The xpath-default-namespace in force at node (None when none is declared)."""
+    while node is not None:
+        if node.get('xpath-default-namespace') is not None:
+            return node.get('xpath-default-namespace')
+        node = node.getparent()
+    return None
+
+
+def _namespace_problems(root: etree._Element) -> list[str]:
+    found: dict[str, list[str]] = {}
+    for node in root.iter(f'{{{XSL}}}*'):
+        if _default_namespace(node) is not None:
+            continue
+        for attr in _XPATH_ATTRS:
+            expr = node.get(attr)
+            if not expr:
+                continue
+            names = set(_NAME_STEP.findall(_ELEMENT_AXIS.sub('', _LITERAL.sub("''", expr))))
+            for namespace, known in _INPUT_NAMESPACES.items():
+                if namespace == JSON_NS and any(f in expr for f in ('json-to-xml', 'parse-xml', 'analyze-string')):
+                    continue
+                if names & known:
+                    found.setdefault(namespace, []).append(f'{attr}="{expr}"')
+    problems = []
+    for namespace, where in found.items():
+        shown = ', '.join(where[:3]) + (f" and {len(where) - 3} more" if len(where) > 3 else '')
+        note = (f" (the JSONParser's output; json-to-xml() output is in {FN_NS})" if namespace == JSON_NS else
+                " (a Data Splitter's output)" if namespace == 'records:2' else " (an Events stream)")
+        problems.append(f"{shown} select nothing: those elements are in namespace {namespace}{note}, and no "
+                        f"xpath-default-namespace is declared. Set xpath-default-namespace=\"{namespace}\" on "
+                        f"xsl:stylesheet, or bind a prefix to it. If the input really has no namespace, declare "
+                        f"xpath-default-namespace=\"\" to say so.")
+    return problems
+
+
+def _literal_children(node: etree._Element):
+    """Literal event-logging elements written directly below node, looking through xsl:if, xsl:choose and so on."""
+    for child in node:
+        if not isinstance(child.tag, str):
+            continue
+        if child.tag.startswith(f'{{{EVT}}}'):
+            yield child
+        elif child.tag in (f'{{{XSL}}}variable', f'{{{XSL}}}param'):
+            continue
+        else:
+            yield from _literal_children(child)
+
+
+def _event_element_problems(root: etree._Element, schema) -> list[str]:
+    """Literal result elements in the event-logging namespace that the schema has no place for, e.g.
+    Event/EventDetail/ServerEvent. A fragment written in a named template (an EventSource on its own) is
+    accepted wherever the schema allows an element of that name."""
+    problems: list[str] = []
+
+    def options_below(options: list[str], name: str) -> tuple[list[str], str | None]:
+        kept, reason = [], None
+        for option in options:
+            if option == 'Events':
+                if name == 'Event':
+                    kept.append('Event')
+                else:
+                    reason = f"Events holds Event elements, not {name}"
+                continue
+            try:
+                schema.resolve(f'{option}/{name}')
+                kept.append(f'{option}/{name}')
+            except ValueError as e:
+                reason = str(e)
+        return kept, reason
+
+    def walk(node: etree._Element, options: list[str]) -> None:
+        for child in _literal_children(node):
+            name = etree.QName(child).localname
+            kept, reason = options_below(options, name)
+            if not kept:
+                if len(options) == 1:
+                    message = f"{options[0]}/{name} is not in the event-logging schema" + (f": {reason}" if reason else '')
+                else:
+                    message = f"{name} is not allowed below any of {options[:4]} in the event-logging schema"
+                if message not in problems:
+                    problems.append(message)
+                continue
+            walk(child, kept)
+
+    for node in root.iter(f'{{{EVT}}}*'):
+        if any(isinstance(a.tag, str) and a.tag.startswith(f'{{{EVT}}}') for a in node.iterancestors()):
+            continue
+        name = etree.QName(node).localname
+        if name in ('Events', 'Event'):
+            options = [name]
+        else:
+            options = schema.paths_named(name)
+            if not options:
+                problems.append(f"No element '{name}' exists anywhere in the event-logging schema")
+                continue
+        walk(node, options)
+    return problems
+
+
+async def check_xslt(
+        ctx: Context,
+        xslt: XsltText,
+        schema_version: Annotated[str | None, Field(
+            description="Event-logging version the output must follow, e.g. '3.5.2'. Defaults to the Version the "
+                        "XSLT writes on Events, else the configured version.")] = None,
+) -> dict[str, Any]:
     """
-    Check an XSLT before saving or stepping it: well-formed, an xsl:stylesheet with a version, the
-    stroom namespace declared when stroom: functions are used, known stroom: function names, and
-    xsl:import / xsl:include targets that exist as XSLT documents in Stroom.
-    Full compilation happens when the pipeline is stepped.
+    Check an XSLT before saving or stepping it: well-formed, an xsl:stylesheet with a version, the stroom
+    namespace declared and only real stroom: functions used (an unknown one comes back with the nearest real
+    name), match and select expressions that would select nothing because the input's namespace is not
+    declared, event-logging elements the schema has no place for (e.g. EventDetail/ServerEvent), and
+    xsl:import / xsl:include targets that exist as XSLT documents in Stroom. Full compilation happens when
+    the pipeline is stepped.
     """
     try:
         root = etree.fromstring(xslt.encode('utf-8'))
@@ -54,12 +201,20 @@ async def check_xslt(ctx: Context, xslt: XsltText) -> dict[str, Any]:
         errors.append("Root element must be xsl:stylesheet")
     if not root.get('version'):
         errors.append("xsl:stylesheet needs a version attribute (Stroom supports 2.0 and 3.0)")
-    calls = set(_STROOM_CALL.findall(xslt))
-    if calls and 'stroom' not in (root.nsmap or {}):
-        errors.append('stroom: functions are used but xmlns:stroom="stroom" is not declared')
-    unknown = sorted(calls - STROOM_FUNCTIONS)
-    if unknown:
-        warnings.append(f"Unrecognised stroom: functions (check spelling): {', '.join(unknown)}")
+    function_errors, calls = _function_problems(xslt, root)
+    errors += function_errors
+    errors += _namespace_problems(root)
+    if root.find(f'.//{{{EVT}}}*') is not None:
+        from tools.generation import event_schema
+        events = root.find(f'.//{{{EVT}}}Events')
+        version = schema_version or (events.get('Version') if events is not None else None) \
+            or gateway_from(ctx).settings.event_logging_version
+        try:
+            schema = await event_schema(ctx, version)
+        except ToolError as e:
+            warnings.append(f"Event-logging element names not checked: {e}")
+        else:
+            errors += _event_element_problems(root, schema)
     imports = [e.get('href') for e in root.iter(f'{{{XSL}}}import', f'{{{XSL}}}include') if e.get('href')]
     missing = []
     for href in imports:

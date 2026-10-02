@@ -1,7 +1,7 @@
 # Evaluation set
 
-Ten samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least 8 of
-the 10 reach indexed events with at most one human hint each.
+Eleven samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
+80% of them (9 of 11) reach indexed events with at most one human hint each.
 
 | Case | Format | Events | What it tests |
 | --- | --- | --- | --- |
@@ -15,6 +15,7 @@ the 10 reach indexed events with at most one human hint each.
 | `08_kv_firewall` | key=value | Network | Nested Data Splitter, protocol map, Permitted |
 | `09_csv_noheader_copy` | CSV without a header | Copy | Named columns from a regex, Source and Destination |
 | `10_xml_attrs_lock` | XML attributes | Authenticate (screen lock) | Attribute paths, enumerated actions |
+| `11_jsonl_message_text` | JSON lines, event in a message string | Authenticate | No text converter (JSONParser, `json_layout: lines`), `extract` regexes for the time, user, action, outcome and client address |
 
 Each case (`cases/*.yaml`) holds the sample, the request to give the agent, what the output must contain (record
 count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data

@@ -28,9 +28,13 @@ XSL = 'http://www.w3.org/1999/XSL/Transform'
 XSI = 'http://www.w3.org/2001/XMLSchema-instance'
 XS = 'http://www.w3.org/2001/XMLSchema'
 EVT = 'event-logging:3'
+FN = 'http://www.w3.org/2005/xpath-functions'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
-DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/array'}
-DEFAULT_RECORD = {'data_splitter': 'record', 'json': 'map'}
+DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/'}
+DEFAULT_RECORD = {'data_splitter': 'record'}
+# The JSONParser's records: an array's maps, with or without the parser's root map (addRootObject) around the
+# array; or, for JSON lines, the maps the parser's root map wraps the top-level objects in.
+JSON_RECORDS = {'array': '/array/map | /map/array/map', 'lines': '/map/map'}
 # Values listed per element (EventSource table) or per TypeId (Descriptions) in the documentation.
 DOC_VALUES_SHOWN = 3
 # A value map used by one element with at most this many keys is written inline, as an if.
@@ -47,7 +51,8 @@ class FieldMapping(BaseModel):
     path: str = Field(description="Event-logging path below Event, e.g. 'EventSource/User/Id', "
                                   "'EventDetail/Authenticate/Outcome/Success', or '.../Data' with data_name.")
     field: str | None = Field(None, description="Input field: a Data Splitter data name, a JSON key "
-                                                "('user.name' for nested keys), or an XML path relative to the record.")
+                                                "('user.name' for nested keys), an XML path relative to the record, "
+                                                "or a name from extract.")
     value: str | None = Field(None, description="A constant, e.g. 'Logon'.")
     xpath: str | None = Field(None, description="Advanced: an XPath expression relative to the record.")
     time_format: str | None = Field(None, description="Input time pattern (Java, e.g. \"yyyy-MM-dd'T'HH:mm:ss\", "
@@ -67,7 +72,7 @@ class FieldMapping(BaseModel):
 
 class Condition(BaseModel):
     """A test on the record; give field or xpath and one of equals, one_of, matches or present."""
-    field: str | None = None
+    field: str | None = Field(None, description="An input field, or a name from extract.")
     xpath: str | None = None
     equals: str | None = None
     one_of: list[str] | None = None
@@ -106,6 +111,28 @@ class XsltStyle(BaseModel):
         "shared maps are declared once as an xsl:map. 0: always an xsl:map."))
 
 
+class Extraction(BaseModel):
+    """Fields parsed out of one text field with a regular expression: a message string holding a time, a user, an
+    action and a description, say. Each capture group becomes a field (names, in group order) that common, events
+    and when use like any input field. Records the pattern does not match get no values from it, so the elements
+    are left out, which a rule's conditions can test with present."""
+    field: str | None = Field(None, description="The input field holding the text (a Data Splitter name, JSON key, "
+                                                "XML path, or a name from an earlier extraction).")
+    xpath: str | None = Field(None, description="Or an XPath expression giving the text.")
+    regex: str = Field(description="XPath regular expression with one capture group per field, e.g. "
+                                   "'^(\\S+ \\S+) (\\S+) (\\S+) (.*)$'. Anchor it, and use (?:...) for groups that are "
+                                   "not fields. XPath regexes have no lookaround and no named groups.")
+    names: list[str] = Field(min_length=1, description="A field name per capture group, in order; '' skips a group.")
+    flags: str = Field('', description="XPath regex flags: i (ignore case), m (multi-line), s (dot matches newline), "
+                                       "x (ignore whitespace in the pattern).")
+
+    @model_validator(mode='after')
+    def one_source(self):
+        if (self.field is None) == (self.xpath is None):
+            raise ValueError("An extraction needs exactly one of field or xpath")
+        return self
+
+
 def style_name(text: str, naming: str) -> str:
     """text (a field name, a path such as 'Authenticate-User', or 'src_ip') in the naming style, as an
     XML name: 'EventSource' -> event_source, eventSource, EventSource or event-source."""
@@ -132,6 +159,13 @@ class TranslationMapping(BaseModel):
     record: str | None = Field(None, description="Record elements under the root. Defaults: 'record' / 'map'; "
                                                  "required for xml, e.g. 'logon'.")
     xml_namespace: str = Field('', description="xml input only: the source's default namespace, if it has one.")
+    json_layout: Literal['array', 'lines'] = Field('array', description=(
+        "json input only, from profile_sample: 'array' (one JSON array; set jsonParser.addRootObject=false on the "
+        "pipeline, or leave it: both are matched) or 'lines' (one object per line, or concatenated objects; "
+        "jsonParser.addRootObject must stay true, which wraps them all in one map)."))
+    extract: list[Extraction] = Field(default_factory=list, description=(
+        "Fields parsed out of text fields with regular expressions, e.g. a message string holding the time, user "
+        "and action; their names are then used as fields in common, events and when."))
     common: list[FieldMapping] = Field(default_factory=list, description="Fields every event gets, e.g. time, "
                                                                         "System, Device.")
     events: list[EventRule] = Field(min_length=1, description="Event kinds, tried in order; the first whose "
@@ -201,6 +235,21 @@ class _Generator:
         self._xpath_names: set[str] = set()      # those holding an xpath entry rather than a field
         self._scope: dict[str, str] = {}          # variables the template being written uses: name -> select
         self._maps: dict[tuple, str] = {}         # value map items -> name of the stylesheet variable holding it
+        # Fields an extraction parses out of a text field: name -> (extraction, capture group). Each extraction's
+        # analyze-string() result is held in a variable (parts) declared ahead of the fields read from it.
+        self.derived: dict[str, tuple[Extraction, int]] = {}
+        self._parts: dict[int, str] = {}
+        self._keep: set[str] = set()
+        for n, extraction in enumerate(mapping.extract):
+            self._check_extraction(n, extraction)
+            base = style_name(f"{extraction.field or 'text'}-parts", mapping.style.naming)
+            self._parts[id(extraction)] = unique_name(base, self._keep, mapping.style.naming)
+            self._keep.add(self._parts[id(extraction)])
+            for nr, name in enumerate(extraction.names, 1):
+                if name in self.derived:
+                    self._note(self.problems, f"extract: '{name}' is the name of two extracted fields")
+                elif name:
+                    self.derived[name] = (extraction, nr)
         # A value map becomes an xsl:map when several elements use it or it is too long to read as an if.
         paths: dict[tuple, set[str]] = {}
         for entry in mapping.common + [f for rule in mapping.events for f in rule.fields]:
@@ -213,10 +262,49 @@ class _Generator:
         if message not in bucket:
             bucket.append(message)
 
+    def _check_extraction(self, n: int, ex: Extraction) -> None:
+        where = f"extract[{n}] ({ex.field or ex.xpath})"
+        if re.search(r'\(\?(P?<[A-Za-z_]|<?[=!])', ex.regex):
+            self._note(self.problems, f"{where}: XPath regular expressions have no named groups and no lookaround; "
+                                      f"use plain groups, (?:...) for ones that are not fields, and anchors")
+            return
+        try:
+            groups = re.compile(ex.regex).groups
+        except re.error as e:
+            self._note(self.problems, f"{where}: the regex does not compile: {e}")
+            return
+        if len(ex.names) > groups:
+            self._note(self.problems, f"{where}: {len(ex.names)} names but the regex has {groups} capture groups")
+        elif len(ex.names) < groups:
+            self._note(self.warnings, f"{where}: the regex has {groups} capture groups and {len(ex.names)} names; "
+                                      f"the later groups are not fields")
+        if not any(ex.names):
+            self._note(self.problems, f"{where}: names every group '', so nothing is extracted")
+        if set(ex.flags) - set('imsxq'):
+            self._note(self.problems, f"{where}: flags are any of i, m, s, x, q; not {ex.flags!r}")
+
+    def parts_name(self, ex: Extraction) -> str:
+        return self._parts[id(ex)]
+
+    def declare_parts(self, ex: Extraction) -> None:
+        """Declare the variable holding the extraction's analyze-string() result in the template being written,
+        before anything that reads it (an extraction of an extracted field declares its source's first)."""
+        name = self.parts_name(ex)
+        if name in self._scope:
+            return
+        if ex.field in self.derived:
+            self.declare_parts(self.derived[ex.field][0])
+        text = self.source(ex.field, ex.xpath)
+        flags = f", {literal(ex.flags)}" if ex.flags else ''
+        self._scope[name] = f"analyze-string(string(({text})[1]), {literal(ex.regex)}{flags})"
+
     # --- input addressing ---
     def source(self, field_name: str | None, xpath: str | None) -> str:
         if xpath is not None:
             return xpath
+        if field_name in self.derived:
+            ex, nr = self.derived[field_name]
+            return f"${self.parts_name(ex)}/fn:match//fn:group[@nr={nr}]"
         if self.m.input == 'data_splitter':
             return '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
         if self.m.input == 'json':
@@ -230,10 +318,12 @@ class _Generator:
         if raw not in self._names:
             naming = self.m.style.naming
             base = style_name(label if xpath is not None else field_name, naming)
-            self._names[raw] = unique_name(base, set(self._names.values()) | set(self._maps.values()), naming)
+            self._names[raw] = unique_name(base, set(self._names.values()) | set(self._maps.values()) | self._keep, naming)
         name = self._names[raw]
         if xpath is not None:
             self._xpath_names.add(name)
+        if field_name in self.derived:
+            self.declare_parts(self.derived[field_name][0])
         wrap = (xpath is not None and not is_call(raw)) or self.m.input == 'xml'
         self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
         return '$' + name
@@ -246,7 +336,8 @@ class _Generator:
 
     def condition(self, c: Condition, raw: bool = False) -> str:
         """The rule's test; raw: with the input's own selectors, for the summary returned to the model."""
-        src = self.source(c.field, c.xpath) if raw else self.ref(c.field, c.xpath, 'condition')
+        src = (c.field if c.field in self.derived else self.source(c.field, c.xpath)) if raw \
+            else self.ref(c.field, c.xpath, 'condition')
         if c.equals is not None:
             return f"{src} = {literal(c.equals)}"
         if c.one_of is not None:
@@ -268,7 +359,7 @@ class _Generator:
         if items not in self._maps:
             naming = self.m.style.naming
             base = style_name(f"{src[1:]}-to-{entry.path.strip('/').split('/')[-1]}", naming)
-            self._maps[items] = unique_name(base, set(self._names.values()) | set(self._maps.values()), naming)
+            self._maps[items] = unique_name(base, set(self._names.values()) | set(self._maps.values()) | self._keep, naming)
         return '$' + self._maps[items]
 
     def as_xsl_map(self, entry: FieldMapping) -> bool:
@@ -503,6 +594,8 @@ class _Generator:
         placed: Counter = Counter()
         for variable in template.findall(f'{{{XSL}}}variable'):
             name, select = variable.get('name'), variable.get('select')
+            if name in self._keep:
+                continue
             pattern = re.compile(r'\$' + re.escape(name) + r'(?![\w.-])')
             reads = [(el, attr) for el in template.iter() if el is not variable
                      for attr in ('test', 'select') if pattern.search(el.get(attr) or '')]
@@ -607,15 +700,15 @@ class _Generator:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
                                       f"put the rule without conditions last")
 
-        nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS}
+        nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {})}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
-        sheet.set('exclude-result-prefixes', 'stroom xs')
+        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else ''))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')
-        etree.SubElement(events, f'{{{XSL}}}apply-templates', select=m.record or DEFAULT_RECORD.get(m.input, ''),
-                         mode='event')
+        records = m.record or (JSON_RECORDS[m.json_layout] if m.input == 'json' else DEFAULT_RECORD.get(m.input, ''))
+        etree.SubElement(events, f'{{{XSL}}}apply-templates', select=records, mode='event')
         self.choose_shared([(rule.name, root) for rule, root in trees if root is not None])
         self._templates: dict[str, tuple[str, etree._Element]] = {}
         record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='event')
@@ -762,7 +855,14 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
             if rule not in kinds:
                 kinds.append(rule)
     sampled_kinds = list(dict.fromkeys(rule for rule, _ in attributed or []))
-    lines = ['### EventSource', '']
+    lines = []
+    if mapping.extract:
+        lines += ['### Extracted fields', '']
+        for ex in mapping.extract:
+            names = ', '.join(f'`{n}`' for n in ex.names if n)
+            lines.append(f"- {names}: parsed from `{ex.field or readable(ex.xpath)}` with `{ex.regex}`")
+        lines.append('')
+    lines += ['### EventSource', '']
     if attributed is not None:
         lines += [f'Values are those written for the {len(observed)} events of the sample. Where only some kinds of '
                   'event have an element, they are named.', '']

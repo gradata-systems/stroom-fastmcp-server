@@ -27,6 +27,21 @@ TIMESTAMPS = [
 ]
 
 
+# How a JSON sample reaches the XSLT. The JSONParser reads every top-level value in the stream and, with
+# addRootObject (its default), wraps them all in one <map>; so JSON lines parse as /map/map with no text
+# converter, and an array as /map/array/map, or /array/map with addRootObject off.
+JSON_SETUP = {
+    'lines': {'text_converter': 'none: the JSONParser element parses JSON lines itself; a text converter cannot',
+              'parser_properties': {'jsonParser.addRootObject': True},
+              'xslt_input': {'namespace': 'http://www.w3.org/2013/XSL/json', 'root': '/map', 'record': 'map',
+                             'mapping': {'input': 'json', 'json_layout': 'lines'}}},
+    'array': {'text_converter': 'none: the JSONParser element parses the array itself; a text converter cannot',
+              'parser_properties': {'jsonParser.addRootObject': False},
+              'xslt_input': {'namespace': 'http://www.w3.org/2013/XSL/json', 'root': '/array', 'record': 'map',
+                             'mapping': {'input': 'json', 'json_layout': 'array'}}},
+}
+
+
 def value_type(value: Any) -> str:
     if isinstance(value, bool):
         return 'boolean'
@@ -113,7 +128,7 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             data = json.loads(text)
             records = [_flatten(r) for r in data[:max_records] if isinstance(r, dict)]
             return {**result, 'format': 'json array', 'records': len(data), 'fields': _inventory(records),
-                    'suggested_parser': 'JSONParser (Event Data (JSON) template)'}
+                    'suggested_parser': 'JSONParser (Event Data (JSON) template)', **JSON_SETUP['array']}
         except ValueError:
             pass
     json_lines = []
@@ -126,7 +141,7 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             break
     if json_lines and len(json_lines) == min(len(lines), max_records):
         return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
-                'suggested_parser': 'JSONParser, one object per line (Event Data (JSON) template)'}
+                'suggested_parser': 'JSONParser, one object per line (Event Data (JSON) template)', **JSON_SETUP['lines']}
 
     if sum(bool(SYSLOG_5424.match(line)) for line in lines) >= 0.8 * len(lines):
         return {**result, 'format': 'syslog rfc5424', 'records': len(lines), 'examples': lines[:3],

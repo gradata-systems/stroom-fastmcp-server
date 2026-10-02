@@ -39,9 +39,11 @@ async def build_translation_xslt(
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
     (data_splitter, json or xml), fields every event shares (time, System, Device...), and one rule per
-    kind of event with its conditions and fields. Paths are checked against the schema: unknown paths come
-    back with suggestions, constants are checked against allowed values, and elements are written in schema
-    order with empty inputs left out. Fix any problems in the mapping and call again; then step_sample with
+    kind of event with its conditions and fields. Text fields that hold several values (a message string with
+    a time, user and action) are parsed with extract: a regular expression whose groups become fields; no
+    substring-before/after chains. JSON held in a string is read with an xpath using json-to-xml(). Paths are
+    checked against the schema: unknown paths come back with suggestions, constants are checked against
+    allowed values, and elements are written in schema order with empty inputs left out. Fix any problems in the mapping and call again; then step_sample with
     draft_code={'<xslt element>': xslt}. Saves nothing. The standing instructions (AGENTS docs) that apply
     come back with the result: check the mapping follows them, and set mapping.style from any XSLT style
     section in them (naming, variables, xsl:maps). With pipeline_uuid and stream_ids it also returns
@@ -52,6 +54,13 @@ async def build_translation_xslt(
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
+    if mapping.input == 'json':
+        result['pipeline_properties'] = {
+            'jsonParser.addRootObject': mapping.json_layout == 'lines',
+            'note': ("JSON lines need the parser's root map (addRootObject true, the default), which the XSLT "
+                     "matches as /map/map." if mapping.json_layout == 'lines' else
+                     "A JSON array is matched with or without the parser's root map; set addRootObject false on "
+                     "create_pipeline to keep the output simple, as sibling pipelines do.") + " No text converter."}
     if result['ok'] and pipeline_uuid and stream_ids:
         stroom = gateway_from(ctx)
         pipeline = await _Pipeline.load(stroom, pipeline_uuid)

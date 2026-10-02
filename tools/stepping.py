@@ -24,6 +24,18 @@ DraftCode = Annotated[dict[str, str] | None, Field(
                 "e.g. {'translationFilter': '<xsl:stylesheet ...>'}. Nothing is saved.")]
 
 
+async def _check_drafts(ctx: Context, draft_code: dict[str, str] | None) -> None:
+    """Refuse draft XSLT that check_xslt rejects, with its reasons. Stepping would otherwise report the symptom
+    only: an unknown stroom: function as a compile error, or a missing namespace as empty output."""
+    from tools.validation import XSL as XSL_NS, check_xslt
+    for element, code in (draft_code or {}).items():
+        if XSL_NS not in code:
+            continue
+        result = await check_xslt(ctx, code)
+        if not result['ok']:
+            raise ToolError(f"draft_code[{element!r}] is not stepped: " + '; '.join(result['errors']))
+
+
 class _Pipeline:
     """What stepping needs to know about a pipeline, fetched once per tool call."""
 
@@ -174,6 +186,7 @@ async def step_pipeline(
     the chosen elements, and every element's errors and warnings, triaged. Use draft_code to try a
     translation change without saving it.
     """
+    await _check_drafts(ctx, draft_code)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     if isinstance(record, int):
@@ -215,6 +228,7 @@ async def step_sample(
     status. This is the correctness check before processing; a blocking group means fix and step again.
     With records_per_stream, only the head of each stream is stepped (a broad check on existing streams).
     """
+    await _check_drafts(ctx, draft_code)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
@@ -276,6 +290,7 @@ async def step_records(
     survey_feed's locations to check a translation against every kind of event a feed holds, without copying
     or processing anything. A record that produces no event is flagged.
     """
+    await _check_drafts(ctx, draft_code)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     output_element = pipeline.default_outputs()[-1]

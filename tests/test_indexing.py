@@ -69,6 +69,7 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
                                    {'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'cluster'}]}
     ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace()})
     with patch('tools.indexing._shape', AsyncMock(return_value=shape)), \
+            patch('tools.indexing._events_available', AsyncMock()), \
             patch('tools.indexing.create_pipeline', AsyncMock(return_value={'uuid': 'p'})) as create:
         with pytest.raises(ToolError, match='cluster'):
             await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_name='stroom-acme-v1')

@@ -328,7 +328,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_text_converter` **W** | Create a Data Splitter or XML Fragment converter with code | `textConverter/v1` |
+| `create_text_converter` **W** | Create a Data Splitter or XML Fragment converter with code; refuses anything that is not a `dataSplitter` document, e.g. an attempt to parse JSON (the JSONParser does that, with no converter) | `textConverter/v1` |
 | `update_text_converter` **W** | Replace the code of a converter the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `textConverter/v1/{uuid}` |
 | `create_xslt` **W** | Create an XSLT doc with code | `xslt/v1` |
 | `update_xslt` **W** | Replace the code of an XSLT the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `xslt/v1/{uuid}` |
@@ -345,7 +345,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 
 | Tool | Purpose |
 | --- | --- |
-| `check_xslt` | Well-formed, XSLT 2.0/3.0 namespace, declared `stroom:` functions exist |
+| `check_xslt` | Well-formed, XSLT 2.0/3.0 namespace, only real `stroom:` functions (an unknown one is refused with the nearest name), match/select expressions that would select nothing for want of the input namespace, event-logging elements the schema has no place for (checked against the XSD in Stroom), imports that resolve. Runs on every XSLT saved and on draft code before it is stepped |
 | `validate_events` | Validate event XML against the event-logging XSD held in the Stroom instance (the configured version, or the one the events declare); errors with line, path and a short fix hint |
 | `check_event_quality` | Beyond the XSD: `EventTime/TimeCreated` parses, `EventSource/System/Name` set, no empty elements, `EventDetail` type matches the action |
 | `describe_translation` | Read an XSLT and list, per output event-logging path, the input fields or expressions that feed it; flags constant values and paths never set |

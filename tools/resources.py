@@ -31,6 +31,34 @@ _RULES = """Rules for every run:
   the index template for the destination index has been written."""
 
 
+# Sent to every client at connection (serverInfo.instructions), so the rules hold whichever client runs the model
+# and whether or not it uses the prompts.
+SERVER_INSTRUCTIONS = f"""Stroom MCP server: builds Stroom content (feeds, translation and indexing pipelines) from raw data, through tools
+that enforce the rules; the prompts (onboard_data_source, onboard_existing_feed, update_events_pipeline, ...) are the
+workflows, and stroom://guide/* the reference.
+
+Order of work for a new source, always: stage 1, the events pipeline (profile_sample, template, feed, translation
+XSLT, step every record, process, validate the Events), then stage 2, indexing, which reads the Events streams
+stage 1 produced. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses until the
+build has an events pipeline or is given existing Events streams.
+
+Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
+(JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
+The XSLT reads the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json
+for JSON, root /map for JSON lines, /array for an array), so set xpath-default-namespace to it.
+
+Translation: write the XSLT with build_translation_xslt from a mapping, not by hand. Text fields holding several
+values (a message string with a time, user, action and description) are parsed with the mapping's extract (a
+regular expression whose groups become fields), not with substring-before/after chains; JSON held in a string is
+read with an xpath using json-to-xml(). Only stroom: functions that exist may be used (format-date, lookup, meta,
+dictionary, log, json-to-xml, ...; there is no stroom:json-parse); check_xslt refuses unknown ones, elements the
+event-logging schema has no place for (e.g. EventDetail/ServerEvent: EventDetail holds TypeId, Description and one
+action element such as Authenticate, Process, View, Alert, Unknown), and match/select expressions that would
+select nothing for want of a namespace.
+
+{_RULES}"""
+
+
 def _docs(source_docs: str) -> str:
     return (f"\n\nThe user supplied this source documentation. Record it with record_source_notes and use it for "
             f"field meanings and event types:\n{source_docs}") if source_docs else ''
@@ -69,11 +97,15 @@ Stage 1, events:
 2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
-4. Draft the text converter (if the template needs one). Build the XSLT with build_translation_xslt (feeds=[the feed]) from a mapping:
-   which input field or constant goes to which event-logging path, one rule per kind of event, time patterns from
-   profile_sample. Fix reported problems in the mapping and regenerate; hand-edit only what a mapping cannot express.
-   step_sample with draft_code until the verdict is clean; step_pipeline on single records to debug.
-5. create_text_converter / create_xslt, create_pipeline from the template, step_sample again.
+4. Draft the text converter only if the template's parser needs one (DSParser.textConverter: text such as CSV,
+   syslog, key=value). JSON and XML need none: the JSONParser or XMLParser reads them. Build the XSLT with
+   build_translation_xslt (feeds=[the feed]) from a mapping: which input field or constant goes to which
+   event-logging path, one rule per kind of event, time patterns from profile_sample, extract for text fields
+   holding several values, json_layout from profile_sample for JSON. Fix reported problems in the mapping and
+   regenerate; hand-edit only what a mapping cannot express. step_sample with draft_code until the verdict is
+   clean; step_pipeline on single records to debug.
+5. create_text_converter (if any) / create_xslt, create_pipeline from the template (with the pipeline_properties
+   build_translation_xslt returned, e.g. jsonParser.addRootObject), step_sample again.
 6. create_processor_filter on the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
    validate_events and check_event_quality on the output.
 

@@ -86,8 +86,12 @@ async def test_check_xslt_reports_missing_imports_and_unknown_functions(ctx):
     respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': []}))
     result = await validation.check_xslt(ctx, XSLT.replace('stroom:lookup', 'stroom:lookp'))
     assert result['ok'] is False
-    assert result['errors'] == ["xsl:import/include targets not found as XSLT documents: IP Lookup"]
-    assert result['warnings'] == ["Unrecognised stroom: functions (check spelling): lookp"]
+    # An unknown function is an error (it would not compile), with the nearest real name.
+    assert result['errors'] == ["stroom:lookp() is not a Stroom function and will not compile; did you mean stroom:lookup()?",
+                                "xsl:import/include targets not found as XSLT documents: IP Lookup"]
+    # Stroom here has no event-logging schema, so element names go unchecked and the check says so.
+    assert result['warnings'] == ["Event-logging element names not checked: Stroom has no XML schema "
+                                  "'file://event-logging-v3.5.2.xsd'. Event-logging schemas available: none"]
 
 
 async def test_check_xslt_rejects_malformed_xml(ctx):

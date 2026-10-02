@@ -7,14 +7,29 @@ Stroom runs XSLT 2.0/3.0 (Saxon). Declare `xmlns:stroom="stroom"` to use Stroom 
 | Parser (template) | XSLT input | `xpath-default-namespace` |
 | --- | --- | --- |
 | `DSParser` (Event Data (Text)) | `<records><record><data name="field" value="..."/>` | `records:2` |
-| `JSONParser` (Event Data (JSON)) | JSON as `map`/`array`/`string` elements, keys in `@key` | `http://www.w3.org/2013/XSL/json` |
+| `JSONParser` (Event Data (JSON)), no text converter | JSON as `map`/`array`/`string` elements, keys in `@key`; root `/map` for JSON lines, `/array` for an array (see the JSON guide) | `http://www.w3.org/2013/XSL/json` |
 | `XMLParser` (Event Data (XML)) | the source XML | the source namespace |
 | Indexing pipelines | `<Events>` from the Events stream, with `@StreamId` and `@EventId` on each `Event` | `event-logging:3` |
 
 Match the record element and build one `Event` per record; the split filter hands the XSLT one
-record at a time.
+record at a time. Without the right `xpath-default-namespace` (or a prefix bound to it) a bare `match="record"`
+or `select="map"` selects nothing, the output is empty text, and processing writes no Events and no error;
+`check_xslt` names such expressions, and stepping reports "Output contains no XML elements".
+
+## Output
+
+Every element written below `Event` must be one the event-logging schema has: `EventTime`, `EventSource`,
+`EventDetail` (holding `TypeId`, `Description` and exactly one action element such as `Authenticate`, `Process`,
+`View`, `Alert` or `Unknown`), in schema order. An element the schema lacks (`EventDetail/ServerEvent`,
+`Outcome/Result`) fails validation on every record; `check_xslt` refuses it and names what is allowed there,
+and `build_translation_xslt` only accepts schema paths. Source values with no home go in `Data` elements
+(`EventDetail/<Action>/Data` with `Name` and `Value`).
 
 ## Functions used most
+
+Only the functions Stroom registers compile; `check_xslt` refuses any other `stroom:` name with the nearest
+real one. There is no `stroom:json-parse()`: JSON in a string is parsed with `json-to-xml()`, and raw JSON by
+the pipeline's `JSONParser`.
 
 | Function | Use |
 | --- | --- |
@@ -47,12 +62,37 @@ record at a time.
                         {"path": "EventDetail/Authenticate/Data", "data_name": "session", "field": "sid"}]}]}
 ```
 
-Fields are Data Splitter names, JSON keys (`user.name` for nested keys) or XML paths relative to the record.
-The tool puts elements in schema order, converts times with `stroom:format-date`, leaves elements out when
-their input is empty (or writes `default`), and logs records no rule matches. Unknown paths, constants the
-schema does not allow, alternatives used together and missing required elements come back as problems to fix
-in the mapping. Use `xpath` for a computed value, and write XSLT by hand only for what a mapping cannot
-express, such as unpacking embedded JSON or reference lookups.
+Fields are Data Splitter names, JSON keys (`user.name` for nested keys), XML paths relative to the record, or
+names from `extract`. The tool puts elements in schema order, converts times with `stroom:format-date`, leaves
+elements out when their input is empty (or writes `default`), and logs records no rule matches. Unknown paths,
+constants the schema does not allow, alternatives used together and missing required elements come back as
+problems to fix in the mapping. Use `xpath` for a computed value (embedded JSON: `json-to-xml(...)/*/*[@key='x']`),
+and write XSLT by hand only for what a mapping cannot express, such as reference lookups.
+
+### Text fields holding several values
+
+A message string such as `2026-10-01 10:00:00 alice LOGIN Successful login from 10.0.0.1` is parsed with
+`extract`: a regular expression whose capture groups become fields, usable in `common`, `events` and `when` like
+any input field. An extraction can read a field an earlier one produced. Not `substring-before()` /
+`substring-after()` chains, which break on the first value with a space or a missing part.
+
+```json
+{"input": "json", "json_layout": "lines",
+ "extract": [{"field": "message", "regex": "^(\\S+ \\S+) (\\S+) (\\S+) (.*)$", "names": ["ts", "user", "action", "desc"]},
+             {"field": "desc", "regex": "^(Successful|Failed)", "names": ["result"]}],
+ "common": [{"path": "EventTime/TimeCreated", "field": "ts", "time_format": "yyyy-MM-dd HH:mm:ss", "timezone": "UTC"},
+            {"path": "EventSource/User/Id", "field": "user"},
+            {"path": "EventDetail/Description", "field": "desc"}],
+ "events": [{"name": "logon", "when": [{"field": "action", "equals": "LOGIN"}],
+             "fields": [{"path": "EventDetail/Authenticate/Action", "value": "Logon"},
+                        {"path": "EventDetail/Authenticate/Outcome/Success", "field": "result",
+                         "map": {"Successful": "true", "Failed": "false"}}]}]}
+```
+
+The generated XSLT holds `analyze-string(message, regex)` in a variable per template and reads each group from
+it. XPath regular expressions have no lookaround and no named groups; use `(?:...)` for groups that are not
+fields, and anchor the pattern. A record the pattern does not match gets no values from it, so its elements are
+left out; a rule can test that with `{"field": "ts", "present": false}` (and `drop` it, or map it to `Unknown`).
 
 ## Style
 

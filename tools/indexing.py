@@ -16,7 +16,7 @@ from tools.explorer import _redact
 from tools.pipeline_writes import PropertyValue, create_pipeline
 from tools.processing_writes import elastic_destination
 from tools.stepping import _outputs, _Pipeline
-from tools.streams import summarise_events
+from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
 from utils.fieldplan import Backend, FieldPlan, PlannedField
@@ -209,6 +209,26 @@ async def create_index_doc(
     return {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target}
 
 
+async def _events_available(ctx: Context, build: str, events_stream_ids: list[int]) -> None:
+    """An indexing pipeline reads Events, which raw data only has once an events pipeline has translated it.
+    The build's own events pipeline counts; otherwise the Events streams it will index must already exist."""
+    stroom = gateway_from(ctx)
+    for doc in await guard_from(ctx).folder_contents(build):
+        if doc['type'] == 'Pipeline' and (await _shape(stroom, doc['uuid']))['stage'] == 'translation':
+            return
+    if not events_stream_ids:
+        raise ToolError(f"Build '{build}' has no events pipeline, and no events_stream_ids were given. An indexing "
+                        f"pipeline reads Events streams, not raw data: build the events pipeline first (stage 1 of "
+                        f"onboard_data_source: feed, translation XSLT, step, process), then index its Events. To "
+                        f"index Events an existing pipeline already produces, pass their stream ids as "
+                        f"events_stream_ids. Raw structured data indexed as it is, with no translation, is a "
+                        f"discovery template (find_pipeline_templates stage=discovery).")
+    meta = await _meta(stroom, events_stream_ids[0])
+    if meta.get('typeName') != 'Events':
+        raise ToolError(f"Stream {events_stream_ids[0]} is {meta.get('typeName')!r}, not Events. An indexing pipeline "
+                        f"reads the Events streams an events pipeline produces; build that first (stage 1).")
+
+
 async def create_indexing_pipeline(
         ctx: Context,
         build: Build,
@@ -219,15 +239,23 @@ async def create_indexing_pipeline(
         index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
         cluster_uuid: Annotated[str | None, Field(
             description="Elasticsearch: the cluster, if the template does not already set one.")] = None,
+        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+            description="Events streams this pipeline will index (stage 1's output, or an existing Events feed's). "
+                        "Needed when the build has no events pipeline of its own.")] = [],
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Create an indexing pipeline as a child of an indexing template, setting its XSLT and where it indexes:
-    the Lucene Index doc, or the Elasticsearch index name (and cluster if the template leaves it open).
+    Stage 2: create an indexing pipeline as a child of an indexing template, setting its XSLT and where it
+    indexes: the Lucene Index doc, or the Elasticsearch index name (and cluster if the template leaves it
+    open). It reads Events streams, so it comes after the events pipeline (stage 1) has produced them, or
+    takes an existing Events feed's streams as events_stream_ids.
     """
-    shape = await _shape(gateway_from(ctx), template_uuid)
+    stroom = gateway_from(ctx)
+    shape = await _shape(stroom, template_uuid)
     if shape['stage'] not in ('indexing', 'discovery'):
         raise ToolError(f"That template is a {shape['stage']} template, not an indexing one")
+    if shape['stage'] == 'indexing':
+        await _events_available(ctx, build, events_stream_ids)
     xslt_element = next((s['element'] for s in shape['child_must_supply'] if s['type'] == 'XSLTFilter'), 'xsltFilter')
     props = [PropertyValue(element=xslt_element, name='xslt', doc_uuid=xslt_uuid, doc_type='XSLT')]
     open_props = {(s['element'], s['property']) for s in shape['child_must_supply']}

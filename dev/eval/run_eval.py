@@ -1,9 +1,9 @@
-"""The evaluation set: 10 samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: eleven samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
 
-Pass criterion: at least 8 of 10 samples reach indexed events with at most one human hint each.
+Pass criterion: at least 80% of the samples reach indexed events with at most one human hint each.
 
 --reference proves the cases and the scoring against the local Stroom stack (dev/stroom): each case's
 reference converter and field mapping go through build_translation_xslt, stepping, processing, a Lucene index
@@ -18,6 +18,7 @@ Results go to dev/eval/results/<time>-reference.json with a summary table.
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -36,7 +37,7 @@ CASES = Path(__file__).parent / 'cases'
 RESULTS = Path(__file__).parent / 'results'
 EVT = 'event-logging:3'
 DETAIL_META = {'TypeId', 'Description', 'Classification', 'Purpose'}
-PASS_MIN, MAX_HINTS = 8, 1
+PASS_RATIO, MAX_HINTS = 0.8, 1
 
 
 def load_cases(only: list[str] | None = None) -> list[dict[str, Any]]:
@@ -170,7 +171,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         x = await translation.create_xslt(ctx, build, f'{feed}-Events', generated['xslt'])
         props.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT'))
         if case['template'] == 'Event Data (JSON)':
-            props.append(PropertyValue(element='jsonParser', name='addRootObject', value=False))
+            # JSON lines need the parser's root map round the top-level objects; an array reads better without it.
+            lines = reference['mapping'].get('json_layout') == 'lines'
+            props.append(PropertyValue(element='jsonParser', name='addRootObject', value=lines))
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
                                    template_uuid=template['uuid'], properties=props)
         sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
@@ -225,9 +228,11 @@ def summary(scores: list[Score]) -> str:
         rows.append(f"| {s.case} | {'pass' if s.passed else 'fail'} | {s.stage1} | {s.indexed} | {s.hints} | "
                     f"{s.valid_events}/{s.events} | {s.seconds} |")
     passed = sum(s.passed for s in scores)
-    criterion = f"the exit criterion ({PASS_MIN} of 10, at most {MAX_HINTS} hint each)"
-    verdict = (f"meets {criterion}" if passed >= PASS_MIN and len(scores) >= 10 else
-               f"does not meet {criterion}" if len(scores) >= 10 else f"a partial run, not scored against {criterion}")
+    total = len(load_cases())
+    needed = math.ceil(PASS_RATIO * total)
+    criterion = f"the exit criterion ({needed} of {total}, at most {MAX_HINTS} hint each)"
+    verdict = (f"meets {criterion}" if passed >= needed and len(scores) >= total else
+               f"does not meet {criterion}" if len(scores) >= total else f"a partial run, not scored against {criterion}")
     rows.append(f"\n{passed} of {len(scores)} passed; {verdict}.")
     return '\n'.join(rows)
 

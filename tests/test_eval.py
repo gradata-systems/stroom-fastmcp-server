@@ -15,9 +15,9 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 <EventDetail><TypeId>login</TypeId><Authenticate><Action>Logon</Action></Authenticate></EventDetail></Event></Events>"""
 
 
-def test_ten_cases_each_with_a_reference_mapping_the_schema_accepts():
+def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 10 and len({c['id'] for c in cases}) == 10
+    assert len(cases) == 11 and len({c['id'] for c in cases}) == 11
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'sample', 'reference'} <= set(case), case['id']
         result = generate(TranslationMapping.model_validate(case['reference']['mapping']), SCHEMA, '4.1.0')
@@ -38,7 +38,8 @@ def test_scoring_counts_events_types_and_missing_paths():
 
 
 def test_summary_applies_the_exit_criterion():
-    scores = [ev.Score(f'c{i}', 'test', passed=i < 8) for i in range(10)]
-    assert 'meets the exit criterion' in ev.summary(scores)
-    assert 'does not meet' in ev.summary([ev.Score(f'c{i}', 'test', passed=i < 7) for i in range(10)])
+    total = len(ev.load_cases())   # 80% of the cases, rounded up: 9 of 11
+    scores = [ev.Score(f'c{i}', 'test', passed=i < 9) for i in range(total)]
+    assert 'meets the exit criterion (9 of 11' in ev.summary(scores)
+    assert 'does not meet' in ev.summary([ev.Score(f'c{i}', 'test', passed=i < 8) for i in range(total)])
     assert 'partial run' in ev.summary(scores[:3])
