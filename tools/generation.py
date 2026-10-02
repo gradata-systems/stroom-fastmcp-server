@@ -2,6 +2,7 @@
 from typing import Annotated, Any
 
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from tools.instructions import applicable_instructions
@@ -10,7 +11,10 @@ from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
-from utils.dsgen import SplitterSpec, dry_run, generate_splitter
+from pydantic import ValidationError
+
+from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
+from utils.samples import check_sample
 from utils.localcheck import check_mapping, sample_records
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
@@ -67,6 +71,8 @@ async def build_translation_xslt(
     result = generate(mapping, schema, version)
     result['schema_version'] = version
     if sample is not None:
+        for text in (sample if isinstance(sample, list) else [sample]):
+            check_sample(text)
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
         result['sample_check'] = {**check, **({'note': note} if note else {})}
@@ -115,20 +121,51 @@ async def build_translation_xslt(
 
 async def build_data_splitter(
         ctx: Context,
-        spec: Annotated[SplitterSpec, Field(description="How a record of the text divides into named fields.")],
-        sample: Annotated[str | None, Field(description="The raw sample: the spec is run on it here, so the records "
-                                                        "and field names are seen before anything is created.")] = None,
+        sample: Annotated[str | None, Field(description="The raw sample text (every line of a file). The spec is "
+                                                        "inferred from it when none is given, and run on it, so the "
+                                                        "records and field names are seen before anything is created.")] = None,
+        spec: Annotated[dict[str, Any] | None, Field(description=(
+            "Only when the inferred spec is not right, or for free text: how a record divides into fields. "
+            "{'kind': 'delimited', 'delimiter': ',', 'header': true} (or header: [names]); "
+            "{'kind': 'key_value', 'delimiter': ' ', 'pair_separator': '=', 'quote': '\"'}; "
+            "{'kind': 'regex', 'pattern': '^(\\S+) (.*)$', 'names': ['time', 'message']}; "
+            "{'kind': 'syslog', 'rfc': 'rfc3164', 'body': {'kind': 'key_value'}}."))] = None,
 ) -> dict[str, Any]:
     """
-    Write a Data Splitter (text converter) from a spec instead of by hand: delimited columns with or without a
-    header line, a regex with a name per group, key=value pairs, or syslog (RFC 5424 or 3164) with the
-    message parsed further. With the sample, runs the spec locally and returns the records it produces, the
-    lines that match nothing, and the field names a mapping may use (give the same spec to
-    build_translation_xslt as splitter). Saves nothing: save_text_converter saves the converter.
+    Write a Data Splitter (text converter) from the sample: its format is profiled (delimited with or without
+    a header line, key=value pairs, syslog RFC 5424 or 3164 with the message parsed further) and the spec
+    inferred, unless one is given; the spec is run on the sample locally and the records it produces, the lines
+    that match nothing and the field names a mapping may use come back (give the same spec to
+    build_translation_xslt as splitter). JSON and XML need no converter. Saves nothing: save_text_converter saves it.
     """
-    result: dict[str, Any] = {'converter': generate_splitter(spec), 'converter_type': 'DATA_SPLITTER'}
+    if sample is None and spec is None:
+        raise ToolError("Give the sample (the file's text): the spec is inferred from it")
     if sample is not None:
-        run = dry_run(spec, sample)
+        check_sample(sample)
+    profiled: dict[str, Any] | None = None
+    if spec is None:
+        inferred, profiled = infer_spec(sample)
+        if inferred is None:
+            fmt = profiled['format']
+            if fmt in ('json array', 'json lines', 'xml', 'xml fragments'):
+                raise ToolError(f"The sample is {fmt}: it needs no Data Splitter. {profiled.get('suggested_parser')}. "
+                                f"Go on to build_translation_xslt (input {'json' if fmt.startswith('json') else fmt.replace(' ', '_')}).")
+            raise ToolError(f"The sample's format could not be inferred ({fmt}): give spec, a regex with a name per group, e.g. "
+                            f"{EXAMPLES['unknown text']}, written for lines like {profiled.get('examples', [''])[0]!r}")
+        chosen = inferred
+    else:
+        try:
+            chosen = SplitterSpec.model_validate(spec)
+        except ValidationError as e:
+            fmt = profile_format(sample) if sample else None
+            example = EXAMPLES.get(fmt or '', EXAMPLES['delimited'])
+            raise ToolError(f"spec is not a splitter spec ({'; '.join(x['msg'] for x in e.errors()[:3])}). For "
+                            f"{fmt or 'this'} data it looks like {example}; or leave spec out and it is inferred from the sample.") from e
+    result: dict[str, Any] = {'spec': chosen.model_dump(exclude_none=True, exclude_defaults=True),
+                              'inferred': spec is None, 'converter': generate_splitter(chosen), 'converter_type': 'DATA_SPLITTER',
+                              **({'format': profiled['format']} if profiled else {})}
+    if sample is not None:
+        run = dry_run(chosen, sample)
         result.update({'records': len(run['records']), 'fields': _inventory(run['records']),
                        'first_records': run['records'][:5], 'unmatched_lines': run['unmatched_lines'][:10],
                        'unmatched_count': len(run['unmatched_lines'])})
@@ -138,8 +175,14 @@ async def build_data_splitter(
             result['hint'] = (f"{len(run['unmatched_lines'])} line(s) match nothing and would produce no record: widen the "
                               f"spec, or confirm with the user that they are noise.")
         else:
-            result['hint'] = "Every line parsed. Use these field names in the mapping, with this spec as splitter."
+            result['hint'] = ("Every line parsed. Use these field names in the mapping, with this spec as splitter; "
+                              "save_text_converter saves the converter.")
     return result
+
+
+def profile_format(sample: str) -> str:
+    from utils.profile import profile
+    return profile(sample)['format']
 
 
 async def build_reference_xslt(

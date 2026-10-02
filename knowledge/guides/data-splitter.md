@@ -5,9 +5,12 @@ A Data Splitter text converter (type `DATA_SPLITTER`, used by `DSParser`) turns 
 
 ## Generate it from a spec
 
-`build_data_splitter` writes the converter from a spec and, given the sample, runs the spec on it locally:
-the records it produces, the lines that match nothing, and the field names the mapping may use. Give the same
-spec to `build_translation_xslt` as `splitter` so the mapping is checked against those records.
+`build_data_splitter` takes the sample's text, infers the spec from its format (delimited with or without a header,
+key=value, syslog with a key=value body) and runs it locally: the records it produces, the lines that match
+nothing, and the field names the mapping may use. Give it a `spec` only when the inferred one is wrong or the
+text is free-form (a regex with a name per group). Give the same spec to `build_translation_xslt` as `splitter`
+so the mapping is checked against those records. A sample is the file's text, never a path: the server cannot
+read the client's files, and refuses a path with that instruction.
 
 | Spec | Example |
 | --- | --- |

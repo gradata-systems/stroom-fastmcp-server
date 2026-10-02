@@ -12,6 +12,7 @@ from security.guard import guard_from
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
+from utils.samples import as_named_samples, check_sample
 from utils.stroom import gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -20,10 +21,10 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 async def profile_sample(
         ctx: Context,
         sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long.")] = None,
-        samples: Annotated[dict[str, str] | None, Field(
-            description="Several sample files of the same source, by file name. Profiled each and together: fields "
-                        "and timestamp shapes only some files have are reported, as a mapping built from one file "
-                        "breaks on the others. Prefer this whenever the user has more than one file.")] = None,
+        samples: Annotated[dict[str, str] | list[str] | None, Field(
+            description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
+                        "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
+                        "built from one file breaks on the others. Prefer this whenever the user has more than one file.")] = None,
 ) -> dict[str, Any]:
     """
     Profile raw data locally (nothing is sent to Stroom): its format (XML document or fragments, JSON array or
@@ -32,11 +33,10 @@ async def profile_sample(
     their values; string fields holding JSON are flagged. Says which parser and template to use, whether a text
     converter is needed, and for JSON the parser setting. With several files, also what differs between them.
     """
-    if samples:
-        return profile_many({**samples, **({'sample': sample} if sample else {})})
-    if sample is None:
-        raise ToolError("Give sample, or samples by file name")
-    return profile(sample)
+    named = as_named_samples(samples, sample)
+    if not named:
+        raise ToolError("Give sample (the file's text), or samples: several files' texts")
+    return profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
 
 
 async def create_feed(
@@ -91,6 +91,7 @@ async def upload_sample(
     a stream and every file is stepped. Only upload to feeds in a build (test feeds for updates), never to a
     production feed whose processor filters would pick the data up.
     """
+    check_sample(sample)
     stroom = gateway_from(ctx)
     # A direct lookup: the explorer search index lags new documents by a moment.
     match = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')

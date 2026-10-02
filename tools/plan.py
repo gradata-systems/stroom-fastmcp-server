@@ -14,6 +14,7 @@ from pydantic import Field
 from security.guard import MANAGED, build_tag, guard_from
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
+from utils.samples import as_named_samples
 from utils.stroom import gateway_from
 
 Build = Annotated[str, Field(description="Build name, e.g. 'fortios-v1.0'.")]
@@ -30,7 +31,7 @@ TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'u
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
     ('samples', 'Upload every sample file as its own stream', 'upload_sample'),
-    ('converter', 'Text converter for the format (Data Splitter from a spec, or the XML fragment wrapper)', 'build_data_splitter, save_text_converter'),
+    ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter sample=<the file text>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping, saved with its mapping', 'build_translation_xslt, save_xslt mapping=...'),
     ('pipeline', 'Events pipeline as a child of the right template', 'find_pipeline_templates stage=translation, create_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams (draft_code first)'),
@@ -203,7 +204,9 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
 async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall' (names the build).")],
-        samples: Annotated[dict[str, str], Field(description="Every sample file the user has, by file name.")],
+        samples: Annotated[dict[str, str] | list[str], Field(
+            description="The text of every sample file the user has (read each file and pass its content, every line), "
+                        "by file name or as a list. Not paths: this server cannot read the client's files.")],
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,
         folders: Annotated[list[str], ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
 ) -> dict[str, Any]:
@@ -214,11 +217,12 @@ async def start_onboarding(
     until build_status shows every step done and promote_build has run; each tool's result says what is next.
     """
     from tools.instructions import applicable_instructions
-    if not samples:
-        raise ToolError("Give the sample files (samples by file name); ask the user for every file they have")
+    named = as_named_samples(samples)
+    if not named:
+        raise ToolError("Give the sample files' text (samples by file name); ask the user for every file they have")
     name = build or ('onboard-' + ''.join(c if c.isalnum() else '-' for c in source_name.lower()).strip('-')[:40])
     folder = await guard_from(ctx).build_folder(name)
-    profiled = profile_many(samples) if len(samples) > 1 else profile(next(iter(samples.values())))
+    profiled = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
     template = {'JSONParser': 'Event Data (JSON)', 'XMLParser': 'Event Data (XML)',

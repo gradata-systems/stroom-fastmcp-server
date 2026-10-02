@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from utils.profile import SYSLOG_3164, SYSLOG_5424
+from utils.profile import KEY_VALUE, SYSLOG_3164, SYSLOG_5424, profile
 
 DS_HEAD = ('<?xml version="1.1" encoding="UTF-8"?>\n'
            '<dataSplitter xmlns="data-splitter:3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
@@ -179,6 +179,46 @@ def _apply_record(spec: SplitterSpec, text: str, heading: list[str] | None) -> d
         if inner:
             fields = {**fields, **inner}
     return fields
+
+
+EXAMPLES = {
+    'delimited': {'kind': 'delimited', 'delimiter': ',', 'header': True, 'quote': '"'},
+    'key=value': {'kind': 'key_value', 'delimiter': ' ', 'pair_separator': '=', 'quote': '"'},
+    'syslog rfc3164': {'kind': 'syslog', 'rfc': 'rfc3164', 'body': {'kind': 'key_value'}},
+    'syslog rfc5424': {'kind': 'syslog', 'rfc': 'rfc5424', 'body': {'kind': 'key_value'}},
+    'unknown text': {'kind': 'regex', 'pattern': '^(\\S+ \\S+) (\\S+) (.*)$', 'names': ['time', 'host', 'message']},
+}
+
+
+def _body_spec(messages: list[str]) -> 'SplitterSpec | None':
+    """How syslog message bodies divide further, when they do: key=value pairs."""
+    pairs = [len(KEY_VALUE.findall(m)) for m in messages if m.strip()]
+    if pairs and sum(1 for n in pairs if n >= 2) >= 0.8 * len(pairs):
+        quote = '"' if any('="' in m for m in messages) else None
+        return SplitterSpec(kind='key_value', delimiter=' ', quote=quote)
+    return None
+
+
+def infer_spec(sample: str) -> tuple['SplitterSpec | None', dict[str, Any]]:
+    """A spec for the sample's format, from its profile: (spec, profile). None when the format needs no text
+    converter (JSON, XML) or cannot be inferred (free text, which needs a regex from a human)."""
+    info = profile(sample)
+    fmt = info['format']
+    lines = [l for l in sample.splitlines() if l.strip()]
+    if fmt == 'delimited':
+        quote = '"' if any('"' in l for l in lines[:50]) else None
+        header = bool(info.get('has_header'))
+        return SplitterSpec(kind='delimited', delimiter=info.get('delimiter', ','), header=header or list(info.get('columns') or []),
+                            quote=quote), info
+    if fmt == 'key=value':
+        quote = '"' if any('="' in l for l in lines[:50]) else None
+        return SplitterSpec(kind='key_value', delimiter=' ', pair_separator='=', quote=quote), info
+    if fmt in ('syslog rfc3164', 'syslog rfc5424'):
+        rfc = 'rfc3164' if fmt.endswith('3164') else 'rfc5424'
+        head = SplitterSpec(kind='syslog', rfc=rfc)
+        messages = [r.get('message', '') for r in (dry_run(head, sample)['records'])]
+        return SplitterSpec(kind='syslog', rfc=rfc, body=_body_spec(messages)), info
+    return None, info
 
 
 def dry_run(spec: SplitterSpec, sample: str, max_records: int = 200) -> dict[str, Any]:
