@@ -84,6 +84,12 @@ async def test_samples_cut_up_by_the_tool_call_reach_the_server_and_are_explaine
     assert result.is_error and 'samples arrived broken' in text and 'list of strings' in text
 
 
+def test_a_list_of_name_and_text_records_is_one_sample_each():
+    assert as_named_samples([{'name': 'fw.csv', 'text': FORTIOS}, {'content': FORTIOS}]) == {'fw.csv': FORTIOS, 'sample 2': FORTIOS}
+    with pytest.raises(ToolError, match='is a file path'):
+        as_named_samples([{'name': 'fw.csv', 'text': PATHS}])
+
+
 def test_a_list_of_named_texts_and_doubly_escaped_newlines_are_read():
     assert as_named_samples([{'fw.log': FORTIOS}, FORTIOS]) == {'fw.log': FORTIOS, 'sample 2': FORTIOS}
     assert as_named_samples(['a,b\\n1,2\\n3,4']) == {'sample 1': 'a,b\n1,2\n3,4'}

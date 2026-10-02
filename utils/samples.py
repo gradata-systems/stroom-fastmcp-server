@@ -69,6 +69,20 @@ def _unescape(text: str) -> str:
     return text
 
 
+_NAME_KEYS = ('name', 'file', 'filename', 'file_name', 'path')
+_TEXT_KEYS = ('text', 'content', 'contents', 'data', 'sample')
+
+
+def _record_of_one_file(item: dict) -> tuple[str, Any] | None:
+    """(name, text) from {name: ..., text: ...}, the shape models give one file; None for {file name: text}."""
+    keys = {str(k).lower(): k for k in item}
+    text_key = next((keys[k] for k in _TEXT_KEYS if k in keys), None)
+    if text_key is None or set(keys) - set(_NAME_KEYS) - set(_TEXT_KEYS):
+        return None
+    name_key = next((keys[k] for k in _NAME_KEYS if k in keys), None)
+    return (str(item[name_key]) if name_key else ''), item[text_key]
+
+
 def as_named_samples(samples: Any, single: str | None = None) -> dict[str, str]:
     """Samples as {name: text}, from a dict by file name, a list of texts or {name: text} objects, or one text;
     each checked. An object that is one file's text cut into pieces is refused with what to send instead."""
@@ -77,7 +91,10 @@ def as_named_samples(samples: Any, single: str | None = None) -> dict[str, str]:
     elif isinstance(samples, list):
         named = {}
         for n, item in enumerate(samples, 1):
-            if isinstance(item, dict):
+            if isinstance(item, dict) and _record_of_one_file(item):
+                name, text = _record_of_one_file(item)
+                named[name or f'sample {n}'] = text
+            elif isinstance(item, dict):
                 named.update({str(k): v for k, v in item.items()})
             else:
                 named[f'sample {n}'] = item
