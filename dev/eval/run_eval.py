@@ -1,4 +1,4 @@
-"""The evaluation set: fifteen samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: sixteen samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case

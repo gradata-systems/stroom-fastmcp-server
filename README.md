@@ -75,6 +75,8 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   together, uploaded one stream each, and all stepped.
 - Reference data and dictionaries are first-class: `lookup` and `dictionary` sources in the mapping, the Reference
   Data pipeline built from a mapping, and the events pipeline naming the feed as a pipeline reference.
+- One record may hold several events (`for_each`), a value may repeat (`repeat`), and records the user wants left
+  out are dropped by condition with a reason (`drop_when`), in translations, reference data and indexing alike.
   Indexing Events from a pipeline the server did not build needs the user's confirmation of that pipeline.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.

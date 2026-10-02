@@ -47,6 +47,9 @@ VARIABLE_MIN_READS = 3
 _PATTERN_LETTERS = set('GuyDMLdQqYwWEecFaHkKhmsSAnNVzOXxZp')
 
 
+Scope = Literal['record', 'item']
+
+
 class Lookup(BaseModel):
     """Reference data: what stroom:lookup() finds for a key in a map a reference loader provides (find_reference_data
     lists the maps). The pipeline must name the loader as a pipeline reference (create_pipeline references, or
@@ -85,6 +88,13 @@ class FieldMapping(BaseModel):
     transform: Transform | None = Field(None, description="Applied to the input value first: lower, upper, trim, "
                                                           "strip_domain (DOMAIN\\user or user@domain -> user), domain "
                                                           "(the DOMAIN or domain part), digits (digits only).")
+    repeat: bool = Field(False, description="Write one element per value of the input (a JSON array, an element the "
+                                            "record has several of) instead of the first value: the nearest element on "
+                                            "the path the schema lets repeat is written once per value, e.g. Group for "
+                                            "EventSource/User/Groups/Group/Name, or a Data per value. Nothing else may be "
+                                            "mapped below that element; transform is allowed, map and time_format are not.")
+    scope: Scope | None = Field(None, description="With for_each: 'record' when the input is the record's, not the "
+                                                  "item's (the default inside for_each).")
     time_format: str | None = Field(None, description="Input time pattern (Java, e.g. \"yyyy-MM-dd'T'HH:mm:ss\", "
                                                       "from profile_sample), or 'epoch_ms' / 'epoch_s'.")
     timezone: str | None = Field(None, description="Input time zone when the time has none, e.g. '+10:00' or 'UTC'.")
@@ -101,6 +111,8 @@ class FieldMapping(BaseModel):
             raise ValueError(f"'{self.path}': dictionary needs field (or any_of) as the key")
         if self.transform and self.value is not None:
             raise ValueError(f"'{self.path}': transform applies to an input, not a constant")
+        if self.repeat and (self.value is not None or self.map or self.time_format or self.lookup or self.dictionary):
+            raise ValueError(f"'{self.path}': repeat takes an input field, any_of or xpath, with transform at most")
         return self
 
 
@@ -114,6 +126,7 @@ class Condition(BaseModel):
     present: bool | None = Field(None, description="True: the field has a non-empty value; False: it does not.")
     in_dictionary: str | None = Field(None, description="The value is one of the lines of the Dictionary doc of "
                                                         "this name (a list, one entry per line).")
+    scope: Scope | None = Field(None, description="With for_each: 'record' to test the record rather than the item.")
 
     @model_validator(mode='after')
     def one_test(self):
@@ -132,6 +145,12 @@ class EventRule(BaseModel):
                                                                           "override common fields with the same path.")
     drop: bool = Field(False, description="True: records matching this rule are left untranslated on purpose "
                                           "(no Event, no warning), e.g. kinds set_shape_handling marked drop. No fields.")
+
+
+class DropRule(BaseModel):
+    """Records (or, with for_each, items) to leave untranslated on purpose: no Event, no warning."""
+    when: list[Condition] = Field(min_length=1, description="All must hold for the record to be dropped.")
+    reason: str = Field(description="Why, in the user's words; kept as a comment in the XSLT and in the documentation.")
 
 
 class XsltStyle(BaseModel):
@@ -161,6 +180,7 @@ class Extraction(BaseModel):
     names: list[str] = Field(min_length=1, description="A field name per capture group, in order; '' skips a group.")
     flags: str = Field('', description="XPath regex flags: i (ignore case), m (multi-line), s (dot matches newline), "
                                        "x (ignore whitespace in the pattern).")
+    scope: Scope | None = Field(None, description="With for_each: 'record' when the text is the record's, not the item's.")
 
     @model_validator(mode='after')
     def one_source(self):
@@ -208,6 +228,13 @@ class TranslationMapping(BaseModel):
     extract: list[Extraction] = Field(default_factory=list, description=(
         "Fields parsed out of text fields with regular expressions, e.g. a message string holding the time, user "
         "and action; their names are then used as fields in common, events and when."))
+    for_each: str | None = Field(None, description=(
+        "When one record holds several events: the field (JSON key such as 'events', dotted for nested keys) or "
+        "XPath selecting the items, each of which becomes an Event. Fields, conditions and extractions then read the "
+        "item; mark those that read the record itself (the batch's host, say) with scope: record."))
+    drop_when: list[DropRule] = Field(default_factory=list, description=(
+        "Records (items, with for_each) to leave untranslated, tried before the event rules: heartbeats, test "
+        "traffic, service accounts. Each entry's conditions must all hold; any entry drops."))
     common: list[FieldMapping] = Field(default_factory=list, description="Fields every event gets, e.g. time, "
                                                                         "System, Device.")
     events: list[EventRule] = Field(min_length=1, description="Event kinds, tried in order; the first whose "
@@ -266,6 +293,7 @@ class _Node:
     kids: dict[str, '_Node'] = field(default_factory=dict)
     leaf: FieldMapping | None = None
     data: list[tuple[Child, FieldMapping]] = field(default_factory=list)
+    repeat: FieldMapping | None = None       # this element is written once per value of the entry's input
 
 
 class _Generator:
@@ -285,6 +313,9 @@ class _Generator:
         # Dictionary docs read at run time: (name, 'map' for key=value lines, 'set' for a list) -> variable.
         self._dicts: dict[tuple[str, str], str] = {}
         self.reference_maps: set[str] = set()
+        # for_each: the templates run with an item as context; $record (a tunnel parameter) is the record.
+        self._item_mode = bool(mapping.for_each)
+        self.uses_record = False
         for n, extraction in enumerate(mapping.extract):
             self._check_extraction(n, extraction)
             base = style_name(f"{extraction.field or 'text'}-parts", mapping.style.naming)
@@ -339,22 +370,44 @@ class _Generator:
             return
         if ex.field in self.derived:
             self.declare_parts(self.derived[ex.field][0])
-        text = self.source(ex.field, ex.xpath)
+        text = self.source(ex.field, ex.xpath, ex.scope)
         flags = f", {literal(ex.flags)}" if ex.flags else ''
         self._scope[name] = f"analyze-string(string(({text})[1]), {literal(ex.regex)}{flags})"
 
     # --- input addressing ---
-    def source(self, field_name: str | None, xpath: str | None) -> str:
-        if xpath is not None:
-            return xpath
+    def source(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
+        """The selector for an input, relative to the context node: the record, or with for_each the item, where
+        scope 'record' reads the record through $record instead."""
         if field_name in self.derived:
             ex, nr = self.derived[field_name]
             return f"${self.parts_name(ex)}/fn:match//fn:group[@nr={nr}]"
-        if self.m.input == 'data_splitter':
-            return '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
-        if self.m.input == 'json':
-            return '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
-        return field_name
+        if xpath is not None:
+            selector = xpath
+        elif self.m.input == 'data_splitter':
+            selector = '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
+        elif self.m.input == 'json':
+            selector = '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
+        else:
+            selector = field_name
+        if self._item_mode and scope == 'record':
+            self.uses_record = True
+            return f"$record/({selector})" if xpath is not None else f"$record/{selector}"
+        return selector
+
+    def items_of(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
+        """The nodes an input has several of: a JSON array's members, else the input's own nodes."""
+        selector = self.source(field_name, xpath, scope)
+        if self.m.input == 'json' and xpath is None and field_name not in self.derived:
+            return f"{selector}/*"
+        return selector
+
+    def entry_ref(self, entry: FieldMapping) -> str:
+        field_name, xpath, scope = self.src_of(entry)
+        return self.ref(field_name, xpath, self.label(entry), scope)
+
+    def entry_has(self, entry: FieldMapping) -> str:
+        field_name, xpath, scope = self.src_of(entry)
+        return self.has(field_name, xpath, self.label(entry), scope)
 
     def dict_var(self, name: str, kind: str) -> str:
         if (name, kind) not in self._dicts:
@@ -364,34 +417,35 @@ class _Generator:
                                                     | self._keep | set(self._dicts.values()), naming)
         return self._dicts[(name, kind)]
 
-    def key_expr(self, field_name: str | None, xpath: str | None) -> str:
-        return f"string(({self.source(field_name, xpath)})[1])"
+    def key_expr(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
+        return f"string(({self.source(field_name, xpath, scope)})[1])"
 
-    def src_of(self, entry: FieldMapping) -> tuple[str | None, str | None]:
-        """The entry's input as (field, xpath): a field as it is; any_of, lookup and dictionary as the XPath that
-        computes them, so the rest of the generator treats them like any computed value."""
+    def src_of(self, entry: FieldMapping) -> tuple[str | None, str | None, str | None]:
+        """The entry's input as (field, xpath, scope): a field as it is; any_of, lookup and dictionary as the XPath
+        that computes them (scope already applied), so the rest of the generator treats them like any computed value."""
+        scope = entry.scope
         if entry.lookup:
             self.reference_maps.add(entry.lookup.map)
-            key = self.key_expr(entry.lookup.field, entry.lookup.xpath)
+            key = self.key_expr(entry.lookup.field, entry.lookup.xpath, scope)
             found = f"stroom:lookup({literal(entry.lookup.map)}, {key})"
             if not entry.lookup.path:
-                return None, found
+                return None, found, None
             # The value's elements are in no namespace, while the stylesheet's default XPath namespace is the
             # input's: *:name selects them whatever that is, at any depth below the value.
             steps = [s if (':' in s or s.startswith('@') or s in ('.', '*')) else f'*:{s}'
                      for s in entry.lookup.path.strip('/').split('/') if s]
-            return None, f"{found}//{'/'.join(steps)}"
+            return None, f"{found}//{'/'.join(steps)}", None
         if entry.any_of:
-            first = ', '.join(self.source(f, None) for f in entry.any_of)
+            first = ', '.join(self.source(f, None, scope) for f in entry.any_of)
             key_src = f"({first})[normalize-space(.)][1]"
         else:
             key_src = None
         if entry.dictionary:
-            key = f"string(({key_src or self.source(entry.field, None)})[1])"
-            return None, f"${self.dict_var(entry.dictionary, 'map')}?({key})"
+            key = f"string(({key_src or self.source(entry.field, None, scope)})[1])"
+            return None, f"${self.dict_var(entry.dictionary, 'map')}?({key})", None
         if entry.any_of:
-            return None, key_src
-        return entry.field, entry.xpath
+            return None, key_src, None
+        return entry.field, entry.xpath, scope
 
     def scalar(self, entry: FieldMapping, src: str) -> str:
         """The entry's one value, transformed as asked; src is the variable or selector holding its values."""
@@ -411,10 +465,10 @@ class _Generator:
             return f"replace({one}, '[^0-9]', '')"
         return one
 
-    def ref(self, field_name: str | None, xpath: str | None, label: str) -> str:
+    def ref(self, field_name: str | None, xpath: str | None, label: str, scope: str | None = None) -> str:
         """A variable holding the input's non-blank values, declared at the top of the template being written,
         so each selector appears once per template. Named after the field, or for an xpath after `label`."""
-        raw = self.source(field_name, xpath)
+        raw = self.source(field_name, xpath, scope)
         if raw not in self._names:
             naming = self.m.style.naming
             base = style_name(label if xpath is not None else field_name, naming)
@@ -428,16 +482,16 @@ class _Generator:
         self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
         return '$' + name
 
-    def has(self, field_name: str | None, xpath: str | None, label: str) -> str:
+    def has(self, field_name: str | None, xpath: str | None, label: str, scope: str | None = None) -> str:
         """Test that the input has a value. Fields select nodes, which are true when present; an xpath may give
         a number or boolean, which XPath would test by its value, so that needs exists()."""
-        v = self.ref(field_name, xpath, label)
+        v = self.ref(field_name, xpath, label, scope)
         return v if xpath is None else f'exists({v})'
 
     def condition(self, c: Condition, raw: bool = False) -> str:
         """The rule's test; raw: with the input's own selectors, for the summary returned to the model."""
-        src = (c.field if c.field in self.derived else self.source(c.field, c.xpath)) if raw \
-            else self.ref(c.field, c.xpath, 'condition')
+        src = (c.field if c.field in self.derived else self.source(c.field, c.xpath, c.scope)) if raw \
+            else self.ref(c.field, c.xpath, 'condition', c.scope)
         if c.equals is not None:
             return f"{src} = {literal(c.equals)}"
         if c.one_of is not None:
@@ -448,7 +502,7 @@ class _Generator:
             if raw:
                 return f"{src} in dictionary {literal(c.in_dictionary)}"
             return f"{src} = ${self.dict_var(c.in_dictionary, 'set')}"
-        test = f"exists({src}[normalize-space(.)])" if raw else self.has(c.field, c.xpath, 'condition')
+        test = f"exists({src}[normalize-space(.)])" if raw else self.has(c.field, c.xpath, 'condition', c.scope)
         return test if c.present else f"not({test})"
 
     # --- values ---
@@ -482,15 +536,18 @@ class _Generator:
         if entry.default is not None:
             return None
         if entry.map:
-            src = self.ref(*self.src_of(entry), self.label(entry))
+            src = self.entry_ref(entry)
             key = self.scalar(entry, src) if entry.transform else src
             if self.as_xsl_map(entry):
                 return f"exists({self.map_ref(entry, src)}?({key}))"
             return f"{key} = ({', '.join(literal(k) for k in entry.map)})"
-        return self.has(*self.src_of(entry), self.label(entry))
+        return self.entry_has(entry)
 
     def value_expr(self, entry: FieldMapping) -> str:
-        src = self.ref(*self.src_of(entry), self.label(entry))
+        if entry.repeat:
+            # Written inside xsl:for-each over the values: the current value, transformed if asked.
+            return self.scalar(entry, '.') if entry.transform else '.'
+        src = self.entry_ref(entry)
         key = self.scalar(entry, src) if entry.transform else src
         if entry.map and self.as_xsl_map(entry):
             # The lookup operator takes any number of keys, so an empty input gives no value rather than an error.
@@ -519,7 +576,7 @@ class _Generator:
         else:
             expr = one if entry.transform else src
         if entry.default is not None:
-            return f"if ({self.has(*self.src_of(entry), self.label(entry))}) then {expr} else {literal(entry.default)}"
+            return f"if ({self.entry_has(entry)}) then {expr} else {literal(entry.default)}"
         return expr
 
     def write_value(self, element: etree._Element, entry: FieldMapping) -> None:
@@ -598,6 +655,19 @@ class _Generator:
                 continue
             node.leaf = entry
             self.check_leaf(where, last, entry)
+            if entry.repeat:
+                anchor = max((i for i, c in enumerate(chain) if c.repeatable), default=None)
+                if anchor is None:
+                    self._note(self.problems, f"{where}: repeat needs an element on the path the schema lets repeat; "
+                                              f"none of {[c.name for c in chain]} may occur more than once")
+                else:
+                    self._walk(root, chain[:anchor + 1], where).repeat = entry
+        for anchor in self._anchors(root):
+            leaves = self._leaves(anchor)
+            if len(leaves) > 1 or any(n.data for n in self._nodes(anchor)):
+                self._note(self.problems, f"[{rule.name}] {anchor.path} is written once per value of "
+                                          f"{anchor.repeat.field or anchor.repeat.xpath or anchor.repeat.any_of}; map "
+                                          f"nothing else below it (found {[n.path for n in leaves]})")
         self._conditional: list[str] = []
         self._check_structure(rule.name, root, self.schema.event)
         if self._conditional:
@@ -605,6 +675,18 @@ class _Generator:
                                       f"fields are empty, which makes the event invalid. Fine if those fields are "
                                       f"always filled; otherwise give the mapping a default.")
         return root
+
+    def _nodes(self, node: _Node) -> list[_Node]:
+        out = [node]
+        for kid in node.kids.values():
+            out += self._nodes(kid)
+        return out
+
+    def _leaves(self, node: _Node) -> list[_Node]:
+        return [n for n in self._nodes(node) if n.leaf is not None]
+
+    def _anchors(self, node: _Node) -> list[_Node]:
+        return [n for n in self._nodes(node) if n.repeat is not None]
 
     def _walk(self, root: _Node, chain: list[Child], where: str) -> _Node | None:
         node = root
@@ -654,17 +736,28 @@ class _Generator:
         for _, is_data, _, item in sorted(items, key=lambda i: i[:3]):
             if is_data:
                 child, entry = item
-                test = self.leaf_test(entry)
-                holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
+                if entry.repeat:
+                    holder = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(entry))
+                else:
+                    test = self.leaf_test(entry)
+                    holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
                 element = etree.SubElement(holder, f'{{{EVT}}}Data', Name=entry.data_name)
                 if entry.value is not None:
                     element.set('Value', entry.value)
                 else:
                     etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=self.value_expr(entry))
+            elif item.repeat is not None:
+                # One element per value: the loop stands in for the guard, and the leaf below reads the current value.
+                loop = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(item.repeat))
+                self.emit_element(loop, item, self.test_of(item), inline=True)
             elif not inline and self.shareable(item) and self.key(item) in self.shared:
                 etree.SubElement(parent, f'{{{XSL}}}call-template', name=self.template_for(item))
             else:
                 self.emit_element(parent, item, enclosing, inline)
+
+    def repeat_items(self, entry: FieldMapping) -> str:
+        field_name, xpath, scope = self.src_of(entry)
+        return self.items_of(field_name, xpath, scope)
 
     def emit_element(self, parent: etree._Element, node: _Node, enclosing: str | None, inline: bool) -> None:
         # Working out the guard reads every field below; declare them only if the guard is written.
@@ -809,8 +902,10 @@ class _Generator:
         for rule in m.events:
             if rule.drop and rule.fields:
                 self._note(self.problems, f"[{rule.name}] a drop rule writes no Event, so it takes no fields")
-        trees = [(rule, None if rule.drop else self.tree(rule)) for rule in m.events]
-        catch_all = [r.name for r in m.events[:-1] if not r.when]
+        # Drop conditions are rules without an event, tried first.
+        rules = [EventRule(name=f'drop: {d.reason}', when=d.when, drop=True) for d in m.drop_when] + list(m.events)
+        trees = [(rule, None if rule.drop else self.tree(rule)) for rule in rules]
+        catch_all = [r.name for r in rules[:-1] if not r.when]
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
                                       f"put the rule without conditions last")
@@ -831,7 +926,13 @@ class _Generator:
         self.choose_shared([(rule.name, root) for rule, root in trees if root is not None])
         self._templates: dict[str, tuple[str, etree._Element]] = {}
         record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='event')
-        conditional = any(rule.when for rule in m.events)
+        if m.for_each:
+            # One record, several events: each item is handed to the rules with the record as a tunnel parameter.
+            select = m.for_each if re.search(r'[/\[(*@$]', m.for_each) else self.items_of(m.for_each, None)
+            apply = etree.SubElement(record_template, f'{{{XSL}}}apply-templates', select=select, mode='item')
+            etree.SubElement(apply, f'{{{XSL}}}with-param', name='record', select='.', tunnel='yes')
+            record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='item')
+        conditional = any(rule.when for rule in rules)
         summary = []
 
         def write_rules() -> None:
@@ -851,7 +952,7 @@ class _Generator:
                                                       for e in m.common + rule.fields})})
                 if not test and conditional:
                     break
-            if conditional and all(rule.when for rule in m.events) and m.unmatched == 'warn':
+            if conditional and all(rule.when for rule in rules) and m.unmatched == 'warn':
                 otherwise = etree.SubElement(body, f'{{{XSL}}}otherwise')
                 etree.SubElement(otherwise, f'{{{XSL}}}sequence',
                                  select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
@@ -860,6 +961,10 @@ class _Generator:
         self.tidy_variables(record_template)
         for _, template in self._templates.values():
             self.tidy_variables(template)
+        if self.uses_record:
+            for template in [record_template] + [t for _, t in self._templates.values()]:
+                if '$record' in etree.tostring(template, encoding='unicode'):
+                    template.insert(0, etree.Element(f'{{{XSL}}}param', name='record', tunnel='yes'))
         for n, (items, name) in enumerate(self._maps.items()):
             variable = etree.Element(f'{{{XSL}}}variable', name=name, **{'as': 'map(xs:string, xs:string)'})
             entries = etree.SubElement(variable, f'{{{XSL}}}map')
@@ -891,7 +996,8 @@ def generate(mapping: TranslationMapping, schema: EventSchema, version: str) -> 
     xslt, summary = gen.stylesheet(version)
     return {'ok': not gen.problems, 'problems': gen.problems, 'warnings': gen.warnings, 'events': summary,
             'xslt': None if gen.problems else xslt, 'reference_maps': sorted(gen.reference_maps),
-            'dictionaries': sorted({name for name, _ in gen._dicts})}
+            'dictionaries': sorted({name for name, _ in gen._dicts}),
+            **({'items': mapping.for_each} if mapping.for_each else {})}
 
 
 # --- the Field mapping section of the pipeline's documentation ---
@@ -931,6 +1037,10 @@ def _value(entry: FieldMapping) -> str:
         text += f" via dictionary `{entry.dictionary}`"
     if entry.transform:
         text += f" ({entry.transform})"
+    if entry.repeat:
+        text += ", one per value"
+    if entry.scope == 'record':
+        text += " (of the record)"
     if entry.time_format:
         text += f" ({entry.time_format}{', ' + entry.timezone if entry.timezone else ''})"
     elif entry.timezone:
@@ -945,7 +1055,7 @@ def _value(entry: FieldMapping) -> str:
 
 
 def _condition(c: Condition) -> str:
-    src = f'`{c.field}`' if c.field is not None else f'`{readable(c.xpath)}`'
+    src = (f'`{c.field}`' if c.field is not None else f'`{readable(c.xpath)}`') + (' (of the record)' if c.scope == 'record' else '')
     if c.equals is not None:
         return f'{src} = {c.equals}'
     if c.one_of is not None:
@@ -1000,6 +1110,13 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
                 kinds.append(rule)
     sampled_kinds = list(dict.fromkeys(rule for rule, _ in attributed or []))
     lines = []
+    if mapping.for_each:
+        lines += [f'Each record holds several events: one per `{mapping.for_each}` item. Values marked "of the record" '
+                  f'come from the record round the items.', '']
+    if mapping.drop_when:
+        lines += ['### Left untranslated', '']
+        lines += [f"- {' and '.join(_condition(c) for c in d.when)}: {d.reason}" for d in mapping.drop_when]
+        lines.append('')
     if mapping.extract:
         lines += ['### Extracted fields', '']
         for ex in mapping.extract:

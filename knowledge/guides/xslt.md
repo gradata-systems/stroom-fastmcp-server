@@ -90,6 +90,26 @@ Each value has one source and optional modifiers:
 Conditions test a field with `equals`, `one_of`, `matches`, `present` or `in_dictionary` (a Dictionary of one
 entry per line). Write XSLT by hand only for what none of this expresses.
 
+### Several events in one record, repeated values, and records to leave out
+
+- **`for_each`**: when a record is a batch (`{"host": ..., "events": [...]}`, or `<Batch><Entry/>...`), name the
+  field or XPath selecting the items and each item becomes an Event. Fields, conditions and extractions then read
+  the item; mark the ones that read the record round it with `scope: record` (the batch's host). The generated
+  XSLT hands each item to the rules with the record as a tunnel parameter.
+- **`repeat: true`** on a field whose input has several values (a JSON array, an element the record has several
+  of) writes one element per value: the nearest element on the path the schema lets repeat, so
+  `EventSource/User/Groups/Group/Name` with `repeat` writes one `Group` per value, and
+  `EventDetail/<Action>/Data` with a `data_name` writes one `Data` per value. Nothing else may be mapped below
+  the repeated element; `transform` applies to each value.
+- **`drop_when`**: records (or items) to leave untranslated on purpose, each with a reason: heartbeats, test
+  traffic, service accounts. They are tried before the event rules, write no Event and raise no "no mapping
+  matched" warning; the reasons appear in the XSLT and the documentation. `survey_feed`'s `set_shape_handling`
+  records the user's decision for an existing feed; `drop_when` is how the mapping carries it out.
+
+The same filtering exists where other schemas are written: `build_reference_xslt` takes `drop_when` (records to
+keep out of the reference data), and `draft_index_mapping` takes `drop_when` as XPath tests on an Event
+(`"EventDetail/TypeId = 'Heartbeat'"`) for events the index must not hold.
+
 ### Text fields holding several values
 
 A message string such as `2026-10-01 10:00:00 alice LOGIN Successful login from 10.0.0.1` is parsed with

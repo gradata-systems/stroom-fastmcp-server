@@ -10,6 +10,10 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 | XSLT output | `records:2` | `xpath-functions` JSON XML |
 | Fields | On the index doc (`set_index_fields`) | An index template, drafted by `propose_index_template` and committed to Elasticsearch by the user |
 
+Events the index must not hold (heartbeats, a monitoring account) are left out at this step: give
+`draft_index_mapping` `drop_when` XPath tests on an Event, e.g. `"EventDetail/TypeId = 'Heartbeat'"`; the drafted
+XSLT applies templates only to the events none of them match.
+
 ## Lucene XSLT output
 
 ```xml

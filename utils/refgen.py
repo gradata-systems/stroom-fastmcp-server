@@ -11,7 +11,7 @@ from typing import Literal
 from lxml import etree
 from pydantic import BaseModel, Field, model_validator
 
-from utils.xsltgen import INPUT_NAMESPACE, JSON_RECORDS, XSI, XSL, literal
+from utils.xsltgen import INPUT_NAMESPACE, JSON_RECORDS, XSI, XSL, Condition, DropRule, literal
 
 REF = 'reference-data:2'
 
@@ -52,12 +52,30 @@ class ReferenceMapping(BaseModel):
     root: str | None = Field(None, description="Root to match; defaults as for build_translation_xslt.")
     record: str | None = Field(None, description="Record elements; defaults as for build_translation_xslt.")
     maps: list[ReferenceMap] = Field(min_length=1)
+    drop_when: list[DropRule] = Field(default_factory=list, description="Records to leave out of the reference data "
+                                                                        "(disabled accounts, say); each entry's conditions "
+                                                                        "must all hold.")
 
 
 def _selector(mapping: ReferenceMapping, field: str) -> str:
     if mapping.input == 'data_splitter':
         return '/'.join(f"data[@name={literal(p)}]" for p in field.split('/')) + '/@value'
     return '/'.join(f"*[@key={literal(p)}]" for p in field.split('.'))
+
+
+def _test(mapping: ReferenceMapping, c: Condition, problems: list[str]) -> str:
+    src = c.xpath or _selector(mapping, c.field)
+    if c.equals is not None:
+        return f"{src} = {literal(c.equals)}"
+    if c.one_of is not None:
+        return f"{src} = ({', '.join(literal(v) for v in c.one_of)})"
+    if c.matches is not None:
+        return f"exists({src}[matches(., {literal(c.matches)})])"
+    if c.present is not None:
+        test = f"exists({src}[normalize-space(.)])"
+        return test if c.present else f"not({test})"
+    problems.append(f"drop_when: a reference mapping's conditions take equals, one_of, matches or present, not in_dictionary")
+    return 'false()'
 
 
 def generate_reference(mapping: ReferenceMapping, schema_version: str = '2.0.1') -> dict:
@@ -81,6 +99,12 @@ def generate_reference(mapping: ReferenceMapping, schema_version: str = '2.0.1')
     data.set(f'{{{XSI}}}schemaLocation', f'{REF} file://reference-data-v{schema_version}.xsd')
     etree.SubElement(data, f'{{{XSL}}}apply-templates', select=records)
     record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*')
+    if mapping.drop_when:
+        drops = ' or '.join(f"({' and '.join(_test(mapping, c, problems) for c in d.when)})" for d in mapping.drop_when)
+        record_template.append(etree.Comment(' left out: ' + '; '.join(d.reason for d in mapping.drop_when) + ' '))
+        record_template = etree.SubElement(record_template, f'{{{XSL}}}if', test=f"not({drops})")
+    if problems:
+        return {'ok': False, 'problems': problems, 'xslt': None, 'maps': sorted(seen)}
     for m in mapping.maps:
         key = m.key_xpath or _selector(mapping, m.key)
         guard = etree.SubElement(record_template, f'{{{XSL}}}if', test=f"normalize-space({key})")

@@ -1,7 +1,7 @@
 # Evaluation set
 
-Fifteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
-80% of them (12 of 15) reach indexed events with at most one human hint each.
+Sixteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
+80% of them (13 of 16) reach indexed events with at most one human hint each.
 
 | Case | Format | Events | What it tests |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ Fifteen samples to measure how well an agent builds with the server, whatever ru
 | `13_json_embedded_message` | JSON array; JSON in a string field; a key=value message string inside that | Authenticate | `json-to-xml()` through `xpath`, then `extract` on an `xpath` source |
 | `14_csv_two_files_variants` | Two CSV exports of one source: renamed columns, an extra column, a new action | Authenticate | Several sample files (one stream each, all stepped), `any_of`, the mapping checked against every file first |
 | `15_csv_lookup_reference_data` | CSV events plus a CSV user directory | Authenticate | Reference data end to end: Raw Reference feed, `build_reference_xslt`, Reference Data pipeline, `references` on the events pipeline, `lookup` with case-normalised keys, `transform` |
+| `16_json_batches_items` | JSON array of batches, each holding an events array and role arrays | Authenticate | `for_each` (one record, several events) with `scope: record` fields, `repeat` (one Group per role), `drop_when` on records and items |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data

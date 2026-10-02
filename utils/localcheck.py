@@ -108,6 +108,21 @@ def _value_of(record: Any, field: str) -> str | None:
     return xml_value(record, field)
 
 
+def _items_of(record: Any, path: str) -> list[Any]:
+    """The items a record holds under path: a JSON array's objects, or XML elements the path selects."""
+    if isinstance(record, dict):
+        value = record.get(path)
+        return [_flatten(v) for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+    nodes: list = [record]
+    for segment in [s for s in path.strip('/').split('/') if s]:
+        m = _STEP.match(segment)
+        if not m or m.group('attr'):
+            return []
+        nodes = [c for n in nodes if isinstance(n, etree._Element) for c in n
+                 if _local(c.tag) and (m.group('name') == '*' or _local(c.tag) == m.group('name'))]
+    return nodes
+
+
 def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, Any]:
     """Fields the mapping names that no sample record has (with close matches), and time formats the sample's
     values do not fit. Fields an extraction produces are known, not looked for."""
@@ -119,32 +134,48 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         if isinstance(record, dict):
             seen += [k for k in record if k not in seen]
     derived = {n for ex in mapping.extract for n in ex.names if n}
+    items: list[Any] = [i for r in records for i in _items_of(r, mapping.for_each)] if mapping.for_each else []
+    if mapping.for_each and not items:
+        warnings.append(f"for_each '{mapping.for_each}' selects no items in any of the {len(records)} sample records")
+    for item in items:
+        if isinstance(item, dict):
+            seen += [k for k in item if k not in seen]
+
+    def where(scope: str | None) -> list[Any]:
+        return items if mapping.for_each and scope != 'record' else records
+
     entries = list(mapping.common) + [f for rule in mapping.events for f in rule.fields]
-    wanted: dict[str, list[str]] = {}
+    wanted: dict[tuple[str, str | None], list[str]] = {}
     for entry in entries:
         for name in ([entry.field] if entry.field else []) + list(entry.any_of or []) + (
                 [entry.lookup.field] if entry.lookup and entry.lookup.field else []):
-            wanted.setdefault(name, []).append(entry.path)
+            wanted.setdefault((name, entry.scope), []).append(entry.path)
     for rule in mapping.events:
         for c in rule.when:
             if c.field:
-                wanted.setdefault(c.field, []).append(f'[{rule.name}] when')
+                wanted.setdefault((c.field, c.scope), []).append(f'[{rule.name}] when')
+    for d in mapping.drop_when:
+        for c in d.when:
+            if c.field:
+                wanted.setdefault((c.field, c.scope), []).append(f'drop: {d.reason}')
     for ex in mapping.extract:
         if ex.field:
-            wanted.setdefault(ex.field, []).append('extract')
-    for name, used in wanted.items():
+            wanted.setdefault((ex.field, ex.scope), []).append('extract')
+    for (name, scope), used in wanted.items():
         if name in derived:
             continue
-        values = [v for v in (_value_of(r, name) for r in records) if v is not None]
+        pool = where(scope)
+        values = [v for v in (_value_of(r, name) for r in pool) if v is not None]
         if not values:
             close = difflib.get_close_matches(name, seen, n=3, cutoff=0.6) if seen else []
+            what = 'sample items' if pool is items else 'sample records'
             warnings.append(f"field '{name}' (used for {used[0]}{' and more' if len(used) > 1 else ''}) is in none of "
-                            f"the {len(records)} sample records" + (f"; did you mean {close}?" if close else '')
+                            f"the {len(pool)} {what}" + (f"; did you mean {close}?" if close else '')
                             + (f". Fields seen: {seen[:30]}" if seen and not close else ''))
     for entry in entries:
         if not entry.time_format or not entry.field or entry.field in derived:
             continue
-        values = [v for v in (_value_of(r, entry.field) for r in records) if v]
+        values = [v for v in (_value_of(r, entry.field) for r in where(entry.scope)) if v]
         if not values:
             continue
         message = check_time_format(entry.time_format, values)

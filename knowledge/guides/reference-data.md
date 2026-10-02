@@ -30,8 +30,9 @@ How it fits together:
              {"name": "USER_TO_NAME", "key_xpath": "lower-case(data[@name='user']/@value)", "values": [{"field": "name"}]}]}
    ```
 
-   Process the reference stream (`create_processor_filter`, `wait_for_processing output_type='Reference'`): the
-   pipeline writes `Reference` streams.
+   Records the table should not contribute (disabled accounts, say) are left out with `drop_when`, conditions with
+   a reason, as in a translation mapping. Process the reference stream (`create_processor_filter`,
+   `wait_for_processing output_type='Reference'`): the pipeline writes `Reference` streams.
 3. **The events pipeline names the feed** as a pipeline reference on its translation step, loaded by the
    standard `Reference Loader` pipeline: `create_pipeline references=[{"feed": "ACME-USERS", "loader_pipeline":
    "Reference Loader"}]`, or `set_pipeline_references` on a pipeline that exists. Without this the lookups find

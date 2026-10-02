@@ -79,12 +79,16 @@ async def draft_index_mapping(
                                                                   "event-logging paths are actually populated.")],
         extra_fields: Annotated[list[PlannedField], Field(
             description="Fields the user asked for beyond the convention's map.")] = [],
+        drop_when: Annotated[list[str], Field(
+            description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
+                        "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
     convention, limited to paths the sample events actually populate, plus StreamId and EventId. Returns
     the plan rendered for the backend (Lucene field list or Elasticsearch index template) and a draft
-    indexing XSLT in the output form that backend's indexing filter reads. Nothing is saved.
+    indexing XSLT in the output form that backend's indexing filter reads, leaving out events drop_when
+    names. Nothing is saved.
     """
     profiles = _conventions(ctx)
     if convention not in profiles:
@@ -105,7 +109,7 @@ async def draft_index_mapping(
     if backend == 'elasticsearch' and not any(f.name == '@timestamp' for f in fields):
         fields.append(PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'))
         time_field = '@timestamp'
-    plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields)
+    plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when)
     rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
     unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
     return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),

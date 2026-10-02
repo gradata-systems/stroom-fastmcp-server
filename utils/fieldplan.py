@@ -34,6 +34,16 @@ class FieldPlan(BaseModel):
     index_name: str = Field(description="Lucene index doc name, or Elasticsearch index / data stream name.")
     time_field: str = Field(description="Name of the field holding the event time.")
     fields: list[PlannedField]
+    drop_when: list[str] = Field(default_factory=list, description=(
+        "XPath tests on an Event (event-logging:3 is the default namespace) for events the index must not hold, e.g. "
+        "\"EventDetail/TypeId = 'Heartbeat'\" or \"EventSource/User/Id = 'monitor'\"; any that holds drops the event."))
+
+    def events(self) -> str:
+        """The apply-templates select: every Event, less the ones drop_when names."""
+        if not self.drop_when:
+            return 'Event'
+        tests = ' or '.join(f'({t})' for t in self.drop_when)
+        return f'Event[not({tests})]'.replace('&', '&amp;').replace('<', '&lt;').replace('"', '&quot;')
 
     def required(self) -> list[str]:
         """Problems that would stop indexing or verification from working."""
@@ -70,7 +80,7 @@ class FieldPlan(BaseModel):
     xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="{version}">
   <xsl:template match="/Events">
     <records xsi:schemaLocation="records:2 file://records-v2.0.xsd" version="2.0">
-      <xsl:apply-templates select="Event" />
+      <xsl:apply-templates select="{self.events()}" />
     </records>
   </xsl:template>
   <xsl:template match="Event">
@@ -91,7 +101,7 @@ class FieldPlan(BaseModel):
     xmlns:stroom="stroom" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="{version}">
   <xsl:template match="/Events">
     <array>
-      <xsl:apply-templates select="Event" />
+      <xsl:apply-templates select="{self.events()}" />
     </array>
   </xsl:template>
   <xsl:template match="Event">

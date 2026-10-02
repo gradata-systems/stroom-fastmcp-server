@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 15 and len({c['id'] for c in cases}) == 15
+    assert len(cases) == 16 and len({c['id'] for c in cases}) == 16
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']
@@ -39,8 +39,8 @@ def test_scoring_counts_events_types_and_missing_paths():
 
 
 def test_summary_applies_the_exit_criterion():
-    total = len(ev.load_cases())   # 80% of the cases, rounded up: 12 of 15
-    scores = [ev.Score(f'c{i}', 'test', passed=i < 12) for i in range(total)]
-    assert 'meets the exit criterion (12 of 15' in ev.summary(scores)
-    assert 'does not meet' in ev.summary([ev.Score(f'c{i}', 'test', passed=i < 11) for i in range(total)])
+    total = len(ev.load_cases())   # 80% of the cases, rounded up: 13 of 16
+    scores = [ev.Score(f'c{i}', 'test', passed=i < 13) for i in range(total)]
+    assert 'meets the exit criterion (13 of 16' in ev.summary(scores)
+    assert 'does not meet' in ev.summary([ev.Score(f'c{i}', 'test', passed=i < 12) for i in range(total)])
     assert 'partial run' in ev.summary(scores[:3])
