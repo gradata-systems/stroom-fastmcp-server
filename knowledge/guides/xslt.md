@@ -9,6 +9,7 @@ Stroom runs XSLT 2.0/3.0 (Saxon). Declare `xmlns:stroom="stroom"` to use Stroom 
 | `DSParser` (Event Data (Text)) | `<records><record><data name="field" value="..."/>` | `records:2` |
 | `JSONParser` (Event Data (JSON)), no text converter | JSON as `map`/`array`/`string` elements, keys in `@key`; root `/map` for JSON lines, `/array` for an array (see the JSON guide) | `http://www.w3.org/2013/XSL/json` |
 | `XMLParser` (Event Data (XML)) | the source XML | the source namespace |
+| `XMLFragmentParser` with an XML_FRAGMENT wrapper converter | the fragments (one `<Event>` per line) inside the wrapper's `records` root | the fragments' own namespace, else the wrapper's: `records:2` (see the Data Splitter guide) |
 | Indexing pipelines | `<Events>` from the Events stream, with `@StreamId` and `@EventId` on each `Event` | `event-logging:3` |
 
 Match the record element and build one `Event` per record; the split filter hands the XSLT one

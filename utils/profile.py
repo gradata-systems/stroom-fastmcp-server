@@ -42,6 +42,62 @@ JSON_SETUP = {
 }
 
 
+# The wrapper an XMLFragmentParser puts round XML fragments (its text converter, type XML_FRAGMENT): the entity
+# `fragment` is the stream. Fragments that declare no namespace of their own take the wrapper's default, records:2.
+XML_FRAGMENT_WRAPPER = """<?xml version="1.1" encoding="UTF-8"?>
+<!DOCTYPE records [
+<!ENTITY fragment SYSTEM "fragment">
+]>
+<records xmlns="records:2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="records:2 file://records-v2.0.xsd" version="2.0">
+&fragment;
+</records>
+"""
+_XML_DECL = re.compile(r'^\s*<\?xml[^>]*\?>')
+
+
+def xml_fragments(text: str) -> list | None:
+    """The top-level elements of text that is XML fragments (several root elements, e.g. one <Event> per line);
+    None for a single document or anything that is not XML."""
+    body = _XML_DECL.sub('', text, count=1)
+    try:
+        root = etree.fromstring(f'<fragments>{body}</fragments>'.encode('utf-8'))
+    except (etree.XMLSyntaxError, ValueError):
+        return None
+    elements = [c for c in root if isinstance(c.tag, str)]
+    return elements if len(elements) > 1 else None
+
+
+def xml_fragment_setup(namespace: str | None, record: str) -> dict[str, Any]:
+    effective = namespace or 'records:2'
+    return {
+        'text_converter': {'type': 'XML_FRAGMENT', 'code': XML_FRAGMENT_WRAPPER,
+                           'note': "The wrapper the XMLFragmentParser puts round the fragments (its textConverter); "
+                                   "use the template's own wrapper if it already sets one."},
+        'parser': "XMLFragmentParser: a template whose chain has one (child_must_supply names its textConverter), "
+                  "else create_pipeline from Event Data (XML) with replace_parser='XMLFragmentParser'",
+        'xslt_input': {'namespace': effective, 'root': '/', 'record': f'*/{record}',
+                       'note': ("The fragments declare no namespace, so inside the wrapper they take its default "
+                                "namespace, records:2: set xml_namespace to that." if not namespace else
+                                "The fragments declare their own namespace and keep it inside the wrapper."),
+                       'mapping': {'input': 'xml_fragments', 'xml_namespace': effective, 'record': record}},
+    }
+
+
+def _xml_record_fields(record: etree._Element) -> dict[str, str]:
+    """A record's leaf texts by element name, and its attributes as name@attribute."""
+    out: dict[str, str] = {}
+    for node in record.iter():
+        if not isinstance(node.tag, str):
+            continue
+        name = etree.QName(node).localname
+        for attr, value in node.attrib.items():
+            out[f'{name}@{etree.QName(attr).localname}'] = value
+        if len(node) == 0 and (node.text or '').strip():
+            out[name] = node.text.strip()
+    return out
+
+
 def value_type(value: Any) -> str:
     if isinstance(value, bool):
         return 'boolean'
@@ -115,13 +171,22 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             root = etree.fromstring(text.encode('utf-8'))
             children = Counter(etree.QName(c).localname for c in root if isinstance(c.tag, str))
             record_tag = children.most_common(1)[0][0] if children else etree.QName(root).localname
-            records = [{etree.QName(n).localname: (n.text or '').strip() for n in rec.iter() if isinstance(n.tag, str)
-                        and len(n) == 0} for rec in root if isinstance(rec.tag, str)][:max_records]
+            records = [_xml_record_fields(rec) for rec in root if isinstance(rec.tag, str)][:max_records]
             return {**result, 'format': 'xml', 'root': etree.QName(root).localname, 'namespace': etree.QName(root).namespace,
                     'record_element': record_tag, 'records': sum(children.values()), 'fields': _inventory(records),
-                    'suggested_parser': 'XMLParser (Event Data (XML) template)'}
+                    'suggested_parser': 'XMLParser (Event Data (XML) template)', 'text_converter': 'none: the XMLParser reads the document'}
         except etree.XMLSyntaxError:
-            result['note'] = 'Starts with < but is not a single well-formed XML document; may be XML fragments'
+            fragments = xml_fragments(text)
+            if fragments:
+                children = Counter(etree.QName(c).localname for c in fragments)
+                record_tag = children.most_common(1)[0][0]
+                namespace = etree.QName(fragments[0]).namespace
+                return {**result, 'format': 'xml fragments', 'record_element': record_tag, 'namespace': namespace,
+                        'records': len(fragments), 'fields': _inventory([_xml_record_fields(f) for f in fragments[:max_records]]),
+                        'suggested_parser': 'XMLFragmentParser with an XML_FRAGMENT text converter (the wrapper below); '
+                                            'no root element, so the XMLParser cannot read it',
+                        **xml_fragment_setup(namespace, record_tag)}
+            result['note'] = 'Starts with < but is not well-formed XML, as a document or as fragments'
 
     if text.startswith('['):
         try:

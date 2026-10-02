@@ -23,6 +23,13 @@ def _summary(doc: dict[str, Any]) -> dict[str, Any]:
 def _check_converter(converter_type: str, code: str) -> None:
     """A Data Splitter is a <dataSplitter> document. JSON needs no text converter at all: the JSONParser element
     of the Event Data (JSON) template parses it, and a converter holding a <jsonParser> element parses nothing."""
+    if converter_type == 'XML_FRAGMENT':
+        if not (re.search(r'<!ENTITY\s+fragment\s+SYSTEM\s+["\']fragment["\']', code) and '&fragment;' in code):
+            raise ToolError("Not saved: an XML_FRAGMENT converter is the wrapper the XMLFragmentParser puts round the "
+                            "fragments: a DOCTYPE declaring <!ENTITY fragment SYSTEM \"fragment\"> and &fragment; "
+                            "inside the root element where the fragments go. profile_sample gives one "
+                            "(stroom://guide/data-splitter).")
+        return
     if converter_type != 'DATA_SPLITTER':
         return
     if re.search(r'<\s*json', code, re.IGNORECASE):
@@ -50,8 +57,9 @@ async def create_text_converter(
         build: Build,
         name: Annotated[str, Field(description="Document name, following the environment's naming.")],
         converter_type: Annotated[Literal['DATA_SPLITTER', 'XML_FRAGMENT'], Field(
-            description="DATA_SPLITTER for text (CSV, syslog, key=value); XML_FRAGMENT to wrap XML fragments. "
-                        "JSON and XML sources take no text converter: their template's parser reads them.")],
+            description="DATA_SPLITTER for text (CSV, syslog, key=value); XML_FRAGMENT: the wrapper for XML "
+                        "fragments (several root elements), read by an XMLFragmentParser. JSON and single-document "
+                        "XML sources take no text converter: their template's parser reads them.")],
         code: Annotated[str, Field(description="The converter definition, e.g. a <dataSplitter> document.")],
 ) -> dict[str, Any]:
     """

@@ -1,4 +1,4 @@
-"""The evaluation set: eleven samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: thirteen samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
@@ -163,11 +163,12 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == case['template'])
         props = []
-        converter = reference.get('converter')
+        converter, replace_parser = reference.get('converter'), reference.get('replace_parser')
         if converter:
             code = p2.CSV_SPLITTER if converter == 'csv_header' else converter
-            tc = await translation.create_text_converter(ctx, build, feed, 'DATA_SPLITTER', code)
-            props.append(PropertyValue(element='dsParser', name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))
+            tc = await translation.create_text_converter(ctx, build, feed, reference.get('converter_type', 'DATA_SPLITTER'), code)
+            parser = pipeline_writes.element_id(replace_parser) if replace_parser else 'dsParser'
+            props.append(PropertyValue(element=parser, name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))
         x = await translation.create_xslt(ctx, build, f'{feed}-Events', generated['xslt'])
         props.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT'))
         if case['template'] == 'Event Data (JSON)':
@@ -175,7 +176,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             lines = reference['mapping'].get('json_layout') == 'lines'
             props.append(PropertyValue(element='jsonParser', name='addRootObject', value=lines))
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
-                                   template_uuid=template['uuid'], properties=props)
+                                   template_uuid=template['uuid'], properties=props, replace_parser=replace_parser)
         sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
         if sample['verdict'] == 'blocking':
             score.problems.append(f"stepping blocking: {[(g['element'], g.get('examples')) for g in sample['groups']][:3]}")

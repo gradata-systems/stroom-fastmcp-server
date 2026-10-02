@@ -1,7 +1,7 @@
 # Evaluation set
 
-Eleven samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
-80% of them (9 of 11) reach indexed events with at most one human hint each.
+Thirteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
+80% of them (11 of 13) reach indexed events with at most one human hint each.
 
 | Case | Format | Events | What it tests |
 | --- | --- | --- | --- |
@@ -16,6 +16,8 @@ Eleven samples to measure how well an agent builds with the server, whatever run
 | `09_csv_noheader_copy` | CSV without a header | Copy | Named columns from a regex, Source and Destination |
 | `10_xml_attrs_lock` | XML attributes | Authenticate (screen lock) | Attribute paths, enumerated actions |
 | `11_jsonl_message_text` | JSON lines, event in a message string | Authenticate | No text converter (JSONParser, `json_layout: lines`), `extract` regexes for the time, user, action, outcome and client address |
+| `12_xml_fragments_events` | XML fragments: one `<Event>` per line, no root, no namespace | Authenticate | `XML_FRAGMENT` wrapper converter, `create_pipeline` with `replace_parser: XMLFragmentParser` (no fragment template), `input: xml_fragments` with the wrapper's `records:2` namespace, attribute and `Data[@Name]` paths |
+| `13_json_embedded_message` | JSON array; JSON in a string field; a key=value message string inside that | Authenticate | `json-to-xml()` through `xpath`, then `extract` on an `xpath` source |
 
 Each case (`cases/*.yaml`) holds the sample, the request to give the agent, what the output must contain (record
 count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data

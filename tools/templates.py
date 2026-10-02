@@ -16,6 +16,7 @@ from utils.stroom import StroomGateway, gateway_from
 Stage = Literal['translation', 'indexing', 'discovery']
 # The property that makes each element type do something; unset means a child must supply it.
 KEY_PROPERTIES = {'XSLTFilter': ('xslt',), 'DSParser': ('textConverter',), 'CombinedParser': ('textConverter',),
+                  'XMLFragmentParser': ('textConverter',),
                   'IndexingFilter': ('index',), 'ElasticIndexingFilter': ('cluster', 'indexName'),
                   'SchemaFilter': ('schemaGroup',)}
 _INDEXING = {'IndexingFilter': 'lucene', 'ElasticIndexingFilter': 'elasticsearch'}
@@ -73,7 +74,7 @@ async def _shape(stroom: StroomGateway, uuid: str) -> dict[str, Any]:
         etype = elements[element]
         for key in KEY_PROPERTIES.get(etype, ()):
             _slot(element, etype, key, properties.get((element, key)), open_slots, shared)
-    return {'stage': stage, 'backend': backend, 'chain': chain,
+    return {'stage': stage, 'backend': backend, 'chain': chain, 'parser': elements.get(chain[0]) if chain else None,
             'child_must_supply': open_slots, 'shared': shared,
             'reference_data': [f"{(r.get('feed') or {}).get('name')} via {(r.get('pipeline') or {}).get('name')}"
                                for r in merged['references']],
@@ -132,6 +133,11 @@ async def find_pipeline_templates(
     result: dict[str, Any] = {'stage': stage, 'candidates': candidates[:10]}
     if not candidates:
         result['hint'] = "No template found for this stage; ask the user which pipeline to base it on."
+    elif stage == 'translation' and not any(c['parser'] in ('XMLFragmentParser', 'CombinedParser') for c in candidates):
+        result['xml_fragments'] = ("No template parses XML fragments (several root elements, e.g. one <Event> per "
+                                   "line). For such data, create_pipeline from the Event Data (XML) template with "
+                                   "replace_parser='XMLFragmentParser' and an XML_FRAGMENT text converter on "
+                                   "xmlFragmentParser.textConverter (profile_sample gives the wrapper).")
     return result
 
 

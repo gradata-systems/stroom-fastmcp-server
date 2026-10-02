@@ -30,7 +30,7 @@ XS = 'http://www.w3.org/2001/XMLSchema'
 EVT = 'event-logging:3'
 FN = 'http://www.w3.org/2005/xpath-functions'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
-DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/'}
+DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/', 'xml_fragments': '/'}
 DEFAULT_RECORD = {'data_splitter': 'record'}
 # The JSONParser's records: an array's maps, with or without the parser's root map (addRootObject) around the
 # array; or, for JSON lines, the maps the parser's root map wraps the top-level objects in.
@@ -153,12 +153,18 @@ def unique_name(base: str, taken: set[str], naming: str) -> str:
 
 
 class TranslationMapping(BaseModel):
-    input: Literal['data_splitter', 'json', 'xml'] = Field(
-        description="What the XSLT reads: data_splitter (Event Data (Text)), json (JSONParser), xml (the source XML).")
-    root: str | None = Field(None, description="Root element to match. Defaults: 'records' / '/array'; required for xml.")
-    record: str | None = Field(None, description="Record elements under the root. Defaults: 'record' / 'map'; "
-                                                 "required for xml, e.g. 'logon'.")
-    xml_namespace: str = Field('', description="xml input only: the source's default namespace, if it has one.")
+    input: Literal['data_splitter', 'json', 'xml', 'xml_fragments'] = Field(
+        description="What the XSLT reads: data_splitter (Event Data (Text)), json (JSONParser), xml (the source XML, "
+                    "one document), xml_fragments (XMLFragmentParser: several root elements, one record each, inside "
+                    "its converter's wrapper).")
+    root: str | None = Field(None, description="Root element to match. Defaults: 'records' (data_splitter), '/' (json, "
+                                               "xml_fragments); required for xml.")
+    record: str | None = Field(None, description="Record elements under the root. Defaults: 'record' (data_splitter), "
+                                                 "the JSON layout's maps; required for xml and xml_fragments, e.g. "
+                                                 "'logon' or 'Event'.")
+    xml_namespace: str = Field('', description="xml and xml_fragments: the records' namespace, if any. Fragments that "
+                                               "declare none take the wrapper's default namespace, records:2 with the "
+                                               "standard wrapper (profile_sample says which).")
     json_layout: Literal['array', 'lines'] = Field('array', description=(
         "json input only, from profile_sample: 'array' (one JSON array; set jsonParser.addRootObject=false on the "
         "pipeline, or leave it: both are matched) or 'lines' (one object per line, or concatenated objects; "
@@ -324,7 +330,7 @@ class _Generator:
             self._xpath_names.add(name)
         if field_name in self.derived:
             self.declare_parts(self.derived[field_name][0])
-        wrap = (xpath is not None and not is_call(raw)) or self.m.input == 'xml'
+        wrap = (xpath is not None and not is_call(raw)) or self.m.input in ('xml', 'xml_fragments')
         self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
         return '$' + name
 
@@ -691,6 +697,8 @@ class _Generator:
         m = self.m
         if m.input == 'xml' and not (m.root and m.record):
             self._note(self.problems, "xml input needs root and record, e.g. root='logons', record='logon'")
+        if m.input == 'xml_fragments' and not m.record:
+            self._note(self.problems, "xml_fragments input needs record, the fragment element, e.g. record='Event'")
         for rule in m.events:
             if rule.drop and rule.fields:
                 self._note(self.problems, f"[{rule.name}] a drop rule writes no Event, so it takes no fields")
@@ -708,6 +716,8 @@ class _Generator:
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')
         records = m.record or (JSON_RECORDS[m.json_layout] if m.input == 'json' else DEFAULT_RECORD.get(m.input, ''))
+        if m.input == 'xml_fragments' and not m.root:
+            records = f'*/{m.record}'   # the fragments sit under the wrapper's root, whatever its namespace
         etree.SubElement(events, f'{{{XSL}}}apply-templates', select=records, mode='event')
         self.choose_shared([(rule.name, root) for rule, root in trees if root is not None])
         self._templates: dict[str, tuple[str, etree._Element]] = {}

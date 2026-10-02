@@ -310,7 +310,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_pipeline` **W** | Create a child of the chosen template; sets only the elements the child supplies (text converter, XSLT) and any properties the template leaves open | `explorer/v2/create`, `pipeline/v1/savePipelineJson` |
+| `create_pipeline` **W** | Create a child of the chosen template; sets only the elements the child supplies (text converter, XSLT) and any properties the template leaves open. `replace_parser` swaps the template's parser in the child (e.g. an `XMLFragmentParser` for XML fragments when no template has one), re-linked where the old one was | `explorer/v2/create`, `pipeline/v1/savePipelineJson` |
 | `copy_pipeline` **W** | Copy an existing pipeline and the docs it owns into the workspace under new names, e.g. a version bump; keeps the original's structure, reference loaders and settings, rewires the copies and can set properties such as `indexName` | `explorer/v2/copy`, `pipeline/v1/savePipelineJson` |
 | `describe_pipeline` | Flattened element chain with effective properties, including inherited ones and removed elements | `pipeline/v1/fetchPipelineJson`, `fetchPipelineLayers` |
 | `set_pipeline_property` **W** | Set one element property, e.g. `schemaFilter.schemaGroup`, `elasticIndexingFilter.indexName` | `pipeline/v1/savePipelineJson` |
@@ -328,7 +328,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 | Tool | Purpose | Stroom API |
 | --- | --- | --- |
-| `create_text_converter` **W** | Create a Data Splitter or XML Fragment converter with code; refuses anything that is not a `dataSplitter` document, e.g. an attempt to parse JSON (the JSONParser does that, with no converter) | `textConverter/v1` |
+| `create_text_converter` **W** | Create a Data Splitter or XML Fragment converter with code; refuses a Data Splitter that is not a `dataSplitter` document, e.g. an attempt to parse JSON (the JSONParser does that, with no converter), and an XML Fragment wrapper without the `fragment` entity | `textConverter/v1` |
 | `update_text_converter` **W** | Replace the code of a converter the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `textConverter/v1/{uuid}` |
 | `create_xslt` **W** | Create an XSLT doc with code | `xslt/v1` |
 | `update_xslt` **W** | Replace the code of an XSLT the server created (production docs change through a working copy); refused if the doc changed since the `version` given | `xslt/v1/{uuid}` |

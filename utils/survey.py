@@ -22,7 +22,7 @@ from typing import Any
 
 from lxml import etree
 
-from utils.profile import SYSLOG_3164, SYSLOG_5424, _flatten, profile
+from utils.profile import SYSLOG_3164, SYSLOG_5424, _XML_DECL, _flatten, profile
 
 NAMING = re.compile(r'(^|[._-])(type|event|event_?type|event_?name|event_?id|action|category|activity|operation|'
                     r'op|kind|result_?type|msg_?id|message_?id|log_?type|subtype|logger|logger_?name)$', re.I)
@@ -105,8 +105,8 @@ def _json_array(text: str, max_records: int) -> Chunk:
     return Chunk('json array', records, parsed)
 
 
-def _xml_records(text: str, max_records: int) -> Chunk | None:
-    """Children of the root element that are complete, even if the document is cut off."""
+def _complete_children(text: str, max_records: int) -> tuple[etree._Element | None, list[etree._Element]]:
+    """The root element and its complete children, even if the text is cut off."""
     parser = etree.XMLPullParser(events=('start', 'end'))
     root, depth, records = None, 0, []
     try:
@@ -126,6 +126,16 @@ def _xml_records(text: str, max_records: int) -> Chunk | None:
                         break
     except etree.XMLSyntaxError:
         pass
+    return root, records
+
+
+def _xml_records(text: str, max_records: int) -> Chunk | None:
+    """Children of the root element that are complete, even if the document is cut off; or, for XML fragments
+    (several root elements, one <Event> per line), the complete fragments themselves."""
+    _, fragments = _complete_children('<fragments>' + _XML_DECL.sub('', text, count=1) + '</fragments>', max_records)
+    if len(fragments) > 1:
+        return Chunk('xml fragments', [_xml_text(r) for r in fragments], [_xml_fields(r) for r in fragments])
+    root, records = _complete_children(text, max_records)
     if root is None:
         return None
     qname = etree.QName(root)

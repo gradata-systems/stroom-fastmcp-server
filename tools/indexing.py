@@ -273,7 +273,7 @@ async def create_indexing_pipeline(
             if not cluster_uuid:
                 raise ToolError("The template leaves the cluster open: give cluster_uuid")
             props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
-    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id)
+    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id=confirmation_id)
     if result.get('uuid'):
         result['backend'] = shape['backend']
     return result

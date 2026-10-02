@@ -1,5 +1,6 @@
 """Tools that create and change pipelines in a build."""
 import copy
+import re
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -7,13 +8,37 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from security.guard import copy_of_tag, guard_from
-from tools.pipelines import merge_layers
+from tools.pipelines import chain_order, merge_layers
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 # Document types a pipeline owns: copied with it, rather than shared with the original.
 OWNED_TYPES = {'XSLT', 'TextConverter'}
+PARSERS = {'XMLParser', 'XMLFragmentParser', 'JSONParser', 'DSParser', 'CombinedParser'}
+
+
+def element_id(element_type: str) -> str:
+    """The id Stroom's templates give an element of a type: XMLFragmentParser -> xmlFragmentParser, DSParser ->
+    dsParser, CombinedParser -> combinedParser (a leading acronym is lowered whole)."""
+    lowered = re.sub(r'^[A-Z]+(?=[A-Z][a-z])', lambda m: m.group(0).lower(), element_type)
+    return lowered[0].lower() + lowered[1:]
+
+
+def swap_parser(merged: dict[str, Any], new_type: str) -> tuple[dict[str, Any], str, str]:
+    """Pipeline data for a child that replaces the template's parser with one of new_type, linked where the old
+    one was: (data, new element id, old element type). A child may remove and add elements as the UI does."""
+    if new_type not in PARSERS:
+        raise ToolError(f"replace_parser must be one of {sorted(PARSERS)}")
+    types = {e['id']: e['type'] for e in merged['elements']}
+    old = next((e for e in chain_order(merged['elements'], merged['links']) if types[e] in PARSERS), None)
+    if old is None:
+        raise ToolError("The template has no parser element to replace")
+    new_id = element_id(new_type)
+    outgoing = [{'from': link['from'], 'to': link['to']} for link in merged['links'] if link['from'] == old]
+    data = {'elements': {'add': [{'id': new_id, 'type': new_type}], 'remove': [{'id': old, 'type': types[old]}]},
+            'links': {'add': [{'from': new_id, 'to': link['to']} for link in outgoing], 'remove': outgoing}}
+    return data, new_id, types[old]
 
 
 class PropertyValue(BaseModel):
@@ -52,21 +77,32 @@ async def create_pipeline(
         template_uuid: Annotated[str, Field(description="Parent template, from find_pipeline_templates.")],
         properties: Annotated[list[PropertyValue], Field(
             description="What the child supplies, e.g. translationFilter.xslt and dsParser.textConverter.")],
+        replace_parser: Annotated[str | None, Field(
+            description="Parser element type to use instead of the template's, e.g. 'XMLFragmentParser' for XML "
+                        "fragments (several root elements) when no template has one. It takes the template's "
+                        "parser's place and links, with the id of its type (xmlFragmentParser), which properties "
+                        "may address (xmlFragmentParser.textConverter).")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
     Create a new pipeline as a child of a template, setting only what the child supplies. It keeps the
-    template's structure and defaults (including any optional steps such as an empty decoration XSLT).
-    The user confirms the template and name first.
+    template's structure and defaults (including any optional steps such as an empty decoration XSLT),
+    unless replace_parser swaps the parser. The user confirms the template and name first.
     """
     stroom = gateway_from(ctx)
     template = await stroom.get_doc('Pipeline', template_uuid)
-    elements = {e['id'] for e in merge_layers(await stroom.pipeline_layers(template_uuid))['elements']}
+    merged = merge_layers(await stroom.pipeline_layers(template_uuid))
+    elements = {e['id'] for e in merged['elements']}
+    data: dict[str, Any] = {}
+    if replace_parser:
+        data, new_id, old_type = swap_parser(merged, replace_parser)
+        elements = (elements - {data['elements']['remove'][0]['id']}) | {new_id}
     unknown = sorted({p.element for p in properties} - elements)
     if unknown:
-        raise ToolError(f"The template has no element(s) {unknown}; its elements are {sorted(elements)}")
+        raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
-               'sets': [f'{p.element}.{p.name}' for p in properties]}
+               'sets': [f'{p.element}.{p.name}' for p in properties],
+               **({'parser': f"{replace_parser} in place of the template's {old_type}"} if replace_parser else {})}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_pipeline',
                                            f"Create pipeline '{name}' from template '{template.get('name')}'",
                                            details, confirmation_id)
@@ -75,7 +111,6 @@ async def create_pipeline(
     ref = await guard_from(ctx).create('Pipeline', name, build)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
-    data: dict[str, Any] = {}
     for prop in properties:
         _set_property(data, prop.element, prop.name, await _value(stroom, prop))
     doc['pipelineData'] = data

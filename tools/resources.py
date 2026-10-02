@@ -44,8 +44,11 @@ build has an events pipeline or is given existing Events streams.
 
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
-The XSLT reads the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json
-for JSON, root /map for JSON lines, /array for an array), so set xpath-default-namespace to it.
+XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an
+XML_FRAGMENT wrapper converter: a template with one, else create_pipeline from Event Data (XML) with
+replace_parser='XMLFragmentParser'; fragments without a namespace take the wrapper's, records:2. The XSLT reads
+the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json for JSON, root
+/map for JSON lines, /array for an array), so set xpath-default-namespace to it.
 
 Translation: write the XSLT with build_translation_xslt from a mapping, not by hand. Text fields holding several
 values (a message string with a time, user, action and description) are parsed with the mapping's extract (a
@@ -98,7 +101,8 @@ Stage 1, events:
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
 4. Draft the text converter only if the template's parser needs one (DSParser.textConverter: text such as CSV,
-   syslog, key=value). JSON and XML need none: the JSONParser or XMLParser reads them. Build the XSLT with
+   syslog, key=value; xmlFragmentParser.textConverter: the wrapper for XML fragments). JSON and single-document
+   XML need none: the JSONParser or XMLParser reads them. Build the XSLT with
    build_translation_xslt (feeds=[the feed]) from a mapping: which input field or constant goes to which
    event-logging path, one rule per kind of event, time patterns from profile_sample, extract for text fields
    holding several values, json_layout from profile_sample for JSON. Fix reported problems in the mapping and
