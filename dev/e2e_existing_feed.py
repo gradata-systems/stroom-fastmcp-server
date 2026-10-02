@@ -103,7 +103,7 @@ async def text_locations(ctx, stamp: str) -> None:
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == 'Event Data (Text)')
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
-                                   template_uuid=template['uuid'], properties=[
+                                   template_uuid=template['uuid'], set_properties=[
                                        PropertyValue(element='dsParser', name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'),
                                        PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT')])
         examples = [(e, loc) for s in survey['shapes'] for e, loc in zip([s['example']], s['locations'][:1])]
@@ -153,7 +153,7 @@ async def main():
                         if c['name'] == 'Event Data (JSON)')
         xslt = await translation.create_xslt(ctx, build, f'{source}-Events', await xslt_for(ctx, V1))
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{source}-Events',
-                                   template_uuid=template['uuid'], properties=[
+                                   template_uuid=template['uuid'], set_properties=[
                                        PropertyValue(element='translationFilter', name='xslt', doc_uuid=xslt['uuid'], doc_type='XSLT'),
                                        PropertyValue(element='jsonParser', name='addRootObject', value=False)])
         stepped = await stepping.step_records(ctx, pipeline['uuid'], first['locations'])

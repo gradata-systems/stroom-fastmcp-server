@@ -215,7 +215,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             rx = await translation.create_xslt(ctx, build, f'{ref_feed}-Reference', ref_xslt['xslt'])
             rprops.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=rx['uuid'], doc_type='XSLT'))
             rpipe = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
-                                    template_uuid=ref_template['uuid'], properties=rprops)
+                                    template_uuid=ref_template['uuid'], set_properties=rprops)
             rstep = await stepping.step_sample(ctx, rpipe['uuid'], [ref_raw])
             if rstep['verdict'] != 'clean':
                 score.problems.append(f"reference pipeline stepping: {rstep['verdict']}")
@@ -241,7 +241,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             lines = reference['mapping'].get('json_layout') == 'lines'
             props.append(PropertyValue(element='jsonParser', name='addRootObject', value=lines))
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
-                                   template_uuid=template['uuid'], properties=props, replace_parser=replace_parser,
+                                   template_uuid=template['uuid'], set_properties=props, replace_parser=replace_parser,
                                    references=references)
         sample = await stepping.step_sample(ctx, pipeline['uuid'], raws)
         if sample['verdict'] == 'blocking':

@@ -51,3 +51,19 @@ async def test_a_list_sent_as_text_reaches_the_tool_as_a_list():
         result = await client.call_tool('find_documents', {'types': "['Feed']", 'name': 'FIREWALL-LOGS-V1'}, raise_on_error=False)
     # Without a Stroom to talk to the body fails later, but not on the arguments.
     assert 'must be array' not in str(result.content) and 'Input should be a valid list' not in str(result.content)
+
+
+async def test_no_parameter_is_named_after_a_schema_keyword():
+    # VS Code read a create_pipeline parameter called `properties` as the JSON Schema keyword and refused every
+    # call with "must have required property 'properties'", although the schema required only `name`.
+    # Keywords that give a schema its structure; `type` and `description` hold plain values and clients take them.
+    keywords = {'properties', 'patternProperties', 'additionalProperties', 'required', 'items', 'anyOf', 'oneOf',
+                'allOf', 'not', '$ref', '$defs', 'definitions'}
+    server = FastMCP('test', lifespan=None)
+    for module in main_tools.TOOL_MODULES:
+        for tool in module.ALL_TOOLS:
+            server.tool(tool)
+    async with Client(server) as client:
+        tools = await client.list_tools()
+    clashes = [f'{t.name}.{p}' for t in tools for p in (t.input_schema.get('properties') or {}) if p in keywords]
+    assert not clashes, clashes

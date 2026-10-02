@@ -196,7 +196,7 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     if fmt == 'json':
         props.append(PropertyValue(element='jsonParser', name='addRootObject', value=False))
     pipeline = await agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed_name}-Events',
-                            template_uuid=template['uuid'], properties=props)
+                            template_uuid=template['uuid'], set_properties=props)
     sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
     if sample['verdict'] != 'clean':
         print(json.dumps(sample['groups'], indent=1)[:2000])

@@ -142,7 +142,7 @@ async def run(ctx, fmt: str, stamp: str) -> None:
     if fmt == 'json':
         props.append(PropertyValue(element='jsonParser', name='addRootObject', value=False))
     pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed_name}-Events',
-                               template_uuid=template['uuid'], properties=props)
+                               template_uuid=template['uuid'], set_properties=props)
     sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
     groups = [(g['class'], g['severity'], g.get('examples') or g.get('message')) for g in sample['groups']]
     if fmt == 'xml':

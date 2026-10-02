@@ -55,11 +55,11 @@ async def test_save_tools_create_or_update_by_uuid():
             patch.object(translation, 'update_dictionary', AsyncMock(return_value={'uuid': 'd2'})):
         assert (await translation.save_dictionary(None, 'b', 'VIP', 'a\nb'))['uuid'] == 'd'
         assert (await translation.save_dictionary(None, 'b', 'VIP', 'a', uuid='d2'))['uuid'] == 'd2'
-    with pytest.raises(ToolError, match='Give properties to set'):
+    with pytest.raises(ToolError, match='Give set_properties'):
         await pipeline_writes.update_pipeline(None, 'p')
     with patch.object(pipeline_writes, 'set_pipeline_property', AsyncMock(return_value={'name': 'P', 'set': 'a.b'})), \
             patch.object(pipeline_writes, 'set_pipeline_references', AsyncMock(return_value={'name': 'P', 'reference_data': ['F via L']})):
-        result = await pipeline_writes.update_pipeline(None, 'p', properties=[pipeline_writes.PropertyValue(element='a', name='b', value='c')],
+        result = await pipeline_writes.update_pipeline(None, 'p', set_properties=[pipeline_writes.PropertyValue(element='a', name='b', value='c')],
                                                        references=[pipeline_writes.PipelineReference(feed='F')])
         assert result['set'] == ['a.b'] and result['reference_data'] == ['F via L']
 

@@ -166,7 +166,7 @@ async def fill_open_slots(ctx: Context, build: str, merged: dict[str, Any], repl
             if not candidates:
                 raise ToolError(f"The template's {slot['type']} ({slot['element']}) needs a text converter and build '{build}' has "
                                 f"none: build_data_splitter with the sample (save_as=<name>), or save_text_converter, then "
-                                f"create the pipeline (or pass {slot['element']}.textConverter in properties).")
+                                f"create the pipeline (or pass {slot['element']}.textConverter in set_properties).")
             doc_type = 'TextConverter'
         else:
             xslts = [d for d in docs if d['type'] == 'XSLT']
@@ -183,7 +183,7 @@ async def fill_open_slots(ctx: Context, build: str, merged: dict[str, Any], repl
         if len(candidates) > 1:
             names = ', '.join(f"{c['name']} ({c['uuid']})" for c in candidates)
             raise ToolError(f"{slot['element']}.{slot['property']} is not set and build '{build}' has {len(candidates)} "
-                            f"{doc_type} documents ({names}): pass the right one in properties.")
+                            f"{doc_type} documents ({names}): pass the right one in set_properties.")
         chosen = candidates[0]
         properties = [*properties, PropertyValue(element=slot['element'], name=slot['property'], doc_uuid=chosen['uuid'], doc_type=doc_type)]
         filled.append(f"{slot['element']}.{slot['property']} = {chosen['name']} (the build's only {doc_type})")
@@ -239,7 +239,7 @@ async def create_pipeline(
         name: Annotated[str, Field(description="Pipeline name following the environment's convention.")],
         template_uuid: Annotated[str | None, Field(description="Parent template, from find_pipeline_templates (its UUID; "
                                                                "`template` takes a UUID or a name too).")] = None,
-        properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
+        set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
             description="What the child supplies, e.g. translationFilter.xslt and dsParser.textConverter. May be left "
                         "for update_pipeline once the XSLT and converter are saved.")] = [],
         build: Annotated[str | None, Field(description="The build this pipeline belongs to; defaults to the build this "
@@ -249,7 +249,7 @@ async def create_pipeline(
         replace_parser: Annotated[str | None, Field(
             description="Parser element type to use instead of the template's, e.g. 'XMLFragmentParser' for XML "
                         "fragments (several root elements) when no template has one. It takes the template's "
-                        "parser's place and links, with the id of its type (xmlFragmentParser), which properties "
+                        "parser's place and links, with the id of its type (xmlFragmentParser), which set_properties "
                         "may address (xmlFragmentParser.textConverter).")] = None,
         references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(
             description="Reference data the translation looks up (the mapping's lookup entries): the feed and its "
@@ -281,10 +281,10 @@ async def create_pipeline(
     if replace_parser:
         data, new_id, old_type = swap_parser(merged, replace_parser)
         elements = (elements - {data['elements']['remove'][0]['id']}) | {new_id}
-    unknown = sorted({p.element for p in properties} - elements)
+    unknown = sorted({p.element for p in set_properties} - elements)
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
-    properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(properties))
+    properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
     await _own_documents(ctx, build, properties, reuse_existing_docs)
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     refs = await reference_entries(stroom, merged, references)
@@ -317,7 +317,7 @@ async def create_pipeline(
                                         **({'filled_from_build': filled} if filled else {}),
                                         **({'still_to_set': still_open, 'hint': f"The pipeline cannot run until {still_open} is set: "
                                             f"save the translation XSLT (save_xslt mapping=...) and update_pipeline with "
-                                            f"properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
+                                            f"set_properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
                                         **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
 
 
@@ -451,7 +451,7 @@ async def set_pipeline_references(
 async def update_pipeline(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
-        properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(description="Element properties to set, e.g. "
+        set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(description="Element properties to set, e.g. "
                                                                     "schemaFilter.schemaGroup or jsonParser.addRootObject.")] = [],
         references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(description="Reference data to attach (added to any "
                                                                         "the pipeline already has), for stroom:lookup().")] = [],
@@ -460,10 +460,10 @@ async def update_pipeline(
     Change a pipeline this server created: set element properties, and attach reference data (feed and loader
     pipeline, from find_reference_data) so its XSLT's lookups find the maps.
     """
-    if not properties and not references:
-        raise ToolError("Give properties to set, references to attach, or both")
+    if not set_properties and not references:
+        raise ToolError("Give set_properties, references, or both")
     result: dict[str, Any] = {'uuid': pipeline_uuid, 'set': [], 'reference_data': None}
-    for prop in properties:
+    for prop in set_properties:
         outcome = await set_pipeline_property(ctx, pipeline_uuid, prop)
         result['name'], result['type'] = outcome['name'], 'Pipeline'
         result['set'].append(outcome['set'])
