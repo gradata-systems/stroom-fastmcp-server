@@ -45,7 +45,8 @@ streams stage 1 produced, then promotion. One tool call is never the whole job: 
 until `next` says promote. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses
 until the build has an events pipeline or is given existing Events streams; create_processor_filter refuses a
 pipeline with no clean step recorded; create_pipeline refuses another source's XSLT and a template whose parser
-cannot read the sample.
+cannot read the sample. Templates are inherited (create_pipeline), never copied: copy_pipeline refuses one, and is for a
+new version or working copy of a source's own pipeline.
 
 Samples: ask for every sample file the user has and give them all to profile_sample (samples by file name): it
 reports what differs between files. Upload each file as its own stream, step them all, and survey_feed with those

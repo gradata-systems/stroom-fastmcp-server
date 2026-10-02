@@ -68,3 +68,20 @@ async def test_slots_are_filled_from_the_builds_only_candidates_or_refused():
     with patch.object(pipeline_writes, 'guard_from', lambda c: guard):
         with pytest.raises(ToolError, match='has 2 TextConverter documents'):
             await fill_open_slots(ctx, 'b', merged, None, [])
+
+
+async def test_copying_a_template_is_refused_in_favour_of_inheriting():
+    from tools import templates
+    index = {'t': {'uuid': 't', 'name': 'Event Data (Text)', 'path': 'System/Template Pipelines', 'parent_uuid': None},
+             'p': {'uuid': 'p', 'name': 'Acme-V1-Events', 'path': 'System/Feeds/Acme', 'parent_uuid': 't'},
+             'q': {'uuid': 'q', 'name': 'Base', 'path': 'System/Feeds', 'parent_uuid': None},
+             'r': {'uuid': 'r', 'name': 'Child', 'path': 'System/Feeds', 'parent_uuid': 'q'}}
+    ctx = SimpleNamespace(lifespan_context={'policy': None})
+    with patch.object(templates, '_pipeline_index', AsyncMock(return_value=index)):
+        assert await templates.template_reason(ctx, 't') == 'it is one of the template pipelines'
+        assert await templates.template_reason(ctx, 'q') == '1 pipeline(s) inherit from it (Child)'
+        assert await templates.template_reason(ctx, 'p') is None
+        stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'Event Data (Text)', 'pipelineData': {}}))
+        with patch.object(pipeline_writes, 'gateway_from', lambda c: stroom), patch.object(pipeline_writes, 'guard_from', lambda c: None):
+            with pytest.raises(ToolError, match="is a template .*templates are inherited, not copied.*create_pipeline"):
+                await pipeline_writes.copy_pipeline(ctx, 'b', 't', 'Copy of template')

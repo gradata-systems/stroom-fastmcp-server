@@ -338,7 +338,8 @@ async def copy_pipeline(
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Copy a pipeline into the build with exactly the original's structure and settings: same parent template,
+    Copy an existing source's pipeline (not a template: those are inherited with create_pipeline) into the build
+    with exactly the original's structure and settings: same parent template,
     same element changes (removed or re-linked steps, extra XSLT steps), reference loaders and property
     values. The XSLTs and text converters it owns are copied too and the copy is rewired to them; other
     documents (shared libraries, indexes, clusters) stay shared. The user confirms the names first.
@@ -346,6 +347,13 @@ async def copy_pipeline(
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
     source = await stroom.get_doc('Pipeline', source_uuid)
+    from tools.templates import template_reason
+    reason = await template_reason(ctx, source_uuid)
+    if reason:
+        raise ToolError(f"'{source.get('name')}' is a template ({reason}): templates are inherited, not copied. A new source's "
+                        f"pipeline is a child of it: create_pipeline(name=..., template_uuid='{source_uuid}'), which keeps the "
+                        f"template's structure and takes later fixes to it. copy_pipeline is for a new version or a working "
+                        f"copy of a source's own pipeline (e.g. Keycloak-V1.2-Events).")
     data = copy.deepcopy(source.get('pipelineData') or {})
     owned = [p['value']['entity'] for p in (data.get('properties') or {}).get('add') or []
              if (p.get('value') or {}).get('entity', {}).get('type') in OWNED_TYPES]

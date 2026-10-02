@@ -148,6 +148,26 @@ async def find_pipeline_templates(
     return result
 
 
+async def template_reason(ctx: Context, uuid: str) -> str | None:
+    """Why a pipeline counts as a template (to inherit from, not to copy): it sits in a configured template folder
+    or Stroom's standard templates, or other pipelines inherit from it. None for an ordinary pipeline."""
+    policy: AccessPolicy = ctx.lifespan_context.get('policy') if isinstance(ctx.lifespan_context, dict) else None
+    index = await _pipeline_index(ctx)
+    entry = index.get(uuid)
+    if not entry:
+        return None
+    if entry['path'].startswith('System/Template Pipelines'):
+        return "it is one of the template pipelines"
+    for stage, source in (policy.pipeline_templates.items() if policy else []):
+        if any(entry['path'] == f.rstrip('/') for f in source.folders) and (
+                not source.names or any(fnmatch.fnmatchcase(entry['name'], n) for n in source.names)):
+            return f"it is a configured {stage} template"
+    children = [p['name'] for p in index.values() if p['parent_uuid'] == uuid]
+    if children:
+        return f"{len(children)} pipeline(s) inherit from it ({', '.join(children[:3])}{'...' if len(children) > 3 else ''})"
+    return None
+
+
 async def list_template_children(
         ctx: Context,
         template_uuid: Annotated[str, Field(description="UUID of a template pipeline.")],
