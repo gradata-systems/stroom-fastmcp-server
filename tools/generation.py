@@ -10,6 +10,10 @@ from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
+from utils.dsgen import SplitterSpec, dry_run, generate_splitter
+from utils.localcheck import check_mapping, sample_records
+from utils.profile import _inventory
+from utils.refgen import ReferenceMapping, generate_reference
 from utils.xsltgen import TranslationMapping, field_mapping_markdown, generate, sampled_events
 
 
@@ -35,6 +39,12 @@ async def build_translation_xslt(
                         "Do this before write_documentation.")] = None,
         stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Sample streams to step for field_mapping.")] = [],
         max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 200,
+        sample: Annotated[str | list[str] | None, Field(
+            description="The raw sample, or a list of sample files, to check the mapping against before stepping: "
+                        "fields no record has, and time formats the values do not fit. For data_splitter input "
+                        "give splitter too.")] = None,
+        splitter: Annotated[SplitterSpec | None, Field(
+            description="The Data Splitter spec (build_data_splitter) that parses the sample, for the check.")] = None,
 ) -> dict[str, Any]:
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
@@ -54,6 +64,15 @@ async def build_translation_xslt(
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
+    if sample is not None:
+        records, note = sample_records(mapping, sample, splitter)
+        check = check_mapping(mapping, records)
+        result['sample_check'] = {**check, **({'note': note} if note else {})}
+        result['warnings'] += [f"sample: {w}" for w in check['warnings']]
+        if check['problems']:
+            # A time format no sample value fits fails every record at stepping: as good as a schema problem.
+            result['problems'] += [f"sample: {p}" for p in check['problems']]
+            result['ok'], result['xslt'] = False, None
     if mapping.input == 'json':
         result['pipeline_properties'] = {
             'jsonParser.addRootObject': mapping.json_layout == 'lines',
@@ -88,4 +107,60 @@ async def build_translation_xslt(
     return result
 
 
-ALL_TOOLS = [build_translation_xslt]
+async def build_data_splitter(
+        ctx: Context,
+        spec: Annotated[SplitterSpec, Field(description="How a record of the text divides into named fields.")],
+        sample: Annotated[str | None, Field(description="The raw sample: the spec is run on it here, so the records "
+                                                        "and field names are seen before anything is created.")] = None,
+) -> dict[str, Any]:
+    """
+    Write a Data Splitter (text converter) from a spec instead of by hand: delimited columns with or without a
+    header line, a regex with a name per group, key=value pairs, or syslog (RFC 5424 or 3164) with the
+    message parsed further. With the sample, runs the spec locally and returns the records it produces, the
+    lines that match nothing, and the field names a mapping may use (give the same spec to
+    build_translation_xslt as splitter). Saves nothing: create_text_converter saves the converter.
+    """
+    result: dict[str, Any] = {'converter': generate_splitter(spec), 'converter_type': 'DATA_SPLITTER'}
+    if sample is not None:
+        run = dry_run(spec, sample)
+        result.update({'records': len(run['records']), 'fields': _inventory(run['records']),
+                       'first_records': run['records'][:5], 'unmatched_lines': run['unmatched_lines'][:10],
+                       'unmatched_count': len(run['unmatched_lines'])})
+        if run['unmatched_lines'] and not run['records']:
+            result['hint'] = "No line matched the spec: check the pattern or delimiter against the lines shown."
+        elif run['unmatched_lines']:
+            result['hint'] = (f"{len(run['unmatched_lines'])} line(s) match nothing and would produce no record: widen the "
+                              f"spec, or confirm with the user that they are noise.")
+        else:
+            result['hint'] = "Every line parsed. Use these field names in the mapping, with this spec as splitter."
+    return result
+
+
+async def build_reference_xslt(
+        ctx: Context,
+        mapping: Annotated[ReferenceMapping, Field(description="The maps a reference feed provides: name, key field "
+                                                               "and value fields per map.")],
+        schema_version: Annotated[str | None, Field(description="reference-data schema version; defaults to the "
+                                                                "newest this Stroom holds.")] = None,
+) -> dict[str, Any]:
+    """
+    Write the XSLT of a reference-data pipeline (a child of the Reference Data template) from a mapping: for
+    each record and map, a <reference> with the map name, key and value in reference-data:2. The events
+    pipeline then names the feed as a pipeline reference and its mapping reads the map with lookup.
+    """
+    version = schema_version
+    if not version:
+        cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx)))
+        ids = [s for s in await cache.system_ids() if 'reference-data' in s]
+        version = ids[-1].split('-v')[-1].removesuffix('.xsd') if ids else '2.0.1'
+    result = generate_reference(mapping, version)
+    result['schema_version'] = version
+    result['hint'] = ("Fix the problems and call again." if not result['ok'] else
+                      "create_xslt it; create_pipeline from the Reference Data template (find_pipeline_templates "
+                      "stage=reference) with combinedParser.textConverter (if the feed is text) and translationFilter.xslt; "
+                      "create_processor_filter on the Raw Reference stream; wait_for_processing output_type='Reference'. "
+                      "Then give the events pipeline references=[{feed, loader_pipeline}].")
+    return result
+
+
+ALL_TOOLS = [build_translation_xslt, build_data_splitter, build_reference_xslt]

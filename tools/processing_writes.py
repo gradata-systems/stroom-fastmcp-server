@@ -422,11 +422,13 @@ async def wait_for_processing(
                         "pipelines, which write to an index and should produce no Error stream.")] = True,
         filter_id: Annotated[int | None, Field(
             description="Only count outputs from this processor filter, e.g. the one reprocess_streams made.")] = None,
+        output_type: Annotated[str, Field(description="The stream type expected per input: 'Events', or 'Reference' "
+                                                      "for a reference-data pipeline.")] = 'Events',
 ) -> dict[str, Any]:
     """
-    Wait until the pipeline's processor tasks finish, then report per input stream the Events and Error
-    streams it produced. The gate before the next stage: exactly one Events stream per input stream.
-    A missing or duplicate one is flagged with the likely cause.
+    Wait until the pipeline's processor tasks finish, then report per input stream the output (Events, or
+    Reference) and Error streams it produced. The gate before the next stage: exactly one output stream per
+    input stream. A missing or duplicate one is flagged with the likely cause.
     """
     stroom = gateway_from(ctx)
     deadline = time.monotonic() + timeout_seconds
@@ -440,17 +442,17 @@ async def wait_for_processing(
         await asyncio.sleep(3)
     per_stream, problems = [], []
     for raw, metas in outputs.items():
-        events = [m['id'] for m in metas if m.get('typeName') == 'Events']
+        events = [m['id'] for m in metas if m.get('typeName') == output_type]
         errors = [m['id'] for m in metas if m.get('typeName') == 'Error']
-        per_stream.append({'input': raw, 'events': events, 'errors': errors})
+        per_stream.append({'input': raw, 'events': events, 'errors': errors, **({'output_type': output_type} if output_type != 'Events' else {})})
         if not expect_events:
             if errors:
                 problems.append(f"Stream {raw} produced Error stream(s) {errors}: summarise_errors {raw}")
         elif len(events) == 0:
-            problems.append(f"Stream {raw} produced no Events stream: check processing_status and summarise_errors "
+            problems.append(f"Stream {raw} produced no {output_type} stream: check processing_status and summarise_errors "
                             f"{raw} (failed task, fatal error, or a filter that missed it)")
         elif len(events) > 1:
-            problems.append(f"Stream {raw} has {len(events)} Events streams: it was processed more than once. "
+            problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
                             "ask the user which to keep")
     return {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,

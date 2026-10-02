@@ -19,10 +19,11 @@ The server has 58 tools:
 | Stepping | `step_pipeline`, `step_sample`, `step_records` (chosen records in place), `compare_outputs` (with unsaved draft code) |
 | Processing | `processing_status`, `create_processor_filter`**, `set_processor_filter_enabled`**, `reprocess_streams`**, `wait_for_processing` |
 | Standing instructions | `get_instructions` (AGENTS Documentation docs in Stroom, by folder) |
-| Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream), `set_shape_handling`* (kinds the user leaves untranslated) |
+| Sampling | `survey_feed` (kinds of event in an existing feed, stream after stream, or in given sample streams), `set_shape_handling`* (kinds the user leaves untranslated) |
 | Diagnosis | `locate_event` (stream and event back to raw part and record), `summarise_fix` (prove a fix, diff, manual steps) |
 | Validation | `check_xslt`, `validate_events`, `check_event_quality`, `describe_translation` |
-| Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema) |
+| Generation | `build_translation_xslt` (event-logging XSLT from a field mapping, checked against the schema and the sample), `build_data_splitter` (a Data Splitter from a spec, run on the sample), `build_reference_xslt` (reference-data maps from a mapping) |
+| Reference data | `find_reference_data` (maps, feeds and loaders the environment has), `set_pipeline_references`, `create_dictionary`, `update_dictionary` |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `test_elastic_index` |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
@@ -68,6 +69,12 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   version to the next.
 - Processing: sample filters run one task at a time; a translation pipeline only processes the build's own feeds;
   promotion pre-creates each promoted pipeline's filter for new data, disabled, with a link to review and enable it.
+- Generate, then check, rather than hand-write: text converters, translations and reference-data XSLTs come from
+  specs and mappings; a mapping is checked against the schema and against every sample file (fields no record has,
+  time formats the values do not fit) before anything is stepped. Several sample files of one source are profiled
+  together, uploaded one stream each, and all stepped.
+- Reference data and dictionaries are first-class: `lookup` and `dictionary` sources in the mapping, the Reference
+  Data pipeline built from a mapping, and the events pipeline naming the feed as a pipeline reference.
   Indexing Events from a pipeline the server did not build needs the user's confirmation of that pipeline.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, after the user confirms that the index
   template for the destination index (named in the question) has been written.

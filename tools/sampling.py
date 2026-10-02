@@ -8,7 +8,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import guard_from
-from tools.streams import _term
+from tools.streams import _meta, _term
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
@@ -90,8 +90,11 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
 
 async def survey_feed(
         ctx: Context,
-        feed: Annotated[str, Field(description="The feed that already holds the raw data.")],
+        feed: Annotated[str | None, Field(description="The feed that already holds the raw data.")] = None,
         stream_type: Annotated[str, Field(description="Stream type to sample.")] = 'Raw Events',
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+            description="Survey exactly these streams instead of picking from the feed: the sample streams an "
+                        "onboarding uploaded (one per file), to see every kind of event they hold and where.")] = [],
         max_streams: Annotated[int, Field(ge=1, le=50, description="Streams to read in this call, spread over the "
                                                                   "feed's lifetime.")] = 10,
         skip_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
@@ -123,6 +126,11 @@ async def survey_feed(
     kept in (and continued from) the build's survey doc. Reads only, apart from that doc.
     """
     stroom = gateway_from(ctx)
+    chosen = [await _meta(stroom, i) for i in stream_ids]
+    if not feed:
+        if not chosen:
+            raise ToolError("Give feed, or stream_ids")
+        feed = chosen[0].get('feedName')
     record = await _load_record(ctx, build, feed) if build else None
     state = read_state(body_text(record)) if record else None
     if state:
@@ -130,7 +138,13 @@ async def survey_feed(
         known_signatures = list(dict.fromkeys(known_signatures + list(state['shapes'])))
     terms = [_term('Feed', feed), _term('Type', stream_type)]
     skip = set(skip_stream_ids)
-    streams, span = await pick_spread(stroom, terms, max_streams, skip)
+    if chosen:
+        streams = [m for m in chosen if m['id'] not in skip]
+        times = [m['createMs'] for m in chosen if m.get('createMs')]
+        span = {'oldest': _iso(min(times)), 'newest': _iso(max(times))} if times else {}
+        quiet_streams = len(streams) + 1   # read every chosen stream, whatever it adds
+    else:
+        streams, span = await pick_spread(stroom, terms, max_streams, skip)
     if not streams and skip:
         result = {'feed': feed, 'streams_read': [], 'records_read': 0, 'saturated': True, 'shapes': [],
                   'new_shapes': 0, 'locations': [], 'time_range': span,
@@ -178,11 +192,13 @@ async def survey_feed(
     to_step = new_shapes if known_signatures else found
     drop = dropped(state)
     read_ids = [p['stream'] for p in per_stream if 'records' in p]
-    saturated = quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
+    saturated = (quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
+                 or bool(chosen))   # chosen streams: every one was read, so the sample is covered as far as it goes
     result = {
         'feed': feed, 'format': fmt, 'time_range': span, 'streams_read': read_ids, 'records_read': records_read,
         'saturated': saturated,
-        'coverage': ('covered: no new kinds of event in the last streams read' if saturated else
+        'coverage': (f'all {len(read_ids)} given stream(s) read: these are the kinds of event the sample holds' if chosen else
+                     'covered: no new kinds of event in the last streams read' if saturated else
                      'NOT COVERED YET: keep surveying before treating the translation as complete'),
         'per_stream': per_stream,
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],

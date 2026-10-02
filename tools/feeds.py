@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from security.guard import guard_from
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
-from utils.profile import profile
+from utils.profile import profile, profile_many
 from utils.stroom import gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -19,14 +19,23 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 
 async def profile_sample(
         ctx: Context,
-        sample: Annotated[str, Field(description="A representative sample of the raw data, several records long.")],
+        sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long.")] = None,
+        samples: Annotated[dict[str, str] | None, Field(
+            description="Several sample files of the same source, by file name. Profiled each and together: fields "
+                        "and timestamp shapes only some files have are reported, as a mapping built from one file "
+                        "breaks on the others. Prefer this whenever the user has more than one file.")] = None,
 ) -> dict[str, Any]:
     """
-    Profile a raw data sample locally (nothing is sent to Stroom): its format (XML, JSON array or lines,
-    delimited with or without a header, RFC 3164/5424 syslog, key=value), record structure, and each
-    field's fill rate, inferred type and examples. Timestamps get a suggested stroom:format-date pattern;
-    string fields holding JSON are flagged as embedded JSON. Also suggests the parser and template to use.
+    Profile raw data locally (nothing is sent to Stroom): its format (XML document or fragments, JSON array or
+    lines, delimited with or without a header, RFC 3164/5424 syslog, key=value), record structure, and each
+    field's fill rate, inferred type and examples. Timestamps get a stroom:format-date pattern inferred from
+    their values; string fields holding JSON are flagged. Says which parser and template to use, whether a text
+    converter is needed, and for JSON the parser setting. With several files, also what differs between them.
     """
+    if samples:
+        return profile_many({**samples, **({'sample': sample} if sample else {})})
+    if sample is None:
+        raise ToolError("Give sample, or samples by file name")
     return profile(sample)
 
 
@@ -68,11 +77,18 @@ async def upload_sample(
         sample: Annotated[str, Field(description="The raw data to send, exactly as the source produces it.")],
         headers: Annotated[dict[str, str] | None, Field(
             description="Extra receipt headers, e.g. {'MyHost': 'ws01'}; readable in XSLT with stroom:meta().")] = None,
+        stream_type: Annotated[str, Field(description="'Raw Events', or 'Raw Reference' for a reference feed.")] = 'Raw Events',
+        effective_time: Annotated[str | None, Field(
+            description="Reference data only: from when it applies (ISO 8601 UTC). A lookup uses the reference data in "
+                        "effect at the event stream's time, so give a time before the events, e.g. "
+                        "'2000-01-01T00:00:00.000Z' for a table that always applied. Default: now, which is after "
+                        "any sample already uploaded.")] = None,
 ) -> dict[str, Any]:
     """
     Send sample data to a feed through Stroom's datafeed receiver, as the real source would, and return
-    the receipt id and the Raw Events stream it created. Only upload to feeds in a build (test feeds for
-    updates), never to a production feed whose processor filters would pick the data up.
+    the receipt id and the raw stream it created. Upload each sample file as its own call, so each becomes
+    a stream and every file is stepped. Only upload to feeds in a build (test feeds for updates), never to a
+    production feed whose processor filters would pick the data up.
     """
     stroom = gateway_from(ctx)
     # A direct lookup: the explorer search index lags new documents by a moment.
@@ -81,9 +97,10 @@ async def upload_sample(
         raise ToolError(f"No feed named '{feed}'")
     await guard_from(ctx).check_managed(match)
     started = int(time.time() * 1000) - 1000
-    response = await stroom.datafeed(feed, sample.encode('utf-8'), {'Type': 'Raw Events', **(headers or {})})
+    receipt = {'Type': stream_type, **({'EffectiveTime': effective_time} if effective_time else {}), **(headers or {})}
+    response = await stroom.datafeed(feed, sample.encode('utf-8'), receipt)
     terms = [{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed},
-             {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Raw Events'}]
+             {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': stream_type}]
     for _ in range(20):
         rows = (await stroom.find_meta(terms, 5)).get('values') or []
         fresh = [r['meta'] for r in rows if (r['meta'].get('createMs') or 0) >= started]

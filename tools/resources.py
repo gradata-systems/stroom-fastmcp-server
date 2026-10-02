@@ -42,6 +42,10 @@ XSLT, step every record, process, validate the Events), then stage 2, indexing, 
 stage 1 produced. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses until the
 build has an events pipeline or is given existing Events streams.
 
+Samples: ask for every sample file the user has and give them all to profile_sample (samples by file name): it
+reports what differs between files. Upload each file as its own stream, step them all, and survey_feed with those
+stream_ids shows every kind of event the sample holds; map variants with any_of.
+
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
 XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an
@@ -50,7 +54,15 @@ replace_parser='XMLFragmentParser'; fragments without a namespace take the wrapp
 the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json for JSON, root
 /map for JSON lines, /array for an array), so set xpath-default-namespace to it.
 
-Translation: write the XSLT with build_translation_xslt from a mapping, not by hand. Text fields holding several
+Text formats: write the Data Splitter with build_data_splitter from a spec (delimited, regex, key=value, syslog with a
+parsed body), which runs it on the sample and shows the records and field names; never by hand first.
+
+Translation: write the XSLT with build_translation_xslt from a mapping, not by hand, and pass it the sample (and the
+splitter spec) so fields no record has and time formats the values do not fit are caught before stepping. Sources:
+field, any_of (first of several names), value, xpath, lookup (reference data); modifiers: transform (lower, upper,
+trim, strip_domain, domain, digits), dictionary, map, default, time_format. Values the record does not carry come
+from reference data (find_reference_data; build_reference_xslt and a Reference Data pipeline for new tables; the
+events pipeline names the feed in references) or from a Dictionary doc (create_dictionary). Text fields holding several
 values (a message string with a time, user, action and description) are parsed with the mapping's extract (a
 regular expression whose groups become fields), not with substring-before/after chains; JSON held in a string is
 read with an xpath using json-to-xml(). Only stroom: functions that exist may be used (format-date, lookup, meta,
@@ -69,7 +81,8 @@ def _docs(source_docs: str) -> str:
 
 def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None:
     @mcp.resource('stroom://guide/{name}', mime_type='text/markdown',
-                  description="Working guides: event-logging, xslt, data-splitter, json-input, indexing, agent-instructions.")
+                  description="Working guides: event-logging, xslt, data-splitter, json-input, reference-data, indexing, "
+                              "documentation, agent-instructions.")
     def guide(name: str) -> str:
         path = GUIDES / f'{name}.md'
         if not path.is_file() or path.parent != GUIDES:
@@ -96,21 +109,28 @@ def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None
         return f"""Onboard "{source_name}"{f' from {vendor}' if vendor else ''} into Stroom.
 
 Stage 1, events:
-1. profile_sample on the sample below. start_build with a build name for this source (and the feed, once named).
+1. Ask whether there are more sample files than the one below (other appliances, versions or days) and get them all:
+   profile_sample with samples by file name reports the fields and timestamp shapes that differ between them.
+   start_build with a build name for this source (and the feed, once named).
 2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
-3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample.
-4. Draft the text converter only if the template's parser needs one (DSParser.textConverter: text such as CSV,
-   syslog, key=value; xmlFragmentParser.textConverter: the wrapper for XML fragments). JSON and single-document
-   XML need none: the JSONParser or XMLParser reads them. Build the XSLT with
-   build_translation_xslt (feeds=[the feed]) from a mapping: which input field or constant goes to which
-   event-logging path, one rule per kind of event, time patterns from profile_sample, extract for text fields
-   holding several values, json_layout from profile_sample for JSON. Fix reported problems in the mapping and
-   regenerate; hand-edit only what a mapping cannot express. step_sample with draft_code until the verdict is
-   clean; step_pipeline on single records to debug.
+3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a
+   stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
+   every kind gets a rule and step_records can check each. Values the records do not carry (a user's department, a
+   host's site): find_reference_data for maps the environment loads, or build the reference data (reference-data guide).
+4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter from a spec, with the sample, until
+   every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON and single-document XML
+   need none: the JSONParser or XMLParser reads them. Build the XSLT with build_translation_xslt (feeds=[the feed],
+   sample=all the files, splitter=the spec) from a mapping: which input field or constant goes to which event-logging
+   path, one rule per kind of event, time patterns from profile_sample, any_of where files name a field differently,
+   extract for text fields holding several values, lookup or dictionary for values from reference data,
+   json_layout from profile_sample for JSON. Fix reported problems in the mapping and regenerate; hand-edit only
+   what a mapping cannot express. step_sample with draft_code over every sample stream until the verdict is clean;
+   step_pipeline on single records to debug.
 5. create_text_converter (if any) / create_xslt, create_pipeline from the template (with the pipeline_properties
-   build_translation_xslt returned, e.g. jsonParser.addRootObject), step_sample again.
-6. create_processor_filter on the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
+   build_translation_xslt returned, e.g. jsonParser.addRootObject, and references for any lookup maps), step_sample
+   again over every sample stream.
+6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
    validate_events and check_event_quality on the output.
 
 Stage 2, indexing:

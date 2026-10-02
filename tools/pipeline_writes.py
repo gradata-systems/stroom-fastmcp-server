@@ -2,6 +2,7 @@
 import copy
 import re
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -39,6 +40,48 @@ def swap_parser(merged: dict[str, Any], new_type: str) -> tuple[dict[str, Any], 
     data = {'elements': {'add': [{'id': new_id, 'type': new_type}], 'remove': [{'id': old, 'type': types[old]}]},
             'links': {'add': [{'from': new_id, 'to': link['to']} for link in outgoing], 'remove': outgoing}}
     return data, new_id, types[old]
+
+
+class PipelineReference(BaseModel):
+    """Reference data an XSLT step reads with stroom:lookup(): a feed of Reference streams, loaded by a loader
+    pipeline (the standard 'Reference Loader' unless the environment has its own; find_reference_data)."""
+    feed: str = Field(description="The reference feed's name.")
+    loader_pipeline: str = Field('Reference Loader', description="The loader pipeline's name (or UUID).")
+    element: str | None = Field(None, description="The XSLT element that does the lookups; defaults to the "
+                                                  "pipeline's translation step.")
+
+
+async def _doc_ref_by_name(stroom: StroomGateway, doc_type: str, name: str) -> dict[str, Any]:
+    if doc_type == 'Feed':
+        found = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')
+        if not found:
+            raise ToolError(f"No feed named '{name}'")
+        return {'type': 'Feed', 'uuid': found['uuid'], 'name': found.get('name') or name}
+    if re.fullmatch(r'[0-9a-f-]{36}', name):
+        doc = await stroom.get_doc(doc_type, name)
+        return {'type': doc_type, 'uuid': doc['uuid'], 'name': doc.get('name')}
+    found = await stroom.find_documents(name, [doc_type], 20)
+    matches = [v['docRef'] for v in found.get('values') or [] if v['docRef'].get('type') == doc_type and v['docRef'].get('name') == name]
+    if len(matches) != 1:
+        raise ToolError(f"{'No' if not matches else len(matches)} {doc_type} document(s) named '{name}'" +
+                        ("; give the UUID" if len(matches) > 1 else " (find_reference_data lists loaders)"))
+    return {'type': doc_type, 'uuid': matches[0]['uuid'], 'name': matches[0].get('name')}
+
+
+async def reference_entries(stroom: StroomGateway, merged: dict[str, Any], references: list[PipelineReference]
+                            ) -> list[dict[str, Any]]:
+    """pipelineReferences entries for the references, on the element asked for or the first XSLT step."""
+    xslt_steps = [e for e in chain_order(merged['elements'], merged['links'])
+                  if {x['id']: x['type'] for x in merged['elements']}.get(e) == 'XSLTFilter']
+    out = []
+    for ref in references:
+        element = ref.element or (xslt_steps[0] if xslt_steps else None)
+        if not element:
+            raise ToolError("The pipeline has no XSLT step to attach reference data to")
+        out.append({'element': element, 'name': 'pipelineReference',
+                    'pipeline': await _doc_ref_by_name(stroom, 'Pipeline', ref.loader_pipeline),
+                    'feed': await _doc_ref_by_name(stroom, 'Feed', ref.feed), 'streamType': 'Reference'})
+    return out
 
 
 class PropertyValue(BaseModel):
@@ -82,12 +125,16 @@ async def create_pipeline(
                         "fragments (several root elements) when no template has one. It takes the template's "
                         "parser's place and links, with the id of its type (xmlFragmentParser), which properties "
                         "may address (xmlFragmentParser.textConverter).")] = None,
+        references: Annotated[list[PipelineReference], Field(
+            description="Reference data the translation looks up (the mapping's lookup entries): the feed and its "
+                        "loader pipeline, from find_reference_data.")] = [],
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
     Create a new pipeline as a child of a template, setting only what the child supplies. It keeps the
     template's structure and defaults (including any optional steps such as an empty decoration XSLT),
-    unless replace_parser swaps the parser. The user confirms the template and name first.
+    unless replace_parser swaps the parser. References attach reference data for stroom:lookup(). The user
+    confirms the template and name first.
     """
     stroom = gateway_from(ctx)
     template = await stroom.get_doc('Pipeline', template_uuid)
@@ -100,9 +147,12 @@ async def create_pipeline(
     unknown = sorted({p.element for p in properties} - elements)
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
+    refs = await reference_entries(stroom, merged, references)
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
                'sets': [f'{p.element}.{p.name}' for p in properties],
-               **({'parser': f"{replace_parser} in place of the template's {old_type}"} if replace_parser else {})}
+               **({'parser': f"{replace_parser} in place of the template's {old_type}"} if replace_parser else {}),
+               **({'reference data': [f"{r['feed']['name']} via {r['pipeline']['name']} on {r['element']}" for r in refs]}
+                  if refs else {})}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_pipeline',
                                            f"Create pipeline '{name}' from template '{template.get('name')}'",
                                            details, confirmation_id)
@@ -113,9 +163,12 @@ async def create_pipeline(
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
     for prop in properties:
         _set_property(data, prop.element, prop.name, await _value(stroom, prop))
+    if refs:
+        data.setdefault('pipelineReferences', {})['add'] = refs
     doc['pipelineData'] = data
     doc = await stroom.put_doc(doc)
-    return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name')}
+    return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name'),
+            **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})}
 
 
 async def copy_pipeline(
@@ -209,4 +262,32 @@ async def set_pipeline_property(
     return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'set': f'{prop.element}.{prop.name}'}
 
 
-ALL_TOOLS = [create_pipeline, copy_pipeline, set_pipeline_property]
+async def set_pipeline_references(
+        ctx: Context,
+        pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
+        references: Annotated[list[PipelineReference], Field(description="Reference data to attach (added to any "
+                                                                        "the pipeline already has).")],
+) -> dict[str, Any]:
+    """
+    Attach reference data to a pipeline this server created, so its XSLT's stroom:lookup() calls find the maps
+    (find_reference_data names feeds and loaders; the mapping's lookup entries name the maps).
+    """
+    stroom = gateway_from(ctx)
+    doc = await stroom.get_doc('Pipeline', pipeline_uuid)
+    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    new = await reference_entries(stroom, merged, references)
+    data = doc.get('pipelineData') or {}
+    existing = data.setdefault('pipelineReferences', {}).setdefault('add', [])
+    key = lambda r: (r['element'], r['feed']['uuid'], r['pipeline']['uuid'])
+    have = {key(r) for r in existing}
+    added = [r for r in new if key(r) not in have]
+    existing.extend(added)
+    doc['pipelineData'] = data
+    doc = await stroom.put_doc(doc)
+    return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'],
+            'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']} on {r['element']}" for r in existing],
+            'added': len(added)}
+
+
+ALL_TOOLS = [create_pipeline, copy_pipeline, set_pipeline_property, set_pipeline_references]

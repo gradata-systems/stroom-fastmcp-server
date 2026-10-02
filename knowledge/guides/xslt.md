@@ -67,8 +67,28 @@ Fields are Data Splitter names, JSON keys (`user.name` for nested keys), XML pat
 names from `extract`. The tool puts elements in schema order, converts times with `stroom:format-date`, leaves
 elements out when their input is empty (or writes `default`), and logs records no rule matches. Unknown paths,
 constants the schema does not allow, alternatives used together and missing required elements come back as
-problems to fix in the mapping. Use `xpath` for a computed value (embedded JSON: `json-to-xml(...)/*/*[@key='x']`),
-and write XSLT by hand only for what a mapping cannot express, such as reference lookups.
+problems to fix in the mapping. Give it the `sample` too (and the `splitter` spec for text): it then reports
+fields no sample record has, with the nearest names, and time formats the sample's values do not fit, before
+anything is stepped.
+
+Each value has one source and optional modifiers:
+
+| Source | Meaning |
+| --- | --- |
+| `field` | An input field, or a name from `extract` |
+| `any_of: [a, b]` | The first of these fields with a value, for sources whose variants name a thing differently |
+| `value` | A constant |
+| `lookup: {map, field, path?}` | What reference data holds for the key (see the reference-data guide) |
+| `xpath` | A computed value (embedded JSON: `json-to-xml(...)/*/*[@key='x']`) |
+
+| Modifier | Meaning |
+| --- | --- |
+| `transform` | `lower`, `upper`, `trim`, `strip_domain` (`DOMAIN\user`, `user@domain` → `user`), `domain`, `digits` |
+| `dictionary: name` | The value a Dictionary of key=value lines gives the field |
+| `map`, `default`, `time_format`, `timezone` | As before: a value map, a fallback, time parsing |
+
+Conditions test a field with `equals`, `one_of`, `matches`, `present` or `in_dictionary` (a Dictionary of one
+entry per line). Write XSLT by hand only for what none of this expresses.
 
 ### Text fields holding several values
 

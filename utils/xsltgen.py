@@ -29,6 +29,7 @@ XSI = 'http://www.w3.org/2001/XMLSchema-instance'
 XS = 'http://www.w3.org/2001/XMLSchema'
 EVT = 'event-logging:3'
 FN = 'http://www.w3.org/2005/xpath-functions'
+MAP_NS = 'http://www.w3.org/2005/xpath-functions/map'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
 DEFAULT_ROOT = {'data_splitter': 'records', 'json': '/', 'xml_fragments': '/'}
 DEFAULT_RECORD = {'data_splitter': 'record'}
@@ -46,15 +47,44 @@ VARIABLE_MIN_READS = 3
 _PATTERN_LETTERS = set('GuyDMLdQqYwWEecFaHkKhmsSAnNVzOXxZp')
 
 
+class Lookup(BaseModel):
+    """Reference data: what stroom:lookup() finds for a key in a map a reference loader provides (find_reference_data
+    lists the maps). The pipeline must name the loader as a pipeline reference (create_pipeline references, or
+    set_pipeline_references); a key the map lacks gives no value, so the element is left out (or `default`)."""
+    map: str = Field(description="The map name, e.g. 'USER_TO_DEPARTMENT'.")
+    field: str | None = Field(None, description="Input field holding the key (or a name from extract).")
+    xpath: str | None = Field(None, description="Or an XPath giving the key.")
+    path: str | None = Field(None, description="Path below the map's value when it holds elements, e.g. 'department'; "
+                                               "omit for a text value.")
+
+    @model_validator(mode='after')
+    def one_key(self):
+        if (self.field is None) == (self.xpath is None):
+            raise ValueError(f"lookup '{self.map}': give exactly one of field or xpath for the key")
+        return self
+
+
+Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits']
+
+
 class FieldMapping(BaseModel):
-    """One output value. Give exactly one of field, value or xpath."""
+    """One output value. Give exactly one of field, any_of, value, xpath or lookup."""
     path: str = Field(description="Event-logging path below Event, e.g. 'EventSource/User/Id', "
                                   "'EventDetail/Authenticate/Outcome/Success', or '.../Data' with data_name.")
     field: str | None = Field(None, description="Input field: a Data Splitter data name, a JSON key "
                                                 "('user.name' for nested keys), an XML path relative to the record, "
                                                 "or a name from extract.")
+    any_of: list[str] | None = Field(None, description="Input fields tried in order; the first with a value is used, "
+                                                       "for sources whose variants name the same thing differently.")
     value: str | None = Field(None, description="A constant, e.g. 'Logon'.")
     xpath: str | None = Field(None, description="Advanced: an XPath expression relative to the record.")
+    lookup: Lookup | None = Field(None, description="The value reference data holds for a key field.")
+    dictionary: str | None = Field(None, description="With field (the key): the value a Dictionary doc of this name "
+                                                     "gives it, one key=value per line (create_dictionary). Keys "
+                                                     "the dictionary lacks give no value, or `default`.")
+    transform: Transform | None = Field(None, description="Applied to the input value first: lower, upper, trim, "
+                                                          "strip_domain (DOMAIN\\user or user@domain -> user), domain "
+                                                          "(the DOMAIN or domain part), digits (digits only).")
     time_format: str | None = Field(None, description="Input time pattern (Java, e.g. \"yyyy-MM-dd'T'HH:mm:ss\", "
                                                       "from profile_sample), or 'epoch_ms' / 'epoch_s'.")
     timezone: str | None = Field(None, description="Input time zone when the time has none, e.g. '+10:00' or 'UTC'.")
@@ -65,26 +95,32 @@ class FieldMapping(BaseModel):
 
     @model_validator(mode='after')
     def one_source(self):
-        if sum(x is not None for x in (self.field, self.value, self.xpath)) != 1:
-            raise ValueError(f"'{self.path}': give exactly one of field, value or xpath")
+        if sum(x is not None for x in (self.field, self.any_of, self.value, self.xpath, self.lookup)) != 1:
+            raise ValueError(f"'{self.path}': give exactly one of field, any_of, value, xpath or lookup")
+        if self.dictionary is not None and self.field is None and self.any_of is None:
+            raise ValueError(f"'{self.path}': dictionary needs field (or any_of) as the key")
+        if self.transform and self.value is not None:
+            raise ValueError(f"'{self.path}': transform applies to an input, not a constant")
         return self
 
 
 class Condition(BaseModel):
-    """A test on the record; give field or xpath and one of equals, one_of, matches or present."""
+    """A test on the record; give field or xpath and one of equals, one_of, matches, present or in_dictionary."""
     field: str | None = Field(None, description="An input field, or a name from extract.")
     xpath: str | None = None
     equals: str | None = None
     one_of: list[str] | None = None
     matches: str | None = Field(None, description="Regular expression (XPath flavour).")
     present: bool | None = Field(None, description="True: the field has a non-empty value; False: it does not.")
+    in_dictionary: str | None = Field(None, description="The value is one of the lines of the Dictionary doc of "
+                                                        "this name (a list, one entry per line).")
 
     @model_validator(mode='after')
     def one_test(self):
         if (self.field is None) == (self.xpath is None):
             raise ValueError("A condition needs exactly one of field or xpath")
-        if sum(x is not None for x in (self.equals, self.one_of, self.matches, self.present)) != 1:
-            raise ValueError("A condition needs exactly one of equals, one_of, matches or present")
+        if sum(x is not None for x in (self.equals, self.one_of, self.matches, self.present, self.in_dictionary)) != 1:
+            raise ValueError("A condition needs exactly one of equals, one_of, matches, present or in_dictionary")
         return self
 
 
@@ -246,6 +282,9 @@ class _Generator:
         self.derived: dict[str, tuple[Extraction, int]] = {}
         self._parts: dict[int, str] = {}
         self._keep: set[str] = set()
+        # Dictionary docs read at run time: (name, 'map' for key=value lines, 'set' for a list) -> variable.
+        self._dicts: dict[tuple[str, str], str] = {}
+        self.reference_maps: set[str] = set()
         for n, extraction in enumerate(mapping.extract):
             self._check_extraction(n, extraction)
             base = style_name(f"{extraction.field or 'text'}-parts", mapping.style.naming)
@@ -317,6 +356,61 @@ class _Generator:
             return '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
         return field_name
 
+    def dict_var(self, name: str, kind: str) -> str:
+        if (name, kind) not in self._dicts:
+            naming = self.m.style.naming
+            base = style_name(f"{name}-{'map' if kind == 'map' else 'list'}", naming)
+            self._dicts[(name, kind)] = unique_name(base, set(self._names.values()) | set(self._maps.values())
+                                                    | self._keep | set(self._dicts.values()), naming)
+        return self._dicts[(name, kind)]
+
+    def key_expr(self, field_name: str | None, xpath: str | None) -> str:
+        return f"string(({self.source(field_name, xpath)})[1])"
+
+    def src_of(self, entry: FieldMapping) -> tuple[str | None, str | None]:
+        """The entry's input as (field, xpath): a field as it is; any_of, lookup and dictionary as the XPath that
+        computes them, so the rest of the generator treats them like any computed value."""
+        if entry.lookup:
+            self.reference_maps.add(entry.lookup.map)
+            key = self.key_expr(entry.lookup.field, entry.lookup.xpath)
+            found = f"stroom:lookup({literal(entry.lookup.map)}, {key})"
+            if not entry.lookup.path:
+                return None, found
+            # The value's elements are in no namespace, while the stylesheet's default XPath namespace is the
+            # input's: *:name selects them whatever that is, at any depth below the value.
+            steps = [s if (':' in s or s.startswith('@') or s in ('.', '*')) else f'*:{s}'
+                     for s in entry.lookup.path.strip('/').split('/') if s]
+            return None, f"{found}//{'/'.join(steps)}"
+        if entry.any_of:
+            first = ', '.join(self.source(f, None) for f in entry.any_of)
+            key_src = f"({first})[normalize-space(.)][1]"
+        else:
+            key_src = None
+        if entry.dictionary:
+            key = f"string(({key_src or self.source(entry.field, None)})[1])"
+            return None, f"${self.dict_var(entry.dictionary, 'map')}?({key})"
+        if entry.any_of:
+            return None, key_src
+        return entry.field, entry.xpath
+
+    def scalar(self, entry: FieldMapping, src: str) -> str:
+        """The entry's one value, transformed as asked; src is the variable or selector holding its values."""
+        one = f"{src}[1]"
+        t = entry.transform
+        if t == 'lower':
+            return f"lower-case({one})"
+        if t == 'upper':
+            return f"upper-case({one})"
+        if t == 'trim':
+            return f"normalize-space({one})"
+        if t == 'strip_domain':
+            return f"replace(replace({one}, '^[^\\\\]*\\\\', ''), '@.*$', '')"
+        if t == 'domain':
+            return f"replace({one}, '^(?:([^\\\\]*)\\\\.*|[^@]*@(.*))$', '$1$2')"
+        if t == 'digits':
+            return f"replace({one}, '[^0-9]', '')"
+        return one
+
     def ref(self, field_name: str | None, xpath: str | None, label: str) -> str:
         """A variable holding the input's non-blank values, declared at the top of the template being written,
         so each selector appears once per template. Named after the field, or for an xpath after `label`."""
@@ -350,12 +444,22 @@ class _Generator:
             return f"{src} = ({', '.join(literal(v) for v in c.one_of)})"
         if c.matches is not None:
             return f"exists({src}[matches(., {literal(c.matches)})])"
+        if c.in_dictionary is not None:
+            if raw:
+                return f"{src} in dictionary {literal(c.in_dictionary)}"
+            return f"{src} = ${self.dict_var(c.in_dictionary, 'set')}"
         test = f"exists({src}[normalize-space(.)])" if raw else self.has(c.field, c.xpath, 'condition')
         return test if c.present else f"not({test})"
 
     # --- values ---
     @staticmethod
     def label(entry: FieldMapping) -> str:
+        if entry.lookup:
+            return entry.lookup.map
+        if entry.dictionary:
+            return f"{(entry.field or entry.any_of[0])}-{entry.dictionary}"
+        if entry.any_of:
+            return entry.any_of[0]
         return '-'.join(entry.path.strip('/').split('/')[-2:])
 
     def map_ref(self, entry: FieldMapping, src: str) -> str:
@@ -378,17 +482,19 @@ class _Generator:
         if entry.default is not None:
             return None
         if entry.map:
-            src = self.ref(entry.field, entry.xpath, self.label(entry))
+            src = self.ref(*self.src_of(entry), self.label(entry))
+            key = self.scalar(entry, src) if entry.transform else src
             if self.as_xsl_map(entry):
-                return f"exists({self.map_ref(entry, src)}?({src}))"
-            return f"{src} = ({', '.join(literal(k) for k in entry.map)})"
-        return self.has(entry.field, entry.xpath, self.label(entry))
+                return f"exists({self.map_ref(entry, src)}?({key}))"
+            return f"{key} = ({', '.join(literal(k) for k in entry.map)})"
+        return self.has(*self.src_of(entry), self.label(entry))
 
     def value_expr(self, entry: FieldMapping) -> str:
-        src = self.ref(entry.field, entry.xpath, self.label(entry))
+        src = self.ref(*self.src_of(entry), self.label(entry))
+        key = self.scalar(entry, src) if entry.transform else src
         if entry.map and self.as_xsl_map(entry):
             # The lookup operator takes any number of keys, so an empty input gives no value rather than an error.
-            lookup = f"{self.map_ref(entry, src)}?({src})"
+            lookup = f"{self.map_ref(entry, src)}?({key})"
             return f"({lookup}, {literal(entry.default)})[1]" if entry.default is not None else f"{lookup}[1]"
         if entry.map:
             items = list(entry.map.items())
@@ -399,20 +505,21 @@ class _Generator:
                 # last key needs no test of its own.
                 *items, (_, last) = items
                 expr = literal(last)
-            for key, out in reversed(items):
-                expr = f"if ({src} = {literal(key)}) then {literal(out)} else {expr}"
+            for k, out in reversed(items):
+                expr = f"if ({key} = {literal(k)}) then {literal(out)} else {expr}"
             return expr
         fmt, tz = entry.time_format, entry.timezone
+        one = self.scalar(entry, src) if entry.transform else f"{src}[1]"
         if fmt == 'epoch_ms':
-            expr = f"stroom:format-date(string({src}[1]))"
+            expr = f"stroom:format-date(string({one}))"
         elif fmt == 'epoch_s':
-            expr = f"stroom:format-date(string(xs:integer(xs:decimal({src}[1]) * 1000)))"
+            expr = f"stroom:format-date(string(xs:integer(xs:decimal({one}) * 1000)))"
         elif fmt:
-            expr = f"stroom:format-date({src}[1], {literal(fmt)}{', ' + literal(tz) if tz else ''})"
+            expr = f"stroom:format-date({one}, {literal(fmt)}{', ' + literal(tz) if tz else ''})"
         else:
-            expr = src
+            expr = one if entry.transform else src
         if entry.default is not None:
-            return f"if ({self.has(entry.field, entry.xpath, self.label(entry))}) then {expr} else {literal(entry.default)}"
+            return f"if ({self.has(*self.src_of(entry), self.label(entry))}) then {expr} else {literal(entry.default)}"
         return expr
 
     def write_value(self, element: etree._Element, entry: FieldMapping) -> None:
@@ -438,7 +545,7 @@ class _Generator:
             bad = [v for v in outputs if v not in ('true', 'false')]
             if bad:
                 self._note(self.problems, f"{where}: {child.name} is true or false, not {bad}")
-            elif entry.value is None and not entry.map and entry.xpath is None:
+            elif entry.value is None and not entry.map and self.src_of(entry)[1] is None:
                 self._note(self.warnings, f"{where}: {child.name} is true/false; map the input values, e.g. "
                                           f"{{'ok': 'true', 'fail': 'false'}}, unless they already are")
         if kind == 'dateTime' and entry.value is None and not entry.time_format:
@@ -708,10 +815,12 @@ class _Generator:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
                                       f"put the rule without conditions last")
 
-        nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {})}
+        uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
+        nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
+                 **({'map': MAP_NS} if uses_dict_map else {})}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
-        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else ''))
+        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else '') + (' map' if uses_dict_map else ''))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')
@@ -757,6 +866,18 @@ class _Generator:
             for key, out in items:
                 etree.SubElement(entries, f'{{{XSL}}}map-entry', key=literal(key), select=literal(out))
             sheet.insert(n, variable)
+        for n, ((name, kind), var) in enumerate(self._dicts.items(), len(self._maps)):
+            lines = f"tokenize(stroom:dictionary({literal(name)}), '\\r?\\n')"
+            if kind == 'map':
+                select = (f"map:merge(for $line in {lines}[contains(., '=')] return map{{normalize-space("
+                          f"substring-before($line, '=')): normalize-space(substring-after($line, '='))}})")
+            else:
+                select = f"{lines} ! normalize-space(.)"
+            sheet.insert(n, etree.Element(f'{{{XSL}}}variable', name=var, select=select))
+        if self.reference_maps:
+            self._note(self.warnings, f"Lookups read reference map(s) {sorted(self.reference_maps)}: the pipeline needs "
+                                      f"the feed that loads each as a pipeline reference (create_pipeline references, or "
+                                      f"set_pipeline_references); find_reference_data lists the maps and their feeds.")
         # Called with the record as context, so they read its fields just as the event rules do.
         for k, (name, template) in self._templates.items():
             sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))
@@ -769,7 +890,8 @@ def generate(mapping: TranslationMapping, schema: EventSchema, version: str) -> 
     gen = _Generator(mapping, schema)
     xslt, summary = gen.stylesheet(version)
     return {'ok': not gen.problems, 'problems': gen.problems, 'warnings': gen.warnings, 'events': summary,
-            'xslt': None if gen.problems else xslt}
+            'xslt': None if gen.problems else xslt, 'reference_maps': sorted(gen.reference_maps),
+            'dictionaries': sorted({name for name, _ in gen._dicts})}
 
 
 # --- the Field mapping section of the pipeline's documentation ---
@@ -798,7 +920,17 @@ def _value(entry: FieldMapping) -> str:
     converted."""
     if entry.value is not None:
         return f'"{entry.value}"'
-    text = f'`{entry.field}`' if entry.field is not None else f'`{readable(entry.xpath)}`'
+    if entry.lookup:
+        key = entry.lookup.field or readable(entry.lookup.xpath)
+        text = f"lookup `{entry.lookup.map}` by `{key}`" + (f" (`{entry.lookup.path}`)" if entry.lookup.path else '')
+    elif entry.any_of:
+        text = 'first of ' + ', '.join(f'`{f}`' for f in entry.any_of)
+    else:
+        text = f'`{entry.field}`' if entry.field is not None else f'`{readable(entry.xpath)}`'
+    if entry.dictionary:
+        text += f" via dictionary `{entry.dictionary}`"
+    if entry.transform:
+        text += f" ({entry.transform})"
     if entry.time_format:
         text += f" ({entry.time_format}{', ' + entry.timezone if entry.timezone else ''})"
     elif entry.timezone:
@@ -820,6 +952,8 @@ def _condition(c: Condition) -> str:
         return f"{src} in {', '.join(c.one_of)}"
     if c.matches is not None:
         return f'{src} matches `{c.matches}`'
+    if c.in_dictionary is not None:
+        return f'{src} in dictionary `{c.in_dictionary}`'
     return f'{src} {"present" if c.present else "empty"}'
 
 

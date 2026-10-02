@@ -1,4 +1,4 @@
-"""The evaluation set: thirteen samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: fifteen samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
@@ -50,10 +50,20 @@ def load_cases(only: list[str] | None = None) -> list[dict[str, Any]]:
     return cases
 
 
+def samples_of(case: dict[str, Any]) -> list[str]:
+    """A case's sample files: `samples` (several), else the one `sample`."""
+    return list(case.get('samples') or [case['sample']])
+
+
 def request_text(case: dict[str, Any]) -> str:
     """What to ask an agent for this case."""
-    return (f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n"
-            f"Sample:\n{case['sample']}")
+    samples = samples_of(case)
+    shown = (f"Sample:\n{samples[0]}" if len(samples) == 1 else
+             '\n\n'.join(f"Sample file {n}:\n{s}" for n, s in enumerate(samples, 1)))
+    ref = case.get('reference', {}).get('reference_data')
+    if ref:
+        shown += f"\n\nUser directory export (reference data):\n{ref['sample']}"
+    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{shown}"
 
 
 # --- scoring ---
@@ -132,7 +142,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
     from security.policy import AccessPolicy
     from tools import (feeds, generation, indexing, pipeline_writes, processing_writes, stepping, templates,
                        translation, validation, streams)
-    from tools.pipeline_writes import PropertyValue
+    from tools.pipeline_writes import PipelineReference, PropertyValue
+    from utils.dsgen import SplitterSpec
+    from utils.refgen import ReferenceMapping
     from utils.consent import ConsentStore
     from utils.fieldplan import FieldPlan
     from utils.stroom import StroomGateway
@@ -155,13 +167,48 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
     build, feed = f'eval-{tag}-{stamp}', f'EVAL-{tag}-{stamp}'
     try:
         reference = case['reference']
-        generated = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(reference['mapping']))
+        samples = samples_of(case)
+        splitter = SplitterSpec.model_validate(reference['splitter']) if reference.get('splitter') else None
+        # The mapping is checked against every sample file first, as an agent would do with profile_sample's files.
+        generated = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(reference['mapping']),
+                                                            sample=samples, splitter=splitter)
         if not generated['ok']:
             raise RuntimeError(f"mapping problems: {generated['problems']}")
+        if generated.get('sample_check', {}).get('warnings'):
+            score.notes.append(f"sample check: {generated['sample_check']['warnings']}")
         await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
-        raw = (await feeds.upload_sample(ctx, feed, case['sample']))['stream_id']
+        raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
+        raw = raws[0]
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == case['template'])
+        references = []
+        ref_data = reference.get('reference_data')
+        if ref_data:
+            # The user directory: a Raw Reference feed, a Reference Data pipeline, processed to Reference streams.
+            ref_feed = f'{feed}-USERS'
+            await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=ref_feed, stream_type='Raw Reference')
+            # Reference data applies from its effective time: before the events' streams, or lookups find nothing.
+            ref_raw = (await feeds.upload_sample(ctx, ref_feed, ref_data['sample'], stream_type='Raw Reference',
+                                                 effective_time='2000-01-01T00:00:00.000Z'))['stream_id']
+            ref_xslt = await generation.build_reference_xslt(ctx, ReferenceMapping.model_validate(ref_data['mapping']))
+            if not ref_xslt['ok']:
+                raise RuntimeError(f"reference mapping problems: {ref_xslt['problems']}")
+            ref_template = next(c for c in (await templates.find_pipeline_templates(ctx, 'reference'))['candidates']
+                                if c['name'] == 'Reference Data')
+            rprops = []
+            rcode = p2.CSV_SPLITTER if ref_data.get('converter') == 'csv_header' else ref_data.get('converter')
+            if rcode:
+                rtc = await translation.create_text_converter(ctx, build, ref_feed, 'DATA_SPLITTER', rcode)
+                rprops.append(PropertyValue(element='combinedParser', name='textConverter', doc_uuid=rtc['uuid'], doc_type='TextConverter'))
+            rx = await translation.create_xslt(ctx, build, f'{ref_feed}-Reference', ref_xslt['xslt'])
+            rprops.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=rx['uuid'], doc_type='XSLT'))
+            rpipe = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
+                                    template_uuid=ref_template['uuid'], properties=rprops)
+            await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=rpipe['uuid'], stream_ids=[ref_raw])
+            rgate = await processing_writes.wait_for_processing(ctx, rpipe['uuid'], [ref_raw], output_type='Reference')
+            if rgate['gate'] != 'pass':
+                score.problems.append(f"reference data: {rgate['problems']}")
+            references = [PipelineReference(feed=ref_feed)]
         props = []
         converter, replace_parser = reference.get('converter'), reference.get('replace_parser')
         if converter:
@@ -176,12 +223,13 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             lines = reference['mapping'].get('json_layout') == 'lines'
             props.append(PropertyValue(element='jsonParser', name='addRootObject', value=lines))
         pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
-                                   template_uuid=template['uuid'], properties=props, replace_parser=replace_parser)
-        sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+                                   template_uuid=template['uuid'], properties=props, replace_parser=replace_parser,
+                                   references=references)
+        sample = await stepping.step_sample(ctx, pipeline['uuid'], raws)
         if sample['verdict'] == 'blocking':
             score.problems.append(f"stepping blocking: {[(g['element'], g.get('examples')) for g in sample['groups']][:3]}")
-        await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=[raw])
-        gate = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw])
+        await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=raws)
+        gate = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], raws)
         events = [e for s in gate['streams'] for e in s['events']]
         await check_output(call, score, case, events)
         if not score.stage1:

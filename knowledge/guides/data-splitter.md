@@ -3,6 +3,23 @@
 A Data Splitter text converter (type `DATA_SPLITTER`, used by `DSParser`) turns text into
 `records:2` XML: one `<record>` per match, with `<data name value>` for each field.
 
+## Generate it from a spec
+
+`build_data_splitter` writes the converter from a spec and, given the sample, runs the spec on it locally:
+the records it produces, the lines that match nothing, and the field names the mapping may use. Give the same
+spec to `build_translation_xslt` as `splitter` so the mapping is checked against those records.
+
+| Spec | Example |
+| --- | --- |
+| Delimited with a header line | `{"kind": "delimited", "delimiter": ",", "header": true, "quote": "\""}` |
+| Delimited, named columns | `{"kind": "delimited", "delimiter": "\|", "header": ["time", "user", "action"]}` |
+| Regex, a name per group | `{"kind": "regex", "pattern": "^(\\S+) (\\S+) (.*)$", "names": ["time", "user", "message"]}` |
+| key=value pairs | `{"kind": "key_value", "delimiter": " ", "pair_separator": "=", "quote": "\""}` |
+| Syslog, body parsed further | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "key_value"}}` |
+
+`body` parses one field further (syslog's `message`, or a regex group) and adds its fields; the recipes below
+are what it writes.
+
 ## Delimited with a header row
 
 ```xml

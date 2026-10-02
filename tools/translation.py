@@ -123,4 +123,38 @@ async def update_xslt(
     return _summary(await stroom.put_doc(doc, version))
 
 
-ALL_TOOLS = [create_text_converter, update_text_converter, create_xslt, update_xslt]
+async def create_dictionary(
+        ctx: Context,
+        build: Build,
+        name: Annotated[str, Field(description="Dictionary name, as the mapping's `dictionary` / `in_dictionary` name it.")],
+        text: Annotated[str, Field(description="One entry per line: key=value lines for a value map, or plain lines "
+                                               "for a list. Blank lines and whitespace round keys and values are ignored.")],
+        description: Annotated[str, Field(description="What the entries are and where they came from.")] = '',
+) -> dict[str, Any]:
+    """
+    Create a Dictionary doc in the build: a small static table a translation reads at run time with
+    stroom:dictionary() (the mapping's `dictionary` for key=value lines, `in_dictionary` for a list). For
+    data that changes or is large, use reference data instead (find_reference_data).
+    """
+    stroom = gateway_from(ctx)
+    ref = await guard_from(ctx).create('Dictionary', name, build)
+    doc = await stroom.get_doc('Dictionary', ref['uuid'])
+    doc.update(data=text, description=description)
+    return {**_summary(await stroom.put_doc(doc)), 'entries': sum(1 for l in text.splitlines() if l.strip())}
+
+
+async def update_dictionary(
+        ctx: Context,
+        uuid: Annotated[str, Field(description="Dictionary UUID.")],
+        text: Annotated[str, Field(description="The complete new content, one entry per line.")],
+        version: Version = None,
+) -> dict[str, Any]:
+    """Replace a dictionary's entries. Only dictionaries this server created can be changed."""
+    stroom = gateway_from(ctx)
+    doc = await stroom.get_doc('Dictionary', uuid)
+    await guard_from(ctx).check_managed({'type': 'Dictionary', 'uuid': uuid, 'name': doc.get('name')})
+    doc['data'] = text
+    return {**_summary(await stroom.put_doc(doc, version)), 'entries': sum(1 for l in text.splitlines() if l.strip())}
+
+
+ALL_TOOLS = [create_text_converter, update_text_converter, create_xslt, update_xslt, create_dictionary, update_dictionary]

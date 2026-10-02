@@ -11,3 +11,11 @@ pipeline_templates:
   discovery:
     folders: [System/Template Pipelines/Elasticsearch]
     names: ['Raw to Elasticsearch']
+  reference:
+    folders: [System/Template Pipelines]
+    names: ['Reference Data']
+# What marks a pipeline as a stage when it is not obvious from its elements. Defaults shown; override when the
+# environment's templates validate against other schema groups or write other stream types.
+# stage_markers:
+#   translation: {schema_groups: [EVENTS], stream_types: [Events]}
+#   reference: {schema_groups: [REFERENCE_DATA], stream_types: [Reference]}

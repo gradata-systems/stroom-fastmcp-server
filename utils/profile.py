@@ -9,6 +9,8 @@ from typing import Any
 
 from lxml import etree
 
+from utils.timefmt import check_time_format, infer_time_pattern
+
 SYSLOG_5424 = re.compile(r'^<\d{1,3}>1 \S+ \S+ \S+ \S+ \S+')
 SYSLOG_3164 = re.compile(r'^(<\d{1,3}>)?[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \S+ ')
 KEY_VALUE = re.compile(r'(\w[\w.-]*)=("[^"]*"|\S*)')
@@ -108,9 +110,10 @@ def value_type(value: Any) -> str:
     text = str(value).strip()
     if not text:
         return 'empty'
-    for pattern, java in TIMESTAMPS:
-        if pattern.match(text):
-            return f'timestamp ({java})'
+    if 6 <= len(text) <= 40 and any(ch.isdigit() for ch in text):
+        pattern = infer_time_pattern(text)
+        if pattern and check_time_format(pattern, [text]) is None:
+            return f'timestamp ({pattern})'
     try:
         ipaddress.ip_address(text)
         return 'ip'
@@ -159,6 +162,45 @@ def _inventory(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     total = len(records) or 1
     return [{'field': e['field'], 'fill_rate': round(100 * e['present'] / total),
              'type': e['types'].most_common(1)[0][0], 'examples': e['examples']} for e in fields.values()]
+
+
+def profile_many(samples: dict[str, str], max_records: int = 200) -> dict[str, Any]:
+    """Several sample files of one source, profiled each and together: the fields' fill rates per file, fields and
+    timestamp shapes only some files have (what breaks a mapping built from one file), and whether the files
+    even share a format."""
+    profiles = {name: profile(text, max_records) for name, text in samples.items()}
+    formats = {p['format'] for p in profiles.values()}
+    merged: dict[str, dict[str, Any]] = {}
+    for name, p in profiles.items():
+        for f in p.get('fields') or []:
+            entry = merged.setdefault(f['field'], {'field': f['field'], 'files': {}, 'types': Counter(), 'examples': []})
+            entry['files'][name] = f['fill_rate']
+            entry['types'][f['type']] += 1
+            entry['examples'] += [e for e in f['examples'] if e not in entry['examples']][:3 - len(entry['examples'])]
+    fields = []
+    differences = []
+    for entry in merged.values():
+        missing = [n for n in profiles if n not in entry['files']]
+        types = [t for t in entry['types']]
+        fields.append({'field': entry['field'], 'fill_rate_by_file': entry['files'], 'type': types[0],
+                       'examples': entry['examples'], **({'only_in': sorted(entry['files'])} if missing else {}),
+                       **({'types_by_file': types} if len(types) > 1 else {})})
+        if missing:
+            differences.append(f"field '{entry['field']}' is only in {sorted(entry['files'])}")
+        if len(types) > 1 and any(t.startswith('timestamp') for t in types):
+            differences.append(f"field '{entry['field']}' has different timestamp shapes across files: {types}")
+    if len(formats) > 1:
+        differences.insert(0, f"the files are not one format: { {n: p['format'] for n, p in profiles.items()} }")
+    first = next(iter(profiles.values()))
+    setup = {k: first[k] for k in ('suggested_parser', 'text_converter', 'parser_properties', 'xslt_input', 'parser')
+             if k in first}
+    return {'files': {n: {k: v for k, v in p.items() if k in ('format', 'records', 'lines', 'note', 'delimiter', 'has_header',
+                                                               'record_element', 'namespace')} for n, p in profiles.items()},
+            'format': first['format'] if len(formats) == 1 else 'mixed', 'records': sum(p.get('records', 0) for p in profiles.values()),
+            'fields': fields, 'differences': differences, **setup,
+            'hint': ("Map every field a rule needs with any_of where files name it differently, and give rules for the "
+                     "kinds of event each file shows; upload each file as its own stream and step them all."
+                     if differences else "The files agree; upload each as its own stream and step them all.")}
 
 
 def profile(sample: str, max_records: int = 200) -> dict[str, Any]:

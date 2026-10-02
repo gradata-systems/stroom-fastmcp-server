@@ -9,11 +9,11 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from security.policy import AccessPolicy
+from security.policy import DEFAULT_MARKERS, AccessPolicy, StageMarkers
 from tools.pipelines import chain_order, merge_layers
 from utils.stroom import StroomGateway, gateway_from
 
-Stage = Literal['translation', 'indexing', 'discovery']
+Stage = Literal['translation', 'indexing', 'discovery', 'reference']
 # The property that makes each element type do something; unset means a child must supply it.
 KEY_PROPERTIES = {'XSLTFilter': ('xslt',), 'DSParser': ('textConverter',), 'CombinedParser': ('textConverter',),
                   'XMLFragmentParser': ('textConverter',),
@@ -52,22 +52,27 @@ async def _pipeline_index(ctx: Context) -> dict[str, dict[str, Any]]:
     return index
 
 
-def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any]) -> tuple[str, str | None]:
+def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
+              markers: dict[str, StageMarkers] | None = None) -> tuple[str, str | None]:
     indexers = [t for t in elements.values() if t in _INDEXING]
     if indexers:
         raw_input = any(t in _RAW_PARSERS for t in elements.values())
         return ('discovery' if raw_input else 'indexing'), _INDEXING[indexers[0]]
-    if properties.get(('schemaFilter', 'schemaGroup')) == 'EVENTS' or \
-            properties.get(('streamAppender', 'streamType')) == 'Events':
-        return 'translation', None
+    if 'ReferenceDataFilter' in elements.values():
+        return 'loader', None
+    groups = {v for (e, n), v in properties.items() if n == 'schemaGroup'}
+    types = {v for (e, n), v in properties.items() if n == 'streamType'}
+    for stage, marker in (markers or DEFAULT_MARKERS).items():
+        if groups & set(marker.schema_groups) or types & set(marker.stream_types):
+            return stage, None
     return 'other', None
 
 
-async def _shape(stroom: StroomGateway, uuid: str) -> dict[str, Any]:
+async def _shape(stroom: StroomGateway, uuid: str, markers: dict[str, StageMarkers] | None = None) -> dict[str, Any]:
     merged = merge_layers(await stroom.pipeline_layers(uuid))
     elements = {e['id']: e['type'] for e in merged['elements']}
     properties = {(p['element'], p['name']): p['value'] for p in merged['properties']}
-    stage, backend = _classify(elements, properties)
+    stage, backend = _classify(elements, properties, markers)
     chain = chain_order(merged['elements'], merged['links'])
     open_slots, shared = [], []
     for element in chain:
@@ -94,8 +99,10 @@ def _slot(element: str, etype: str, key: str, value: Any, open_slots: list[dict]
 
 async def find_pipeline_templates(
         ctx: Context,
-        stage: Annotated[Stage, Field(description="translation (Raw Events to Events), indexing (Events to an "
-                                                  "index) or discovery (raw structured data straight to an index).")],
+        stage: Annotated[Stage, Field(description="translation (Raw Events to Events; always the first pipeline for a "
+                                                  "new source), indexing (Events to an index), discovery (raw structured "
+                                                  "data straight to an index) or reference (a Raw Reference feed to "
+                                                  "the reference-data maps stroom:lookup() reads).")],
 ) -> dict[str, Any]:
     """
     Candidate parent pipelines for a new pipeline at this stage, best first: configured template folders,
@@ -125,7 +132,7 @@ async def find_pipeline_templates(
     order = {'configured': 0, 'inherited_by_others': 1, 'standard': 2}
     candidates = []
     for why, p in sorted(ranked, key=lambda x: (order[x[0]], -children.get(x[1]['uuid'], 0))):
-        shape = await _shape(stroom, p['uuid'])
+        shape = await _shape(stroom, p['uuid'], policy.markers())
         if shape['stage'] != stage:
             continue
         candidates.append({'uuid': p['uuid'], 'name': p['name'], 'path': p['path'], 'source': why,

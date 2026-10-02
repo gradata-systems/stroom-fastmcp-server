@@ -233,7 +233,7 @@ def test_unmatched_records_are_logged_when_every_rule_has_conditions():
 
 
 def test_each_field_needs_exactly_one_source():
-    with pytest.raises(ValidationError, match='exactly one of field, value or xpath'):
+    with pytest.raises(ValidationError, match='exactly one of field, any_of, value, xpath or lookup'):
         mapping(common=[{'path': 'EventSource/User/Id', 'field': 'user', 'value': 'x'}])
 
 
