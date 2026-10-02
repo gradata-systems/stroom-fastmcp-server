@@ -8,15 +8,17 @@ answer:
   an answer cannot be replayed for something else.
 - Earlier connections: the server sends the elicitation request during the call.
 Otherwise the tool returns a pending id with a plain-language summary; the client shows it to the user
-and repeats the call with the id once they agree. The id is bound to the action, the exact details and
-the caller, and expires, so it cannot be reused for something else.
+and repeats the call with the id once they agree. The id is a sealed token bound to the action, the exact
+details and the caller, signed with the request-state keys and expiring, so it cannot be reused for
+something else and any replica sharing the keys can verify it.
 """
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import secrets
 import time
-from dataclasses import dataclass
 from typing import Any, Literal
 
 import mcp_types
@@ -28,16 +30,6 @@ from security.audit import audit
 logger = logging.getLogger(__name__)
 Kind = Literal['confirmation', 'approval']
 TTL_SECONDS = 3600
-
-
-@dataclass
-class _Pending:
-    kind: Kind
-    action: str
-    digest: str
-    user: str | None
-    expires: float
-    granted: bool = False
 
 
 def _user() -> str | None:
@@ -94,9 +86,42 @@ def _call_state(ctx: Any) -> dict[str, Any]:
 
 
 class ConsentStore:
-    def __init__(self, use_elicitation: bool = True):
+    """Pending ids are self-contained: a sealed token naming the kind, action, details digest, user and expiry,
+    signed with the shared request-state keys, so the repeated call may land on any replica. Single use is
+    enforced per replica (a token is remembered once spent); the binding to the exact details and the short
+    expiry are what keep a replay from doing anything but the same action again."""
+
+    def __init__(self, use_elicitation: bool = True, keys: list[str] | None = None):
         self.use_elicitation = use_elicitation
-        self._pending: dict[str, _Pending] = {}
+        self._keys = [k for k in (keys or []) if k] or [secrets.token_hex(32)]
+        self._spent: dict[str, float] = {}      # token -> expiry: used (or discarded) on this replica
+        self._granted: dict[str, float] = {}    # token -> expiry: already audited as granted (keep rounds)
+
+    def _seal(self, payload: dict[str, Any]) -> str:
+        body = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).decode().rstrip('=')
+        return f"{body}.{self._sign(body, self._keys[0])}"
+
+    @staticmethod
+    def _sign(body: str, key: str) -> str:
+        return hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+
+    def _unseal(self, token: str) -> dict[str, Any] | None:
+        """The payload of a token this server (any replica sharing the keys) issued and that has not expired."""
+        _, _, rest = token.partition('-')
+        body, _, signature = rest.rpartition('.')
+        if not body or not any(hmac.compare_digest(self._sign(body, key), signature) for key in self._keys):
+            return None
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return payload if isinstance(payload, dict) and payload.get('expires', 0) > time.time() else None
+
+    def _sweep(self) -> None:
+        now = time.time()
+        for table in (self._spent, self._granted):
+            for token in [t for t, expiry in table.items() if expiry < now]:
+                table.pop(token, None)
 
     async def require(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
                       token: str | None, keep: bool = False) -> dict[str, Any] | None:
@@ -108,14 +133,19 @@ class ConsentStore:
         """
         digest = _digest(action, details)
         if token:
-            pending = self._pending.get(token) if keep else self._pending.pop(token, None)
-            if pending is None or pending.expires < time.time():
+            payload = self._unseal(token)
+            if payload is None:
                 raise ToolError(f"Unknown or expired {kind} id; request the {kind} again")
-            if (pending.kind, pending.action, pending.digest, pending.user) != (kind, action, digest, _user()):
+            if (payload.get('kind'), payload.get('action'), payload.get('digest'), payload.get('user')) != (kind, action, digest, _user()):
                 raise ToolError(f"This {kind} id was issued for a different request; request the {kind} again")
-            if not keep or pending.granted is False:
+            self._sweep()
+            if token in self._spent:
+                raise ToolError(f"This {kind} id was already used; request the {kind} again")
+            if not keep:
+                self._spent[token] = payload['expires']
+            if token not in self._granted:
                 audit(kind, action=action, details=details, outcome='granted', via='id')
-            pending.granted = True
+                self._granted[token] = payload['expires']
             return None
 
         if self.use_elicitation and _modern(ctx):
@@ -134,9 +164,9 @@ class ConsentStore:
                     raise ToolError(f"The user did not agree to: {summary}")
                 return None
 
-        pending_id = f'{kind[:4]}-{secrets.token_urlsafe(9)}'
-        self._pending[pending_id] = _Pending(kind, action, digest, _user(), time.time() + TTL_SECONDS)
-        audit(kind, action=action, details=details, outcome='requested', id=pending_id)
+        pending_id = f"{kind[:4]}-" + self._seal({'kind': kind, 'action': action, 'digest': digest, 'user': _user(),
+                                                  'expires': int(time.time()) + TTL_SECONDS, 'nonce': secrets.token_hex(4)})
+        audit(kind, action=action, details=details, outcome='requested', id=pending_id[-16:])
         return {'status': f'needs_{kind}', f'{kind}_id': pending_id, 'summary': summary, 'details': details,
                 'hint': f"Show the summary and details to the user. If they agree, call {action} again with the "
                         f"same arguments plus {kind}_id='{pending_id}'. If they change a detail, call again with "
@@ -179,8 +209,10 @@ class ConsentStore:
                                             request_state=json.dumps(state, sort_keys=True))
 
     def discard(self, token: str | None) -> None:
+        """Spend a kept token once the action it covered is done."""
         if token:
-            self._pending.pop(token, None)
+            payload = self._unseal(token)
+            self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
 
 
 def _format(details: dict[str, Any]) -> str:

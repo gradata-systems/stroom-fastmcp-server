@@ -24,7 +24,7 @@ settings = Settings()
 configure_audit_log(settings.audit_log_file)
 rules = ErrorRules.load(settings.error_rules_file)
 policy = AccessPolicy.load(settings.access_policy_file)
-consent = ConsentStore(settings.use_elicitation)
+consent = ConsentStore(settings.use_elicitation, keys=[k.get_secret_value() for k in settings.request_state_keys])
 
 
 @asynccontextmanager

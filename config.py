@@ -77,9 +77,10 @@ class Settings(BaseSettings):
     oidc_ca_certs: Path | None = None
     # External URL clients use to reach the server (https://...). Used in OAuth metadata.
     public_base_url: str = ''
-    # Keys that seal the state carried between rounds of a form (confirmations and approvals), each at
-    # least 32 characters, comma-separated; the first seals, all unseal (for rotation). Unset: a
-    # per-process key, which is fine for one replica. Every replica must share them when there are several.
+    # Keys that seal the state carried between rounds of a form (confirmations and approvals) and the pending
+    # ids given to clients without forms, each at least 32 characters, comma-separated; the first seals, all
+    # unseal (for rotation). Unset: a per-process key, which is fine for one replica. Every replica must share
+    # them when there are several, so a repeated call can land on any of them.
     request_state_keys: Annotated[list[SecretStr], NoDecode] = []
     # Development only: no authentication, and Stroom is called with stroom_api_key. Refused unless the
     # server listens on localhost.

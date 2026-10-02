@@ -16,8 +16,33 @@ async def test_id_flow_binds_the_id_to_the_exact_request():
         await store.require(ctx, 'approval', 'promote_build', 'Promote', {'plan': ['b']}, pending['approval_id'])
     pending = await store.require(ctx, 'approval', 'promote_build', 'Promote', {'plan': ['a']}, None)
     assert await store.require(ctx, 'approval', 'promote_build', 'Promote', {'plan': ['a']}, pending['approval_id']) is None
-    with pytest.raises(ToolError, match='Unknown or expired'):
+    with pytest.raises(ToolError, match='already used'):
         await store.require(ctx, 'approval', 'promote_build', 'Promote', {'plan': ['a']}, pending['approval_id'])
+
+
+async def test_ids_are_self_contained_and_verifiable_by_any_replica_with_the_keys():
+    key = 'k' * 32
+    one, two, other = ConsentStore(False, keys=[key]), ConsentStore(False, keys=['rotated' * 5, key]), ConsentStore(False, keys=['x' * 32])
+    ctx = SimpleNamespace()
+    pending = await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, None)
+    token = pending['confirmation_id']
+    assert token.startswith('conf-') and '.' in token
+    # Another replica with the same (or a rotated set including the) key accepts it; one without refuses.
+    assert await two.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token) is None
+    with pytest.raises(ToolError, match='Unknown or expired'):
+        await other.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token)
+    # Tampered or expired tokens are refused; a kept token survives until discarded.
+    body, _, sig = token.rpartition('.')
+    with pytest.raises(ToolError, match='Unknown or expired'):
+        await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, f'{body}.{"0" * 32}')
+    stale = 'conf-' + one._seal({'kind': 'confirmation', 'action': 'create_feed', 'digest': 'd', 'user': None, 'expires': 1})
+    with pytest.raises(ToolError, match='Unknown or expired'):
+        await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, stale)
+    assert await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token, keep=True) is None
+    assert await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token, keep=True) is None
+    one.discard(token)
+    with pytest.raises(ToolError, match='already used'):
+        await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token)
 
 
 class Answer:

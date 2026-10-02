@@ -112,7 +112,7 @@ brackets.
 | `OIDC_REQUIRED_SCOPES` | `openid` | Scopes every token must carry (`scope` or `scp`), comma- or space-separated; may be empty [`oidc.requiredScopes`] |
 | `OIDC_CA_CERTS` | | CA for the provider's certificate, added to the system CAs [`oidc.ca`] |
 | `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata [`publicBaseUrl`] |
-| `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state, comma-separated [`requestState`] |
+| `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state and the confirmation and approval ids given to clients without forms, comma-separated; set them when running more than one replica [`requestState`] |
 | `TLS_CERTFILE`, `TLS_KEYFILE` | | Server certificate and key [`tls`] |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Serve plain HTTP behind a TLS proxy [`tls.enabled: false`]. Without it or a certificate, the server only starts when listening on localhost |
 | `HOST`, `PORT` | `0.0.0.0`, `8000` | Listener [`containerPort`] |
