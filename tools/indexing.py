@@ -76,11 +76,11 @@ async def draft_index_mapping(
         backend: Annotated[Backend, Field(description="From the chosen indexing template (find_pipeline_templates).")],
         index_name: Annotated[str, Field(description="Lucene index doc name, or ES index / data stream name.")],
         convention: Annotated[str, Field(description="Convention profile the user chose (get_field_conventions).")],
-        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams from stage 1, to see which "
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams from stage 1, to see which "
                                                                   "event-logging paths are actually populated.")],
-        extra_fields: Annotated[list[PlannedField], Field(
+        extra_fields: Annotated[list[PlannedField] | str, ONE_OR_MORE, Field(
             description="Fields the user asked for beyond the convention's map.")] = [],
-        drop_when: Annotated[list[str], Field(
+        drop_when: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
                         "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
 ) -> dict[str, Any]:
@@ -259,7 +259,7 @@ async def create_indexing_pipeline(
         index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
         cluster_uuid: Annotated[str | None, Field(
             description="Elasticsearch: the cluster, if the template does not already set one.")] = None,
-        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Events streams this pipeline will index (stage 1's output, or an existing Events feed's). "
                         "Needed when the build has no events pipeline of its own.")] = [],
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
@@ -293,7 +293,7 @@ async def create_indexing_pipeline(
             if not cluster_uuid:
                 raise ToolError("The template leaves the cluster open: give cluster_uuid")
             props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
-    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id=confirmation_id,
+    result = await create_pipeline(ctx, name, template_uuid, props, build=build, confirmation_id=confirmation_id,
                                    accept_parser_mismatch=True)   # an indexing pipeline reads Events, not the raw sample
     if result.get('uuid'):
         result['backend'] = shape['backend']
@@ -324,7 +324,7 @@ async def create_verification_dashboard(
         name: Annotated[str, Field(description="Dashboard name, e.g. the index name with a -VERIFY suffix.")],
         index_uuid: Annotated[str, Field(description="The index doc to query.")],
         backend: Backend,
-        fields: Annotated[list[str], ONE_OR_MORE, Field(description="Minimal field set: StreamId, EventId, the time field and a "
+        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Minimal field set: StreamId, EventId, the time field and a "
                                                        "few key fields.")],
 ) -> dict[str, Any]:
     """A workspace dashboard with a query on the index doc and a table of the given fields, for verify_index."""
@@ -381,9 +381,9 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
 async def run_test_searches(
         ctx: Context,
         dashboard_uuid: Annotated[str, Field(description="A verification dashboard.")],
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams that were indexed.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams that were indexed.")],
         expected_documents: Annotated[int, Field(description="Events records in those streams.")],
-        exact: Annotated[list[dict[str, str]], Field(
+        exact: Annotated[list[dict[str, str]] | str, ONE_OR_MORE, Field(
             description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
                         "each must return at least one row.")] = [],
         time_range: Annotated[dict[str, Any] | None, Field(
@@ -449,7 +449,7 @@ async def propose_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
         plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
-        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to check the template against.")],
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to check the template against.")],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
 ) -> dict[str, Any]:
@@ -480,7 +480,7 @@ async def check_index_template(
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
         template: Annotated[str, Field(description="The template as the user gave it: a Dev Tools request "
                                                    "(PUT _index_template/name {...}), the JSON body, or GET output.")],
-        events_stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
 ) -> dict[str, Any]:
     """
@@ -510,11 +510,11 @@ async def verify_index(
         build: Build,
         index_uuid: Annotated[str, Field(description="The index doc that was indexed into.")],
         backend: Backend,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams that were indexed.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams that were indexed.")],
         expected_documents: Annotated[int, Field(description="Events records in those streams.")],
-        fields: Annotated[list[str], ONE_OR_MORE, Field(description="Minimal field set for the dashboard: StreamId, EventId, "
+        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Minimal field set for the dashboard: StreamId, EventId, "
                                                        "the time field and a few key fields.")],
-        exact: Annotated[list[dict[str, str]], Field(
+        exact: Annotated[list[dict[str, str]] | str, ONE_OR_MORE, Field(
             description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
                         "each must return at least one row.")] = [],
         time_range: Annotated[dict[str, Any] | None, Field(

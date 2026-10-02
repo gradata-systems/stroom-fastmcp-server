@@ -1,4 +1,5 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
+import json
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -33,18 +34,18 @@ async def event_schema(ctx: Context, version: str) -> EventSchema:
 
 async def build_translation_xslt(
         ctx: Context,
-        mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any], Field(
+        mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str, Field(
             description="The translation mapping: {input, common: [{path, field|value|...}], events: [{name, when, fields}]}. "
                         "Start from draft_translation_mapping and edit it. A field inventory is not a mapping.")],
         schema_version: Annotated[str | None, Field(
             description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
-        feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
+        feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
                                                       "instructions for their folders are included.")] = [],
         pipeline_uuid: Annotated[str | None, Field(
             description="With stream_ids: step this pipeline with the generated XSLT over the sample (nothing is "
                         "saved), so field_mapping gives the TypeId and Description values the events actually get. "
                         "Do this before write_documentation.")] = None,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Sample streams to step for field_mapping.")] = [],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Sample streams to step for field_mapping.")] = [],
         max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 200,
         sample: Annotated[str | list[str] | None, Field(
             description="The raw sample, or a list of sample files, to check the mapping against before stepping: "
@@ -69,6 +70,11 @@ async def build_translation_xslt(
     (save_xslt mapping=...), stepped over the sample streams.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
+    if isinstance(mapping, str):
+        try:
+            mapping = json.loads(mapping)
+        except ValueError:
+            raise ToolError("mapping is text that is not JSON: pass the mapping object (draft_translation_mapping gives one)")
     if not isinstance(mapping, TranslationMapping):
         try:
             mapping = TranslationMapping.model_validate(mapping)
@@ -148,6 +154,9 @@ async def build_data_splitter(
             "{'kind': 'key_value', 'delimiter': ' ', 'pair_separator': '=', 'quote': '\"'}; "
             "{'kind': 'regex', 'pattern': '^(\\S+) (.*)$', 'names': ['time', 'message']}; "
             "{'kind': 'syslog', 'rfc': 'rfc3164', 'body': {'kind': 'key_value'}}."))] = None,
+        save_as: Annotated[str | None, Field(description="Also save the converter in the build under this document name "
+                                                         "(the build this session is on, or `build`), when every line parsed.")] = None,
+        build: Annotated[str | None, Field(description="With save_as: the build; defaults to the one this session is on.")] = None,
 ) -> dict[str, Any]:
     """
     Write a Data Splitter (text converter) from the sample: its format is profiled (delimited with or without
@@ -194,7 +203,16 @@ async def build_data_splitter(
                               f"spec, or confirm with the user that they are noise.")
         else:
             result['hint'] = ("Every line parsed. Use these field names in the mapping, with this spec as splitter; "
-                              "save_text_converter saves the converter.")
+                              "save_text_converter saves the converter (or call again with save_as=<name>).")
+    if save_as:
+        if result.get('unmatched_count'):
+            result['not_saved'] = f"{result['unmatched_count']} line(s) match nothing: fix the spec (or confirm they are noise) before saving"
+        else:
+            from tools.plan import resolve_build
+            from tools.translation import create_text_converter
+            saved = await create_text_converter(ctx, resolve_build(ctx, build, 'build_data_splitter save_as'), save_as,
+                                                'DATA_SPLITTER', result['converter'])
+            result['saved'] = saved
     return result
 
 

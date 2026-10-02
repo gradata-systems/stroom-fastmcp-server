@@ -74,6 +74,6 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
         with pytest.raises(ToolError, match='cluster'):
             await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_name='stroom-acme-v1')
         await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_name='stroom-acme-v1', cluster_uuid='c')
-    props = {(p.element, p.name): (p.value or p.doc_uuid) for p in create.call_args.args[4]}
+    props = {(p.element, p.name): (p.value or p.doc_uuid) for p in create.call_args.args[3]}
     assert props == {('xsltFilter', 'xslt'): 'x', ('elasticIndexingFilter', 'indexName'): 'stroom-acme-v1',
                      ('elasticIndexingFilter', 'cluster'): 'c'}

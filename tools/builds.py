@@ -29,9 +29,9 @@ _COPY_OF = 'mcp-copy-of-'
 async def start_build(
         ctx: Context,
         build: Build,
-        feeds: Annotated[list[str], ONE_OR_MORE, Field(description="Feeds the build is for, if known, so the standing "
+        feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the build is for, if known, so the standing "
                                                       "instructions for their folders are included.")] = [],
-        folders: Annotated[list[str], ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
+        folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
 ) -> dict[str, Any]:
     """
     Create (or find) the build's workspace folder. Every write tool creates documents there. Returns the
@@ -166,7 +166,7 @@ async def write_documentation(
                                                    "field_mapping from build_translation_xslt as it is. The change log "
                                                    "is added by the tool.")],
         change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")],
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="The pipeline's sample streams (raw streams for an events pipeline, Events streams for an "
                         "indexing pipeline): the Field mapping section is generated from the mapping kept with the XSLT, "
                         "stepped over them. Required when the XSLT keeps a mapping.")] = [],

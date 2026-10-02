@@ -9,6 +9,7 @@ from starlette.responses import PlainTextResponse, Response
 from config import Settings
 from security.audit import AuditMiddleware, configure_audit_log
 from security.auth import oidc_auth, oidc_http_client
+from security.lenient import LenientArguments
 from security.policy import AccessPolicy
 from main_tools import TOOL_MODULES
 from tools import resources
@@ -72,7 +73,7 @@ request_state_security = (
 
 # The version is reported to clients in serverInfo, and on /healthz.
 mcp = FastMCP("stroom", version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS, lifespan=lifespan, auth=auth,
-              middleware=[AuditMiddleware()], request_state_security=request_state_security)
+              middleware=[AuditMiddleware(), LenientArguments()], request_state_security=request_state_security)
 
 
 @mcp.custom_route('/healthz', methods=['GET'], include_in_schema=False)

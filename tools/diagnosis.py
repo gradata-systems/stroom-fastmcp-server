@@ -152,9 +152,9 @@ async def summarise_fix(
         pipeline_uuid: Annotated[str, Field(description="The pipeline being fixed.")],
         element: Annotated[str, Field(description="Element whose XSLT or text converter the fix changes.")],
         draft: Annotated[str, Field(description="The complete fixed XSLT or text converter.")],
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Raw streams to prove it on: the reported one plus recent production streams.")],
-        expected_paths: Annotated[list[str], ONE_OR_MORE, Field(
+        expected_paths: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Output field paths the fix should change, e.g. ['Event/EventSource/User/Id'].")],
         issue: Annotated[str, Field(description="The problem in the user's words, for the write-up.")] = '',
 ) -> dict[str, Any]:

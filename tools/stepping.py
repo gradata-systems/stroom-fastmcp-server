@@ -177,7 +177,7 @@ async def step_pipeline(
             description="Zero-based record index within the part, or 'first' / 'last'.")] = 'first',
         part: Annotated[int, Field(ge=0, description="Zero-based part of a multi-part stream (locate_event gives it).")] = 0,
         draft_code: DraftCode = None,
-        show: Annotated[list[str] | None, ONE_OR_MORE, Field(
+        show: Annotated[list[str] | str | None, ONE_OR_MORE, Field(
             description="Element ids whose input and output to return. Defaults to the pipeline's own "
                         "XSLT steps.")] = None,
 ) -> dict[str, Any]:
@@ -214,7 +214,7 @@ async def step_pipeline(
 async def step_sample(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Sample streams to step through, every record.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Sample streams to step through, every record.")],
         draft_code: DraftCode = None,
         max_records: Annotated[int | None, Field(
             ge=1, description="Stop after this many records (default: the server's max_sample_records).")] = None,
@@ -285,7 +285,7 @@ _EVENT = re.compile(r'<(?:[\w.-]+:)?Event[\s>/]')
 async def step_records(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        locations: Annotated[list[RecordLocation], Field(
+        locations: Annotated[list[RecordLocation] | str, ONE_OR_MORE, Field(
             description="Records to step where they are, e.g. survey_feed's locations: {stream, part, record}.")],
         draft_code: DraftCode = None,
 ) -> dict[str, Any]:
@@ -391,7 +391,7 @@ async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[
 async def compare_outputs(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Streams whose records to compare.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams whose records to compare.")],
         draft_code: DraftCode = None,
         other_pipeline_uuid: Annotated[str | None, Field(
             description="Compare against this pipeline instead of draft code, e.g. a v2 copy.")] = None,

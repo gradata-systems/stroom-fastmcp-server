@@ -200,7 +200,7 @@ def _leaf_paths(event: etree._Element) -> set[str]:
 
 async def summarise_events(
         ctx: Context,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Events streams to profile.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to profile.")],
         max_events: Annotated[int, Field(ge=1, le=2000)] = 200,
 ) -> dict[str, Any]:
     """
@@ -256,7 +256,7 @@ async def describe_stream(ctx: Context, stream_id: StreamId) -> dict[str, Any]:
 
 async def summarise_streams(
         ctx: Context,
-        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(description="Streams to summarise.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams to summarise.")],
         kind: Annotated[Literal['errors', 'events'], Field(
             description="errors: the error markers of Error streams (or the Error children of raw or Events "
                         "streams), grouped and triaged as blocking, review or benign; events: what Events streams "

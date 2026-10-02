@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from security.guard import MANAGED, build_tag, copy_of_tag, guard_from
 from tools.pipelines import chain_order, merge_layers
 from utils.consent import consent_from
+from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -113,6 +114,82 @@ def _set_property(data: dict[str, Any], element: str, name: str, value: dict[str
     props['add'] = adds + [{'element': element, 'name': name, 'value': value}]
 
 
+async def _template_uuid(stroom: StroomGateway, template: str | None) -> str:
+    """A template given as a UUID or as its exact name."""
+    if not template:
+        raise ToolError("Give template_uuid (or template: the template's UUID or name), from find_pipeline_templates stage=translation")
+    if re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', template):
+        return template
+    return (await _doc_ref_by_name(stroom, 'Pipeline', template))['uuid']
+
+
+async def open_slots(stroom: StroomGateway, merged: dict[str, Any], replace_parser: str | None = None) -> list[dict[str, str]]:
+    """The properties a child must supply for the template's chain to run: the parser's text converter (DSParser,
+    XMLFragmentParser, CombinedParser) and the first XSLT step's xslt, where the template leaves them unset."""
+    from tools.templates import KEY_PROPERTIES
+    types = {e['id']: e['type'] for e in merged['elements']}
+    if replace_parser:
+        old = next((e for e in chain_order(merged['elements'], merged['links']) if types[e] in PARSERS), None)
+        if old:
+            types.pop(old, None)
+        types[element_id(replace_parser)] = replace_parser
+    values = {(p['element'], p['name']): p.get('value') for p in merged['properties']}
+    slots, seen_xslt = [], False
+    known = {e['id'] for e in merged['elements']}
+    for element in chain_order(merged['elements'], merged['links']) + [e for e in types if e not in known]:
+        etype = types.get(element)
+        for key in KEY_PROPERTIES.get(etype, ()):
+            if key == 'xslt':
+                if seen_xslt:
+                    continue   # a second XSLT step (decoration) is optional
+                seen_xslt = True
+            if key in ('xslt', 'textConverter') and values.get((element, key)) in (None, ''):
+                slots.append({'element': element, 'type': etype, 'property': key})
+    return slots
+
+
+async def fill_open_slots(ctx: Context, build: str, merged: dict[str, Any], replace_parser: str | None,
+                          properties: list[PropertyValue]) -> tuple[list[PropertyValue], list[str], list[str]]:
+    """Properties with the template's open slots filled from the build's own documents when there is exactly one
+    candidate: (properties, what was filled, what is still open). A parser with no converter in the build is
+    refused: the pipeline could not parse anything."""
+    from utils.mappingstore import read_mapping
+    stroom = gateway_from(ctx)
+    given = {(p.element, p.name) for p in properties}
+    docs = await guard_from(ctx).folder_contents(build)
+    filled, still_open = [], []
+    for slot in await open_slots(stroom, merged, replace_parser):
+        if (slot['element'], slot['property']) in given:
+            continue
+        if slot['property'] == 'textConverter':
+            candidates = [d for d in docs if d['type'] == 'TextConverter']
+            if not candidates:
+                raise ToolError(f"The template's {slot['type']} ({slot['element']}) needs a text converter and build '{build}' has "
+                                f"none: build_data_splitter with the sample (save_as=<name>), or save_text_converter, then "
+                                f"create the pipeline (or pass {slot['element']}.textConverter in properties).")
+            doc_type = 'TextConverter'
+        else:
+            xslts = [d for d in docs if d['type'] == 'XSLT']
+            with_mapping = []
+            for d in xslts:
+                kept = read_mapping((await stroom.get_doc('XSLT', d['uuid'])).get('description'))
+                if kept and kept[0] == 'translation':
+                    with_mapping.append(d)
+            candidates = with_mapping or xslts
+            doc_type = 'XSLT'
+            if not candidates:
+                still_open.append(f"{slot['element']}.xslt")
+                continue
+        if len(candidates) > 1:
+            names = ', '.join(f"{c['name']} ({c['uuid']})" for c in candidates)
+            raise ToolError(f"{slot['element']}.{slot['property']} is not set and build '{build}' has {len(candidates)} "
+                            f"{doc_type} documents ({names}): pass the right one in properties.")
+        chosen = candidates[0]
+        properties = [*properties, PropertyValue(element=slot['element'], name=slot['property'], doc_uuid=chosen['uuid'], doc_type=doc_type)]
+        filled.append(f"{slot['element']}.{slot['property']} = {chosen['name']} (the build's only {doc_type})")
+    return properties, filled, still_open
+
+
 async def _own_documents(ctx: Context, build: str, properties: list[PropertyValue], allowed: bool) -> None:
     """The XSLT and text converter a child supplies must be the build's own (made with save_xslt /
     save_text_converter), not another source's or a library's: those are inherited from the template."""
@@ -159,17 +236,22 @@ async def _parser_reads_sample(ctx: Context, build: str, merged: dict[str, Any],
 
 async def create_pipeline(
         ctx: Context,
-        build: Build,
         name: Annotated[str, Field(description="Pipeline name following the environment's convention.")],
-        template_uuid: Annotated[str, Field(description="Parent template, from find_pipeline_templates.")],
-        properties: Annotated[list[PropertyValue], Field(
-            description="What the child supplies, e.g. translationFilter.xslt and dsParser.textConverter.")],
+        template_uuid: Annotated[str | None, Field(description="Parent template, from find_pipeline_templates (its UUID; "
+                                                               "`template` takes a UUID or a name too).")] = None,
+        properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
+            description="What the child supplies, e.g. translationFilter.xslt and dsParser.textConverter. May be left "
+                        "for update_pipeline once the XSLT and converter are saved.")] = [],
+        build: Annotated[str | None, Field(description="The build this pipeline belongs to; defaults to the build this "
+                                                       "session is working on (start_onboarding / start_build).")] = None,
+        template: Annotated[str | None, Field(description="The template's UUID or exact name, instead of template_uuid.")] = None,
+        description: Annotated[str, Field(description="What the pipeline does, kept on the pipeline doc.")] = '',
         replace_parser: Annotated[str | None, Field(
             description="Parser element type to use instead of the template's, e.g. 'XMLFragmentParser' for XML "
                         "fragments (several root elements) when no template has one. It takes the template's "
                         "parser's place and links, with the id of its type (xmlFragmentParser), which properties "
                         "may address (xmlFragmentParser.textConverter).")] = None,
-        references: Annotated[list[PipelineReference], Field(
+        references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(
             description="Reference data the translation looks up (the mapping's lookup entries): the feed and its "
                         "loader pipeline, from find_reference_data.")] = [],
         reuse_existing_docs: Annotated[bool, Field(
@@ -188,7 +270,10 @@ async def create_pipeline(
     and build_data_splitter) and a template whose parser cannot read the build's sample streams. The user
     confirms the template and name first.
     """
+    from tools.plan import resolve_build
     stroom = gateway_from(ctx)
+    build = resolve_build(ctx, build, 'create_pipeline')
+    template_uuid = await _template_uuid(stroom, template_uuid or template)
     template = await stroom.get_doc('Pipeline', template_uuid)
     merged = merge_layers(await stroom.pipeline_layers(template_uuid))
     elements = {e['id'] for e in merged['elements']}
@@ -199,11 +284,14 @@ async def create_pipeline(
     unknown = sorted({p.element for p in properties} - elements)
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
+    properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(properties))
     await _own_documents(ctx, build, properties, reuse_existing_docs)
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     refs = await reference_entries(stroom, merged, references)
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
                'sets': [f'{p.element}.{p.name}' for p in properties],
+               **({'filled from the build': filled} if filled else {}),
+               **({'still to set': still_open} if still_open else {}),
                **({'parser': f"{replace_parser} in place of the template's {old_type}"} if replace_parser else {}),
                **({'reference data': [f"{r['feed']['name']} via {r['pipeline']['name']} on {r['element']}" for r in refs]}
                   if refs else {})}
@@ -215,6 +303,8 @@ async def create_pipeline(
     ref = await guard_from(ctx).create('Pipeline', name, build)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
+    if description:
+        doc['description'] = description
     for prop in properties:
         _set_property(data, prop.element, prop.name, await _value(stroom, prop))
     if refs:
@@ -223,6 +313,11 @@ async def create_pipeline(
     doc = await stroom.put_doc(doc)
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name'),
+                                        'sets': [f'{p.element}.{p.name}' for p in properties],
+                                        **({'filled_from_build': filled} if filled else {}),
+                                        **({'still_to_set': still_open, 'hint': f"The pipeline cannot run until {still_open} is set: "
+                                            f"save the translation XSLT (save_xslt mapping=...) and update_pipeline with "
+                                            f"properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
                                         **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
 
 
@@ -234,7 +329,7 @@ async def copy_pipeline(
         rename: Annotated[dict[str, str] | None, Field(
             description="Text replacements applied to the names of the copied XSLTs and text converters, "
                         "e.g. {'V1.2': 'V1.3'}.")] = None,
-        set_properties: Annotated[list[PropertyValue], Field(
+        set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
             description="Properties to change on the copy, e.g. elasticIndexingFilter.indexName for a new "
                         "index version.")] = [],
         working_copy: Annotated[bool, Field(
@@ -320,7 +415,7 @@ async def set_pipeline_property(
 async def set_pipeline_references(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
-        references: Annotated[list[PipelineReference], Field(description="Reference data to attach (added to any "
+        references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(description="Reference data to attach (added to any "
                                                                         "the pipeline already has).")],
 ) -> dict[str, Any]:
     """
@@ -348,9 +443,9 @@ async def set_pipeline_references(
 async def update_pipeline(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
-        properties: Annotated[list[PropertyValue], Field(description="Element properties to set, e.g. "
+        properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(description="Element properties to set, e.g. "
                                                                     "schemaFilter.schemaGroup or jsonParser.addRootObject.")] = [],
-        references: Annotated[list[PipelineReference], Field(description="Reference data to attach (added to any "
+        references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(description="Reference data to attach (added to any "
                                                                         "the pipeline already has), for stroom:lookup().")] = [],
 ) -> dict[str, Any]:
     """

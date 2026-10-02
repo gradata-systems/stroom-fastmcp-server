@@ -21,7 +21,7 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 async def profile_sample(
         ctx: Context,
         sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long.")] = None,
-        samples: Annotated[dict[str, str] | list[str] | None, Field(
+        samples: Annotated[dict[str, str] | list[str] | str | None, Field(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
                         "built from one file breaks on the others. Prefer this whenever the user has more than one file.")] = None,
@@ -137,9 +137,9 @@ async def record_source_notes(
         build: Build,
         source: Annotated[str, Field(description="Source name, e.g. 'Keycloak'.")],
         summary: Annotated[str, Field(description="What the documentation says about the source, in a few lines.")],
-        fields: Annotated[list[FieldNote], Field(description="Field dictionary condensed from the documentation.")] = [],
-        events: Annotated[list[EventNote], Field(description="Event catalogue condensed from the documentation.")] = [],
-        references: Annotated[list[str], ONE_OR_MORE, Field(description="Titles or links of the documents used.")] = [],
+        fields: Annotated[list[FieldNote] | str, ONE_OR_MORE, Field(description="Field dictionary condensed from the documentation.")] = [],
+        events: Annotated[list[EventNote] | str, ONE_OR_MORE, Field(description="Event catalogue condensed from the documentation.")] = [],
+        references: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Titles or links of the documents used.")] = [],
 ) -> dict[str, Any]:
     """
     Save the field dictionary and event catalogue condensed from user-supplied vendor documentation or

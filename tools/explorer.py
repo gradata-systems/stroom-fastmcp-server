@@ -5,6 +5,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from utils.params import ONE_OR_MORE
 from utils.stroom import RESOURCES, gateway_from
 
 DocType = Literal['Feed', 'Pipeline', 'XSLT', 'TextConverter', 'XMLSchema', 'Dictionary', 'ElasticIndex', 'Index',
@@ -27,7 +28,7 @@ async def find_documents(
         name: Annotated[str, Field(
             description="Name to match, as in the Stroom explorer quick filter, e.g. 'Keycloak'. "
                         "Use '*' to match everything of the given types.")] = '*',
-        types: Annotated[list[DocType] | None, Field(
+        types: Annotated[list[DocType] | str | None, ONE_OR_MORE, Field(
             description="Document types to include, e.g. ['Pipeline', 'XSLT']. All types when omitted.")] = None,
         limit: Annotated[int, Field(ge=1, le=500, description="Maximum number of documents to return.")] = 100,
         content: Annotated[str | None, Field(

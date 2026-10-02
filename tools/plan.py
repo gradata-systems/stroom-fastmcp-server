@@ -33,7 +33,7 @@ STAGE_1 = [
     ('samples', 'Upload every sample file as its own stream', 'upload_sample'),
     ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter sample=<the file text>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate, save with the mapping', 'draft_translation_mapping, build_translation_xslt, save_xslt mapping=...'),
-    ('pipeline', 'Events pipeline as a child of the right template', 'find_pipeline_templates stage=translation, create_pipeline'),
+    ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams (draft_code first)'),
     ('processed', 'Sample streams processed into Events', 'create_processor_filter, wait_for_processing'),
     ('validated', 'Events validated against the schema and the quality rules', 'check_events'),
@@ -51,6 +51,39 @@ FINISH = [('promoted', 'Promoted beside sibling sources, filters handed over dis
 def checklist() -> list[dict[str, str]]:
     return [{'step': s, 'what': w, 'tools': t, 'stage': stage}
             for stage, steps in (('1 events', STAGE_1), ('2 indexing', STAGE_2), ('finish', FINISH)) for s, w, t in steps]
+
+
+def _user(ctx: Context) -> str:
+    try:
+        from fastmcp.server.dependencies import get_access_token
+        token = get_access_token()
+        return (token.claims or {}).get('preferred_username') or (token.claims or {}).get('sub') or '-'
+    except Exception:
+        return '-'
+
+
+def remember_build(ctx: Context, build: str | None) -> None:
+    """The build the user is working on, so tools called without `build` fall back to it (this replica's memory;
+    a call that lands elsewhere is told to name the build)."""
+    if build:
+        try:
+            ctx.lifespan_context.setdefault('current_build', {})[_user(ctx)] = build
+        except Exception:
+            pass
+
+
+def resolve_build(ctx: Context, build: str | None, tool: str) -> str:
+    if build:
+        remember_build(ctx, build)
+        return build
+    try:
+        current = ctx.lifespan_context.get('current_build', {}).get(_user(ctx))
+    except Exception:
+        current = None
+    if current:
+        return current
+    raise ToolError(f"{tool} needs build: the build this work belongs to, as start_onboarding or start_build named it "
+                    f"(e.g. 'onboard-fortios'). build_status shows a build's state.")
 
 
 async def build_of(ctx: Context, ref: dict[str, Any]) -> str | None:
@@ -115,9 +148,13 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         kept = read_mapping(doc.get('description'))
         xslts.append({'name': d['name'], 'uuid': d['uuid'], 'mapping': kept[0] if kept else None})
     pipelines = []
+    from tools.pipeline_writes import open_slots
+    from tools.pipelines import merge_layers
     for d in by_type.get('Pipeline', []):
         shape = await _shape(stroom, d['uuid'])
-        pipelines.append({**d, 'stage': shape['stage'], 'parser': shape.get('parser'), 'stepped': await stepped_clean(ctx, d)})
+        missing = [f"{s['element']}.{s['property']}" for s in await open_slots(stroom, merge_layers(await stroom.pipeline_layers(d['uuid'])))]
+        pipelines.append({**d, 'stage': shape['stage'], 'parser': shape.get('parser'), 'stepped': await stepped_clean(ctx, d),
+                          'missing': missing})
     translation = [p for p in pipelines if p['stage'] == 'translation']
     indexing = [p for p in pipelines if p['stage'] == 'indexing']
     documented = {d['name'] for d in by_type.get('Documentation', [])}
@@ -134,7 +171,7 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'samples': bool(raw),
         'converter': (bool(by_type.get('TextConverter')) if fmt and fmt['needs_text_converter'] else None),
         'translation': any(x['mapping'] == 'translation' for x in xslts),
-        'pipeline': bool(translation),
+        'pipeline': bool(translation) and not any(p['missing'] for p in translation),
         'stepped': any(p['stepped'] for p in translation),
         'processed': bool(events),
         'validated': None,   # not recorded: the model validates after processing
@@ -159,7 +196,7 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'feeds': [d['name'] for d in by_type.get('Feed', [])],
         'sample_streams': {t: [m['id'] for m in ms] for t, ms in streams.items()},
         'xslts': xslts,
-        'pipelines': [{k: p[k] for k in ('name', 'uuid', 'stage', 'parser', 'stepped')} for p in pipelines],
+        'pipelines': [{k: p[k] for k in ('name', 'uuid', 'stage', 'parser', 'stepped', 'missing')} for p in pipelines],
         'events_streams': events[:20],
         'before_promotion': checks,
         'steps': steps,
@@ -193,6 +230,7 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
     """The tool result with `next`, the plan's next step, added (and a reminder that the work is not done)."""
     if not isinstance(result, dict) or 'status' in result:   # a confirmation or approval round, not an outcome
         return result
+    remember_build(ctx, build)
     nxt = await next_step(ctx, build)
     if nxt:
         result['next'] = nxt
@@ -204,11 +242,11 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
 async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall' (names the build).")],
-        samples: Annotated[dict[str, str] | list[str], Field(
+        samples: Annotated[dict[str, str] | list[str] | str, Field(
             description="The text of every sample file the user has (read each file and pass its content, every line), "
                         "by file name or as a list. Not paths: this server cannot read the client's files.")],
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,
-        folders: Annotated[list[str], ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
+        folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
 ) -> dict[str, Any]:
     """
     Start onboarding a source: profiles every sample file (format, fields, timestamp patterns, what differs
@@ -222,6 +260,7 @@ async def start_onboarding(
         raise ToolError("Give the sample files' text (samples by file name); ask the user for every file they have")
     name = build or ('onboard-' + ''.join(c if c.isalnum() else '-' for c in source_name.lower()).strip('-')[:40])
     folder = await guard_from(ctx).build_folder(name)
+    remember_build(ctx, name)
     profiled = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
