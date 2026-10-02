@@ -14,7 +14,7 @@ from pydantic import Field
 from security.guard import MANAGED, build_tag, guard_from
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
-from utils.samples import as_named_samples
+from utils.samples import SampleTexts, as_named_samples
 from utils.stroom import gateway_from
 
 Build = Annotated[str, Field(description="Build name, e.g. 'fortios-v1.0'.")]
@@ -242,7 +242,7 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
 async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall' (names the build).")],
-        samples: Annotated[dict[str, str] | list[str] | str, Field(
+        samples: Annotated[SampleTexts, Field(
             description="The text of every sample file the user has (read each file and pass its content, every line), "
                         "by file name or as a list. Not paths: this server cannot read the client's files.")],
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,

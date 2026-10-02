@@ -12,7 +12,7 @@ from security.guard import guard_from
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
-from utils.samples import as_named_samples, check_sample
+from utils.samples import SampleTexts, as_named_samples, check_sample
 from utils.stroom import gateway_from, set_body_text
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -21,7 +21,7 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 async def profile_sample(
         ctx: Context,
         sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long.")] = None,
-        samples: Annotated[dict[str, str] | list[str] | str | None, Field(
+        samples: Annotated[SampleTexts | None, Field(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
                         "built from one file breaks on the others. Prefer this whenever the user has more than one file.")] = None,

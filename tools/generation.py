@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
-from utils.samples import check_sample
+from utils.samples import SampleTexts, check_sample
 from utils.localcheck import check_mapping, sample_records
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
@@ -250,7 +250,7 @@ async def build_reference_xslt(
 
 async def draft_translation_mapping(
         ctx: Context,
-        samples: Annotated[dict[str, str] | list[str] | str, Field(description="The sample files' text (every line), by "
+        samples: Annotated[SampleTexts, Field(description="The sample files' text (every line), by "
                                                                             "file name or as a list; not paths.")],
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall': names the system and generator "
                                                       "until the user confirms them.")] = '',

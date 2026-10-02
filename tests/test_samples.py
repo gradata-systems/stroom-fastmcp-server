@@ -64,3 +64,27 @@ async def test_the_splitter_spec_is_inferred_from_the_sample():
         await generation.build_data_splitter(None, sample=PATHS)
     spec, _ = infer_spec('a|b\nc|d\n')
     assert spec.kind == 'delimited' and spec.delimiter == '|'
+
+
+# Gemma 4 on vLLM, onboarding a CSV: the file's text cut at ':' and ',' into an object, inside a list.
+BROKEN = [{
+    '"sample_firewall_logs_20.csv"': '"timestamp',
+    'device,event_type,severity,src_ip\\n2026-10-01T09': '00:12+10:00',
+    'FW-EDGE-01,TRAFFIC,INFO,192.0.2.10\\n2026-10-01T09': '01:05+10:00',
+}]
+
+
+async def test_samples_cut_up_by_the_tool_call_reach_the_server_and_are_explained():
+    from fastmcp import Client, FastMCP
+    server = FastMCP('t', lifespan=None)
+    server.tool(feeds.profile_sample)
+    async with Client(server) as client:
+        result = await client.call_tool('profile_sample', {'samples': BROKEN}, raise_on_error=False)
+    text = ' '.join(c.text for c in result.content if getattr(c, 'text', None))
+    assert result.is_error and 'samples arrived broken' in text and 'list of strings' in text
+
+
+def test_a_list_of_named_texts_and_doubly_escaped_newlines_are_read():
+    assert as_named_samples([{'fw.log': FORTIOS}, FORTIOS]) == {'fw.log': FORTIOS, 'sample 2': FORTIOS}
+    assert as_named_samples(['a,b\\n1,2\\n3,4']) == {'sample 1': 'a,b\n1,2\n3,4'}
+    assert as_named_samples({'fw.json': '{"msg": "a\\nb"}\n{"msg": "c"}'})['fw.json'].count('\\n') == 1  # JSON escapes kept
