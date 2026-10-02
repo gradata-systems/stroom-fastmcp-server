@@ -38,8 +38,10 @@ async def start_build(
     standing instructions (AGENTS docs) that apply, which the work must follow.
     """
     folder = await guard_from(ctx).build_folder(build)
+    from tools.plan import checklist, next_step
     return {'build': build, 'folder': folder['_path'], 'uuid': folder['uuid'],
-            'standing_instructions': await applicable_instructions(ctx, folders, feeds)}
+            'standing_instructions': await applicable_instructions(ctx, folders, feeds),
+            'plan': checklist(), 'next': await next_step(ctx, build), 'done': False}
 
 
 async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
@@ -149,7 +151,9 @@ async def list_build(ctx: Context, build: Build) -> dict[str, Any]:
     build's pipelines still lack before promotion (a clean step of their current code, documentation).
     """
     docs = await _build_docs(ctx, build)
-    return {'build': build, 'documents': docs, 'before_promotion': await build_checks(ctx, docs)}
+    from tools.plan import next_step
+    return {'build': build, 'documents': docs, 'before_promotion': await build_checks(ctx, docs),
+            'next': await next_step(ctx, build)}
 
 
 async def write_documentation(
@@ -209,8 +213,9 @@ async def write_documentation(
         doc = await write(existing)
     else:
         doc = await guard_from(ctx).create_filled('Documentation', pipeline['name'], build, write)
-    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
-            **({'field_mapping': generated_section} if generated_section else {})}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
+                                        **({'field_mapping': generated_section} if generated_section else {})})
 
 
 async def promote_build(

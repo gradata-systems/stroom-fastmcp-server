@@ -26,6 +26,7 @@ The server has 58 tools:
 | Reference data | `find_reference_data` (maps, feeds and loaders the environment has), `set_pipeline_references`, `create_dictionary`, `update_dictionary` |
 | Indexing | `get_field_conventions`, `draft_index_mapping`, `create_index_doc`*, `set_index_fields`, `create_indexing_pipeline`*, `create_verification_dashboard`, `run_test_searches` |
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`, `check_index_template`, `test_elastic_index` |
+| Plan | `start_onboarding` (profile every file, create the build, return the plan), `build_status` (each step's state from the build; every write tool's result carries `next`) |
 | Builds | `start_build`, `list_build`, `write_documentation`, `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the

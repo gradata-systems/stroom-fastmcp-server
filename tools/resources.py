@@ -37,10 +37,15 @@ SERVER_INSTRUCTIONS = f"""Stroom MCP server: builds Stroom content (feeds, trans
 that enforce the rules; the prompts (onboard_data_source, onboard_existing_feed, update_events_pipeline, ...) are the
 workflows, and stroom://guide/* the reference.
 
-Order of work for a new source, always: stage 1, the events pipeline (profile_sample, template, feed, translation
-XSLT, step every record, process, validate the Events), then stage 2, indexing, which reads the Events streams
-stage 1 produced. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses until the
-build has an events pipeline or is given existing Events streams.
+Order of work for a new source, always: start_onboarding (profiles every sample file, creates the build, returns
+the plan), then stage 1, the events pipeline (feed, samples uploaded, template, translation XSLT saved with its
+mapping, step every record, process, validate the Events, document), then stage 2, indexing, which reads the Events
+streams stage 1 produced, then promotion. One tool call is never the whole job: every write tool's result carries
+`next`, the plan's next step, and `done: false` until promotion; build_status shows every step's state. Keep going
+until `next` says promote. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses
+until the build has an events pipeline or is given existing Events streams; create_processor_filter refuses a
+pipeline with no clean step recorded; create_pipeline refuses another source's XSLT and a template whose parser
+cannot read the sample.
 
 Samples: ask for every sample file the user has and give them all to profile_sample (samples by file name): it
 reports what differs between files. Upload each file as its own stream, step them all, and survey_feed with those
@@ -109,9 +114,10 @@ def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None
         return f"""Onboard "{source_name}"{f' from {vendor}' if vendor else ''} into Stroom.
 
 Stage 1, events:
-1. Ask whether there are more sample files than the one below (other appliances, versions or days) and get them all:
-   profile_sample with samples by file name reports the fields and timestamp shapes that differ between them.
-   start_build with a build name for this source (and the feed, once named).
+1. Ask whether there are more sample files than the one below (other appliances, versions or days) and get them all.
+   start_onboarding with every file by name: it profiles them (fields and timestamp shapes that differ between files,
+   the parser and template, whether a text converter is needed), creates the build and returns the plan. Follow `next`
+   in each result until it says promote; build_status shows what remains.
 2. find_pipeline_templates stage=translation; list_template_children and describe_template_contract on the best
    candidate to see how this environment specialises it. find_similar_translations for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a

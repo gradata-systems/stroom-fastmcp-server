@@ -288,9 +288,12 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
         cells.append('\n'.join(detail_lines))
         lines.append(_row(*cells))
     if unexplained:
-        kinds = Counter(next((etree.QName(c).localname for c in e.find(f'{{{EVT}}}EventDetail') or []
-                              if isinstance(c.tag, str) and etree.QName(c).localname not in ('TypeId', 'Description')), '?')
-                        for e in unexplained)
+        def kind_of(e: etree._Element) -> str:
+            detail = e.find(f'{{{EVT}}}EventDetail')
+            children = list(detail) if detail is not None else []
+            return next((etree.QName(c).localname for c in children
+                         if isinstance(c.tag, str) and etree.QName(c).localname not in ('TypeId', 'Description')), '?')
+        kinds = Counter(kind_of(e) for e in unexplained)
         lines += ['', f"{len(unexplained)} of the sample's {total} events were not written by a rule of this mapping "
                       f"(the XSLT was edited by hand, or a later step rewrote them): {dict(kinds)}."]
     return '\n'.join(lines) + '\n'

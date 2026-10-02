@@ -19,6 +19,7 @@ from pydantic import Field
 from security.guard import guard_from
 from tools.pipelines import merge_layers
 from tools.processing import processing_status
+from tools.stepping import stepped_clean
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, doc_link, gateway_from
@@ -285,6 +286,10 @@ async def create_processor_filter(
     pipeline = await _managed_pipeline(ctx, pipeline_uuid)
     if bool(stream_ids) == bool(feed):
         raise ToolError("Give either stream_ids (the sample) or feed, not both")
+    if not await stepped_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.get('name')}):
+        raise ToolError(f"Pipeline '{pipeline.get('name')}' has no clean step of its current code recorded: step_sample "
+                        f"(or step_records) over the sample streams until the verdict is clean, then process. A change "
+                        f"to its XSLT or converter since the last clean step needs stepping again.")
     await _build_feeds_only(ctx, pipeline, stream_ids, feed)
     source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, stream_type, source_confirmation_id)
     if source and 'status' in source:
@@ -324,8 +329,10 @@ async def create_processor_filter(
         return gate
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
     consent_from(ctx).discard(source_confirmation_id)
-    return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
-            **({'events_from_pipeline': source['name']} if source else {})}
+    from tools.plan import build_of, with_next
+    result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
+              **({'events_from_pipeline': source['name']} if source else {})}
+    return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
 
 
 async def set_processor_filter_enabled(
@@ -455,9 +462,11 @@ async def wait_for_processing(
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
                             "ask the user which to keep")
-    return {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
-            'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
-            'hint': None if finished else "Tasks were still running at the timeout; call again."}
+    from tools.plan import build_of, with_next
+    result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
+              'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
+              'hint': None if finished else "Tasks were still running at the timeout; call again."}
+    return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), result)
 
 
 ALL_TOOLS = [create_processor_filter, set_processor_filter_enabled, reprocess_streams, wait_for_processing]

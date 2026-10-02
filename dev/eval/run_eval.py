@@ -216,6 +216,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             rprops.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=rx['uuid'], doc_type='XSLT'))
             rpipe = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
                                     template_uuid=ref_template['uuid'], properties=rprops)
+            rstep = await stepping.step_sample(ctx, rpipe['uuid'], [ref_raw])
+            if rstep['verdict'] != 'clean':
+                score.problems.append(f"reference pipeline stepping: {rstep['verdict']}")
             await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=rpipe['uuid'], stream_ids=[ref_raw])
             rgate = await processing_writes.wait_for_processing(ctx, rpipe['uuid'], [ref_raw], output_type='Reference')
             if rgate['gate'] != 'pass':
@@ -268,6 +271,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
                       if c['backend'] == 'lucene')
         ipipe = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',
                                 template_uuid=lucene['uuid'], xslt_uuid=ixslt['uuid'], index_uuid=index['uuid'])
+        istep = await stepping.step_sample(ctx, ipipe['uuid'], events)
+        if istep['verdict'] != 'clean':
+            score.problems.append(f"indexing pipeline stepping: {istep['verdict']}")
         await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=ipipe['uuid'], stream_ids=events,
                         source_pipeline_uuid=pipeline['uuid'])
         igate = await processing_writes.wait_for_processing(ctx, ipipe['uuid'], events, expect_events=False)

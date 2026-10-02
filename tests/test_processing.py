@@ -33,6 +33,28 @@ async def ctx():
     await stroom.close()
 
 
+@pytest.fixture(autouse=True)
+def stepped(request):
+    """Processing needs a clean step recorded; these tests are about what comes after, except the one that is not."""
+    if 'no_step_recorded' in request.keywords:
+        yield
+        return
+    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=True)), \
+            patch('tools.plan.with_next', AsyncMock(side_effect=lambda ctx, build, result: result)), \
+            patch('tools.plan.build_of', AsyncMock(return_value=None)):
+        yield
+
+
+@pytest.mark.no_step_recorded
+@respx.mock
+async def test_processing_refuses_a_pipeline_that_was_not_stepped_clean(ctx):
+    mock_stroom(elastic=False)
+    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)), \
+            patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+        with pytest.raises(ToolError, match='no clean step of its current code recorded'):
+            await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[1])
+
+
 def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = (), streams: dict | None = None):
     """p1 is the pipeline under test (Elasticsearch indexing, or a translation); 'ev' is an events pipeline.
 

@@ -21,3 +21,4 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["no_step_recorded: processing test that keeps the step gate active"]

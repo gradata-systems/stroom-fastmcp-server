@@ -8,7 +8,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from security.guard import copy_of_tag, guard_from
+from security.guard import MANAGED, build_tag, copy_of_tag, guard_from
 from tools.pipelines import chain_order, merge_layers
 from utils.consent import consent_from
 from utils.stroom import StroomGateway, gateway_from
@@ -113,6 +113,50 @@ def _set_property(data: dict[str, Any], element: str, name: str, value: dict[str
     props['add'] = adds + [{'element': element, 'name': name, 'value': value}]
 
 
+async def _own_documents(ctx: Context, build: str, properties: list[PropertyValue], allowed: bool) -> None:
+    """The XSLT and text converter a child supplies must be the build's own (made with create_xslt /
+    create_text_converter), not another source's or a library's: those are inherited from the template."""
+    if allowed:
+        return
+    guard = guard_from(ctx)
+    for prop in properties:
+        if prop.name not in ('xslt', 'textConverter') or not prop.doc_uuid:
+            continue
+        ref = {'type': prop.doc_type, 'uuid': prop.doc_uuid}
+        tags = await guard.tags(ref)
+        if MANAGED not in tags or build_tag(build) not in tags:
+            raise ToolError(f"{prop.element}.{prop.name}: {prop.doc_type} {prop.doc_uuid} is not a document of build "
+                            f"'{build}'. A new pipeline's translation is written for its own source: "
+                            f"build_translation_xslt from a mapping and create_xslt (mapping=...) in the build, and a text "
+                            f"converter with build_data_splitter and create_text_converter. Shared libraries are "
+                            f"xsl:imported or inherited from the template, not set on the child. If the user says this "
+                            f"existing document is the right one, call again with reuse_existing_docs=true.")
+
+
+async def _parser_reads_sample(ctx: Context, build: str, merged: dict[str, Any], replace_parser: str | None,
+                               allowed: bool) -> None:
+    """The template's parser (or the replacement) must read the format of the build's sample streams."""
+    if allowed:
+        return
+    from tools.plan import PARSER_FOR_FORMAT, sample_format
+    from tools.pipelines import chain_order
+    types = {e['id']: e['type'] for e in merged['elements']}
+    chain = chain_order(merged['elements'], merged['links'])
+    parser = replace_parser or next((types[e] for e in chain if types[e] in PARSERS), None)
+    if parser is None:
+        return
+    sample = await sample_format(ctx, build)
+    if sample is None:
+        return
+    readers = PARSER_FOR_FORMAT.get(sample['format'])
+    if readers and parser not in readers:
+        raise ToolError(f"The build's sample (stream {sample['stream_id']} of feed {sample['feed']}) is {sample['format']}, "
+                        f"which this template's {parser} cannot read; it needs {readers[0]} ({sample['suggested_parser']}). "
+                        f"Choose the template with that parser (find_pipeline_templates stage=translation), or "
+                        f"replace_parser for XML fragments. If the user insists on this template, call again with "
+                        f"accept_parser_mismatch=true.")
+
+
 async def create_pipeline(
         ctx: Context,
         build: Build,
@@ -128,12 +172,20 @@ async def create_pipeline(
         references: Annotated[list[PipelineReference], Field(
             description="Reference data the translation looks up (the mapping's lookup entries): the feed and its "
                         "loader pipeline, from find_reference_data.")] = [],
+        reuse_existing_docs: Annotated[bool, Field(
+            description="Only when the user says an XSLT or text converter that already exists outside this build is "
+                        "the right one for this pipeline. Otherwise the child's documents must be ones this build made.")] = False,
+        accept_parser_mismatch: Annotated[bool, Field(
+            description="Only when the user says to use this template although the build's sample is not in a format "
+                        "its parser reads.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
     Create a new pipeline as a child of a template, setting only what the child supplies. It keeps the
     template's structure and defaults (including any optional steps such as an empty decoration XSLT),
-    unless replace_parser swaps the parser. References attach reference data for stroom:lookup(). The user
+    unless replace_parser swaps the parser. References attach reference data for stroom:lookup(). It refuses
+    an XSLT or text converter from outside the build (a new source gets its own, from build_translation_xslt
+    and build_data_splitter) and a template whose parser cannot read the build's sample streams. The user
     confirms the template and name first.
     """
     stroom = gateway_from(ctx)
@@ -147,6 +199,8 @@ async def create_pipeline(
     unknown = sorted({p.element for p in properties} - elements)
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
+    await _own_documents(ctx, build, properties, reuse_existing_docs)
+    await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     refs = await reference_entries(stroom, merged, references)
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
                'sets': [f'{p.element}.{p.name}' for p in properties],
@@ -167,8 +221,9 @@ async def create_pipeline(
         data.setdefault('pipelineReferences', {})['add'] = refs
     doc['pipelineData'] = data
     doc = await stroom.put_doc(doc)
-    return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name'),
-            **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name'),
+                                        **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
 
 
 async def copy_pipeline(

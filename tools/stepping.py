@@ -262,6 +262,11 @@ async def step_sample(
     if len(records) >= cap:
         result['hint'] = f"Stopped at {cap} records; the sample has more."
     await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
+    if result['verdict'] == 'clean' and not draft_code:
+        from tools.plan import build_of, with_next
+        result = await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}), result)
+    elif result['verdict'] == 'clean':
+        result['hint'] = (result.get('hint') or '') + " Clean with draft code: save it (create_xslt with the mapping / update_xslt) and step the saved code once more."
     return result
 
 

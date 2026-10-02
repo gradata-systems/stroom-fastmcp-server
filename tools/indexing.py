@@ -213,7 +213,8 @@ async def create_index_doc(
         doc.update(clusterRef={'type': 'ElasticCluster', 'uuid': cluster_uuid, 'name': cluster.get('name')},
                    indexName=index_name, timeField=time_field)
     doc = await stroom.put_doc(doc)
-    return {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target})
 
 
 async def _events_available(ctx: Context, build: str, events_stream_ids: list[int]) -> None:
@@ -280,7 +281,8 @@ async def create_indexing_pipeline(
             if not cluster_uuid:
                 raise ToolError("The template leaves the cluster open: give cluster_uuid")
             props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
-    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id=confirmation_id)
+    result = await create_pipeline(ctx, build, name, template_uuid, props, confirmation_id=confirmation_id,
+                                   accept_parser_mismatch=True)   # an indexing pipeline reads Events, not the raw sample
     if result.get('uuid'):
         result['backend'] = shape['backend']
     return result

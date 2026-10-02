@@ -75,7 +75,8 @@ async def create_text_converter(
     ref = await guard_from(ctx).create('TextConverter', name, build)
     doc = await stroom.get_doc('TextConverter', ref['uuid'])
     doc.update(converterType=converter_type, data=code)
-    return _summary(await stroom.put_doc(doc))
+    from tools.plan import with_next
+    return await with_next(ctx, build, _summary(await stroom.put_doc(doc)))
 
 
 async def update_text_converter(
@@ -145,7 +146,8 @@ async def create_xslt(
     doc = await stroom.get_doc('XSLT', ref['uuid'])
     doc['data'] = code
     extra = await _described(ctx, doc, code, mapping, index_plan)
-    return {**_summary(await stroom.put_doc(doc)), **extra}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {**_summary(await stroom.put_doc(doc)), **extra})
 
 
 async def update_xslt(

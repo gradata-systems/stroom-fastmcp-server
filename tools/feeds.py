@@ -67,8 +67,9 @@ async def create_feed(
     doc = await stroom.get_doc('Feed', ref['uuid'])
     doc.update(encoding=encoding, streamType=stream_type, description=description)
     doc = await stroom.put_doc(doc)
-    return {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'], 'stream_type': doc.get('streamType'),
-            'encoding': doc.get('encoding')}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'],
+                                        'stream_type': doc.get('streamType'), 'encoding': doc.get('encoding')})
 
 
 async def upload_sample(
@@ -105,8 +106,11 @@ async def upload_sample(
         rows = (await stroom.find_meta(terms, 5)).get('values') or []
         fresh = [r['meta'] for r in rows if (r['meta'].get('createMs') or 0) >= started]
         if fresh:
-            return {'feed': feed, 'receipt_id': response.text.strip(), 'stream_id': fresh[0]['id'],
-                    'bytes': len(sample.encode('utf-8'))}
+            from tools.plan import build_of, with_next
+            return await with_next(ctx, await build_of(ctx, match), {
+                'feed': feed, 'receipt_id': response.text.strip(), 'stream_id': fresh[0]['id'],
+                'bytes': len(sample.encode('utf-8')),
+                'hint': "One stream per sample file: upload the next file, or go on with the plan (next)."})
         await asyncio.sleep(0.5)
     return {'feed': feed, 'receipt_id': response.text.strip(), 'stream_id': None,
             'hint': "Stroom accepted the data but the stream is not visible yet; check find_streams shortly."}
@@ -161,8 +165,9 @@ async def record_source_notes(
         return await stroom.put_doc(doc)
 
     doc = await guard_from(ctx).create_filled('Documentation', f'{source} source notes', build, write)
-    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'fields': len(fields),
-            'events': len(events)}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'fields': len(fields),
+            'events': len(events)})
 
 
 ALL_TOOLS = [profile_sample, create_feed, upload_sample, record_source_notes]
