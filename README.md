@@ -54,7 +54,11 @@ that issues JWT access tokens works; Keycloak is the worked example.
   `mcp-generated`. Only `mcp-managed` docs can be changed; promotion moves them into place and removes
   `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
 - **Checked before promotion.** `list_build` and the promotion approval show what a build's pipelines still lack:
-  a clean step of their current code (recorded as `mcp-stepped-*` tags on the pipeline) and documentation.
+  a clean step of their current code (recorded as `mcp-stepped-*` tags on the pipeline), documentation whose Field
+  mapping matches the current mapping and XSLT, and an XSLT that is still what its mapping generates.
+- **Documented from the mapping.** The mapping an XSLT was generated from is kept with it; `write_documentation`
+  generates the Field mapping section from it over the sample streams (sources and sampled values, exact per-rule
+  counts), so the documentation cannot drift from the code.
 - **Standing instructions.** A Documentation doc named `AGENTS` in a Stroom folder holds instructions for building
   pipelines there (and below), like an AGENTS.md; see `stroom://guide/agent-instructions`. `get_instructions` returns
   them, and `start_build` and `build_translation_xslt` hand them back too, so a model that skips the step still sees

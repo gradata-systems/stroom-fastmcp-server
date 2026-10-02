@@ -1,4 +1,5 @@
 """Tools for builds: the workspace folder, Documentation docs, and promotion out of the workspace."""
+import json
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -10,7 +11,13 @@ from pydantic import Field
 from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from
 from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
-from tools.stepping import stepped_clean, stepped_tags
+from tools.pipelines import translation_docs
+from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags
+from tools.streams import summarise_events
+from utils.fielddoc import field_mapping_markdown, index_field_mapping_markdown, sampled_events
+from utils.fieldplan import FieldPlan
+from utils.mappingstore import DOC_MARK, digest, doc_digest, normalise_xslt, read_mapping, replace_section
+from utils.xsltgen import TranslationMapping, generate
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, gateway_from, set_body_text
@@ -44,10 +51,28 @@ async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
     return sorted(docs, key=lambda d: (d['type'], d['name'], d['uuid']))
 
 
+async def kept_mapping(ctx: Context, pipeline_uuid: str) -> dict[str, Any] | None:
+    """The mapping or index plan kept with the pipeline's own XSLT: {'kind', 'payload', 'element', 'xslt'}."""
+    stroom = gateway_from(ctx)
+    for entry in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid)):
+        if entry['inherited_from_template'] or entry['doc']['type'] != 'XSLT':
+            continue
+        xslt = await stroom.get_doc('XSLT', entry['doc']['uuid'])
+        found = read_mapping(xslt.get('description'))
+        if found:
+            return {'kind': found[0], 'payload': found[1], 'element': entry['element'], 'xslt': xslt}
+    return None
+
+
+def mapping_digest(kept: dict[str, Any]) -> str:
+    return digest(json.dumps(kept['payload'], sort_keys=True), normalise_xslt(kept['xslt'].get('data') or ''))
+
+
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
     """What a build's pipelines still lack before promotion: a clean step of their current code (recorded as
-    mcp-stepped-* tags on the pipeline), and (for new pipelines) a Documentation doc."""
-    documented = {d['name'] for d in docs if d['type'] == 'Documentation'}
+    mcp-stepped-* tags on the pipeline), a Documentation doc (for new pipelines), a Field mapping section that
+    matches the current mapping and XSLT, and an XSLT that is what its mapping generates."""
+    documented = {d['name']: d for d in docs if d['type'] == 'Documentation'}
     problems = []
     for doc in docs:
         if doc['type'] != 'Pipeline':
@@ -57,7 +82,65 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
                             "recorded")
         if not doc['working_copy_of'] and doc['name'] not in documented:
             problems.append(f"Pipeline '{doc['name']}': no documentation (write_documentation)")
+        kept = await kept_mapping(ctx, doc['uuid'])
+        if not kept:
+            continue
+        if kept['kind'] == 'translation':
+            drift = await _drift(ctx, kept)
+            if drift:
+                problems.append(f"Pipeline '{doc['name']}': {drift}")
+        if doc['name'] in documented:
+            body = body_text(await gateway_from(ctx).get_doc('Documentation', documented[doc['name']]['uuid']))
+            if doc_digest(body) != mapping_digest(kept):
+                problems.append(f"Pipeline '{doc['name']}': the documentation's Field mapping predates the current mapping "
+                                f"or XSLT (write_documentation again)")
     return problems
+
+
+async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
+    """Whether the XSLT still is what its mapping generates."""
+    from tools.generation import event_schema
+    try:
+        version = kept['payload'].get('schema_version') or gateway_from(ctx).settings.event_logging_version
+        regenerated = generate(TranslationMapping.model_validate(kept['payload']['mapping']), await event_schema(ctx, version), version)
+    except Exception as e:
+        return f"the mapping kept with its XSLT no longer generates ({e})"
+    if not regenerated['ok']:
+        return f"the mapping kept with its XSLT no longer generates: {regenerated['problems'][:2]}"
+    if normalise_xslt(regenerated['xslt']) != normalise_xslt(kept['xslt'].get('data') or ''):
+        return ("its XSLT differs from what its mapping generates (edited by hand): change the mapping and update_xslt "
+                "with mapping=..., or accept that the documentation says so")
+    return None
+
+
+async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: dict[str, Any],
+                                stream_ids: list[int]) -> str:
+    """The Field mapping section generated from the kept mapping (stepped over the sample streams, with each
+    Event marked by its rule) or index plan (with the Events' path population)."""
+    stroom = gateway_from(ctx)
+    if kept['kind'] == 'translation':
+        from tools.generation import event_schema
+        version = kept['payload'].get('schema_version') or stroom.settings.event_logging_version
+        mapping = TranslationMapping.model_validate(kept['payload']['mapping'])
+        schema = await event_schema(ctx, version)
+        marked = generate(mapping, schema, version, mark_rules=True)
+        if not marked['ok']:
+            raise ToolError(f"The mapping kept with the XSLT no longer generates: {marked['problems'][:3]}")
+        loaded = await _Pipeline.load(stroom, pipeline['uuid'])
+        outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], {kept['element']: marked['xslt']}, 200)
+        events = sampled_events(list(outputs.values()))
+        section = field_mapping_markdown(mapping, schema, events)
+        if not events:
+            section += (f"\nThe {len(outputs)} sampled records produced no events: check the stream ids are the "
+                        f"pipeline's input.\n")
+        drift = await _drift(ctx, kept)
+        if drift:
+            section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
+    else:
+        plan = FieldPlan.model_validate(kept['payload'])
+        population = (await summarise_events(ctx, stream_ids, 200))['path_population'] if stream_ids else None
+        section = index_field_mapping_markdown(plan, population)
+    return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
 
 
 async def list_build(ctx: Context, build: Build) -> dict[str, Any]:
@@ -79,16 +162,38 @@ async def write_documentation(
                                                    "field_mapping from build_translation_xslt as it is. The change log "
                                                    "is added by the tool.")],
         change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")],
+        stream_ids: Annotated[list[int], ONE_OR_MORE, Field(
+            description="The pipeline's sample streams (raw streams for an events pipeline, Events streams for an "
+                        "indexing pipeline): the Field mapping section is generated from the mapping kept with the XSLT, "
+                        "stepped over them. Required when the XSLT keeps a mapping.")] = [],
 ) -> dict[str, Any]:
     """
-    Create or update the Documentation doc for a pipeline in the build (same name as the pipeline). An update
-    replaces the body and keeps the change log, adding a line. Promoted with the pipeline.
+    Create or update the Documentation doc for a pipeline in the build (same name as the pipeline). The Field
+    mapping section is not taken from the markdown: it is generated from the mapping (or index plan) kept with the
+    pipeline's XSLT, stepped over stream_ids, and put in place of whatever the markdown has there, so it always
+    agrees with the XSLT. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
+    section. An update replaces the body and keeps the change log, adding a line. Promoted with the pipeline.
     """
     body = markdown.split('## Change log')[0].rstrip()
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
     stroom = gateway_from(ctx)
     pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
+    kept = await kept_mapping(ctx, pipeline_uuid)
+    generated_section = None
+    if kept:
+        if kept['kind'] == 'translation' and not stream_ids:
+            raise ToolError("Give stream_ids (the pipeline's sample raw streams): the Field mapping section is generated "
+                            "from the mapping kept with the XSLT by stepping them")
+        generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids)
+        body = replace_section(body, 'Field mapping', generated_section)
+    elif '## Field mapping' not in body:
+        from tools.templates import _shape
+        if (await _shape(stroom, pipeline_uuid))['stage'] == 'translation':
+            raise ToolError("An events pipeline's documentation needs a '## Field mapping' section. Its XSLT keeps no "
+                            "mapping (it was not saved with create_xslt mapping=...), so write the section from "
+                            "describe_translation and a stepped sample, or save the XSLT again with its mapping and the "
+                            "section is generated here")
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +209,8 @@ async def write_documentation(
         doc = await write(existing)
     else:
         doc = await guard_from(ctx).create_filled('Documentation', pipeline['name'], build, write)
-    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing)}
+    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
+            **({'field_mapping': generated_section} if generated_section else {})}
 
 
 async def promote_build(

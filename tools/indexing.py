@@ -19,6 +19,7 @@ from tools.stepping import _outputs, _Pipeline
 from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
+from utils.fielddoc import index_field_mapping_markdown
 from utils.fieldplan import Backend, FieldPlan, PlannedField
 from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from
@@ -114,7 +115,9 @@ async def draft_index_mapping(
     unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
     return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
-            'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again."}
+            'field_mapping': index_field_mapping_markdown(plan, populated),
+            'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
+                    "XSLT with create_xslt index_plan=plan, so write_documentation generates the Field mapping section."}
 
 
 async def set_index_fields(

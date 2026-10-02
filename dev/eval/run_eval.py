@@ -38,6 +38,18 @@ RESULTS = Path(__file__).parent / 'results'
 EVT = 'event-logging:3'
 DETAIL_META = {'TypeId', 'Description', 'Classification', 'Purpose'}
 PASS_RATIO, MAX_HINTS = 0.8, 1
+DOC_SKELETON = """## Purpose and data
+
+Evaluation case.
+
+## Processing
+
+Child of the template.
+
+## Output
+
+See Field mapping.
+"""
 
 
 def load_cases(only: list[str] | None = None) -> list[dict[str, Any]]:
@@ -216,7 +228,10 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             tc = await translation.create_text_converter(ctx, build, feed, reference.get('converter_type', 'DATA_SPLITTER'), code)
             parser = pipeline_writes.element_id(replace_parser) if replace_parser else 'dsParser'
             props.append(PropertyValue(element=parser, name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))
-        x = await translation.create_xslt(ctx, build, f'{feed}-Events', generated['xslt'])
+        x = await translation.create_xslt(ctx, build, f'{feed}-Events', generated['xslt'],
+                                          mapping=TranslationMapping.model_validate(reference['mapping']))
+        if x.get('matches_mapping') is False:
+            score.problems.append('the saved XSLT is not what its mapping generates')
         props.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT'))
         if case['template'] == 'Event Data (JSON)':
             # JSON lines need the parser's root map round the top-level objects; an array reads better without it.
@@ -232,6 +247,14 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         gate = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], raws)
         events = [e for s in gate['streams'] for e in s['events']]
         await check_output(call, score, case, events)
+        # The documentation: its Field mapping section is generated from the kept mapping over the sample streams.
+        from tools import builds
+        written = await builds.write_documentation(ctx, build, pipeline['uuid'], DOC_SKELETON, 'Created', stream_ids=raws)
+        section = written.get('field_mapping') or ''
+        if '### Event types' not in section or 'not written by a rule' in section:
+            score.problems.append(f"documentation: field mapping section incomplete ({section[:120]!r})")
+        if any(p for p in await builds.build_checks(ctx, await builds._build_docs(ctx, build)) if 'Field mapping' in p or 'differs' in p):
+            score.problems.append('documentation: build checks report a stale field mapping or a hand-edited XSLT')
         if not score.stage1:
             return score
 
@@ -240,7 +263,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         index = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='lucene', name=f'{feed}-INDEX',
                                 time_field=plan.time_field)
         await indexing.set_index_fields(ctx, index['uuid'], plan)
-        ixslt = await translation.create_xslt(ctx, build, f'{feed}-INDEX-XSLT', draft['xslt'])
+        ixslt = await translation.create_xslt(ctx, build, f'{feed}-INDEX-XSLT', draft['xslt'], index_plan=plan)
         lucene = next(c for c in (await templates.find_pipeline_templates(ctx, 'indexing'))['candidates']
                       if c['backend'] == 'lucene')
         ipipe = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',
@@ -252,6 +275,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
                                                             ['StreamId', 'EventId', plan.time_field])
         searched = await indexing.run_test_searches(ctx, dash['uuid'], events, score.events)
         score.indexed = igate['gate'] == 'pass' and searched['passed']
+        idoc = await builds.write_documentation(ctx, build, ipipe['uuid'], DOC_SKELETON, 'Created', stream_ids=events)
+        if '| Index field |' not in (idoc.get('field_mapping') or ''):
+            score.problems.append('documentation: no index field mapping generated')
         if not score.indexed:
             score.problems.append(f"indexing: gate {igate['gate']}, searches {[c for c in searched['checks'] if not c['pass']]}")
     except Exception as e:  # a case failing must not stop the evaluation

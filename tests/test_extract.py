@@ -2,7 +2,8 @@
 from lxml import etree
 
 from tests.test_xsltgen import SCHEMA, VALIDATOR, transform
-from utils.xsltgen import TranslationMapping, field_mapping_markdown, generate
+from utils.fielddoc import field_mapping_markdown
+from utils.xsltgen import TranslationMapping, generate
 
 NS = {'e': 'event-logging:3'}
 # What the JSONParser emits for three JSON lines with addRootObject (its default): one map round them all.

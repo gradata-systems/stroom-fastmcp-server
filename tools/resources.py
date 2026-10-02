@@ -127,7 +127,8 @@ Stage 1, events:
    json_layout from profile_sample for JSON. Fix reported problems in the mapping and regenerate; hand-edit only
    what a mapping cannot express. step_sample with draft_code over every sample stream until the verdict is clean;
    step_pipeline on single records to debug.
-5. create_text_converter (if any) / create_xslt, create_pipeline from the template (with the pipeline_properties
+5. create_text_converter (if any) / create_xslt with mapping=the mapping (kept with the XSLT, so the documentation
+   is generated from it), create_pipeline from the template (with the pipeline_properties
    build_translation_xslt returned, e.g. jsonParser.addRootObject, and references for any lookup maps), step_sample
    again over every sample stream.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
@@ -138,7 +139,7 @@ Stage 2, indexing:
    ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
 8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
    (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping; set_index_fields (Lucene); create_xslt with the drafted indexing XSLT;
+9. draft_index_mapping; set_index_fields (Lucene); create_xslt with the drafted indexing XSLT and index_plan=plan;
    create_indexing_pipeline; step_sample on the Events streams.
 10. Elasticsearch: propose_index_template and show the user its dev_tools request. If they send back a changed
     template, check_index_template; if it is not compatible, show the pipeline changes it needs and ask whether to
@@ -149,7 +150,9 @@ Stage 2, indexing:
     once they have enabled it, continue. Then wait_for_processing expect_events=false, create_verification_dashboard
     and run_test_searches.
 
-Finish: write_documentation for both pipelines, then promote_build to the folders sibling sources use.
+Finish: write_documentation for both pipelines, with stream_ids (the sample raw streams for the events pipeline, its
+Events streams for the indexing one): the Field mapping section is generated from the kept mapping. Then
+promote_build to the folders sibling sources use.
 
 {_RULES}{_docs(source_docs)}
 

@@ -28,6 +28,8 @@ XSL = 'http://www.w3.org/1999/XSL/Transform'
 XSI = 'http://www.w3.org/2001/XMLSchema-instance'
 XS = 'http://www.w3.org/2001/XMLSchema'
 EVT = 'event-logging:3'
+# Comment the documentation run puts in each Event, naming the rule that wrote it; never in saved XSLT.
+RULE_MARK = 'stroom-mcp rule: '
 FN = 'http://www.w3.org/2005/xpath-functions'
 MAP_NS = 'http://www.w3.org/2005/xpath-functions/map'
 INPUT_NAMESPACE = {'data_splitter': 'records:2', 'json': 'http://www.w3.org/2013/XSL/json'}
@@ -297,8 +299,9 @@ class _Node:
 
 
 class _Generator:
-    def __init__(self, mapping: TranslationMapping, schema: EventSchema):
+    def __init__(self, mapping: TranslationMapping, schema: EventSchema, mark_rules: bool = False):
         self.m, self.schema = mapping, schema
+        self.mark_rules = mark_rules
         self.problems: list[str] = []
         self.warnings: list[str] = []
         self._names: dict[str, str] = {}          # selector -> variable name, the same in every template
@@ -946,7 +949,10 @@ class _Generator:
                     holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
                     summary.append({'event': rule.name, 'when': when, 'dropped': True})
                 else:
-                    self.emit(etree.SubElement(holder, f'{{{EVT}}}Event'), root)
+                    event = etree.SubElement(holder, f'{{{EVT}}}Event')
+                    if self.mark_rules:
+                        event.append(etree.Comment(f'{RULE_MARK}{rule.name}'))
+                    self.emit(event, root)
                     summary.append({'event': rule.name, 'when': when,
                                     'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
                                                       for e in m.common + rule.fields})})
@@ -991,267 +997,12 @@ class _Generator:
         return text, summary
 
 
-def generate(mapping: TranslationMapping, schema: EventSchema, version: str) -> dict:
-    gen = _Generator(mapping, schema)
+def generate(mapping: TranslationMapping, schema: EventSchema, version: str, mark_rules: bool = False) -> dict:
+    """The XSLT for a mapping. mark_rules puts a comment naming the rule in each Event, for the documentation run
+    (stepping with draft code, nothing saved): the Field mapping tables then know exactly which rule wrote what."""
+    gen = _Generator(mapping, schema, mark_rules)
     xslt, summary = gen.stylesheet(version)
     return {'ok': not gen.problems, 'problems': gen.problems, 'warnings': gen.warnings, 'events': summary,
             'xslt': None if gen.problems else xslt, 'reference_maps': sorted(gen.reference_maps),
             'dictionaries': sorted({name for name, _ in gen._dicts}),
             **({'items': mapping.for_each} if mapping.for_each else {})}
-
-
-# --- the Field mapping section of the pipeline's documentation ---
-
-def _cell(text: str) -> str:
-    return text.replace('|', '\\|').replace('\n', '<br>')
-
-
-def _row(*cells: str) -> str:
-    return '| ' + ' | '.join(_cell(c) for c in cells) + ' |'
-
-
-_DATA_SPLITTER_FIELD = re.compile(r"(?:data\[@name='([^']*)'\]/)+@value")
-_JSON_FIELD = re.compile(r"\*\[@key='[^']*'\](?:/\*\[@key='[^']*'\])*")
-
-
-def readable(expr: str) -> str:
-    """An xpath with its field selectors written as the field names, for a reader:
-    normalize-space(data[@name='username']/@value) -> normalize-space(username)."""
-    expr = _DATA_SPLITTER_FIELD.sub(lambda m: '/'.join(re.findall(r"data\[@name='([^']*)'\]", m.group(0))), expr)
-    return _JSON_FIELD.sub(lambda m: '.'.join(re.findall(r"@key='([^']*)'", m.group(0))), expr)
-
-
-def _value(entry: FieldMapping) -> str:
-    """What an element is written from, for a reader: a constant, a field, a computed value, and how it's
-    converted."""
-    if entry.value is not None:
-        return f'"{entry.value}"'
-    if entry.lookup:
-        key = entry.lookup.field or readable(entry.lookup.xpath)
-        text = f"lookup `{entry.lookup.map}` by `{key}`" + (f" (`{entry.lookup.path}`)" if entry.lookup.path else '')
-    elif entry.any_of:
-        text = 'first of ' + ', '.join(f'`{f}`' for f in entry.any_of)
-    else:
-        text = f'`{entry.field}`' if entry.field is not None else f'`{readable(entry.xpath)}`'
-    if entry.dictionary:
-        text += f" via dictionary `{entry.dictionary}`"
-    if entry.transform:
-        text += f" ({entry.transform})"
-    if entry.repeat:
-        text += ", one per value"
-    if entry.scope == 'record':
-        text += " (of the record)"
-    if entry.time_format:
-        text += f" ({entry.time_format}{', ' + entry.timezone if entry.timezone else ''})"
-    elif entry.timezone:
-        text += f' ({entry.timezone})'
-    if entry.map:
-        text += ': ' + ', '.join(f'{k} → {v}' for k, v in entry.map.items())
-        if entry.default is not None:
-            text += f'; otherwise {entry.default}'
-    elif entry.default is not None:
-        text += f', or "{entry.default}" when empty'
-    return text
-
-
-def _condition(c: Condition) -> str:
-    src = (f'`{c.field}`' if c.field is not None else f'`{readable(c.xpath)}`') + (' (of the record)' if c.scope == 'record' else '')
-    if c.equals is not None:
-        return f'{src} = {c.equals}'
-    if c.one_of is not None:
-        return f"{src} in {', '.join(c.one_of)}"
-    if c.matches is not None:
-        return f'{src} matches `{c.matches}`'
-    if c.in_dictionary is not None:
-        return f'{src} in dictionary `{c.in_dictionary}`'
-    return f'{src} {"present" if c.present else "empty"}'
-
-
-def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
-                          observed: list[etree._Element] | None = None) -> str:
-    """The Field mapping section of a pipeline's documentation: a table of the EventSource (and EventTime)
-    elements every event carries, with the schema's description of each, then one row per kind of event with
-    the source records it covers, its TypeId and Description, and each EventDetail element's XPath and value.
-    With observed (the events a sample produced), TypeId and Description are the values written, one row per
-    rule and TypeId; without, they are what the mapping says."""
-    def key(entry: FieldMapping) -> tuple:
-        try:
-            order = tuple(c.index for c in schema.resolve(entry.path.strip('/')))
-        except ValueError:
-            order = (999,)
-        return order, entry.data_name or ''
-
-    def xpath(entry: FieldMapping, below: str = '') -> str:
-        path = entry.path.strip('/').removeprefix(below)
-        return path + (f"[@Name='{entry.data_name}']/@Value" if entry.data_name else '')
-
-    rules = [r for r in mapping.events if not r.drop]
-    effective = {}
-    for rule in rules:
-        fields = {(e.path.strip('/'), e.data_name): e for e in mapping.common}
-        fields.update({(e.path.strip('/'), e.data_name): e for e in rule.fields})
-        effective[rule.name] = fields
-
-    attributed = _attribute(rules, effective, observed) if observed is not None else None
-    # EventSource and EventTime: one row per element. Sampled, the values the events got; from the mapping, how
-    # each is written. Either way, when not every kind of event has an element, which kinds do.
-    rows: dict[tuple, dict[str, list[str]]] = {}
-    entries: dict[tuple, FieldMapping] = {}
-    for rule in rules:
-        for k, entry in effective[rule.name].items():
-            if k[0].split('/')[0] in ('EventSource', 'EventTime'):
-                rows.setdefault(k, {}).setdefault(_value(entry), []).append(rule.name)
-                entries.setdefault(k, entry)
-    seen: dict[tuple, dict[str, list[str]]] = {}      # element -> value -> kinds of event, in sample order
-    for rule, event in attributed or []:
-        for k, value in _leaves(event, ('EventTime', 'EventSource')).items():
-            kinds = seen.setdefault(k, {}).setdefault(value, [])
-            if rule not in kinds:
-                kinds.append(rule)
-    sampled_kinds = list(dict.fromkeys(rule for rule, _ in attributed or []))
-    lines = []
-    if mapping.for_each:
-        lines += [f'Each record holds several events: one per `{mapping.for_each}` item. Values marked "of the record" '
-                  f'come from the record round the items.', '']
-    if mapping.drop_when:
-        lines += ['### Left untranslated', '']
-        lines += [f"- {' and '.join(_condition(c) for c in d.when)}: {d.reason}" for d in mapping.drop_when]
-        lines.append('')
-    if mapping.extract:
-        lines += ['### Extracted fields', '']
-        for ex in mapping.extract:
-            names = ', '.join(f'`{n}`' for n in ex.names if n)
-            lines.append(f"- {names}: parsed from `{ex.field or readable(ex.xpath)}` with `{ex.regex}`")
-        lines.append('')
-    lines += ['### EventSource', '']
-    if attributed is not None:
-        lines += [f'Values are those written for the {len(observed)} events of the sample. Where only some kinds of '
-                  'event have an element, they are named.', '']
-    else:
-        lines += ['Common to every kind of event; where only some kinds have an element, they are named.', '']
-    lines += ['| XPath | Description | Value |', '| --- | --- | --- |']
-    for k in sorted(rows, key=lambda k: key(entries[k])):
-        if attributed is not None:
-            values = seen.get(k) or {}
-            kinds = list(dict.fromkeys(r for rs in values.values() for r in rs))
-            value = _shown(list(values), quote=True) or '(not in the sample)'
-            if values and len(kinds) < len(sampled_kinds):
-                value += f"\n({', '.join(kinds)})"
-        elif len(rows[k]) == 1 and len(next(iter(rows[k].values()))) == len(rules):
-            value = next(iter(rows[k]))
-        else:
-            value = '\n'.join(f"{v} ({', '.join(names)})" for v, names in rows[k].items())
-        try:
-            description = schema.describe(schema.resolve(k[0]))
-        except ValueError:
-            description = ''
-        lines.append(_row(f'`{xpath(entries[k])}`', description, value))
-
-    sampled = _by_rule_and_type_id(attributed) if attributed is not None else None
-    lines += ['', '### Event types', '']
-    if sampled is not None:
-        lines += [f'Values are those written for the {len(observed)} events of the sample: EventDetail shows one '
-                  'event of each TypeId.', '']
-    lines += ['| Source | TypeId | Description | EventDetail |', '| --- | --- | --- | --- |']
-    for rule in mapping.events:
-        source = f'**{rule.name}**\n' + (' and '.join(_condition(c) for c in rule.when) or 'any other record')
-        if rule.drop:
-            lines.append(_row(source, '', 'Left untranslated on purpose', ''))
-            continue
-        fields = effective[rule.name]
-        detail = sorted((e for (path, _), e in fields.items() if path.startswith('EventDetail/')
-                         and path not in ('EventDetail/TypeId', 'EventDetail/Description')), key=key)
-        # Without a sample, the mapping: a constant in quotes, an input in braces so it doesn't read as text.
-        mapped = '\n'.join(_assignment(xpath(e, 'EventDetail/'), _value(e).replace('`', '') if e.value is None
-                                       else e.value, braces=e.value is None) for e in detail)
-        if sampled is None:
-            type_id = fields.get(('EventDetail/TypeId', None))
-            description = fields.get(('EventDetail/Description', None))
-            lines.append(_row(source, _value(type_id) if type_id else '', _value(description) if description else '',
-                              mapped))
-            continue
-        if not sampled.get(rule.name):
-            lines.append(_row(source, '(not in the sample)', '', mapped))
-        for type_id, found in (sampled.get(rule.name) or {}).items():
-            example = '\n'.join(_assignment(path.removeprefix('EventDetail/') + (f"[@Name='{name}']/@Value" if name else ''),
-                                            value) for (path, name), value in found['example'].items()
-                                if path not in ('EventDetail/TypeId', 'EventDetail/Description'))
-            lines.append(_row(source, type_id, _shown(found['descriptions']), example))
-    return '\n'.join(lines) + '\n'
-
-
-def _assignment(path: str, value: str, braces: bool = False) -> str:
-    """One EventDetail element as `XPath="value"`, in code so it reads as one unit."""
-    value = value.replace('`', "'")
-    return f'`{path}="{{{value}}}"`' if braces else f'`{path}="{value}"`'
-
-
-def _leaves(event: etree._Element, sections: tuple[str, ...] = ('EventDetail',)) -> dict[tuple[str, str | None], str]:
-    """An output event's values in the given top-level sections, keyed as the mapping keys them: (path, None)
-    for an element, (path to Data, Name) for a Data element."""
-    found: dict[tuple[str, str | None], str] = {}
-
-    def walk(node: etree._Element, path: str) -> None:
-        name = etree.QName(node).localname
-        here = f'{path}/{name}'
-        children = [c for c in node if isinstance(c.tag, str)]
-        if name == 'Data' and node.get('Name') is not None:
-            found[(here, node.get('Name'))] = node.get('Value') or ''
-        elif not children:
-            found[(here, None)] = (node.text or '').strip()
-        for child in children:
-            walk(child, here)
-    for section in (c for c in event if isinstance(c.tag, str) and etree.QName(c).localname in sections):
-        for child in (c for c in section if isinstance(c.tag, str)):
-            walk(child, etree.QName(section).localname)
-    return found
-
-
-def _attribute(rules: list[EventRule], effective: dict[str, dict], observed: list[etree._Element]
-               ) -> list[tuple[str, etree._Element]]:
-    """(rule, event) for each sampled event. An event belongs to the first rule (in the mapping's order, as the
-    XSLT tries them) whose EventDetail elements include all the event's and whose constants agree with it, e.g.
-    Authenticate/Action Logon or Logoff. Events no rule explains are left out."""
-    out = []
-    for event in observed:
-        leaves = _leaves(event)
-        for rule in rules:
-            fields = effective[rule.name]
-            if set(leaves) <= set(fields) and not any(
-                    e.value is not None and k in leaves and leaves[k] != e.value for k, e in fields.items()):
-                out.append((rule.name, event))
-                break
-    return out
-
-
-def _by_rule_and_type_id(attributed: list[tuple[str, etree._Element]]) -> dict[str, dict[str, dict]]:
-    """rule -> TypeId -> {'descriptions': those seen with it, in order of first appearance, 'example': the
-    EventDetail values of the first such event}."""
-    out: dict[str, dict[str, dict]] = {}
-    for rule, event in attributed:
-        leaves = _leaves(event)
-        seen = out.setdefault(rule, {}).setdefault(leaves.get(('EventDetail/TypeId', None), ''),
-                                                   {'descriptions': [], 'example': leaves})
-        description = leaves.get(('EventDetail/Description', None), '')
-        if description and description not in seen['descriptions']:
-            seen['descriptions'].append(description)
-    return out
-
-
-def _shown(values: list[str], quote: bool = False) -> str:
-    """Up to DOC_VALUES_SHOWN values, a line each, then how many more."""
-    shown = [f'"{v}"' if quote else v for v in values[:DOC_VALUES_SHOWN]]
-    more = len(values) - DOC_VALUES_SHOWN
-    return '\n'.join(shown + ([f'… and {more} more'] if more > 0 else []))
-
-
-def sampled_events(outputs: list[str]) -> list[etree._Element]:
-    """The Event elements in translation outputs (one per record when stepping)."""
-    events = []
-    for xml in outputs:
-        try:
-            root = etree.fromstring(xml.encode('utf-8'))
-        except (etree.XMLSyntaxError, ValueError):
-            continue
-        events += [e for e in root.iter() if isinstance(e.tag, str) and etree.QName(e).localname == 'Event']
-    return events

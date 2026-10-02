@@ -9,7 +9,8 @@ from tests.test_xsltgen import SCHEMA, VALIDATOR, transform
 from utils.fieldplan import FieldPlan, PlannedField
 from utils.localcheck import check_mapping, sample_records
 from utils.refgen import ReferenceMapping, generate_reference
-from utils.xsltgen import TranslationMapping, field_mapping_markdown, generate
+from utils.fielddoc import field_mapping_markdown
+from utils.xsltgen import TranslationMapping, generate
 
 NS = {'e': 'event-logging:3'}
 CASE = yaml.safe_load((Path(__file__).resolve().parents[1] / 'dev' / 'eval' / 'cases' / '16_json_batches_items.yaml')

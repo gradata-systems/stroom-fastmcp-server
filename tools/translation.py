@@ -9,7 +9,10 @@ from pydantic import Field
 
 from security.guard import guard_from
 from tools.validation import check_xslt
+from utils.fieldplan import FieldPlan
+from utils.mappingstore import normalise_xslt, with_mapping
 from utils.stroom import gateway_from
+from utils.xsltgen import TranslationMapping
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed, e.g. 'keycloak-v1.3'.")]
 Version = Annotated[str | None, Field(
@@ -90,19 +93,59 @@ async def update_text_converter(
     return _summary(await stroom.put_doc(doc, version))
 
 
+Mapping = Annotated[TranslationMapping | None, Field(
+    description="The mapping build_translation_xslt generated this code from. Kept with the XSLT (in its description), "
+                "so write_documentation regenerates the Field mapping section from it and later changes start from the "
+                "mapping; list_build reports an XSLT edited by hand since.")]
+IndexPlan = Annotated[FieldPlan | None, Field(
+    description="For an indexing XSLT: the field plan draft_index_mapping drafted it from, kept with the XSLT for the "
+                "documentation.")]
+
+
+async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: TranslationMapping | None,
+                     index_plan: FieldPlan | None) -> dict[str, Any]:
+    """The doc with its description carrying the mapping or plan the code came from, and whether the code is
+    what the mapping generates (a hand-edited XSLT is kept, but reported)."""
+    extra: dict[str, Any] = {}
+    if mapping is not None:
+        from tools.generation import event_schema
+        version = gateway_from(ctx).settings.event_logging_version
+        payload = {'schema_version': version, 'mapping': mapping.model_dump(exclude_none=True, exclude_defaults=True)}
+        doc['description'] = with_mapping(doc.get('description'), 'translation', payload)
+        try:
+            from utils.xsltgen import generate
+            regenerated = generate(mapping, await event_schema(ctx, version), version)['xslt']
+            extra['matches_mapping'] = normalise_xslt(regenerated or '') == normalise_xslt(code)
+            if not extra['matches_mapping']:
+                extra['warning'] = ("The code differs from what the mapping generates: the documentation will say the "
+                                    "XSLT was edited by hand. Prefer changing the mapping and regenerating.")
+        except Exception:   # the schema may be unavailable here; the comparison is advice, not a gate
+            pass
+    elif index_plan is not None:
+        doc['description'] = with_mapping(doc.get('description'), 'index', index_plan.model_dump())
+    return extra
+
+
 async def create_xslt(
         ctx: Context,
         build: Build,
         name: Annotated[str, Field(description="Document name, following the environment's naming.")],
         code: Annotated[str, Field(description="The complete XSLT.")],
+        mapping: Mapping = None,
+        index_plan: IndexPlan = None,
 ) -> dict[str, Any]:
-    """Create an XSLT in the build folder. It is checked with check_xslt first and not saved if that fails."""
+    """
+    Create an XSLT in the build folder. It is checked with check_xslt first and not saved if that fails. Give the
+    mapping (or index plan) it was generated from: it is kept with the XSLT, and the pipeline's documentation
+    is generated from it.
+    """
     await _checked(ctx, code)
     stroom = gateway_from(ctx)
     ref = await guard_from(ctx).create('XSLT', name, build)
     doc = await stroom.get_doc('XSLT', ref['uuid'])
     doc['data'] = code
-    return _summary(await stroom.put_doc(doc))
+    extra = await _described(ctx, doc, code, mapping, index_plan)
+    return {**_summary(await stroom.put_doc(doc)), **extra}
 
 
 async def update_xslt(
@@ -110,17 +153,21 @@ async def update_xslt(
         uuid: Annotated[str, Field(description="XSLT UUID.")],
         code: Annotated[str, Field(description="The complete new XSLT.")],
         version: Version = None,
+        mapping: Mapping = None,
+        index_plan: IndexPlan = None,
 ) -> dict[str, Any]:
     """
     Replace an XSLT's code, after check_xslt passes. Only XSLTs this server created (including working
-    copies of production XSLTs) can be changed; prove the change with step_sample and draft_code first.
+    copies of production XSLTs) can be changed; prove the change with step_sample and draft_code first. Give
+    the mapping the new code was generated from, so the documentation follows the change.
     """
     await _checked(ctx, code)
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('XSLT', uuid)
     await guard_from(ctx).check_managed({'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')})
     doc['data'] = code
-    return _summary(await stroom.put_doc(doc, version))
+    extra = await _described(ctx, doc, code, mapping, index_plan)
+    return {**_summary(await stroom.put_doc(doc, version)), **extra}
 
 
 async def create_dictionary(
