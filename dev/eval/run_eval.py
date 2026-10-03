@@ -205,9 +205,11 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         reference = case['reference']
         samples = samples_of(case)
         splitter = SplitterSpec.model_validate(reference['splitter']) if reference.get('splitter') else None
-        # The mapping is checked against every sample file first, as an agent would do with profile_sample's files.
+        # The mapping is checked against every sample file first, as an agent would do with profile_sample's files;
+        # the XSLT is saved with it in the build, so its code never comes back, as an agent should do it.
         generated = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(reference['mapping']),
-                                                            sample=samples, splitter=splitter)
+                                                            sample=samples, splitter=splitter, build=build,
+                                                            name=f'{feed}-Events')
         if not generated['ok']:
             raise RuntimeError(f"mapping problems: {generated['problems']}")
         if generated.get('sample_check', {}).get('warnings'):
@@ -255,10 +257,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             tc = await translation.create_text_converter(ctx, build, feed, reference.get('converter_type', 'DATA_SPLITTER'), code)
             parser = pipeline_writes.element_id(replace_parser) if replace_parser else 'dsParser'
             props.append(PropertyValue(element=parser, name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))
-        x = await translation.create_xslt(ctx, build, f'{feed}-Events', generated['xslt'],
-                                          mapping=TranslationMapping.model_validate(reference['mapping']))
-        if x.get('matches_mapping') is False:
-            score.problems.append('the saved XSLT is not what its mapping generates')
+        x = generated['saved']
         props.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT'))
         if case['template'] == 'Event Data (JSON)':
             # JSON lines need the parser's root map round the top-level objects; an array reads better without it.
@@ -290,7 +289,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         index = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='lucene', name=f'{feed}-INDEX',
                                 time_field=plan.time_field)
         await indexing.set_index_fields(ctx, index['uuid'], plan)
-        ixslt = await translation.create_xslt(ctx, build, f'{feed}-INDEX-XSLT', draft['xslt'], index_plan=plan)
+        ixslt = await translation.save_xslt(ctx, build, f'{feed}-INDEX-XSLT', index_plan=plan)   # generated from the plan
         lucene = next(c for c in (await templates.find_pipeline_templates(ctx, 'indexing'))['candidates']
                       if c['backend'] == 'lucene')
         ipipe = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',

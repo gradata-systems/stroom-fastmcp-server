@@ -280,7 +280,7 @@ async def step_sample(
         from tools.plan import build_of, with_next
         result = await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}), result)
     elif result['verdict'] == 'clean':
-        result['hint'] = (result.get('hint') or '') + " Clean with draft code: save it (save_xslt with the mapping, uuid= to replace) and step the saved code once more."
+        result['hint'] = (result.get('hint') or '') + " Clean with draft code: save it (build_translation_xslt uuid= for a generated XSLT, else save_xslt uuid=) and step the saved code once more."
     return result
 
 

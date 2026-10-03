@@ -32,16 +32,16 @@ STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
     ('samples', 'Upload every sample file as its own stream', 'upload_sample'),
     ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter sample=<the file text>, save_text_converter'),
-    ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate, save with the mapping', 'draft_translation_mapping, build_translation_xslt, save_xslt mapping=...'),
+    ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
-    ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams (draft_code first)'),
+    ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams; fix the mapping and build_translation_xslt uuid=... in between'),
     ('processed', 'Sample streams processed into Events', 'create_processor_filter, wait_for_processing'),
     ('validated', 'Events validated against the schema and the quality rules', 'check_events'),
     ('documented', 'Events pipeline documented, with its Field mapping generated', 'write_documentation stream_ids=...'),
 ]
 STAGE_2 = [
     ('index', 'Index doc for the agreed backend, convention and name', 'get_field_conventions, draft_index_mapping, create_index_doc'),
-    ('indexing_pipeline', 'Indexing pipeline from the plan (XSLT saved with index_plan)', 'save_xslt index_plan=..., create_indexing_pipeline'),
+    ('indexing_pipeline', 'Indexing pipeline from the plan (XSLT saved with index_plan)', 'save_xslt index_plan=... (no code), create_indexing_pipeline'),
     ('indexed', 'Events indexed and found by the verification searches', 'create_processor_filter, wait_for_processing, verify_index'),
     ('index_documented', 'Indexing pipeline documented', 'write_documentation stream_ids=<Events streams>'),
 ]
@@ -279,8 +279,9 @@ async def start_onboarding(
         'done': False,
         'standing_instructions': await applicable_instructions(ctx, folders, []),
         'hint': ("Propose the feed name from sibling feeds and create_feed; upload each file as its own stream; then the "
-                 "converter (if needed), build_translation_xslt with the sample, save_xslt with the mapping, the "
-                 "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
+                 "converter (if needed), build_translation_xslt with the sample and build and name (it saves the XSLT "
+                 "with the mapping), the pipeline, step_sample over all streams until clean, process, validate, "
+                 "write_documentation, index. "
                  "build_status shows what remains at any point."),
     }
 

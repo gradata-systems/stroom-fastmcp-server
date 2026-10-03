@@ -49,6 +49,22 @@ def _check_converter(converter_type: str, code: str) -> None:
                         f"not <{etree.QName(root).localname}> (stroom://guide/data-splitter)")
 
 
+async def _generated(ctx: Context, mapping: TranslationMapping | None, index_plan: FieldPlan | None) -> str:
+    """The XSLT an index plan or a translation mapping generates, for a save given no code."""
+    if index_plan is not None:
+        return index_plan.xslt()
+    if mapping is None:
+        raise ToolError("Give code (an XSLT written by hand), or index_plan or mapping to save the XSLT generated from it")
+    from tools.generation import event_schema
+    from utils.xsltgen import generate
+    version = gateway_from(ctx).settings.event_logging_version
+    result = generate(mapping, await event_schema(ctx, version), version)
+    if not result['ok']:
+        raise ToolError(f"XSLT not saved: the mapping has problems: {'; '.join(result['problems'][:5])}. "
+                        f"build_translation_xslt shows them all.")
+    return result['xslt']
+
+
 async def _checked(ctx: Context, xslt: str) -> None:
     result = await check_xslt(ctx, xslt)
     if not result['ok']:
@@ -237,7 +253,9 @@ async def save_xslt(
         ctx: Context,
         build: Build,
         name: Annotated[str, Field(description="Document name, following the environment's naming (new documents).")],
-        code: Annotated[str, Field(description="The complete XSLT.")],
+        code: Annotated[str | None, Field(
+            description="The complete XSLT, for one written by hand. Omit it with index_plan (or mapping) to save the "
+                        "XSLT generated from that, without it passing through you.")] = None,
         mapping: Mapping = None,
         index_plan: IndexPlan = None,
         uuid: Uuid = None,
@@ -245,10 +263,14 @@ async def save_xslt(
 ) -> dict[str, Any]:
     """
     Save an XSLT: create it in the build, or with uuid replace the code of one this server created (including
-    working copies of production XSLTs; prove the change with step_sample and draft_code first). It is checked
+    working copies of production XSLTs; prove a hand edit with step_sample and draft_code first). It is checked
     with check_xslt and not saved if that fails. Give the mapping (or index plan) it was generated from: it is
-    kept with the XSLT, and the pipeline's documentation is generated from it.
+    kept with the XSLT, and the pipeline's documentation is generated from it. With no code, the XSLT is
+    generated from the index plan (or mapping) here; a translation is usually saved by build_translation_xslt
+    (build, name) instead.
     """
+    if code is None:
+        code = await _generated(ctx, mapping, index_plan)
     if uuid:
         return await update_xslt(ctx, uuid, code, version, mapping, index_plan)
     return await create_xslt(ctx, build, name, code, mapping, index_plan)

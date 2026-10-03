@@ -204,7 +204,7 @@ async def _own_documents(ctx: Context, build: str, properties: list[PropertyValu
         if MANAGED not in tags or build_tag(build) not in tags:
             raise ToolError(f"{prop.element}.{prop.name}: {prop.doc_type} {prop.doc_uuid} is not a document of build "
                             f"'{build}'. A new pipeline's translation is written for its own source: "
-                            f"build_translation_xslt from a mapping and save_xslt (mapping=...) in the build, and a text "
+                            f"build_translation_xslt from a mapping, saved in the build (build=, name=), and a text "
                             f"converter with build_data_splitter and save_text_converter. Shared libraries are "
                             f"xsl:imported or inherited from the template, not set on the child. If the user says this "
                             f"existing document is the right one, call again with reuse_existing_docs=true.")
@@ -316,7 +316,7 @@ async def create_pipeline(
                                         'sets': [f'{p.element}.{p.name}' for p in properties],
                                         **({'filled_from_build': filled} if filled else {}),
                                         **({'still_to_set': still_open, 'hint': f"The pipeline cannot run until {still_open} is set: "
-                                            f"save the translation XSLT (save_xslt mapping=...) and update_pipeline with "
+                                            f"save the translation XSLT (build_translation_xslt build=, name=) and update_pipeline with "
                                             f"set_properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
                                         **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
 

@@ -117,7 +117,8 @@ async def draft_index_mapping(
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
-                    "XSLT with save_xslt index_plan=plan, so write_documentation generates the Field mapping section."}
+                    "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
+                    "write_documentation generates the Field mapping section."}
 
 
 async def set_index_fields(

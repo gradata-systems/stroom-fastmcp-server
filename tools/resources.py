@@ -19,7 +19,8 @@ _RULES = """Rules for every run:
 - Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
   from, and let the user confirm or correct it.
 - Step every sample record (step_sample) before processing; fix blocking groups and treat review groups as
-  questions to resolve. Draft code is tried with draft_code before anything is saved.
+  questions to resolve. A generated XSLT is saved by build_translation_xslt (build, name) and stepped as saved;
+  code written by hand is tried with draft_code before it is saved.
 - Document what you build (write_documentation) and use the user's source notes for field meanings.
 - While developing a pipeline in the build, reprocess sample streams after a fix with reprocess_streams (at most
   10 per call, one task at a time) and wait_for_processing with its filter_id. Reprocessing production data, and
@@ -134,13 +135,13 @@ Stage 1, events:
    Environment, a time zone); then build_translation_xslt (feeds=[the feed], sample=all the files, splitter=the
    spec) with it: which input field or constant goes to which event-logging path, one rule per kind of event,
    any_of where files name a field differently, extract for text fields holding several values, lookup or
-   dictionary for values from reference data. Fix reported problems in the mapping and regenerate; hand-edit only
-   what a mapping cannot express. step_sample with draft_code over every sample stream until the verdict is clean;
-   step_pipeline on single records to debug.
-5. save_text_converter (if any) / save_xslt with mapping=the mapping (kept with the XSLT, so the documentation
-   is generated from it), create_pipeline from the template (with the pipeline_properties
-   build_translation_xslt returned, e.g. jsonParser.addRootObject, and references for any lookup maps), step_sample
-   again over every sample stream.
+   dictionary for values from reference data. Give it build and name: it saves the XSLT with the mapping (kept
+   with it, so the documentation is generated from it) and returns the document, not the code. Fix reported
+   problems in the mapping and call again with uuid= the saved XSLT; hand-edit only what a mapping cannot express.
+5. save_text_converter (if any), create_pipeline from the template (with the pipeline_properties
+   build_translation_xslt returned, e.g. jsonParser.addRootObject, and references for any lookup maps), then
+   step_sample over every sample stream until the verdict is clean, fixing the mapping and saving again (uuid=)
+   in between; step_pipeline on single records to debug.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
    check_events on the output.
 
@@ -149,7 +150,8 @@ Stage 2, indexing:
    ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
 8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
    (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping; create_index_doc (plan=...) (Lucene); save_xslt with the drafted indexing XSLT and index_plan=plan;
+9. draft_index_mapping; create_index_doc (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is
+   generated from the plan);
    create_indexing_pipeline; step_sample on the Events streams.
 10. Elasticsearch: propose_index_template and show the user its dev_tools request. If they send back a changed
     template, check_index_template; if it is not compatible, show the pipeline changes it needs and ask whether to
