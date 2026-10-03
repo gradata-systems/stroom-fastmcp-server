@@ -672,12 +672,48 @@ class _Generator:
                                           f"{anchor.repeat.field or anchor.repeat.xpath or anchor.repeat.any_of}; map "
                                           f"nothing else below it (found {[n.path for n in leaves]})")
         self._conditional: list[str] = []
+        self._root = root
         self._check_structure(rule.name, root, self.schema.event)
+        detail = root.kids.get('EventDetail')
+        if rule.when and detail is not None and 'Unknown' in detail.kids:
+            # A catch-all rule (no conditions) may rightly say Unknown; a kind told apart by conditions usually has an action.
+            self._note(self.warnings, f"[{rule.name}] writes EventDetail/Unknown, which says what happened is not known, "
+                                      f"yet its conditions single these records out. If they are an activity another "
+                                      f"action element describes (Alert, Authenticate, Network, Process, Create, Update, "
+                                      f"Delete, View, ...), use that; keep Unknown only when none fits.")
         if self._conditional:
             self._note(self.warnings, f"[{rule.name}] required {self._conditional} are left out when their input "
                                       f"fields are empty, which makes the event invalid. Fine if those fields are "
                                       f"always filled; otherwise give the mapping a default.")
         return root
+
+    def _mapped_elsewhere(self, node: _Node, members: list[str]) -> str:
+        """For a missing required choice: the members the event already maps outside node (EventSource/User/Id when
+        Authenticate lacks its User, say), as paths under node the same input could fill; '' when there are none."""
+        mapped, candidates = [], []
+        for leaf in self._leaves(self._root):
+            if leaf.path.startswith(node.path + '/'):
+                continue
+            parts = leaf.path.split('/')
+            member = next((i for i in range(len(parts) - 2, 0, -1) if parts[i] in members), None)
+            if member is None:
+                continue
+            candidate = f"{node.path}/{'/'.join(parts[member:])}".removeprefix('Event/')
+            try:
+                self.schema.resolve(candidate)
+            except ValueError:
+                continue
+            entry = leaf.leaf
+            source = (f"field '{entry.field}'" if entry.field else f"any_of {entry.any_of}" if entry.any_of else
+                      f"xpath {entry.xpath!r}" if entry.xpath else f"value {entry.value!r}" if entry.value is not None
+                      else 'a lookup')
+            mapped.append(f"{leaf.path.removeprefix('Event/')} ({source})")
+            candidates.append(candidate)
+        if not mapped:
+            return ''
+        return (f". Already mapped elsewhere in the event: {', '.join(mapped[:4])}. If the action is about one of "
+                f"them, map the same input here as well ({' or '.join(candidates[:4])}), and keep the existing "
+                f"mapping: it says something different")
 
     def _nodes(self, node: _Node) -> list[_Node]:
         out = [node]
@@ -720,7 +756,7 @@ class _Generator:
                 self._conditional.append(f"{node.path}/{c.name}".removeprefix('Event/'))
         for cid, members in self.schema.required_choices.items():
             if any(c.choice == cid for c in allowed) and not present & set(members):
-                self._note(self.problems, f"[{rule}] {node.path} needs one of {members}")
+                self._note(self.problems, f"[{rule}] {node.path} needs one of {members}" + self._mapped_elsewhere(node, members))
         for kid in node.kids.values():
             self._check_structure(rule, kid, kid.child.decl)
 

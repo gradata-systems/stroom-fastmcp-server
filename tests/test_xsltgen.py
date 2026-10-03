@@ -221,6 +221,29 @@ def test_missing_required_elements_and_choices_are_problems():
     assert any(p.startswith("[bare] Event/EventDetail needs one of ['Authenticate'") for p in problems)
 
 
+def test_a_missing_choice_points_to_the_same_member_mapped_elsewhere():
+    # The user is mapped as the source's (BASE) but not as the one logging on: say so, and to keep both.
+    no_user = [f for f in LOGON if f['path'] != 'EventDetail/Authenticate/User/Id']
+    problems = generate(mapping(events=[{'name': 'logon', 'fields': no_user}]), SCHEMA, '4.1.0')['problems']
+    problem = next(p for p in problems if 'Authenticate needs one of' in p)
+    assert "EventSource/User/Id (field 'user')" in problem and 'EventDetail/Authenticate/User/Id' in problem
+    assert 'keep the existing mapping' in problem
+    # Nothing comparable mapped elsewhere: the plain message.
+    base = [f for f in BASE if not f['path'].startswith(('EventSource/User', 'EventSource/Device'))]
+    plain = generate(mapping(common=base, events=[{'name': 'logon', 'fields': no_user}]), SCHEMA, '4.1.0')['problems']
+    assert any(p.endswith("Authenticate needs one of ['User', 'Device', 'Group']") for p in plain), plain
+
+
+def test_unknown_in_a_rule_with_conditions_is_a_warning():
+    # The default mapping's 'other' rule has no conditions: Unknown is its job, so no warning.
+    assert not any('Unknown' in w for w in generate(mapping(), SCHEMA, '4.1.0')['warnings'])
+    kind = {'name': 'status', 'when': [{'field': 'action', 'equals': 'status'}],
+            'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                       {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}
+    result = generate(mapping(events=[kind, mapping().events[-1].model_dump(exclude_none=True)]), SCHEMA, '4.1.0')
+    assert not result['problems'] and any(w.startswith('[status] writes EventDetail/Unknown') for w in result['warnings'])
+
+
 def test_a_rule_without_conditions_must_be_last():
     rules = [{'name': 'any', 'fields': LOGON}, {'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON}]
     assert any("Rules ['any'] have no conditions" in p for p in generate(mapping(events=rules), SCHEMA, '4.1.0')['problems'])

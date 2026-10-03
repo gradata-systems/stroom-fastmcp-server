@@ -293,15 +293,24 @@ async def check_event_quality(ctx: Context, events_xml: EventsXml) -> dict[str, 
     root = _parse(events_xml, 'Events XML')
     events = root.findall(f'{{{EVT}}}Event') if etree.QName(root).localname == 'Events' else [root]
     rules: dict[str, dict[str, Any]] = {}
+    unknown = []
     for index, event in enumerate(events):
         for rule, message in _event_findings(event):
             entry = rules.setdefault(rule, {'events_failing': set(), 'examples': []})
             entry['events_failing'].add(index)
             if len(entry['examples']) < 3:
                 entry['examples'].append({'event': index, 'message': message})
-    return {'events_checked': len(events), 'ok': not rules,
-            'rules': {r: {'events_failing': len(v['events_failing']), 'examples': v['examples']}
-                      for r, v in sorted(rules.items())}}
+        if event.find(f'{{{EVT}}}EventDetail/{{{EVT}}}Unknown') is not None:
+            unknown.append(index)
+    result = {'events_checked': len(events), 'ok': not rules,
+              'rules': {r: {'events_failing': len(v['events_failing']), 'examples': v['examples']}
+                        for r, v in sorted(rules.items())}}
+    if unknown:
+        # Advice, not a failure: Unknown is right for records no action element describes.
+        result['notes'] = [f"{len(unknown)} of {len(events)} events (e.g. {unknown[:3]}) have EventDetail/Unknown: what "
+                           f"happened is not known. If those records are an activity another action element describes "
+                           f"(Alert, Authenticate, Network, Process, Create, Update, Delete, View, ...), use it."]
+    return result
 
 
 _INPUT_FIELD = re.compile(r"""(?:data|string|number|boolean|map|array)\[@(?:name|key)\s*=\s*['"]([^'"]+)['"]\]""")

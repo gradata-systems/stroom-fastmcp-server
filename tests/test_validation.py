@@ -81,6 +81,13 @@ async def test_quality_rules_pass_a_complete_event_and_flag_gaps(ctx):
     assert set(rules) == {'generator', 'time_created'}
 
 
+async def test_unknown_events_are_noted_without_failing(ctx):
+    assert 'notes' not in await validation.check_event_quality(ctx, EVENT)
+    unknown = EVENT.replace('<Authenticate><Action>Logon</Action></Authenticate>', '<Unknown><Data Name="a" Value="b"/></Unknown>')
+    quality = await validation.check_event_quality(ctx, unknown)
+    assert quality['ok'] is True and 'EventDetail/Unknown' in quality['notes'][0]
+
+
 @respx.mock
 async def test_check_xslt_reports_missing_imports_and_unknown_functions(ctx):
     respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': []}))
