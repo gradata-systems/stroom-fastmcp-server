@@ -13,7 +13,7 @@ The server has 58 tools:
 | Explorer and pipelines | `find_documents` (by name, type or content), `describe_document` (content plus how Stroom runs a pipeline or what an XSLT does) |
 | Templates | `find_pipeline_templates`, `describe_template` (children and contract) |
 | Samples and feeds | `profile_sample`, `create_feed`*, `upload_sample`, `record_source_notes` |
-| Translation | `save_text_converter`, `save_xslt` (with the mapping), `save_dictionary`; `uuid=` replaces an existing one |
+| Translation | `save_text_converter`, `save_xslt` (written by hand, or an indexing XSLT from its plan), `save_dictionary`; `uuid=` replaces an existing one |
 | Pipelines | `create_pipeline`*, `copy_pipeline`*, `update_pipeline` |
 | Streams and errors | `find_streams`, `describe_stream` (children and attributes), `read_stream`, `summarise_streams` (errors triaged, or events by type and path) |
 | Stepping | `step_pipeline`, `step_sample`, `step_records` (chosen records in place), `compare_outputs` (with unsaved draft code) |

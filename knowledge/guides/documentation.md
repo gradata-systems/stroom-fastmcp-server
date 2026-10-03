@@ -19,7 +19,7 @@ that changed; the tool keeps the change log and adds a line to it.
 
 `write_documentation` writes this section itself. It reads the mapping (or index plan) kept with the pipeline's
 XSLT, which `build_translation_xslt` stores when it saves (`build=`, `name=`), or `save_xslt` when given
-`mapping=` or `index_plan=`, steps it over the
+`index_plan=`, steps it over the
 `stream_ids` you pass (the sample raw streams for an events pipeline, the Events streams for an indexing
 pipeline), and puts the result in place of whatever the markdown has under `## Field mapping`. So:
 

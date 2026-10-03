@@ -71,22 +71,21 @@ async def test_saving_returns_the_document_not_the_code():
             await generation.build_translation_xslt(ctx, mapping(), build='acme-v1')
 
 
-async def test_save_xslt_generates_the_code_it_is_not_given():
+async def test_save_xslt_generates_an_indexing_xslt_from_its_plan_and_takes_no_mapping():
+    # A translation from a mapping is saved by build_translation_xslt; save_xslt's copy of the mapping schema was
+    # ~4,500 tokens of tool definition in every model's context.
+    import inspect
     from tools import translation
     from utils.fieldplan import FieldPlan, PlannedField
-    ctx, (schema, _) = ctx_and_patches()
+    assert 'mapping' not in inspect.signature(translation.save_xslt).parameters
     plan = FieldPlan(backend='lucene', index_name='acme', time_field='EventTime',
                      fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
                              PlannedField(name='EventTime', type='date', source='EventTime/TimeCreated')])
-    with schema, patch.object(translation, 'event_schema', AsyncMock(return_value=SCHEMA), create=True), \
-            patch.object(translation, 'gateway_from', lambda ctx: SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))), \
-            patch.object(translation, 'create_xslt', AsyncMock(return_value={'uuid': 'i-1'})) as create:
-        await translation.save_xslt(ctx, 'acme-v1', 'ACME-INDEX-XSLT', index_plan=plan)
-        assert create.await_args.args[3] == plan.xslt()
-        await translation.save_xslt(ctx, 'acme-v1', 'ACME-Events', mapping=mapping())
-        assert create.await_args.args[3] == generate(mapping(), SCHEMA, '4.1.0')['xslt']
-        with pytest.raises(ToolError, match='Give code'):
-            await translation.save_xslt(ctx, 'acme-v1', 'ACME-Events')
+    with patch.object(translation, 'create_xslt', AsyncMock(return_value={'uuid': 'i-1'})) as create:
+        await translation.save_xslt(SimpleNamespace(), 'acme-v1', 'ACME-INDEX-XSLT', index_plan=plan)
+        assert create.await_args.args[3] == plan.xslt() and create.await_args.args[5] == plan
+        with pytest.raises(ToolError, match='build_translation_xslt'):
+            await translation.save_xslt(SimpleNamespace(), 'acme-v1', 'ACME-Events')
 
 
 async def test_tools_read_the_sample_from_its_streams_instead_of_its_text():
