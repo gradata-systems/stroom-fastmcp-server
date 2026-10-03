@@ -155,7 +155,16 @@ def _empty_output(result: dict[str, Any], element: str, record: Any) -> list[dic
                         "Check xpath-default-namespace and the match patterns against the element's input."}]
 
 
-def _markers(result: dict[str, Any], record: int | None = None) -> list[dict[str, Any]]:
+def _nothing_stepped(result: dict[str, Any], markers: list[dict[str, Any]], where: str) -> None:
+    """No record was stepped: never clean, and say why."""
+    result['verdict'] = 'blocking'
+    result['hint'] = ("No record was stepped: the errors in groups stop the pipeline before its first record; fix them "
+                      "and step again." if markers else
+                      f"No record was stepped: Stroom found none in {where}. Check the stream ids, and that the "
+                      f"pipeline's parser reads this data.")
+
+
+def _markers(result: dict[str, Any], record: int | str | None = None) -> list[dict[str, Any]]:
     markers = []
     for element, data in ((result.get('stepData') or {}).get('elementMap') or {}).items():
         for error in ((data.get('indicators') or {}).get('uniqueErrorSet') or []):
@@ -237,6 +246,9 @@ async def step_sample(
     first_output = None
     for stream_id in stream_ids:
         result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
+        if not result.get('foundRecord'):
+            # An element that fails before the first record (an XSLT that doesn't compile, say) reports it here.
+            markers += _markers(result, str(stream_id))
         stream_start = len(records)
         while result.get('foundRecord') and len(records) < cap and (
                 records_per_stream is None or len(records) - stream_start < records_per_stream):
@@ -261,6 +273,8 @@ async def step_sample(
                               'first_record_output': first_output}
     if len(records) >= cap:
         result['hint'] = f"Stopped at {cap} records; the sample has more."
+    if not records:
+        _nothing_stepped(result, markers, f"streams {stream_ids}")
     await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
     if result['verdict'] == 'clean' and not draft_code:
         from tools.plan import build_of, with_next
@@ -306,7 +320,9 @@ async def step_records(
         key = record_key(loc.stream, where)
         result = await _step(stroom, pipeline, loc.stream, 'REFRESH', where, draft_code)
         if not result.get('foundRecord'):
-            records.append({'record': key, 'shape': loc.shape, 'found': False})
+            found = _markers(result, key)
+            markers += found
+            records.append({'record': key, 'shape': loc.shape, 'found': False, **({'errors': len(found)} if found else {})})
             continue
         found = _markers(result, key) + _empty_output(result, output_element, key)
         output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
@@ -337,6 +353,8 @@ async def step_records(
               'left_untranslated_as_intended': sum(1 for r in records if r.get('expect') == 'none' and not r.get('errors')),
               'draft_code_used': sorted(draft_code or {}), **summary,
               'records': records[:100]}
+    if not result['records_stepped']:
+        _nothing_stepped(result, markers, f"the records {missing[:5]}")
     if not uncovered:
         await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
     return result

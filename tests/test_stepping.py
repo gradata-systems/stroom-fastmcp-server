@@ -63,6 +63,28 @@ async def test_step_sample_steps_every_record_with_fresh_requests(ctx):
 
 
 @respx.mock
+async def test_nothing_stepped_is_never_clean(ctx):
+    mock_pipeline()
+    # An XSLT that doesn't compile: Stroom finds no record and reports the error on the element.
+    fatal = {'complete': True, 'foundRecord': False, 'generalErrors': [], 'stepData': {'elementMap': {'translationFilter': {
+        'indicators': {'uniqueErrorSet': [{'severity': 'FATAL_ERROR', 'elementId': {'id': 'translationFilter'},
+                                           'message': 'XsltPool - Variable user has not been declared',
+                                           'location': {'lineNo': 61, 'colNo': 5}}]}}}}}
+    respx.post(f'{API}/stepping/v1/step').mock(return_value=httpx.Response(200, json=fatal))
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    assert (result['records_stepped'], result['verdict']) == (0, 'blocking')
+    assert 'Variable user has not been declared' in result['groups'][0]['examples'][0]['message']
+    assert 'before its first record' in result['hint']
+    located = await stepping.step_records(ctx, 'p-1', [{'stream': 7, 'record': 0}])
+    assert (located['records_stepped'], located['verdict']) == (0, 'blocking') and located['groups']
+
+    # No record and no error (an empty stream, a parser that reads nothing): still not clean.
+    respx.post(f'{API}/stepping/v1/step').mock(return_value=httpx.Response(200, json={'complete': True, 'foundRecord': False}))
+    empty = await stepping.step_sample(ctx, 'p-1', [7])
+    assert empty['verdict'] == 'blocking' and 'found none in streams [7]' in empty['hint']
+
+
+@respx.mock
 async def test_incomplete_step_is_polled_with_its_session(ctx):
     mock_pipeline()
     route = respx.post(f'{API}/stepping/v1/step').mock(side_effect=[

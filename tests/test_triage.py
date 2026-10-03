@@ -61,5 +61,11 @@ def test_stored_error_without_a_real_location():
                                          'location': None}
 
 
+def test_stepping_fatal_errors_are_blocking():
+    # Stepping indicators say FATAL_ERROR (an XSLT that doesn't compile): the same as FATAL.
+    stored = {'severity': 'FATAL_ERROR', 'elementId': {'id': 'translationFilter'}, 'message': 'XsltPool - Variable x has not been declared'}
+    assert triage([from_stored_error(stored)], RULES, {'translationFilter'})['verdict'] == 'blocking'
+
+
 def test_clean_when_no_markers():
     assert triage([], RULES, set())['verdict'] == 'clean'

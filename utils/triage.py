@@ -12,7 +12,7 @@ Severity = Literal['FATAL', 'ERROR', 'WARNING', 'INFO']
 Classification = Literal['blocking', 'review', 'benign']
 _ORDER = {'blocking': 0, 'review': 1, 'benign': 2}
 # Stroom reports WARN in some places and WARNING in others.
-_SEVERITY = {'WARN': 'WARNING'}
+_SEVERITY = {'WARN': 'WARNING', 'FATAL_ERROR': 'FATAL'}   # stepping indicators say FATAL_ERROR
 
 
 class Rule(BaseModel):
