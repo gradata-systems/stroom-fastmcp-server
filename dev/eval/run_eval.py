@@ -20,6 +20,7 @@ Results go to dev/eval/results/<time>-reference.json with a summary table.
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -312,8 +313,11 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         searched = await indexing.run_test_searches(ctx, dash['uuid'], events, score.events)
         score.indexed = igate['gate'] == 'pass' and searched['passed']
         idoc = await builds.write_documentation(ctx, build, ipipe['uuid'], DOC_SKELETON, 'Created', stream_ids=events)
-        if '| Index field |' not in (idoc.get('field_mapping') or ''):
+        index_section = idoc.get('field_mapping') or ''
+        if '| Index field |' not in index_section:
             score.problems.append('documentation: no index field mapping generated')
+        elif not re.search(r'Sample values are what the [1-9]\d* documents', index_section):
+            score.problems.append('documentation: the index field mapping has no sampled values')
         if not score.indexed:
             score.problems.append(f"indexing: gate {igate['gate']}, searches {[c for c in searched['checks'] if not c['pass']]}")
     except Exception as e:  # a case failing must not stop the evaluation

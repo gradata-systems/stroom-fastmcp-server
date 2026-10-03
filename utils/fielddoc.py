@@ -305,19 +305,97 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
     return '\n'.join(lines) + '\n'
 
 
-def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None = None) -> str:
+def index_documents(outputs: list[str]) -> list[dict[str, list[str]]]:
+    """The documents an indexing XSLT wrote, one per output record, as field -> values: records:2 <data name value>
+    (Lucene), or the xpath-functions JSON XML the Elasticsearch filter reads (nested maps as dotted names)."""
+    from utils.templatecheck import flatten_document, json_xml_documents
+    documents = []
+    for xml in outputs:
+        try:
+            root = etree.fromstring(xml.encode('utf-8'))
+        except (etree.XMLSyntaxError, ValueError):
+            continue
+        if etree.QName(root).namespace == 'records:2':
+            for record in root.iter('{records:2}record'):
+                doc: dict[str, list[str]] = {}
+                for data in record.iter('{records:2}data'):
+                    if data.get('name'):
+                        doc.setdefault(data.get('name'), []).append(data.get('value') or '')
+                documents.append(doc)
+        else:
+            for item in json_xml_documents(xml):
+                # Values come as (JSON type, text); a nested map as ('object', None).
+                documents.append({k: [str(v[1]) for v in vs if v[0] != 'object' and v[1] is not None]
+                                  for k, vs in flatten_document(item).items()})
+    return documents
+
+
+def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None = None,
+                                 documents: list[dict[str, list[str]]] | None = None) -> str:
     """The Field mapping section of an indexing pipeline's documentation: index field, type, the event-logging
-    path it comes from, and (from the Events sampled) how often that path is populated."""
+    path it comes from, and from the sample: how often that path is populated in the Events, and the values the
+    index documents the pipeline wrote got for the field."""
     lines = [f'Documents for `{plan.index_name}` ({plan.backend}); the time field is `{plan.time_field}`.', '']
     if plan.drop_when:
         lines += ['Events left out of the index:', ''] + [f'- `{t}`' for t in plan.drop_when] + ['']
     sampled = population is not None
-    lines += (['| Index field | Type | From (event-logging path) | In sample |', '| --- | --- | --- | --- |'] if sampled else
-              ['| Index field | Type | From (event-logging path) |', '| --- | --- | --- |'])
+    if documents is not None:
+        lines += [f'Sample values are what the {len(documents)} documents written from the sample got.', '']
+    head = ['Index field', 'Type', 'From (event-logging path)'] + (['In sample'] if sampled else [])         + (['Sample values'] if documents is not None else [])
+    lines += [_row(*head), _row(*['---'] * len(head))]
     for f in plan.fields:
         cells = [f'`{f.name}`', f.type, f'`{f.source}`']
         if sampled:
             pct = population.get(f.source)
             cells.append('always' if f.source.startswith('@') else f'{pct:g}% of events' if pct is not None else 'not in the sample')
+        if documents is not None:
+            values = list(dict.fromkeys(v for d in documents for v in d.get(f.name, []) if v != ''))
+            cells.append(', '.join(f'`{v[:40]}`' for v in values[:3]) + (f' (+{len(values) - 3})' if len(values) > 3 else '')
+                         if values else '(none in the sample)')
         lines.append(_row(*cells))
+    return '\n'.join(lines) + '\n'
+
+
+def _values(values: list[str]) -> str:
+    distinct = list(dict.fromkeys(v for v in values if v != ''))
+    return (', '.join(f'`{v[:40]}`' for v in distinct[:3]) + (f' (+{len(distinct) - 3})' if len(distinct) > 3 else '')
+            if distinct else '(none in the sample)')
+
+
+def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | None) -> str:
+    """The Field mapping section of a discovery pipeline: how records become documents, the fields mapped
+    explicitly, and the fields the sample's documents held (Elasticsearch maps those dynamically)."""
+    d = plan.discovery
+    lines = [f'Documents for `{plan.index_name}` (Elasticsearch, discovery): each raw record indexed as it is, with '
+             f"the source's field names. Elasticsearch maps fields dynamically as documents arrive: strings as "
+             f'keywords (up to {d.ignore_above} characters), at most {d.total_fields_limit} fields, malformed values '
+             f'ignored.', '']
+    if d.unpack_json:
+        lines += ['A string holding a JSON object is also indexed parsed, as `<field>_json`; the string is kept.', '']
+    if d.drop:
+        lines += ['Left out: ' + ', '.join(f'`{k}`' for k in d.drop) + '.', '']
+    explicit = {'StreamId': 'the stream id', 'EventId': 'the record number in the stream',
+                '@timestamp': f"`{d.timestamp_field}`" + (f' (format `{d.timestamp_format}`)' if d.timestamp_format else '')}
+    explicit.update({name: f'stream meta `{attr}`' for name, attr in d.meta.items()})
+    lines += ['| Index field | Mapping | From |' + (' Sample values |' if documents is not None else ''),
+              '| --- | --- | --- |' + (' --- |' if documents is not None else '')]
+    types = {f.name: f.type for f in plan.fields}
+    for name, source in explicit.items():
+        cells = [f'`{name}`', {'id': 'long', 'date': 'date'}.get(types.get(name), 'dynamic'), source]
+        if documents is not None:
+            cells.append(_values([v for doc in documents for v in doc.get(name, [])]))
+        lines.append(_row(*cells))
+    if documents:
+        seen: dict[str, int] = {}
+        for doc in documents:
+            for key, values in doc.items():
+                if key not in explicit and any(v != '' for v in values):
+                    seen[key] = seen.get(key, 0) + 1
+        lines += ['', f'Fields in the {len(documents)} documents written from the sample, mapped dynamically:', '',
+                  '| Field | In sample | Sample values |', '| --- | --- | --- |']
+        for key in sorted(seen)[:80]:
+            lines.append(_row(f'`{key}`', f'{100 * seen[key] / len(documents):.0f}% of documents',
+                              _values([v for doc in documents for v in doc.get(key, [])])))
+        if len(seen) > 80:
+            lines.append(f'\n(+{len(seen) - 80} more fields)')
     return '\n'.join(lines) + '\n'

@@ -1,0 +1,238 @@
+"""A discovery index against the local Stroom stack and Elasticsearch 9 (see dev/stroom).
+
+    cd dev/stroom && docker compose --profile elastic up -d
+    uv run python dev/e2e_discovery.py
+
+Raw JSON indexed as it is, for exploration, with no event-logging translation and nothing surveyed up front:
+Elasticsearch maps the source's fields dynamically, and only StreamId, EventId and @timestamp are mapped
+explicitly. The sample holds nested objects, arrays, a message that is sometimes JSON text and sometimes not, and
+numbers, so the dynamic mapping has something to do.
+
+1. A raw JSON sample uploaded to a new workspace feed. The local stack has no discovery template, so this adds a
+   fixture one ('E2E Raw to Elasticsearch': JSONParser, one record per split, XSLTFilter, ElasticIndexingFilter).
+2. The discovery plan from what the user confirms (the timestamp field, stream meta to add, a field to drop):
+   the XSLT copies each record, unpacking JSON held in a string into a sibling <field>_json object.
+3. The indexing pipeline from the template, stepped over the raw stream: the documents show the source's fields.
+4. The index template: permissive, with the settings and component templates of the user's example, agreed by
+   the user; indexing is refused before that, and the approval asks whether it is committed.
+5. The cluster admin applies it; indexing on the raw stream; Elasticsearch has mapped every field dynamically
+   (strings as keywords), the JSON message unpacked, the dropped field absent; Stroom's searches find the
+   documents; the pipeline is documented with the fields the sample documents held.
+"""
+import asyncio
+import json
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'dev'))
+
+import e2e_phase2 as p2  # noqa: E402
+from e2e_elastic_handover import ES, _request, live_cluster  # noqa: E402
+from config import Settings  # noqa: E402
+from fastmcp.exceptions import ToolError  # noqa: E402
+from security.policy import AccessPolicy  # noqa: E402
+from tools import builds, feeds, indexing, processing_writes, stepping, templates, translation  # noqa: E402
+from utils.consent import ConsentStore  # noqa: E402
+from utils.fieldplan import Discovery, FieldPlan  # noqa: E402
+from utils.stroom import StroomGateway  # noqa: E402
+from utils.triage import ErrorRules  # noqa: E402
+
+FIXTURE_TEMPLATE = 'E2E Raw to Elasticsearch'
+
+SAMPLE = json.dumps([
+    {'ts': '2026-10-01T09:00:00Z', 'host': 'web01', 'user': {'name': 'alice', 'roles': ['admin', 'ops']},
+     'event': 'login', 'status': 200, 'latency_ms': 12.5, 'session_token': 'tok-1',
+     'message': json.dumps({'action': 'login', 'client': {'ip': '10.1.1.1', 'agent': 'curl/8.9'}, 'ok': True})},
+    {'ts': '2026-10-01T09:01:30Z', 'host': 'web02', 'user': {'name': 'bob'}, 'event': 'logout', 'status': 200,
+     'session_token': 'tok-2', 'message': 'session closed by user'},
+    {'ts': '2026-10-01T09:05:00Z', 'host': 'web01', 'user': {'name': 'carol'}, 'event': 'upload', 'status': 500,
+     'tags': ['bulk', 'retry'], 'session_token': 'tok-3',
+     'message': json.dumps({'action': 'upload', 'bytes': 1048576, 'error': {'code': 'E42', 'detail': 'disk full'}})},
+], indent=1)
+
+# The user's example: a sibling discovery index's template, for its settings and components (not its fields:
+# a discovery index keeps the source's names).
+EXAMPLE = """PUT _index_template/stroom-discovery-proxy-v1
+{"index_patterns": ["stroom-discovery-proxy-v1*"], "priority": 250, "composed_of": ["e2e-discovery-base"],
+ "template": {"settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+              "mappings": {"dynamic": true, "properties": {"proxy": {"properties": {"name": {"type": "keyword"}}}}}}}"""
+COMPONENT = """PUT _component_template/e2e-discovery-base
+{"template": {"mappings": {"properties": {"StreamId": {"type": "long"}, "EventId": {"type": "long"}}}}}"""
+
+
+async def fixture_template(stroom: StroomGateway) -> dict:
+    """A discovery template: the JSON translation template's parser and one-record splits, then an XSLT and the
+    Elasticsearch indexing filter."""
+    found = {v['docRef']['name']: v['docRef'] for v in
+             (await stroom.find_documents('E2E*', ['Pipeline'], 50)).get('values') or []}
+    if FIXTURE_TEMPLATE in found:
+        return found[FIXTURE_TEMPLATE]
+    parent = await stroom.post('/explorer/v2/find', {
+        'filter': {'includedTypes': ['Folder'], 'nameFilter': 'Template Pipelines', 'requiredPermissions': ['VIEW']},
+        'pageRequest': {'offset': 0, 'length': 5}})
+    node = await stroom.post('/explorer/v2/create', {
+        'docType': 'Pipeline', 'docName': FIXTURE_TEMPLATE, 'permissionInheritance': 'DESTINATION',
+        'destinationFolder': parent['values'][0]['docRef'] if parent.get('values') else None})
+    ref = node.get('docRef', node)
+    doc = await stroom.get(f"/pipeline/v1/{ref['uuid']}")
+    elements = [('jsonParser', 'JSONParser'), ('readRecordCountFilter', 'RecordCountFilter'),
+                ('splitFilter', 'SplitFilter'), ('xsltFilter', 'XSLTFilter'),
+                ('elasticIndexingFilter', 'ElasticIndexingFilter')]
+    doc['pipelineData'] = {
+        'elements': {'add': [{'id': i, 'type': t} for i, t in elements]},
+        'links': {'add': [{'from': a[0], 'to': b[0]} for a, b in zip(elements, elements[1:])]},
+        'properties': {'add': [
+            {'element': 'jsonParser', 'name': 'addRootObject', 'value': {'boolean': False}},
+            {'element': 'readRecordCountFilter', 'name': 'countRead', 'value': {'boolean': True}},
+            # One record per split, so the record number (EventId) finds exactly one record again.
+            {'element': 'splitFilter', 'name': 'splitDepth', 'value': {'integer': 1}},
+            {'element': 'splitFilter', 'name': 'splitCount', 'value': {'integer': 1}}]}}
+    doc['description'] = 'Fixture for dev/e2e_discovery.py'
+    await stroom.request('PUT', f"/pipeline/v1/{ref['uuid']}", doc)
+    return {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': FIXTURE_TEMPLATE}
+
+
+async def main():
+    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
+    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
+    stroom = StroomGateway(settings)
+    ctx = SimpleNamespace(lifespan_context={
+        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
+        'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
+    stamp = time.strftime('%H%M%S')
+    try:
+        async with httpx.AsyncClient(base_url=ES, timeout=30) as es:
+            try:
+                version = (await es.get('/')).json()['version']['number']
+            except httpx.HTTPError:
+                raise SystemExit(f"No Elasticsearch at {ES}: cd dev/stroom && docker compose --profile elastic up -d")
+            p2.check(version.startswith('9.'), f'Elasticsearch {version}')
+            await run(ctx, stroom, es, stamp)
+        print('\nALL PASSED')
+    finally:
+        await stroom.close()
+
+
+async def run(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> None:
+    build, feed = f'e2e-discovery-{stamp}', f'E2E-WEB-{stamp}'
+    index = f'stroom-discovery-web-{stamp}-v1'
+    print('\n### the raw sample')
+    await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+    raw = (await feeds.upload_sample(ctx, feed, SAMPLE))['stream_id']
+    p2.check(raw is not None, f'raw JSON uploaded as stream {raw}')
+    template = await fixture_template(stroom)
+    candidates = (await templates.find_pipeline_templates(ctx, 'discovery'))['candidates']
+    found = next((c for c in candidates if c['name'] == FIXTURE_TEMPLATE), None)
+    p2.check(found is not None and found['backend'] == 'elasticsearch', 'the fixture reads as a discovery template')
+    cluster = await live_cluster(stroom)
+
+    print('\n### the discovery plan: nothing surveyed, only what the user confirms')
+    discovery = Discovery(timestamp_field='ts', meta={'stroom.feed': 'Feed'}, drop=['session_token'])
+    draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, discovery=discovery)
+    plan = FieldPlan.model_validate(draft['plan'])
+    p2.check([f.name for f in plan.fields] == ['StreamId', 'EventId', '@timestamp'],
+             'only StreamId, EventId and @timestamp are mapped explicitly')
+    xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
+    pipeline = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Discovery',
+                               template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_name=index,
+                               cluster_uuid=cluster['uuid'])
+    sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    if sample['verdict'] != 'clean':
+        print(json.dumps(sample, indent=1)[:3000])
+    p2.check(sample['verdict'] == 'clean', f"stepped {sample.get('records_stepped')} records clean")
+    documents = await indexing._documents(ctx, pipeline['uuid'], [raw], 10)
+    first = documents[0]
+    p2.check([d['EventId'][1] for d in documents] == ['1', '2', '3'] and first['StreamId'][1] == str(raw),
+             'StreamId is the stream, EventId the record number')
+    p2.check(first['@timestamp'][1] == '2026-10-01T09:00:00Z' and first['stroom.feed'][1] == feed
+             and first['user']['roles'] == [('string', 'admin'), ('string', 'ops')],
+             'each record as it is, with @timestamp from ts and the feed from stream meta')
+    p2.check(first['message_json']['client']['ip'] == ('string', '10.1.1.1') and 'message_json' not in documents[1]
+             and documents[1]['message'] == ('string', 'session closed by user'),
+             'a JSON message is unpacked beside its text; a plain one is left as it is')
+    p2.check(not any('session_token' in d for d in documents), 'the dropped field is left out')
+
+    print('\n### the index template: permissive, with the example\'s settings, agreed by the user')
+    try:
+        await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=[raw])
+        refused = ''
+    except ToolError as e:
+        refused = str(e)
+    p2.check(refused.startswith('No Elasticsearch index template has been agreed'), f'refused before: {refused[:80]}')
+    final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
+                            events_stream_ids=[raw], example_template=EXAMPLE, component_templates=[COMPONENT])
+    body, mappings = final['template'], final['template']['template']['mappings']
+    for note in final.get('from_example') or []:
+        print(f'    {note}')
+    p2.check(final.get('agreed') and mappings['dynamic'] is True and mappings['date_detection'] is False
+             and mappings['dynamic_templates'][0]['strings_as_keywords']['mapping']['type'] == 'keyword',
+             'agreed: dynamic mapping, strings as keywords, no date guessing')
+    index_settings = body['template']['settings']['index']
+    p2.check(index_settings['number_of_shards'] == 1 and index_settings['mapping']['ignore_malformed'] is True
+             and index_settings['mapping']['total_fields']['limit'] == 2000 and body['composed_of'] == ['e2e-discovery-base'],
+             "the example's settings and components, with the discovery guardrails")
+    p2.check(mappings['properties'] == {'@timestamp': {'type': 'date'}} and 'proxy' not in json.dumps(mappings),
+             "StreamId and EventId left to the component, @timestamp explicit, the example's own fields not copied")
+
+    print('\n### the cluster admin applies it')
+    for text in (COMPONENT, final['dev_tools']):
+        path, request = _request(text)
+        response = await es.put(f'/{path}', json=request)
+        p2.check(response.status_code == 200, f'PUT {path}: {response.status_code} {response.text[:200]}')
+
+    print('\n### indexing the raw stream')
+    started = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                              stream_ids=[raw])
+    done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
+                                                       filter_id=started['filter_id'])
+    p2.check(done.get('gate') == 'pass', f"processed with no Error stream: {done.get('streams')}")
+    await es.post(f'/{index}/_refresh')
+    count = (await es.get(f'/{index}/_count')).json().get('count')
+    p2.check(count == 3, f'the index holds the 3 records: {count}')
+    mapped = (await es.get(f'/{index}/_mapping')).json()[index]['mappings']['properties']
+
+    def kind(path: str) -> str | None:
+        node = {'properties': mapped}
+        for part in path.split('.'):
+            node = (node.get('properties') or {}).get(part)
+            if node is None:
+                return None
+        return node.get('type', 'object')
+    expected = {'StreamId': 'long', 'EventId': 'long', '@timestamp': 'date', 'ts': 'keyword', 'user.name': 'keyword',
+                'user.roles': 'keyword', 'status': 'long', 'latency_ms': 'float', 'tags': 'keyword',
+                'message': 'keyword', 'message_json.client.ip': 'keyword', 'message_json.ok': 'boolean',
+                'message_json.bytes': 'long', 'message_json.error.code': 'keyword', 'stroom.feed': 'keyword'}
+    actual = {path: kind(path) for path in expected}
+    p2.check(actual == expected, f'Elasticsearch mapped the fields dynamically, strings as keywords: {actual}')
+    p2.check(kind('session_token') is None, 'the dropped field was never indexed')
+    hit = (await es.post(f'/{index}/_search', json={'query': {'term': {'message_json.error.code': 'E42'}}})).json()
+    p2.check(hit['hits']['total']['value'] == 1 and hit['hits']['hits'][0]['_source']['user']['name'] == 'carol',
+             'a field from inside the JSON message is searchable')
+
+    print('\n### verified through Stroom, and documented')
+    doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
+                          time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
+    verified = await indexing.verify_index(ctx, build, doc['uuid'], 'elasticsearch', [raw], 3,
+                                           ['StreamId', 'EventId', '@timestamp', 'user.name', 'event'],
+                                           exact=[{'field': 'user.name', 'value': 'alice'}])
+    p2.check(verified.get('passed') is True, f"Stroom's searches: {json.dumps(verified)[:300]}")
+    written = await builds.write_documentation(ctx, build, pipeline['uuid'],
+                                               '## Purpose and data\n\nWeb access logs, indexed as they are for '
+                                               'exploration.\n', 'Created', stream_ids=[raw])
+    section = written.get('field_mapping') or ''
+    print('    ' + '\n    '.join(section.splitlines()[:14]))
+    p2.check('Elasticsearch, discovery' in section and '| `@timestamp` | date | `ts` |' in section
+             and '| `message_json.client.ip` | 33% of documents | `10.1.1.1` |' in section
+             and f'Elasticsearch index template `{index}`, agreed with the user' in section,
+             'documented: the explicit fields, then the fields the sample held, and the agreed template')
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

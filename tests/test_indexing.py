@@ -110,3 +110,84 @@ async def test_an_indexing_pipeline_gets_the_fields_its_xslt_writes():
     with patch.object(indexing, 'gateway_from', lambda ctx: gateway),             patch.object(indexing, '_shape', AsyncMock(return_value=shape)),             patch.object(indexing, '_events_available', AsyncMock()),             patch.object(indexing, 'create_pipeline', AsyncMock(return_value={'uuid': 'p-1'})),             patch.object(indexing, 'set_index_fields', AsyncMock(return_value={'added': ['StreamId', 'EventTime']})) as add:
         result = await indexing.create_indexing_pipeline(SimpleNamespace(), 'acme-v1', 'ACME - Indexing', 't-1', 'x-1', index_uuid='i-1')
     assert result['index_fields_added'] == ['StreamId', 'EventTime'] and add.await_args.args[1:] == ('i-1', plan)
+
+
+RAW = """<array xmlns="http://www.w3.org/2013/XSL/json"><map><string key="ts">2026-10-01T09:00:00Z</string>
+<map key="user"><string key="name">alice</string><array key="roles"><string>admin</string></array></map>
+<number key="status">200</number><string key="token">secret</string>
+<string key="message">{"action": "login", "client": {"ip": "10.1.1.1"}}</string>
+<string key="note">{not json}</string></map></array>"""
+
+
+def run_raw(xslt: str) -> str:
+    # Plain Saxon has no stroom: functions: the stream id, record number and meta are given fixed values here.
+    xslt = (xslt.replace('stroom:stream-id()', '7').replace('stroom:record-no()', '1')
+            .replace("stroom:meta('Feed')", "'ACME'"))
+    with PySaxonProcessor(license=False) as proc:
+        exe = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt)
+        return exe.transform_to_string(xdm_node=proc.parse_xml(xml_text=RAW))
+
+
+def test_a_discovery_plan_copies_records_as_they_are_and_maps_only_what_stroom_needs():
+    from utils.fieldplan import Discovery
+    plan = FieldPlan.for_discovery('stroom-discovery-acme-v1',
+                                   Discovery(timestamp_field='ts', meta={'stroom.feed': 'Feed'}, drop=['token']))
+    assert plan.required() == [] and [f.name for f in plan.fields] == ['StreamId', 'EventId', '@timestamp']
+    body = plan.elastic_template('stroom-discovery-acme-v1')['body']
+    mappings = body['template']['mappings']
+    assert mappings['dynamic'] is True and mappings['date_detection'] is False
+    assert mappings['dynamic_templates'] == [{'strings_as_keywords': {
+        'match_mapping_type': 'string', 'mapping': {'type': 'keyword', 'ignore_above': 1024}}}]
+    assert mappings['properties'] == {'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'}, '@timestamp': {'type': 'date'}}
+    assert body['template']['settings']['index']['mapping'] == {'total_fields': {'limit': 2000}, 'ignore_malformed': True}
+    output = run_raw(plan.xslt())
+    assert '<number key="StreamId">7</number>' in output and '<number key="EventId">1</number>' in output
+    assert '<string key="@timestamp">2026-10-01T09:00:00Z</string>' in output
+    assert '<string key="stroom.feed">ACME</string>' in output
+    assert '<map key="user"><string key="name">alice</string><array key="roles"><string>admin</string></array></map>' in output
+    assert '<number key="status">200</number>' in output and 'secret' not in output
+    # JSON held in a string: kept, and parsed beside it; text that only looks like JSON is left alone.
+    assert '<map key="message_json"><string key="action">login</string><map key="client"><string key="ip">10.1.1.1</string>' in output
+    assert '<string key="note">{not json}</string>' in output and 'note_json' not in output
+
+
+def test_a_discovery_timestamp_can_be_nested_and_formatted_and_unpacking_turned_off():
+    from utils.fieldplan import Discovery
+    plan = FieldPlan.for_discovery('d', Discovery(timestamp_field='event.created', timestamp_format='dd/MM/yyyy HH:mm:ss',
+                                                  unpack_json=False))
+    xslt = plan.xslt()
+    assert "stroom:format-date(string(*[@key='event']/*[@key='created']), 'dd/MM/yyyy HH:mm:ss')" in xslt
+    assert 'json-to-xml' not in xslt
+
+
+async def test_a_discovery_draft_reads_nothing_and_is_elasticsearch_only():
+    from utils.fieldplan import Discovery
+    stroom = SimpleNamespace()   # any read would fail: nothing is surveyed
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'stroom-discovery-acme-v1',
+                                               discovery=Discovery(timestamp_field='ts'))
+    assert draft['plan']['discovery']['timestamp_field'] == 'ts' and 'json-to-xml' in draft['xslt']
+    with pytest.raises(ToolError, match='A discovery index is Elasticsearch'):
+        await indexing.draft_index_mapping(ctx, 'lucene', 'x', discovery=Discovery(timestamp_field='ts'))
+    with pytest.raises(ToolError, match='Give events_stream_ids'):
+        await indexing.draft_index_mapping(ctx, 'elasticsearch', 'x', convention='ecs')
+
+
+def test_a_discovery_template_takes_the_examples_settings_but_not_its_fields_or_rules():
+    from utils.fieldplan import Discovery
+    from utils.templatecheck import from_example
+    plan = FieldPlan.for_discovery('stroom-discovery-acme-v1', Discovery(timestamp_field='ts'))
+    example = {'index_patterns': ['ecs-x*'], 'composed_of': ['base'], 'template': {
+        'settings': {'index': {'number_of_shards': 3, 'mapping': {'total_fields': {'limit': 500}}}},
+        'mappings': {'dynamic': 'strict', 'properties': {'User': {'properties': {'Id': {'type': 'keyword'}}},
+                                                         '@timestamp': {'type': 'date', 'format': 'epoch_millis'}}}}}
+    body, notes = from_example(plan.elastic_template('x')['body'], example,
+                               {'base': {'template': {'mappings': {'properties': {'StreamId': {'type': 'long'}}}}}},
+                               discovery=True)
+    mappings = body['template']['mappings']
+    assert mappings['dynamic'] is True and 'dynamic_templates' in mappings and 'User' not in mappings['properties']
+    # The example maps @timestamp itself: its definition is kept, as in any template built from an example.
+    assert mappings['properties'] == {'EventId': {'type': 'long'}, '@timestamp': {'type': 'date', 'format': 'epoch_millis'}}
+    assert body['template']['settings']['index'] == {'number_of_shards': 3, 'mapping': {
+        'total_fields': {'limit': 2000}, 'ignore_malformed': True}}
+    assert any(n.startswith('a discovery index') for n in notes) and not any('named unlike' in n for n in notes)

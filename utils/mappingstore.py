@@ -65,3 +65,27 @@ def replace_section(markdown: str, heading: str, body: str) -> str:
         if at >= 0:
             return markdown[:at] + section + markdown[at:]
     return markdown.rstrip() + '\n\n' + section
+
+
+# The Elasticsearch index template the user agreed for an indexing pipeline, kept in the pipeline's description: what
+# the cluster admin was asked to apply, for the index and cluster and the indexing XSLT it was agreed against.
+_AGREED_START = '--- stroom-mcp agreed index template (confirmed by the user; check_index_template to change it) ---'
+_AGREED_END = '--- end of stroom-mcp agreed index template ---'
+_AGREED = re.compile(r'--- stroom-mcp agreed index template[^\n]*---\n(.*?)\n--- end of stroom-mcp agreed index template ---',
+                     re.S)
+
+
+def with_agreed_template(description: str | None, agreed: dict[str, Any]) -> str:
+    text = _AGREED.sub('', description or '').strip()
+    block = f"{_AGREED_START}\n{json.dumps(agreed, indent=1, ensure_ascii=False)}\n{_AGREED_END}"
+    return f"{text}\n\n{block}".strip() if text else block
+
+
+def read_agreed_template(description: str | None) -> dict[str, Any] | None:
+    match = _AGREED.search(description or '')
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except ValueError:
+        return None

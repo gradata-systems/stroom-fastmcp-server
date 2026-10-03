@@ -20,3 +20,31 @@ def test_only_the_first_unset_xslt_is_required():
     assert 'optional' not in open_slots[0] and 'optional' in open_slots[1]
     assert shared == [{'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'cluster',
                        'value': {'name': 'ES_PROD'}}]
+
+
+async def test_one_child_stroom_cannot_load_does_not_hide_the_others():
+    # Live: a pipeline storing schemaFilter.schemaLocation (a property the element lacks) made Stroom answer 500,
+    # and describe_template failed outright; the agent then tried to "fix" the schema filter.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import templates
+    index = {'a': {'uuid': 'a', 'name': 'Bad', 'path': 'X/Bad', 'parent_uuid': 't'},
+             'b': {'uuid': 'b', 'name': 'Good', 'path': 'X/Good', 'parent_uuid': 't'}}
+
+    async def layers(uuid):
+        if uuid == 'a':
+            raise ToolError('Stroom rejected the request (500): Attempt to set property "schemaLocation" on element '
+                            '"schemaFilter" but property is unknown.')
+        return [{'pipelineData': {'properties': {'add': [{'element': 'xsltFilter', 'name': 'xslt'}]}}}]
+    stroom = SimpleNamespace(post=AsyncMock(return_value={'values': []}), pipeline_layers=layers)
+    with patch.object(templates, 'gateway_from', lambda ctx: stroom), \
+            patch.object(templates, '_pipeline_index', AsyncMock(return_value=index)):
+        result = await templates.list_template_children(None, 't')
+        bad, good = result['children']
+        assert 'schemaLocation' in bad['unreadable'] and good['sets'] == ['xsltFilter.xslt']
+        # The template itself unreadable: said to be Stroom's stored settings, for an administrator, not to set here.
+        with patch.object(templates, '_shape', AsyncMock(side_effect=ToolError('Stroom rejected the request (500): x'))):
+            with pytest.raises(ToolError, match='an administrator fixes the template in the Stroom UI'):
+                await templates.describe_template_contract(None, 't')

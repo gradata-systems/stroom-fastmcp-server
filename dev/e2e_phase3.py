@@ -84,6 +84,9 @@ async def version_two(ctx, csv: dict, v1: dict, stamp: str):
     paths = [f['path'] for f in diff['fields_changed']]
     print(f"    v1 -> v2 changed paths: {paths}")
     check(paths == ['record/data[Success]/@value'], 'v2 differs from v1 only by the added field')
+    # The copy's code changed, so it is stepped clean before it processes, as for any pipeline.
+    stepped = await stepping.step_sample(ctx, copy['uuid'], v1['events'])
+    check(stepped['verdict'] == 'clean', f"v2 steps clean: {stepped['verdict']}")
     await agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=copy['uuid'], stream_ids=v1['events'],
                  source_pipeline_uuid=csv['pipeline']['uuid'])
     gate = await processing_writes.wait_for_processing(ctx, copy['uuid'], v1['events'], expect_events=False)

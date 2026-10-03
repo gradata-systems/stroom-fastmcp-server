@@ -21,6 +21,7 @@ from tools.pipelines import merge_layers
 from tools.processing import processing_status
 from tools.stepping import stepped_clean
 from utils.consent import consent_from
+from utils.mappingstore import digest, normalise_xslt, read_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, doc_link, gateway_from
 
@@ -234,26 +235,36 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]], fro
     return made
 
 
-async def _template_gate(ctx: Context, destination: dict[str, Any], confirmation_id: str | None) -> dict[str, Any] | None:
-    """Elasticsearch: the user confirms the index template for the destination index has been committed."""
-    index = destination['index name']
+async def indexing_xslt_digest(stroom: StroomGateway, pipeline_uuid: str) -> str:
+    """The XSLT code the pipeline runs, digested: an index template is agreed for the documents this code writes."""
+    from tools.pipelines import translation_docs
+    parts = []
+    for entry in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid)):
+        if entry['doc'].get('type') == 'XSLT':
+            parts.append(normalise_xslt((await stroom.get_doc('XSLT', entry['doc']['uuid'])).get('data') or ''))
+    return digest(*parts)
+
+
+async def _committed(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any]) -> str:
+    """Elasticsearch: the index template has to be on the cluster before documents arrive, or the index is created
+    with dynamic mappings that the template can no longer change. Only a template the user agreed (kept with the
+    pipeline by propose_index_template or check_index_template) is asked about, and the user confirms it is
+    committed to the cluster in the approval."""
+    index, cluster = destination['index name'], destination['cluster']
     if not index:
         raise ToolError("This Elasticsearch indexing pipeline has no indexName set")
-    return await consent_from(ctx).require(
-        ctx, 'confirmation', 'processing:index_template',
-        f"Have you committed the index template for Elasticsearch index '{index}' (cluster "
-        f"{destination['cluster']})? The indexing filter is then created disabled, for you to enable.",
-        {k: v for k, v in destination.items() if v is not None}, confirmation_id)
-
-
-def _ready_to_enable(stroom: StroomGateway, pipeline: dict[str, Any], created: dict[str, Any],
-                     destination: dict[str, Any]) -> dict[str, Any]:
-    link = doc_link(stroom.settings, 'Pipeline', pipeline['uuid'])
-    return {'filter_id': created['id'], 'enabled': False, 'destination': destination, 'pipeline_link': link,
-            'next': (f"Tell the user the indexing filter {created['id']} on pipeline '{pipeline['name']}' is ready to "
-                     f"enable, with this link to review the pipeline (its Processors tab holds the filter): {link}. "
-                     f"Once they have enabled it (or ask you to, with set_processor_filter_enabled), "
-                     f"wait_for_processing and verify.")}
+    agreed = read_agreed_template(pipeline.get('description'))
+    if not agreed or agreed.get('index') != index or agreed.get('cluster') != cluster:
+        raise ToolError(f"No Elasticsearch index template has been agreed with the user for index '{index}' (cluster "
+                        f"{cluster}). propose_index_template with the user's example index template (or index mapping) "
+                        f"and its component templates; the user confirms it there, or corrects it "
+                        f"(check_index_template with their version). Then they have it committed to the cluster.")
+    if agreed.get('xslt') != await indexing_xslt_digest(stroom, pipeline['uuid']):
+        raise ToolError(f"The indexing XSLT changed since index template '{agreed['name']}' was agreed: "
+                        f"check_index_template with it (and its component templates {agreed.get('component_templates') or []}) "
+                        f"over the Events streams, so the user confirms it again for the documents the pipeline now "
+                        f"writes. The agreed template:\n{(agreed.get('dev_tools') or '')[:4000]}")
+    return f"the agreed index template '{agreed['name']}' for Elasticsearch index '{index}' is committed to cluster {cluster}"
 
 
 async def create_processor_filter(
@@ -268,8 +279,6 @@ async def create_processor_filter(
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
-        confirmation_id: Annotated[str | None, Field(
-            description="From an earlier needs_confirmation reply (Elasticsearch: the index template is written).")] = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -277,9 +286,10 @@ async def create_processor_filter(
     sample stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task
     count. Streams the pipeline already processed are refused: use reprocess_streams for those.
     An indexing pipeline reading Events needs source_pipeline_uuid, and its filter only selects Events from
-    exactly that events pipeline. For an Elasticsearch indexing pipeline the user confirms they have committed
-    the index template for its destination index; the filter is then created disabled, for the user to enable,
-    and the result carries a link to the pipeline. Other filters are enabled, after the user's approval.
+    exactly that events pipeline. For an Elasticsearch indexing pipeline, the index template for its destination
+    index must have been agreed with the user (propose_index_template, check_index_template), and the approval
+    asks the user to confirm it is committed to the cluster, so the index is created with it; processing then
+    starts. Filters are enabled after the user's approval.
     A translation pipeline only processes the build's own feeds; sample filters run one task at a time.
     """
     stroom = gateway_from(ctx)
@@ -314,17 +324,12 @@ async def create_processor_filter(
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
 
     destination = await elastic_destination(stroom, pipeline_uuid)
+    summary = f"Start processing {scope} with pipeline '{pipeline['name']}'"
     if destination:
-        gate = await _template_gate(ctx, destination, confirmation_id)
-        if gate:
-            return gate
-        created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=False)
-        return {**_ready_to_enable(stroom, pipeline, created, destination), 'pipeline': pipeline['name'], 'scope': scope,
-                **({'events_from_pipeline': source['name']} if source else {})}
-
-    gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter',
-                                           f"Start processing {scope} with pipeline '{pipeline['name']}'",
-                                           details, approval_id)
+        committed = await _committed(stroom, pipeline, destination)
+        details['index template'] = committed
+        summary = f"{committed[0].upper()}{committed[1:]}: start indexing {scope} with pipeline '{pipeline['name']}'"
+    gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter', summary, details, approval_id)
     if gate:
         return gate
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
@@ -369,8 +374,6 @@ async def reprocess_streams(
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams it already processed, to process again.")],
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
-        confirmation_id: Annotated[str | None, Field(
-            description="From an earlier needs_confirmation reply (Elasticsearch: the index template is written).")] = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -378,7 +381,7 @@ async def reprocess_streams(
     max_reprocess_streams (default 10) per call, run one task at a time. Stroom marks the pipeline's earlier
     outputs for these streams deleted once the new ones are written; pass the returned filter_id to
     wait_for_processing so only the new outputs count. Needs approval; for Elasticsearch indexing the user
-    instead confirms the index template is committed and the filter is created disabled for them to enable.
+    approval also confirms the index template is applied on the cluster.
     Promoted pipelines are refused by the write guard: reprocessing production data is the user's.
     """
     stroom = gateway_from(ctx)
@@ -403,12 +406,8 @@ async def reprocess_streams(
         expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
-        gate = await _template_gate(ctx, destination, confirmation_id)
-        if gate:
-            return gate
-        created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=False)
-        return {**_ready_to_enable(stroom, pipeline, created, destination), 'streams': stream_ids,
-                'note': "documents already indexed from these streams may be indexed again"}
+        details['index template'] = await _committed(stroom, pipeline, destination)
+        details['already indexed'] = 'documents from these streams may be indexed again'
     gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
                                            f"Reprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'",
                                            details, approval_id)

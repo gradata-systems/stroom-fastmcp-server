@@ -14,9 +14,11 @@ from tools.processing_writes import create_promotion_filters, promotion_processi
 from tools.pipelines import translation_docs
 from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags
 from tools.streams import summarise_events
-from utils.fielddoc import field_mapping_markdown, index_field_mapping_markdown, sampled_events
+from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents,
+                            index_field_mapping_markdown, sampled_events)
 from utils.fieldplan import FieldPlan
-from utils.mappingstore import DOC_MARK, digest, doc_digest, normalise_xslt, read_mapping, replace_section
+from utils.mappingstore import (DOC_MARK, digest, doc_digest, normalise_xslt, read_agreed_template, read_mapping,
+                                replace_section)
 from utils.xsltgen import TranslationMapping, generate
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
@@ -140,6 +142,15 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
     else:
         plan = FieldPlan.model_validate(kept['payload'])
+        if plan.discovery:
+            # Raw records, not Events: the documents the pipeline writes from its sample streams.
+            documents = None
+            if stream_ids:
+                loaded = await _Pipeline.load(stroom, pipeline['uuid'])
+                outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], None, 200)
+                documents = index_documents(list(outputs.values()))
+            return (discovery_field_markdown(plan, documents) + _agreed_line(pipeline)).rstrip() + '\n\n' + \
+                DOC_MARK.format(digest=mapping_digest(kept))
         population = (await summarise_events(ctx, stream_ids, 200))['path_population'] if stream_ids else None
         if stream_ids and not population:
             kinds = [f"{m.get('id')} ({m.get('feedName')}, {m.get('typeName')})" for m in
@@ -147,8 +158,24 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             raise ToolError(f"Field mapping not written: streams {kinds} hold no events to document. An indexing "
                             f"pipeline's stream_ids are the Events streams it indexes (wait_for_processing on the events "
                             f"pipeline lists them).")
-        section = index_field_mapping_markdown(plan, population)
+        documents = None
+        if stream_ids:
+            # What the index gets: the indexing pipeline stepped over its Events streams, its XSLT's documents read.
+            loaded = await _Pipeline.load(stroom, pipeline['uuid'])
+            outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], None, 200)
+            documents = index_documents(list(outputs.values()))
+        section = index_field_mapping_markdown(plan, population, documents) + _agreed_line(pipeline)
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
+
+
+def _agreed_line(pipeline: dict[str, Any]) -> str:
+    """The agreed Elasticsearch index template, for the Field mapping section."""
+    agreed = read_agreed_template(pipeline.get('description'))
+    if not agreed:
+        return ''
+    parts = agreed.get('component_templates') or []
+    return (f"\nElasticsearch index template `{agreed['name']}`, agreed with the user {agreed['agreed'][:10]}"
+            + (f", composed of {', '.join(f'`{c}`' for c in parts)}" if parts else '') + ".\n")
 
 
 async def _meta_or_none(stroom, stream_id: int) -> dict[str, Any] | None:

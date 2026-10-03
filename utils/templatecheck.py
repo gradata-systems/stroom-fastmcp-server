@@ -6,11 +6,13 @@ missing fields under the template's dynamic setting, values the mapped type cann
 clashes, and fields the template expects but the pipeline never writes (often renamed in the template).
 Every mismatch comes back as a change to make, to the pipeline or to the template.
 """
+import copy
 import difflib
 import fnmatch
 import ipaddress
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,24 +28,83 @@ _INT = re.compile(r'^-?\d+$')
 _NUM = re.compile(r'^-?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$')
 
 
+def _json(text: str, what: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise ValueError(f"The {what} is not valid JSON: {e}") from e
+
+
 def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
-    """A template as the user pastes it: Dev Tools 'PUT _index_template/name {...}', the body, or GET output."""
+    """An Elasticsearch index template as the user pastes it: Dev Tools 'PUT _index_template/name {...}', the body, or
+    GET _index_template output; or an existing index's mapping (GET <index>/_mapping, or {mappings: ...}), which has
+    no index_patterns, so which indices it covers is not checked."""
     text = text.strip()
     name = None
     first, _, rest = text.partition('\n')
     match = re.match(r'^(PUT|POST)\s+/?_index_template/([^\s?]+)', first.strip(), re.I)
     if match:
         name, text = match.group(2), rest
-    try:
-        body = json.loads(text)
-    except ValueError as e:
-        raise ValueError(f"The template is not valid JSON: {e}") from e
+    body = _json(text, 'index template')
     if isinstance(body, dict) and 'index_templates' in body:
         entry = (body['index_templates'] or [{}])[0]
         name, body = entry.get('name', name), entry.get('index_template', {})
+    if isinstance(body, dict) and 'index_patterns' not in body:
+        # A mapping: GET <index>/_mapping ({index: {mappings}}), {mappings: ...}, or the mappings themselves.
+        if len(body) == 1 and isinstance(next(iter(body.values())), dict) and 'mappings' in next(iter(body.values())):
+            name, body = next(iter(body)), next(iter(body.values()))
+        mappings = body.get('mappings') if 'mappings' in body else body if 'properties' in body else None
+        if isinstance(mappings, dict):
+            return name, {'template': {'mappings': mappings}}
     if not isinstance(body, dict) or 'index_patterns' not in body:
-        raise ValueError("Expected an index template body with index_patterns (and template.mappings)")
+        raise ValueError("Expected an Elasticsearch index template (index_patterns and template.mappings), or an "
+                         "index's mapping (GET <index>/_mapping)")
     return name, body
+
+
+def parse_component_templates(texts: list[str]) -> dict[str, dict[str, Any]]:
+    """Component templates as the user pastes them, by name: Dev Tools 'PUT _component_template/name {...}', or GET
+    _component_template output (one or several). Each needs its name, to be matched to composed_of."""
+    found: dict[str, dict[str, Any]] = {}
+    for text in texts:
+        text = text.strip()
+        first, _, rest = text.partition('\n')
+        match = re.match(r'^(PUT|POST)\s+/?_component_template/([^\s?]+)', first.strip(), re.I)
+        body = _json(rest if match else text, 'component template')
+        if isinstance(body, dict) and 'component_templates' in body:
+            for entry in body['component_templates'] or []:
+                found[entry.get('name')] = entry.get('component_template') or {}
+        elif match and isinstance(body, dict):
+            found[match.group(2)] = body
+        else:
+            raise ValueError("Give each component template with its name, as a Dev Tools request "
+                             "(PUT _component_template/<name> {...}) or GET _component_template/<name> output, so it can "
+                             "be matched to the index template's composed_of")
+    return found
+
+
+def _merge(into: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    for key, value in other.items():
+        if isinstance(value, dict) and isinstance(into.get(key), dict):
+            _merge(into[key], value)
+        else:
+            into[key] = copy.deepcopy(value)
+    return into
+
+
+def compose(body: dict[str, Any], components: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
+    """(body, missing): the index template with its component templates' mappings merged in as Elasticsearch composes
+    them (each of composed_of in order, then the template's own mappings over them), and those of composed_of not
+    given."""
+    merged: dict[str, Any] = {}
+    missing = []
+    for name in body.get('composed_of') or []:
+        if name in components:
+            _merge(merged, ((components[name].get('template') or {}).get('mappings')) or {})
+        else:
+            missing.append(name)
+    _merge(merged, ((body.get('template') or {}).get('mappings')) or {})
+    return {**body, 'template': {**(body.get('template') or {}), 'mappings': merged}}, missing
 
 
 @dataclass
@@ -77,6 +138,358 @@ def read_mapping(mappings: dict[str, Any]) -> Mapping:
                 out.fields[path] = spec
     walk(mappings.get('properties'), '')
     return out
+
+
+# Per-field parameters that describe a style (how this environment maps a type), as opposed to one field's own.
+_STYLE_PARAMS = ('type', 'ignore_above', 'fields', 'format', 'norms', 'doc_values', 'index', 'normalizer', 'analyzer',
+                 'null_value', 'scaling_factor')
+# Naming styles, judged per dotted segment: 'lower' (one lower-case word) fits ECS-style and camelCase names alike.
+_SEGMENT = (('pascal', re.compile(r'[A-Z][A-Za-z0-9]*')), ('camel', re.compile(r'[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*')),
+            ('snake', re.compile(r'[a-z0-9]+(?:_[a-z0-9]+)+')), ('lower', re.compile(r'[a-z0-9]+')))
+STYLE_NAMES = {'ecs': 'lower case and snake_case (ECS-style, e.g. user.name, source.ip)',
+               'pascal': 'PascalCase (e.g. User.Id, TypeId)', 'camel': 'camelCase (e.g. user.userId)'}
+# Named so for Stroom (or Elasticsearch), whatever the index's style.
+_EXEMPT = ('StreamId', 'EventId')
+
+
+def _segment(part: str) -> str:
+    return next((style for style, pattern in _SEGMENT if pattern.fullmatch(part)), 'other')
+
+
+def naming_style(name: str) -> str | None:
+    """'ecs', 'pascal', 'camel' or 'other' for a field name, judging each dotted part; None for names exempt from
+    any style: @timestamp, _id and the like, StreamId and EventId."""
+    if name.startswith(('@', '_')) or name in _EXEMPT:
+        return None
+    parts = {_segment(p) for p in name.split('.')}
+    if parts <= {'lower', 'snake'}:
+        return 'ecs'
+    if parts == {'pascal'}:
+        return 'pascal'
+    if parts <= {'lower', 'camel'}:
+        return 'camel'
+    return 'other'
+
+
+def fits_style(name: str, style: str) -> bool:
+    found = naming_style(name)
+    return found is None or found == style or (style == 'camel' and found == 'ecs' and '_' not in name)
+
+
+def example_naming(fields: list[str]) -> str | None:
+    """The style most of an example's field names follow, or None when none does."""
+    names = [f for f in fields if naming_style(f) is not None]
+    if not names:
+        return None
+    exact = {style: sum(naming_style(f) == style for f in names) for style in STYLE_NAMES}
+    fitting = [s for s in STYLE_NAMES if sum(fits_style(f, s) for f in names) * 2 > len(names)]
+    return max(fitting, key=lambda s: exact[s]) if fitting else None
+
+
+def example_dotted(fields: list[str]) -> bool:
+    """Whether the example nests its names (User.Id) rather than running them together (UserId)."""
+    names = [f for f in fields if naming_style(f) is not None]
+    return sum('.' in f for f in names) * 2 > len(names)
+
+
+# Event-logging path segments too general to name a field on their own.
+_GENERIC = {'id', 'name', 'value', 'type', 'text', 'data', 'code', 'state', 'number', 'description'}
+_ROOTS = ('EventSource', 'EventDetail', 'EventTime', 'EventChain')
+_PLAN_TYPE = {'keyword': 'keyword', 'constant_keyword': 'keyword', 'wildcard': 'keyword', 'text': 'text',
+              'match_only_text': 'text', 'date': 'date', 'date_nanos': 'date', 'long': 'long', 'integer': 'long',
+              'short': 'long', 'byte': 'long', 'unsigned_long': 'long', 'double': 'double', 'float': 'double',
+              'half_float': 'double', 'scaled_float': 'double', 'boolean': 'boolean', 'ip': 'ip'}
+
+
+def _squash(text: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', text.lower())
+
+
+def _segments(source: str) -> list[str]:
+    """An event-logging path's element names below the root, e.g. EventSource/User/Id -> [User, Id]."""
+    parts = [re.sub(r'\[.*?\]', '', p) for p in source.split('/') if p and not p.startswith('@')]
+    return parts[1:] if len(parts) > 1 and parts[0] in _ROOTS else parts
+
+
+def _match(source: str, example: dict[str, dict[str, Any]], known: set[str]) -> str | None:
+    """The example field that holds this event-logging path: one a convention names for the path, else one whose
+    name is the path's trailing elements run together (User.Id, UserId <- EventSource/User/Id; TypeId <-
+    EventDetail/TypeId), longest first. A single generic element (Id, Name) is not enough on its own."""
+    leaves = [f for f, spec in example.items() if 'properties' not in spec and spec.get('type') != 'object']
+    for name in leaves:
+        if name in known:
+            return name
+    parts = _segments(source)
+    by_squash = {}
+    for name in leaves:
+        by_squash.setdefault(_squash(name), name)
+    for i in range(len(parts)):
+        run = parts[i:]
+        if len(run) == 1 and (_squash(run[0]) in _GENERIC or len(run[0]) < 4):
+            continue
+        hit = by_squash.get(_squash(''.join(run)))
+        if hit:
+            return hit
+    return None
+
+
+def _words(part: str) -> list[str]:
+    """IPAddress -> [IP, Address]; createdOn -> [created, On]."""
+    return re.findall(r'[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+', part) or [part]
+
+
+def _camel(words: list[str]) -> str:
+    return words[0].lower() + ''.join(w[:1].upper() + w[1:].lower() for w in words[1:])
+
+
+def _derive(source: str, style: str, dotted: bool, taken: set[str]) -> str | None:
+    """A name in the example's style for a path it has no field for, from the path's last elements:
+    Client.IPAddress or ClientIPAddress (PascalCase), client.ipAddress or clientIpAddress (camelCase),
+    client.ip_address or client_ip_address (ECS-style)."""
+    parts = _segments(source)
+    if not parts or style not in STYLE_NAMES:
+        return None
+
+    def build(run: list[str]) -> str:
+        if style == 'pascal':
+            names = [p[:1].upper() + p[1:] for p in run]
+            return '.'.join(names) if dotted else ''.join(names)
+        if style == 'camel':
+            return '.'.join(_camel(_words(p)) for p in run) if dotted else _camel([w for p in run for w in _words(p)])
+        names = ['_'.join(w.lower() for w in _words(p)) for p in run]
+        return '.'.join(names) if dotted else '_'.join(names)
+    for take in range(min(2, len(parts)), len(parts) + 1):
+        run = parts[-take:]
+        if take == 1 and _squash(run[0]) in _GENERIC and len(parts) > 1:
+            continue
+        name = build(run)
+        if name not in taken:
+            return name
+    return None
+
+
+def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str, Any]],
+                       convention_names: dict[str, set[str]], populated: list[str]) -> tuple[list[dict[str, str]], list[str]]:
+    """(fields, notes): the field plan's fields named as the user's example names them. A field takes the example's
+    name for its event-logging path (_match); one the example has no field for is named in the example's style
+    (_derive); populated paths the plan leaves out but the example maps are added, typed as the example types
+    them. StreamId, EventId and @timestamp keep their names."""
+    leaves = [f for f, spec in example.items() if 'properties' not in spec and spec.get('type') != 'object']
+    style, dotted = example_naming(leaves), example_dotted(leaves)
+
+    def fits(name: str) -> bool:
+        # A dotted name in an example that runs its names together (userName) does not fit it either.
+        return fits_style(name, style) and (dotted or '.' not in name)
+    out, notes, renamed, derived, added, unlike, used = [], [], [], [], [], [], set()
+    taken = {f['name'] for f in fields}
+    for field in fields:
+        name = field['name']
+        if naming_style(name) is None:
+            out.append(field)
+            used.add(name)
+            continue
+        hit = _match(field['source'], {k: v for k, v in example.items() if k not in used},
+                     convention_names.get(field['source'], set()))
+        if hit:
+            new = hit
+        elif style and not fits(name):
+            # A convention's name for the path in the example's style (host.ip), else one built from the path.
+            conventional = sorted(n for n in convention_names.get(field['source'], set()) if fits(n)
+                                  and naming_style(n) is not None and ('.' in n) == dotted and n not in taken | used)
+            new = conventional[0] if conventional else _derive(field['source'], style, dotted, taken | used)
+            if new:
+                derived.append(f"{name} -> {new}")
+            else:
+                unlike.append(name)
+                new = name
+        else:
+            new = name
+        if hit and hit != name:
+            renamed.append(f"{name} -> {hit}")
+        used.add(new)
+        out.append({**field, 'name': new})
+    sources = {f['source'] for f in out}
+    for path in populated:
+        if path in sources or path.startswith('@'):
+            continue
+        hit = _match(path, {k: v for k, v in example.items() if k not in used}, convention_names.get(path, set()))
+        if hit:
+            out.append({'name': hit, 'type': _PLAN_TYPE.get(example[hit].get('type'), 'keyword'), 'source': path})
+            used.add(hit)
+            added.append(f"{hit} <- {path}")
+    if renamed:
+        notes.append(f"named as the example names them: {renamed}")
+    if derived:
+        notes.append(f"not in the example, named in its style ({STYLE_NAMES[style]}): {derived}")
+    if added:
+        notes.append(f"in the sample and mapped by the example, so added: {added}")
+    if unlike:
+        notes.append(f"named unlike the example ({STYLE_NAMES.get(style, style)}), with no name derived: {unlike}; "
+                     f"agree names with the user and give them as extra_fields")
+    left = [f for f, spec in example.items() if f not in used and 'properties' not in spec
+            and spec.get('type') != 'object' and naming_style(f) is not None]
+    if left:
+        notes.append(f"in the example but not in this source's sample, so not in this plan: {left[:15]}"
+                     + (f" (+{len(left) - 15})" if len(left) > 15 else ''))
+    return out, notes
+
+
+def type_styles(fields: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The way an example maps each type: for each type, its most common set of style parameters (keyword with
+    ignore_above 1024, text with a .keyword sub-field, date with a format...)."""
+    by_type: dict[str, Counter] = {}
+    specs: dict[str, dict[str, Any]] = {}
+    for spec in fields.values():
+        if 'type' not in spec or 'properties' in spec or spec.get('type') == 'object':
+            continue
+        style = {k: spec[k] for k in _STYLE_PARAMS if k in spec}
+        key = json.dumps(style, sort_keys=True)
+        by_type.setdefault(spec['type'], Counter())[key] += 1
+        specs[key] = style
+    return {t: specs[c.most_common(1)[0][0]] for t, c in by_type.items()}
+
+
+_MAPPING_PARAMS = ('dynamic', 'dynamic_templates', 'date_detection', 'numeric_detection', 'subobjects', '_source', '_routing')
+
+
+def read_mapping_fields(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """path -> spec for an index template body's mappings (objects included, as {'type': 'object'})."""
+    return read_mapping(((body.get('template') or {}).get('mappings')) or {}).fields
+
+
+def object_nodes(mappings: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """path -> an object field's own parameters (type, dynamic, enabled, subobjects), for each node with
+    properties in a mapping."""
+    out: dict[str, dict[str, Any]] = {}
+
+    def walk(properties: dict[str, Any], prefix: str) -> None:
+        for name, spec in (properties or {}).items():
+            if isinstance(spec, dict) and 'properties' in spec:
+                path = f'{prefix}.{name}' if prefix else name
+                out[path] = {k: copy.deepcopy(v) for k, v in spec.items() if k != 'properties'}
+                walk(spec['properties'], path)
+    walk(mappings.get('properties'), '')
+    return out
+
+
+def _nest(fields: dict[str, dict[str, Any]], objects: dict[str, dict[str, Any]] | None = None,
+          typed: bool = False) -> dict[str, Any]:
+    """Mapping properties from dotted paths: {'source.ip': {...}} -> {'source': {'properties': {'ip': {...}}}}.
+    An object the examples define gets their parameters for it; with typed, a new object is declared
+    "type": "object" as the examples declare theirs."""
+    properties: dict[str, Any] = {}
+    objects = objects or {}
+    for path, spec in fields.items():
+        node = properties
+        parts = path.split('.')
+        for i, part in enumerate(parts[:-1]):
+            where = '.'.join(parts[:i + 1])
+            if part not in node:
+                params = copy.deepcopy(objects.get(where)) if where in objects else ({'type': 'object'} if typed else {})
+                node[part] = {**params, 'properties': {}}
+            node = node[part].setdefault('properties', {})
+        node[parts[-1]] = copy.deepcopy(spec)
+    return properties
+
+
+def from_example(planned: dict[str, Any], example: dict[str, Any], components: dict[str, dict[str, Any]],
+                 discovery: bool = False) -> tuple[dict[str, Any], list[str]]:
+    """(body, notes): the final index template for the new index, built from the field plan's template and the
+    user's example (an index template or an index's mapping, with the component templates it is composed of): the
+    new index's own pattern; the example's composed_of, settings, priority, data_stream and top-level mapping
+    parameters; a field a component template defines is left to it, a field the example maps keeps the example's
+    type, and the rest are typed from the plan. Aliases and _meta name the example's own indices: not copied."""
+    notes = []
+    own = ((example.get('template') or {}).get('mappings')) or {}
+    composed_of = list(example.get('composed_of') or [])
+    from_components: dict[str, dict[str, Any]] = {}
+    for name in composed_of:
+        if name in components:
+            from_components.update(read_mapping(((components[name].get('template') or {}).get('mappings')) or {}).fields)
+    missing = [n for n in composed_of if n not in components]
+    in_example = read_mapping(own).fields
+    plan_fields = read_mapping(((planned.get('template') or {}).get('mappings')) or {}).fields
+    leaves = {path: spec for path, spec in plan_fields.items()
+              if not any(other.startswith(path + '.') for other in plan_fields)}
+    every = {**from_components, **in_example}
+    # A discovery index keeps the source's names and Elasticsearch's dynamic mapping: the example gives its
+    # settings and components, not its field conventions.
+    styles = {} if discovery else type_styles(every)
+    objects: dict[str, dict[str, Any]] = {}
+    for name in composed_of:
+        if name in components:
+            objects.update(object_nodes(((components[name].get('template') or {}).get('mappings')) or {}))
+    objects.update(object_nodes(own))
+    typed = bool(objects) and sum('type' in o for o in objects.values()) * 2 > len(objects)
+    final, left, kept, new, styled = {}, [], [], [], []
+    for path, spec in leaves.items():
+        if path in from_components:
+            left.append(path)
+        elif path in in_example:
+            final[path] = in_example[path]
+            kept.append(path)
+        elif spec.get('type') in styles and styles[spec['type']] != {'type': spec['type']}:
+            # A field new to the examples, mapped the way they map its type.
+            final[path] = copy.deepcopy(styles[spec['type']])
+            styled.append(path)
+        else:
+            final[path] = spec
+            new.append(path)
+    named = [f for f, spec in every.items() if spec.get('type') != 'object']
+    style = None if discovery else example_naming(named)
+    unlike = [p for p in leaves if p not in every and not (fits_style(p, style) and (example_dotted(named) or '.' not in p))]         if style else []
+    planned_mappings = (planned.get('template') or {}).get('mappings') or {}
+    if discovery:
+        mappings = {k: copy.deepcopy(v) for k, v in planned_mappings.items() if k != 'properties'}
+        mappings.update({k: copy.deepcopy(own[k]) for k in ('_source', '_routing') if k in own})
+    else:
+        mappings = {k: copy.deepcopy(own[k]) for k in _MAPPING_PARAMS if k in own}
+        mappings.setdefault('dynamic', planned_mappings.get('dynamic', False))
+    mappings['properties'] = _nest(final, objects, typed)
+    template: dict[str, Any] = {'mappings': mappings}
+    settings = (example.get('template') or {}).get('settings')
+    if settings:
+        notes.append(f"settings from the example: {sorted(settings if 'index' not in settings else settings['index'])}")
+    if settings or (planned.get('template') or {}).get('settings'):
+        # The plan's own settings (a discovery index's guardrails) over the example's.
+        merged = _merge(copy.deepcopy(settings or {}), (planned.get('template') or {}).get('settings') or {})
+        template = {'settings': merged, **template}
+    body: dict[str, Any] = {'index_patterns': planned['index_patterns'],
+                            'priority': example.get('priority', planned.get('priority', 200))}
+    if composed_of:
+        body['composed_of'] = composed_of
+    if 'data_stream' in example:
+        body['data_stream'] = copy.deepcopy(example['data_stream'])
+        notes.append("a data stream, as the example is")
+    body['template'] = template
+    if left:
+        notes.append(f"left to the component templates (they map them): {left}")
+    if kept:
+        notes.append(f"typed as in the example: {kept}")
+    if styled:
+        notes.append(f"new to this index, mapped in the example's style for their type: {styled}")
+    if new:
+        notes.append(f"new to this index, typed from the field plan: {new}")
+    if typed:
+        notes.append('objects declared "type": "object", as the example declares them')
+    left_out = [f for f, spec in in_example.items() if f not in leaves and spec.get('type') != 'object'
+                and not any(other.startswith(f + '.') for other in in_example)]
+    if discovery:
+        notes.append("a discovery index: the source's fields are mapped dynamically as documents arrive (strings as "
+                     "keywords); the example's own fields and mapping rules are not copied")
+    elif left_out:
+        notes.append(f"in the example but not written by this pipeline, so not in this template: {left_out[:15]}"
+                     + (f" (+{len(left_out) - 15})" if len(left_out) > 15 else ''))
+    if unlike:
+        notes.append(f"named unlike the example ({STYLE_NAMES[style]}): {unlike}. The indexing XSLT writes the plan's "
+                     f"names: draft_index_mapping again with example_template (and the component templates), so the "
+                     f"plan takes the example's names, save the XSLT from it, step, and build this again")
+    if missing:
+        notes.append(f"composed_of {missing} not given: fields they map may be repeated here with the plan's types; ask "
+                     f"the user for them (GET _component_template/<name>) and build again")
+    if (example.get('template') or {}).get('aliases'):
+        notes.append("the example's aliases are not copied: they name its own indices")
+    return body, notes
 
 
 def json_xml_documents(xml: str) -> list[dict[str, Any]]:
@@ -157,7 +570,9 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
     blocking, changes, notes = [], [], []
     patterns = body.get('index_patterns') or []
     patterns = [patterns] if isinstance(patterns, str) else patterns
-    if index_name and not any(fnmatch.fnmatchcase(index_name, p) for p in patterns):
+    if 'index_patterns' not in body:
+        notes.append("a mapping, not an index template: which indices it covers is not checked")
+    elif index_name and not any(fnmatch.fnmatchcase(index_name, p) for p in patterns):
         blocking.append(f"index_patterns {patterns} do not match the pipeline's index '{index_name}', so this template "
                         f"would not apply to it")
         changes.append({'field': None, 'problem': f"template does not cover index '{index_name}'",

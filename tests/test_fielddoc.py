@@ -89,4 +89,40 @@ async def test_a_field_mapping_with_no_sampled_events_is_not_written_and_says_wh
                          fields=[PlannedField(name='StreamId', type='id', source='@StreamId')])
         with patch.object(builds, 'summarise_events', AsyncMock(return_value={'path_population': {}})):
             with pytest.raises(ToolError, match=r"streams \['873 \(ACME, Events\)'\] hold no events"):
-                await builds.field_mapping_section(ctx, {'uuid': 'p'}, {'kind': 'index', 'payload': plan.model_dump()}, [873])
+                await builds.field_mapping_section(ctx, {'uuid': 'p'}, {'kind': 'index', 'payload': plan.model_dump(),
+                                                                        'element': 'xsltFilter'}, [873])
+
+
+def test_the_index_section_shows_what_each_index_field_got_from_the_sample():
+    from utils.fielddoc import index_documents
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',
+                     fields=[PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id'),
+                             PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
+    elastic = ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><string key="@timestamp">2026-10-01T10:00:00.000Z'
+               '</string><map key="user"><string key="name">alice</string></map></map></array>')
+    lucene = ('<records xmlns="records:2"><record><data name="UserId" value="bob"/><data name="UserId" value="carol"/>'
+              '</record></records>')
+    documents = index_documents([elastic])
+    assert documents == [{'@timestamp': ['2026-10-01T10:00:00.000Z'], 'user': [], 'user.name': ['alice']}]
+    assert index_documents([lucene]) == [{'UserId': ['bob', 'carol']}]
+    section = index_field_mapping_markdown(plan, {'EventSource/User/Id': 100.0}, documents)
+    assert 'Sample values are what the 1 documents written from the sample got.' in section
+    assert '| `user.name` | keyword | `EventSource/User/Id` | 100% of events | `alice` |' in section
+    assert '| `source.ip` | ip | `EventSource/Client/IPAddress` | not in the sample | (none in the sample) |' in section
+
+
+async def test_the_index_section_names_the_agreed_elasticsearch_template():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from tools import builds
+    from utils.mappingstore import with_agreed_template
+    plan = FieldPlan(backend='elasticsearch', index_name='stroom-door-v1', time_field='@timestamp',
+                     fields=[PlannedField(name='User.Id', type='keyword', source='EventSource/User/Id')])
+    pipeline = {'uuid': 'p', 'description': with_agreed_template('Doors.', {
+        'name': 'stroom-door-v1', 'index': 'stroom-door-v1', 'cluster': 'ES', 'component_templates': ['stroom-base'],
+        'xslt': 'x', 'agreed': '2026-10-04T01:00:00Z', 'dev_tools': 'PUT _index_template/stroom-door-v1\n{}'})}
+    kept = {'kind': 'index', 'payload': plan.model_dump(), 'element': 'xsltFilter', 'xslt': {'data': ''}}
+    with patch('tools.builds.gateway_from', return_value=SimpleNamespace()):
+        section = await builds.field_mapping_section(None, pipeline, kept, [])
+    assert "Elasticsearch index template `stroom-door-v1`, agreed with the user 2026-10-04, composed of `stroom-base`." in section

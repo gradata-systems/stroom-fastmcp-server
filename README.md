@@ -132,7 +132,8 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_existing_feed.py` | Building a pipeline from a feed that already holds data: surveys, stepping in place, kinds left untranslated |
 | `dev/e2e_generator.py` | Translations generated from field mappings, stepped and validated |
 | `dev/e2e_instructions.py` | Standing instructions (AGENTS docs) by folder |
-| `dev/e2e_elastic_handover.py` | The Elasticsearch template hand-over, without Elasticsearch |
+| `dev/e2e_elastic_handover.py` | The Elasticsearch index template: built from the user's example and component templates, agreed (and corrected), then indexing once committed. Without Elasticsearch, or with `--live` against Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): templates applied, composition compared with `_simulate_index`, documents indexed with no dynamic fields, and searched through Stroom |
+| `dev/e2e_discovery.py` | A discovery index on Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): raw JSON indexed as it is, with nested objects, arrays and a JSON message unpacked, mapped dynamically; the permissive template agreed and committed; Stroom's searches; the documentation |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 
 To call one tool directly (no MCP client or sign-in): `uv run python dev/try_tool.py find_pipeline_templates

@@ -15,17 +15,19 @@ from pydantic import Field
 from security.guard import guard_from
 from tools.explorer import _redact
 from tools.pipeline_writes import PropertyValue, create_pipeline
-from tools.processing_writes import elastic_destination
+from tools.processing_writes import elastic_destination, indexing_xslt_digest
 from tools.stepping import _outputs, _Pipeline
 from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from
 from utils.fielddoc import index_field_mapping_markdown
-from utils.fieldplan import Backend, FieldPlan, PlannedField
-from utils.mappingstore import read_mapping
+from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField
+from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from
-from utils.templatecheck import compare, json_xml_documents, parse_template
+from utils.templatecheck import (compare, compose, from_example, json_xml_documents, names_from_example,
+                                 parse_component_templates, read_mapping_fields,
+                                 parse_template)
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 INDEX_TYPE = {'lucene': 'Index', 'elasticsearch': 'ElasticIndex'}
@@ -73,26 +75,56 @@ async def get_field_conventions(
     return {'name': name, 'profile': profile, 'reference_fields': reference}
 
 
+def _draft_discovery(backend: str, index_name: str, discovery: Discovery) -> dict[str, Any]:
+    """Nothing is read: Elasticsearch maps the source's fields as documents arrive. The fields Stroom needs are
+    the only explicit ones."""
+    if backend != 'elasticsearch':
+        raise ToolError("A discovery index is Elasticsearch: its fields are mapped dynamically as documents arrive")
+    plan = FieldPlan.for_discovery(index_name, discovery)
+    return {'plan': plan.model_dump(exclude_none=True), 'xslt': plan.xslt(),
+            'rendered': plan.elastic_template(index_name),
+            'hint': "Save the XSLT with save_xslt index_plan=plan and no code, create_indexing_pipeline from the "
+                    "discovery template, step_sample on the raw streams (the documents show the source's fields), then "
+                    "propose_index_template with the plan and the user's example template for its settings."}
+
+
 async def draft_index_mapping(
         ctx: Context,
         backend: Annotated[Backend, Field(description="From the chosen indexing template (find_pipeline_templates).")],
         index_name: Annotated[str, Field(description="Lucene index doc name, or ES index / data stream name.")],
-        convention: Annotated[str, Field(description="Convention profile the user chose (get_field_conventions).")],
+        convention: Annotated[str | None, Field(description="Convention profile the user chose (get_field_conventions); "
+                                                     "none for a discovery index.")] = None,
         events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams from stage 1, to see which "
-                                                                  "event-logging paths are actually populated.")],
+                                                                  "event-logging paths are actually populated.")] = [],
         extra_fields: Annotated[list[PlannedField] | str, ONE_OR_MORE, Field(
             description="Fields the user asked for beyond the convention's map.")] = [],
         drop_when: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
                         "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
+        example_template: Annotated[str | None, Field(
+            description="Elasticsearch: the user's example index template or index mapping (as for "
+                        "propose_index_template); field names then follow it.")] = None,
+        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="The component templates the example is composed_of, as the user gave them.")] = [],
+        discovery: Annotated[Discovery | None, Field(
+            description="A discovery index instead: raw JSON indexed as it is into Elasticsearch, with no convention "
+                        "and no Events. Give what the user confirmed: the timestamp field, any stream meta to add, "
+                        "fields to drop.")] = None,
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
-    convention, limited to paths the sample events actually populate, plus StreamId and EventId. Returns
-    the plan rendered for the backend (Lucene field list or Elasticsearch index template) and a draft
-    indexing XSLT in the output form that backend's indexing filter reads, leaving out events drop_when
-    names. Nothing is saved.
+    convention, limited to paths the sample events actually populate, plus StreamId and EventId. With the
+    user's example Elasticsearch index template, fields take the example's names for the same data (User.Id,
+    TypeId...), others are named in its style, and sample paths the example maps are added. Returns the plan
+    rendered for the backend (Lucene field list or Elasticsearch index template) and a draft indexing XSLT in
+    the output form that backend's indexing filter reads, leaving out events drop_when names. With discovery,
+    a discovery index instead: nothing is read; raw JSON records are copied as they are and Elasticsearch maps
+    their fields dynamically. Nothing is saved.
     """
+    if discovery:
+        return _draft_discovery(backend, index_name, discovery)
+    if not events_stream_ids:
+        raise ToolError("Give events_stream_ids: the Events streams the index will hold, to see which paths they populate")
     profiles = _conventions(ctx)
     if convention not in profiles:
         raise ToolError(f"No convention profile '{convention}'; ask the user and use get_field_conventions")
@@ -107,6 +139,22 @@ async def draft_index_mapping(
             fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
         else:
             unused.append(path)
+    example_notes = []
+    if example_template:
+        try:
+            _, example = parse_template(example_template)
+            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
+                                                   else list(component_templates))
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        composed, _ = compose(example, components)
+        known: dict[str, set[str]] = {}
+        for other in profiles.values():
+            for path, spec in (other.get('field_map') or {}).items():
+                known.setdefault(path, set()).add(spec['name'])
+        named, example_notes = names_from_example(
+            [f.model_dump() for f in fields], read_mapping_fields(composed), known, sorted(p for p in populated if populated[p]))
+        fields = [PlannedField(**f) for f in named]
     fields += [f for f in extra_fields if f.name not in {x.name for x in fields}]
     time_field = next((f.name for f in fields if f.source == 'EventTime/TimeCreated'), 'EventTime')
     if backend == 'elasticsearch' and not any(f.name == '@timestamp' for f in fields):
@@ -118,6 +166,7 @@ async def draft_index_mapping(
     return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
+            **({'from_example': example_notes} if example_template else {}),
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
                     "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
                     "write_documentation generates the Field mapping section."}
@@ -476,11 +525,45 @@ async def _documents(ctx: Context, pipeline_uuid: str, stream_ids: list[int], ca
     return docs
 
 
-def _component_notes(body: dict[str, Any]) -> list[str]:
-    """This server doesn't read Elasticsearch, so fields from component templates can't be checked."""
-    names = body.get('composed_of') or []
-    return [f"composed_of {names} not checked: fields from those component templates aren't seen here; ask the "
-            f"user whether they map any field the pipeline writes"] if names else []
+def _component_notes(missing: list[str]) -> list[str]:
+    """This server doesn't read Elasticsearch: component templates the user hasn't given can't be checked."""
+    return [f"composed_of {missing} not given, so not checked: their fields aren't seen here. Ask the user for them "
+            f"(GET _component_template/<name>) and check again with component_templates."] if missing else []
+
+
+async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dict[str, Any], name: str,
+                 body: dict[str, Any], components: dict[str, Any], notes: list[str],
+                 confirmation_id: str | None) -> Any:
+    """The user confirms the index template, as shown; once they have, it is kept with the pipeline as the agreed
+    one, which create_processor_filter asks them to confirm is committed to the cluster. None once agreed."""
+    stroom = gateway_from(ctx)
+    doc = await stroom.get_doc('Pipeline', pipeline_uuid)
+    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
+    dev_tools = f"PUT _index_template/{name}\n{json.dumps(body, indent=2)}"
+    details = {'index template': dev_tools, **({'component templates': sorted(components)} if components else {}),
+               **({'notes': notes} if notes else {})}
+    gate = await consent_from(ctx).require(
+        ctx, 'confirmation', action, f"Use Elasticsearch index template '{name}' for index "
+        f"'{destination['index name']}' (cluster {destination['cluster']}), as shown", details, confirmation_id)
+    if gate:
+        return gate
+    doc['description'] = with_agreed_template(doc.get('description'), {
+        'name': name, 'index': destination['index name'], 'cluster': destination['cluster'],
+        'component_templates': sorted(components), 'xslt': await indexing_xslt_digest(stroom, pipeline_uuid),
+        'agreed': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'dev_tools': dev_tools})
+    await stroom.put_doc(doc)
+    return None
+
+
+def _asking(gate: Any, result: dict[str, Any]) -> Any:
+    """The confirmation to return, with what the agent shows alongside it (a form result goes back unchanged)."""
+    if not isinstance(gate, dict):
+        return gate
+    return {**gate, **{k: result[k] for k in ('compatible', 'blocking', 'pipeline_changes', 'template_name', 'index',
+                                             'cluster', 'self_check', 'from_example', 'notes', 'component_templates')
+                       if k in result},
+            'hint': gate['hint'] + " If the user corrects the template instead, check_index_template with their "
+                                   "version (and the component templates): it is confirmed there."}
 
 
 async def propose_index_template(
@@ -488,14 +571,27 @@ async def propose_index_template(
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
         plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
         events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to check the template against.")],
+        example_template: Annotated[str | None, Field(
+            description="The user's example: the Elasticsearch index template a sibling source's index uses (GET "
+                        "_index_template/<name>, or a Dev Tools request), or an existing index's mapping (GET "
+                        "<index>/_mapping). Ask the user for it: the final template follows it.")] = None,
+        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="The component templates the example is composed_of, as the user gave them (GET "
+                        "_component_template/<name>, or PUT _component_template/<name> {...}).")] = [],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Suggest the index template for the user to commit, when the indexing pipeline is ready: rendered from the
-    field plan for the pipeline's own destination index, as JSON and as a Kibana Dev Tools request, already
-    checked against the documents the pipeline writes. Show it to the user and ask them to commit it, or to
-    send back their changed version (check that with check_index_template). Writes nothing.
+    Build the final Elasticsearch index template (not a Stroom pipeline template) for the indexing pipeline's
+    destination index, for the cluster admin to apply: from the user's example index template or mapping and
+    the component templates it is composed of, following their conventions: their settings and composed_of,
+    the new index's own pattern, fields they map left as they map them, new fields mapped in their style for
+    the type (keyword ignore_above, text sub-fields, date formats), and names unlike theirs reported to rename
+    in the field plan. Without an example, from the field plan alone. Checked against the documents the
+    pipeline writes; when it fits, the user confirms it as shown (or corrects it: check_index_template), and the
+    agreed template is kept with the pipeline. The user then has the cluster admin commit it, and
+    create_processor_filter starts indexing once they confirm that.
     """
     if plan.backend != 'elasticsearch':
         raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with create_index_doc (plan=...)")
@@ -503,43 +599,97 @@ async def propose_index_template(
     index = destination['index name']
     name = template_name or index
     body = plan.model_copy(update={'index_name': index}).elastic_template(name, priority)['body']
+    notes, components = [], {}
+    if example_template:
+        try:
+            _, example = parse_template(example_template)
+            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
+                                                   else list(component_templates))
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        body, notes = from_example(body, example, components, discovery=plan.discovery is not None)
     stroom = gateway_from(ctx)
-    check = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
+    composed, _ = compose(body, components)
+    check = compare(composed, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
     text = json.dumps(body, indent=2)
-    return {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
-            'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
-            'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
-            'hint': ("Show the user dev_tools and ask them to commit it to Elasticsearch, or to send back their "
-                     "changed template; check changes with check_index_template before going on.")}
+    result = {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
+              'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
+              **({'from_example': notes} if example_template else {}),
+              'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid)}
+    if not example_template and not plan.discovery:
+        result['hint'] = ("No example was given: ask the user for the index template (or an index's mapping) a "
+                          "sibling source's index uses, and its component templates, and call again with them.")
+        return result
+    if not check['compatible']:
+        result['hint'] = ("It does not fit the documents the pipeline writes (self_check): show the user and ask "
+                          "whether to change the indexing XSLT or the template. Not yet shown for confirmation.")
+        return result
+    gate = await _agree(ctx, 'propose_index_template', pipeline_uuid, destination, name, body, components, notes,
+                        confirmation_id)
+    if gate:
+        return _asking(gate, result)
+    result.update({'agreed': True, 'hint': (
+        "The user agreed this index template; it is kept with the pipeline. Give them dev_tools for the cluster admin "
+        "to commit to the cluster. Once they say it is committed, create_processor_filter: its approval asks them to "
+        "confirm that, and starts indexing.")})
+    return result
 
 
 async def check_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
-        template: Annotated[str, Field(description="The template as the user gave it: a Dev Tools request "
-                                                   "(PUT _index_template/name {...}), the JSON body, or GET output.")],
+        template: Annotated[str, Field(description="The Elasticsearch index template as the user gave it: a Dev Tools "
+                                                   "request (PUT _index_template/name {...}), the JSON body, or GET "
+                                                   "_index_template output; or an existing index's mapping (GET "
+                                                   "<index>/_mapping) as the example.")],
         events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
+        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="The component templates the index template is composed_of, as the user gave them: each a Dev "
+                        "Tools request (PUT _component_template/name {...}) or GET _component_template output.")] = [],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Check a user's (possibly changed) index template against the candidate indexing pipeline: does it
-    apply to the pipeline's index, and can it take every field the pipeline writes (types, date formats,
-    dynamic setting, object clashes, renamed or dropped fields)? Returns whether it is compatible and each
-    change needed, mostly to the indexing XSLT, to flag to the user before anything is changed.
+    Check a user's Elasticsearch index template (not a Stroom pipeline template), with the component templates
+    it is composed of, against the candidate indexing pipeline: does it apply to the pipeline's index, and can
+    it take every field the pipeline writes (types, date formats, dynamic setting, object clashes, renamed or
+    dropped fields)? Components are merged as Elasticsearch composes them. An existing index's mapping may be
+    given instead. Returns whether it is compatible and each change needed, mostly to the indexing XSLT, to
+    flag to the user before anything is changed. A compatible index template (with index_patterns) is shown to
+    the user to confirm, and kept with the pipeline as the agreed one.
     """
     try:
         name, body = parse_template(template)
+        components = parse_component_templates([component_templates] if isinstance(component_templates, str)
+                                               else list(component_templates))
     except ValueError as e:
         raise ToolError(str(e)) from e
+    body, missing = compose(body, components)
     destination = await _destination(ctx, pipeline_uuid)
     result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
                      destination['index name'])
-    result['notes'] = _component_notes(body) + result['notes']
+    result['notes'] = _component_notes(missing) + result['notes']
+    if components:
+        result['component_templates'] = sorted(components)
     result.update({'template_name': name, 'index': destination['index name'], 'cluster': destination['cluster'],
-                   'pipeline_link': doc_link(gateway_from(ctx).settings, 'Pipeline', pipeline_uuid),
-                   'hint': ("Compatible: ask the user to commit it, then create_processor_filter." if result['compatible']
-                            else "Show the user pipeline_changes and ask whether to make them (update the indexing "
-                                 "XSLT, step again) or to change the template instead. Nothing has been changed.")})
+                   'pipeline_link': doc_link(gateway_from(ctx).settings, 'Pipeline', pipeline_uuid)})
+    if not result['compatible']:
+        result['hint'] = ("Show the user pipeline_changes and ask whether to make them (update the indexing XSLT, step "
+                          "again) or to change the template instead. Nothing has been changed.")
+        return result
+    _, own = parse_template(template)
+    if 'index_patterns' not in own:
+        result['hint'] = ("Compatible, but this is a mapping, not an index template: propose_index_template with it as "
+                          "example_template builds the index template to agree.")
+        return result
+    gate = await _agree(ctx, 'check_index_template', pipeline_uuid, destination, name or destination['index name'],
+                        own, components, result['notes'], confirmation_id)
+    if gate:
+        return _asking(gate, result)
+    result.update({'agreed': True, 'hint': (
+        "The user agreed this index template; it is kept with the pipeline. Once they say the cluster admin has "
+        "committed it to the cluster, create_processor_filter: its approval asks them to confirm that, and starts "
+        "indexing.")})
     return result
 
 

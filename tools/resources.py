@@ -28,8 +28,9 @@ _RULES = """Rules for every run:
 - A translation pipeline only processes the build's own feeds: step production records in place (step_records) or
   copy them into a test feed. Promotion pre-creates each pipeline's filter for new data, disabled: give the user
   the pipeline link to review and enable it.
-- Elasticsearch indexing runs only through the Stroom indexing pipeline, and only after the user confirms that
-  the index template for the destination index has been written."""
+- Elasticsearch indexing runs only through the Stroom indexing pipeline, with an index template the user agreed
+  (built by propose_index_template from their example, or their correction), and only once they confirm the cluster
+  admin has committed it to the cluster: the approval to start it asks them."""
 
 
 # Sent to every client at connection (serverInfo.instructions), so the rules hold whichever client runs the model
@@ -147,21 +148,35 @@ Stage 1, events:
    its Field mapping section is generated from the kept mapping.
 
 Stage 2, indexing:
-7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch). get_field_conventions;
-   ask the user which convention to follow. For Elasticsearch, find_elastic_clusters.
-8. Propose, in one message, the backend, cluster or volume group, convention, indexing template and index name
-   (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping; create_index_doc (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is
-   generated from the plan);
+Two kinds of template, not to be confused: a Stroom pipeline template is a pipeline the indexing pipeline inherits
+from (find_pipeline_templates, describe_template); an Elasticsearch index template defines the destination index's
+mappings and settings on the cluster (propose_index_template, check_index_template).
+
+7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch) and the Stroom pipeline
+   template. get_field_conventions; ask the user which convention to follow. For Elasticsearch, find_elastic_clusters,
+   and ask the user for an example: the Elasticsearch index template a sibling source's index uses (GET
+   _index_template/<name>), or an existing index's mapping (GET <index>/_mapping), and the component templates it
+   is composed of (GET _component_template/<name>). The new index's template is built from them.
+8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
+   name (following the environment's versioned naming); create_index_doc once confirmed.
+9. draft_index_mapping (Elasticsearch: with the user's example and component templates, so field names follow
+   theirs, e.g. User.Id for the user, TypeId for the event type; show its from_example notes); create_index_doc
+   (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is generated from the plan);
    create_indexing_pipeline; step_sample on the Events streams.
-10. Elasticsearch: propose_index_template and show the user its dev_tools request. If they send back a changed
-    template, check_index_template; if it is not compatible, show the pipeline changes it needs and ask whether to
-    make them (update the indexing XSLT, step again, check again) or to change the template instead.
-11. create_processor_filter on the Events stream ids with source_pipeline_uuid = the events pipeline from stage 1
-    (the filter then only selects Events from that pipeline). Elasticsearch: the user confirms they have committed
-    the template, the filter is created disabled, and you give them pipeline_link and say it is ready to enable;
-    once they have enabled it, continue. Then wait_for_processing expect_events=false, and verify_index. Then
-    write_documentation for the indexing pipeline with stream_ids = its Events streams.
+10. Elasticsearch: propose_index_template with the user's example and component templates builds the index
+    template for the new index, following their naming, field type and structure conventions (its from_example
+    notes say what came from where; names unlike the example's are renamed in the field plan, then build again).
+    When it fits the documents, the user confirms it as shown. If they correct it instead, check_index_template
+    with their version (and the component templates): when it fits, they confirm it there; when it does not, show
+    the pipeline changes it needs and ask whether to make them (update the indexing XSLT, step again, check again)
+    or to change the index template. The confirmed template is kept with the pipeline.
+11. Elasticsearch: give the user the agreed template's dev_tools request for the cluster admin to commit to the
+    cluster, and wait until they say it is committed; indexing must not start before, or the index is created
+    without it. Then create_processor_filter on the Events stream ids with source_pipeline_uuid = the events
+    pipeline from stage 1 (the filter then only selects Events from that pipeline): its approval asks the user to
+    confirm the agreed template is committed, and processing starts. Lucene: create_processor_filter likewise.
+    Then wait_for_processing expect_events=false, and verify_index. Then write_documentation for the indexing
+    pipeline with stream_ids = its Events streams.
 
 Finish: promote_build to the folders sibling sources use.
 
@@ -217,18 +232,31 @@ stepping, processing, verification searches, documentation, promotion.
 
     @mcp.prompt(description="Index raw structured data directly into a discovery index.")
     def create_discovery_index(feed: str = '', sample: str = '', timestamp_field: str = '') -> str:
-        return f"""Create a discovery index for {'feed ' + feed if feed else 'the sample below'}: raw structured data
-indexed as it is, for exploration, without an event-logging translation.
+        return f"""Create a discovery index for {'feed ' + feed if feed else 'the sample below'}: raw structured data (JSON)
+indexed as it is into Elasticsearch, for exploration, without an event-logging translation.
 
-1. find_pipeline_templates stage=discovery. profile_sample (and describe_stream on a raw stream) to propose
-   enrichments: embedded JSON to unpack with json-to-xml(), stream meta to add with stroom:meta().
-2. Confirm cluster, index name, template, timestamp field{f' ({timestamp_field})' if timestamp_field else ''} and
-   enrichments with the user in one message.
-3. The XSLT copies the parser's JSON XML (namespace http://www.w3.org/2013/XSL/json) into the xpath-functions
-   namespace the indexing filter reads, adding StreamId, EventId and @timestamp and the enrichments.
-4. Step every sample record, propose the index template (propose_index_template; check_index_template for the
-   user's changes), pre-create the filter disabled once they have committed it and give them the pipeline link, then
-   verify with a dashboard and test searches once they have enabled it; document, promote.
+Elasticsearch maps the source's fields dynamically as documents arrive, so do not survey the data first: no
+profile_sample, no reading through the streams. Only StreamId, EventId and @timestamp are mapped explicitly.
+
+1. The source: the feed's Raw Events streams, or the sample uploaded to a new workspace feed (create_feed,
+   upload_sample). find_pipeline_templates stage=discovery for the Stroom pipeline template; find_elastic_clusters.
+2. Ask the user, in one message: the cluster, the index name (e.g. stroom-discovery-<source>-v1), the Stroom
+   pipeline template, the field holding the event time{f' ({timestamp_field})' if timestamp_field else ''} (and its
+   format, if it is not ISO 8601 or epoch milliseconds), any stream meta to add (describe_stream lists a stream's
+   attributes), any fields to leave out (secrets, tokens), and an example Elasticsearch index template from a
+   sibling index, for its settings and component templates. If they don't know the time field, read one record
+   (read_stream), no more.
+3. draft_index_mapping backend=elasticsearch discovery={{timestamp_field, timestamp_format?, meta?, drop?}}: its XSLT
+   copies every record as it is, adding StreamId, EventId (the record number) and @timestamp, and parses a string
+   holding a JSON object into a sibling <field>_json. save_xslt index_plan=plan with no code;
+   create_indexing_pipeline from the discovery template; step_sample on the raw streams: the documents show what
+   the source holds.
+4. propose_index_template with the plan, the raw streams and the user's example (if any): a permissive template
+   (dynamic mapping, strings as keywords, a total-fields limit, malformed values ignored) with the example's
+   settings and components. The user confirms it, or corrects it (check_index_template). Give them its dev_tools
+   for the cluster admin; once they say it is committed, create_processor_filter on the raw streams (its approval
+   asks them to confirm that) starts indexing. wait_for_processing expect_events=false; create_index_doc for the
+   index; verify_index; write_documentation with stream_ids = the raw streams; promote.
 
 {_RULES}{f'''
 

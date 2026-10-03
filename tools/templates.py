@@ -105,7 +105,8 @@ async def find_pipeline_templates(
                                                   "the reference-data maps stroom:lookup() reads).")],
 ) -> dict[str, Any]:
     """
-    Candidate parent pipelines for a new pipeline at this stage, best first: configured template folders,
+    Stroom pipeline templates (pipelines a new pipeline inherits from; not Elasticsearch index templates, which
+    propose_index_template builds): candidates for this stage, best first: configured template folders,
     then pipelines that working pipelines already inherit from, then Stroom's standard templates. For each:
     its element chain, what a child must supply (e.g. its XSLT), shared elements it already configures
     (e.g. a decoration XSLT or an Elastic cluster), reference loaders, backend, and how many children use it.
@@ -190,7 +191,12 @@ async def list_template_children(
             feeds_by_pipeline.setdefault(pf.get('pipelineUuid'), set()).update(n for n in names if n)
     result = []
     for kid in sorted(kids, key=lambda k: k['name']):
-        layers = await stroom.pipeline_layers(kid['uuid'])
+        try:
+            layers = await stroom.pipeline_layers(kid['uuid'])
+        except ToolError as e:
+            # One pipeline Stroom cannot load (a property its element lacks, say) must not hide the others.
+            result.append({'uuid': kid['uuid'], 'name': kid['name'], 'path': kid['path'], 'unreadable': str(e)[:300]})
+            continue
         own = (layers[-1].get('pipelineData') or {}) if layers else {}
         props = [f"{p['element']}.{p['name']}" for p in (own.get('properties') or {}).get('add') or []]
         added = [f"{e['id']} ({e['type']})" for e in (own.get('elements') or {}).get('add') or []]
@@ -219,7 +225,12 @@ async def describe_template_contract(
     """
     from lxml import etree
     stroom = gateway_from(ctx)
-    shape = await _shape(stroom, template_uuid)
+    try:
+        shape = await _shape(stroom, template_uuid)
+    except ToolError as e:
+        raise ToolError(f"Stroom cannot load this pipeline template: {e}. Its stored settings are invalid in Stroom "
+                        f"(e.g. a property its element type doesn't have); an administrator fixes the template in the "
+                        f"Stroom UI. Nothing to set or change here: choose another pipeline template, or ask the user.") from e
     readers = []
     for slot in shape['shared']:
         if slot['type'] != 'XSLTFilter' or not isinstance(slot.get('value'), dict):
@@ -271,7 +282,8 @@ async def describe_template(
         template_uuid: Annotated[str, Field(description="UUID of a template pipeline (find_pipeline_templates).")],
 ) -> dict[str, Any]:
     """
-    How this environment uses a template, before making a child of it: the pipelines that inherit from it,
+    How this environment uses a Stroom pipeline template (not an Elasticsearch index template), before making a
+    child of it: the pipelines that inherit from it,
     each with what it overrides (properties set, elements removed or re-linked, reference data added) and
     the feeds it covers, as examples; and the template's contract, what a child's output must contain for
     the shared elements (a decoration XSLT, say) to work: the elements and expressions they read, the schema

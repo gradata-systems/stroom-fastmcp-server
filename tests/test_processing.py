@@ -10,6 +10,7 @@ from fastmcp.exceptions import ToolError
 from config import Settings
 from tools import processing_writes
 from utils.consent import ConsentStore
+from utils.mappingstore import digest, with_agreed_template
 from utils.stroom import StroomGateway
 
 SETTINGS = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
@@ -55,14 +56,21 @@ async def test_processing_refuses_a_pipeline_that_was_not_stepped_clean(ctx):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[1])
 
 
-def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = (), streams: dict | None = None):
+AGREED = {'name': 'ecs-acme-v2', 'index': 'ecs-acme-v2', 'cluster': 'ES_DEV', 'component_templates': ['ecs-base'],
+          'xslt': digest(), 'agreed': '2026-10-03T09:00:00Z', 'dev_tools': 'PUT _index_template/ecs-acme-v2\n{}'}
+
+
+def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = (), streams: dict | None = None,
+                agreed: dict | None = AGREED):
     """p1 is the pipeline under test (Elasticsearch indexing, or a translation); 'ev' is an events pipeline.
 
     streams maps a stream id to (type, producing pipeline); by default indexing reads Events from 'ev' and a
-    translation reads Raw Events.
+    translation reads Raw Events. An Elasticsearch p1 carries the agreed index template (for its code: no XSLT).
     """
     streams = streams or {i: ('Events', 'ev') if elastic else ('Raw Events', None) for i in range(1, 20)}
-    respx.get(f'{API}/pipeline/v1/p1').mock(return_value=httpx.Response(200, json={'uuid': 'p1', 'name': 'Acme'}))
+    p1 = {'uuid': 'p1', 'name': 'Acme', **({'description': with_agreed_template('Indexes Acme.', agreed)}
+                                           if elastic and agreed else {})}
+    respx.get(f'{API}/pipeline/v1/p1').mock(return_value=httpx.Response(200, json=p1))
     respx.get(f'{API}/pipeline/v1/ev').mock(return_value=httpx.Response(200, json={'uuid': 'ev', 'name': 'Acme-Events'}))
     respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(side_effect=lambda request: httpx.Response(
         200, json=layers(elastic and json.loads(request.content)['uuid'] == 'p1')))
@@ -117,18 +125,33 @@ async def test_translation_pipeline_needs_only_approval(ctx):
 
 
 @respx.mock
-async def test_elasticsearch_indexing_filter_is_precreated_disabled_once_the_template_is_committed(ctx):
+async def test_elasticsearch_indexing_starts_once_the_template_is_applied(ctx):
+    # One approval, worded so the user confirms the admin applied the index template (propose_index_template built
+    # it), then processing starts: the filter is created enabled, for the agent to wait and verify.
     create = mock_stroom(elastic=True)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-build-b']))):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    [confirm] = gates
-    assert confirm['status'] == 'needs_confirmation' and "committed the index template for Elasticsearch index " \
-        "'ecs-acme-v2' (cluster ES_DEV)" in confirm['summary']
-    assert confirm['details'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'}
-    assert json.loads(create.calls.last.request.content)['enabled'] is False and create.call_count == 1
-    assert result['enabled'] is False and result['destination'] == {'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'}
-    assert result['pipeline_link'] == 'https://stroom.example/?action=open-doc&docType=Pipeline&docUuid=p1'
-    assert 'ready to enable' in result['next'] and result['pipeline_link'] in result['next']
+    [approve] = [g for g in gates if g['status'] == 'needs_approval']
+    assert approve['summary'].startswith("The agreed index template 'ecs-acme-v2' for Elasticsearch index 'ecs-acme-v2' "
+                                         "is committed to cluster ES_DEV: start indexing")
+    assert approve['details']['index template'].startswith("the agreed index template 'ecs-acme-v2'")
+    assert json.loads(create.calls.last.request.content)['enabled'] is True and create.call_count == 1
+    assert result['filter_id'] and 'pipeline_link' not in result
+
+
+@respx.mock
+@pytest.mark.parametrize('agreed, message', [
+    (None, "No Elasticsearch index template has been agreed with the user for index 'ecs-acme-v2'"),
+    ({**AGREED, 'index': 'ecs-acme-v1'}, 'No Elasticsearch index template has been agreed'),
+    ({**AGREED, 'xslt': 'feedfacefeedface'}, "The indexing XSLT changed since index template 'ecs-acme-v2' was agreed"),
+])
+async def test_indexing_into_elasticsearch_needs_a_template_agreed_for_the_current_pipeline(ctx, agreed, message):
+    # Only a template the user confirmed, for this index and the documents the XSLT now writes, is asked about.
+    create = mock_stroom(elastic=True, agreed=agreed)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-build-b']))):
+        with pytest.raises(ToolError, match=message):
+            await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
+    assert create.call_count == 0
 
 
 async def reprocessed(ctx, **kwargs):
@@ -162,13 +185,13 @@ async def test_reprocessing_is_bounded_to_ten_streams_it_already_processed(ctx, 
 
 
 @respx.mock
-async def test_reprocessing_into_elasticsearch_confirms_the_template_first(ctx):
+async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_approval(ctx):
     create = mock_stroom(elastic=True, filtered=[5])
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-build-b']))):
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
-    assert [g['status'] for g in gates] == ['needs_confirmation']
-    assert "index 'ecs-acme-v2'" in gates[0]['summary'] and 'indexed again' in result['note']
-    assert json.loads(create.calls.last.request.content)['enabled'] is False and 'pipeline_link' in result
+    assert [g['status'] for g in gates] == ['needs_approval']
+    assert "index 'ecs-acme-v2'" in gates[0]['details']['index template'] and 'indexed again' in gates[0]['details']['already indexed']
+    assert json.loads(create.calls.last.request.content)['enabled'] is True and result['filter_id'] == 9
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
 

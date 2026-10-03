@@ -4,6 +4,8 @@
 #   cd dev/stroom && ./init-env.sh && docker compose up -d
 #   API:   http://localhost:18080/api      UI login: admin / admin
 #   Reset: docker compose down -v
+#   Elasticsearch 9 too (dev/e2e_elastic_handover.py --live): docker compose --profile elastic up -d
+#          http://localhost:19200, no security; Stroom reaches it as http://elasticsearch:9200
 #
 # Authentication for scripts uses Stroom's insecure test credential: requests bearing
 # STROOM_TEST_CREDENTIAL (from .env) authenticate as the processing user. Local use only.
@@ -56,6 +58,25 @@ services:
     volumes:
       - stroom_volumes:/stroom/volumes
 
+  elasticsearch:
+    # Same major version as the production cluster. Only with --profile elastic: it needs ~1.5 GB.
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.3
+    profiles: ["elastic"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports:
+      - "127.0.0.1:19200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
 volumes:
   mysql_data:
   stroom_volumes:
+  es_data:

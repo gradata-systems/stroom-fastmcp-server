@@ -211,7 +211,10 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     quality = await validation.check_event_quality(ctx, record)
     check(quality['ok'], 'event quality checks pass')
     doc = await builds.write_documentation(ctx, build, pipeline['uuid'],
-                                           f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the Phase 2 test.\n",
+                                           f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the Phase 2 test.\n\n"
+                                           # Written by hand (no mapping kept with the XSLT), so the section is too.
+                                           f"## Field mapping\n\n| XPath | From |\n| --- | --- |\n"
+                                           f"| `EventSource/User/Id` | the user field |\n",
                                            'Created')
     stored = await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])
     text = stored.get('data') or ''
