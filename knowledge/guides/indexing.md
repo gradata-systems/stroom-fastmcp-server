@@ -69,3 +69,15 @@ indexed. Field names and types follow the environment's field convention.
 Verify through Stroom, not by querying the backend: `verify_index` makes the dashboard once and runs the test
 searches: the sample stream ids, an exact match on each key field, and a time range.
 Shard or document counts are not a reliable signal until the index is flushed.
+
+## Searching an Elasticsearch index through Stroom
+
+Dashboard conditions behave as Elasticsearch would for: EQUALS (case-sensitive on keywords, with `*` wildcards:
+`ca*`, `*aro*`), NOT_EQUALS, MATCHES_REGEX, IN (values separated by commas: `alice,bob`), ranges on numbers and
+dates (GREATER_THAN, LESS_THAN, BETWEEN `from,to`), booleans (`true`), EQUALS `*` for any value, array values (a document whose
+`tags` hold `retry` matches `tags = retry`), and fields inside objects (`user.name`, `message_json.error.code`).
+Found against Stroom 7.13 and Elasticsearch 9, and not to be relied on: STARTS_WITH and CONTAINS find nothing (use
+EQUALS with wildcards), IS_NULL and IS_NOT_NULL match every document (use EQUALS `*` and compare counts), and IN
+with spaces
+between the values finds nothing. `verify_index` refuses those searches.
+

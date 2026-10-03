@@ -216,10 +216,10 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
 
 
 
-def test_flat_dotted_keys_only_when_the_template_says_so_and_a_value_cannot_also_be_an_object():
+def test_documents_are_nested_whatever_subobjects_says_and_a_value_cannot_also_be_an_object():
     fields = FIELDS[:4]
-    flat = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields, nest=False)
-    assert '<string key="user.name">alice</string>' in run(flat.xslt())
+    flat = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields, subobjects=False)
+    assert '<map key="user"><string key="name">alice</string></map>' in run(flat.xslt())
     clash = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp',
                       fields=fields + [PlannedField(name='user', type='keyword', source='EventSource/User/Id')])
     assert any("'user' is a value and also the object holding ['user.name']" in p for p in clash.required())
@@ -245,3 +245,40 @@ def test_discovery_keys_stroom_or_elasticsearch_would_lose_are_renamed():
                  '<number key="a.b">2</number>', '<map key="deep"><string key="x_original">in</string></map>',
                  '<string key="StreamId_original">theirs</string>', '<number key="StreamId">7</number>'):
         assert kept in output, kept
+
+
+def test_searches_that_would_mislead_on_elasticsearch_are_refused_with_what_to_use():
+    S = indexing.SearchCheck
+    with pytest.raises(ToolError) as e:
+        indexing._searchable('elasticsearch', [S(field='user', condition='STARTS_WITH', value='al'),
+                                               S(field='msg', condition='CONTAINS', value='err'),
+                                               S(field='tags', condition='IS_NULL'),
+                                               S(field='tags', condition='IS_NOT_NULL'),
+                                               S(field='user', condition='IN', value='alice bob')])
+    text = str(e.value)
+    assert "use EQUALS 'al*'" in text and "use EQUALS '*err*'" in text and 'commas' in text
+    assert "tags IS_NULL" in text and "tags IS_NOT_NULL: Stroom matches every document" in text and "EQUALS '*'" in text
+    indexing._searchable('lucene', [S(field='user', condition='STARTS_WITH', value='al')])     # not known to mislead
+    indexing._searchable('elasticsearch', [S(field='user', condition='EQUALS', value='al*'),
+                                           S(field='status', condition='BETWEEN', value='100,300')])
+
+
+async def test_a_hit_is_traced_to_its_record_and_a_mismatch_fails():
+    step_output = ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">9</number>'
+                   '<number key="EventId">2</number><map key="user"><string key="name">bob</string></map></map></array>')
+    layers = [{'sourcePipeline': {'type': 'Pipeline', 'uuid': 'ix', 'name': 'ix'}, 'pipelineData': {
+        'elements': {'add': [{'id': 'xsltFilter', 'type': 'XSLTFilter'}]},
+        'properties': {'add': [{'element': 'xsltFilter', 'name': 'xslt',
+                                'value': {'entity': {'type': 'XSLT', 'uuid': 'x', 'name': 'x'}}}]}}}]
+    stroom = SimpleNamespace(pipeline_layers=AsyncMock(return_value=layers))
+    stepped = AsyncMock(return_value={'elements': {'xsltFilter': {'output': step_output}}})
+    with patch('tools.indexing.gateway_from', return_value=stroom), patch('tools.stepping.step_pipeline', stepped):
+        ok = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '2'},
+                                    {'field': 'user.name', 'condition': 'EQUALS', 'value': 'bob'})
+        wrong_value = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '2'},
+                                             {'field': 'user.name', 'condition': 'EQUALS', 'value': 'alice'})
+        wrong_record = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '5'}, {})
+    assert ok == {'traced': True, 'stream': 9, 'event': 2}
+    assert stepped.await_args_list[0].args[1:] == ('ix', 9, 1)       # EventId 2 is the second record, index 1
+    assert not wrong_value['traced'] and "user.name = ['bob'], not alice" in wrong_value['why']
+    assert not wrong_record['traced'] and 'no document with EventId 5' in wrong_record['why']

@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT / 'dev'))
 
 import e2e_phase2 as p2  # noqa: E402
 from e2e_elastic_handover import ES, _request, live_cluster  # noqa: E402
+from searching import paired  # noqa: E402
 from config import Settings  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
@@ -239,13 +240,36 @@ async def run(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> 
     p2.check(hit['hits']['total']['value'] == 1 and hit['hits']['hits'][0]['_source']['user']['name'] == 'carol',
              'a field from inside the JSON message is searchable')
 
-    print('\n### verified through Stroom, and documented')
+    print('\n### searched through Stroom and in Elasticsearch, each hit traced to its record; documented')
     doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
                           time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
-    verified = await indexing.verify_index(ctx, build, doc['uuid'], 'elasticsearch', [raw], 3,
-                                           ['StreamId', 'EventId', '@timestamp', 'user.name', 'event'],
-                                           exact=[{'field': 'user.name', 'value': 'alice'}])
-    p2.check(verified.get('passed') is True, f"Stroom's searches: {json.dumps(verified)[:300]}")
+    await paired(ctx, es, build, index, doc['uuid'], [raw], 3,
+                 ['StreamId', 'EventId', '@timestamp', 'user.name', 'event'], [
+                     ('user.name', 'EQUALS', 'alice', 1, {'term': {'user.name': 'alice'}}),
+                     ('user.name', 'EQUALS', 'Alice', 0, {'term': {'user.name': 'Alice'}}),      # keywords: exact case
+                     ('user.name', 'EQUALS', '*aro*', 1, {'wildcard': {'user.name': '*aro*'}}),
+                     ('user.name', 'IN', 'alice,bob', 2, {'terms': {'user.name': ['alice', 'bob']}}),
+                     ('user.name', 'MATCHES_REGEX', 'ca.*', 1, {'regexp': {'user.name': 'ca.*'}}),
+                     ('user.roles', 'EQUALS', 'ops', 1, {'term': {'user.roles': 'ops'}}),           # in an array
+                     ('tags', 'EQUALS', 'retry', 1, {'term': {'tags': 'retry'}}),
+                     ('status', 'GREATER_THAN', '200', 1, {'range': {'status': {'gt': 200}}}),
+                     ('status', 'BETWEEN', '100,300', 2, {'range': {'status': {'gte': 100, 'lte': 300}}}),
+                     ('latency_ms', 'LESS_THAN', '20', 1, {'range': {'latency_ms': {'lt': 20}}}),
+                     ('message', 'EQUALS', '*session*', 1, {'wildcard': {'message': '*session*'}}),
+                     ('message_json.client.ip', 'EQUALS', '10.1.1.1', 1, {'term': {'message_json.client.ip': '10.1.1.1'}}),
+                     ('message_json.ok', 'EQUALS', 'true', 1, {'term': {'message_json.ok': True}}),
+                     ('message_json.bytes', 'GREATER_THAN', '1000000', 1, {'range': {'message_json.bytes': {'gt': 1000000}}}),
+                     ('message_json.error.code', 'EQUALS', '*', 1, {'exists': {'field': 'message_json.error.code'}}),
+                     ('@timestamp', 'BETWEEN', '2026-10-01T09:00:30.000Z,2026-10-01T09:10:00.000Z', 2,
+                      {'range': {'@timestamp': {'gte': '2026-10-01T09:00:30.000Z', 'lte': '2026-10-01T09:10:00.000Z'}}}),
+                 ], pipeline_uuid=pipeline['uuid'])
+    try:
+        await indexing.verify_index(ctx, build, doc['uuid'], 'elasticsearch', [raw], 3, ['StreamId'],
+                                    searches=[indexing.SearchCheck(field='user.name', condition='STARTS_WITH', value='al')])
+        refused = ''
+    except ToolError as e:
+        refused = str(e)
+    p2.check("use EQUALS 'al*'" in refused, 'a search Stroom would answer wrongly on Elasticsearch is refused, with what to use')
     written = await builds.write_documentation(ctx, build, pipeline['uuid'],
                                                '## Purpose and data\n\nWeb access logs, indexed as they are for '
                                                'exploration.\n', 'Created', stream_ids=[raw])
@@ -371,13 +395,20 @@ async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp
     else:
         p2.check(latency == 'keyword', f'latency_ms mapped from "n/a" first, as a keyword; the numbers kept as text')
 
-    print('\n### verified through Stroom, and documented')
+    print('\n### searched through Stroom and in Elasticsearch across the four streams; documented')
     doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
                           time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
-    verified = await indexing.verify_index(ctx, build, doc['uuid'], 'elasticsearch', ids + [later], total,
-                                           ['StreamId', 'EventId', '@timestamp', 'app', 'level'],
-                                           exact=[{'field': 'level', 'value': 'ERROR'}])
-    p2.check(verified.get('passed') is True, f"Stroom's searches: {json.dumps(verified)[:300]}")
+    await paired(ctx, es, build, index, doc['uuid'], ids + [later], total,
+                 ['StreamId', 'EventId', '@timestamp', 'app', 'level'], [
+                     ('level', 'EQUALS', 'ERROR', 1, {'term': {'level': 'ERROR'}}),
+                     ('level', 'IN', 'WARN,ERROR', 2, {'terms': {'level': ['WARN', 'ERROR']}}),
+                     ('app', 'EQUALS', 'billing', total, {'term': {'app': 'billing'}}),
+                     ('geo.country', 'EQUALS', 'NZ', 1, {'term': {'geo.country': 'NZ'}}),          # only in a later stream
+                     ('retry', 'EQUALS', 'true', 1, {'term': {'retry': True}}),                 # only in the last
+                     ('msg_json.upstream', 'EQUALS', 'payments', 1, {'term': {'msg_json.upstream': 'payments'}}),
+                     ('@timestamp', 'GREATER_THAN', '2026-10-01T00:00:00.000Z', 2,
+                      {'range': {'@timestamp': {'gt': '2026-10-01T00:00:00.000Z'}}}),
+                 ], pipeline_uuid=pipeline['uuid'])
     written = await builds.write_documentation(ctx, build, pipeline['uuid'],
                                                f'## Purpose and data\n\nThe {source} feed, indexed as it is for '
                                                f'exploration.\n', 'Created', stream_ids=newest)
@@ -391,6 +422,7 @@ SHAPES = [
      'items': [{'sku': 'A1', 'qty': 2}, {'sku': 'B2', 'qty': 1}], 'scores': [3, 5, 8], 'matrix': [[1, 2], [3, 4]],
      'nothing': None, 'empty_list': [], 'empty_obj': {}, 'deep': {'l1': {'l2': {'l3': {'l4': 'bottom'}}}, '_inner': 'in'},
      'key with space': 'spaced', 'embedded_list': '[1, 2, 3]', '_id': 'src-1', '_other': 'kept', '@timestamp': 'theirs',
+     'long_text': 'x' * 1100,
      '': 'blank',
      'a..b': 'two dots'},
     # user was an object above: Elasticsearch must reject this one, and that must not go unnoticed.
@@ -471,6 +503,29 @@ async def shapes(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) 
     section = written.get('field_mapping') or ''
     p2.check('Arrays of objects are indexed flattened' in section and '`items`' in section
              and 'kept as `<field>_original`' in section, 'documented: arrays of objects flattened, renamed keys')
+
+    print('\n### the shapes searched through Stroom and in Elasticsearch')
+    doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
+                          time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
+    await paired(ctx, es, build, index, doc['uuid'], [raw], 2, ['StreamId', 'EventId', '@timestamp', 'kind'], [
+        ('items.sku', 'EQUALS', 'B2', 1, {'term': {'items.sku': 'B2'}}),                  # inside an array of objects
+        ('items.qty', 'GREATER_THAN', '1', 1, {'range': {'items.qty': {'gt': 1}}}),
+        ('scores', 'EQUALS', '5', 1, {'term': {'scores': 5}}),                             # an array of numbers
+        ('matrix', 'EQUALS', '4', 1, {'term': {'matrix': 4}}),                             # an array of arrays
+        ('deep.l1.l2.l3.l4', 'EQUALS', 'bottom', 1, {'term': {'deep.l1.l2.l3.l4': 'bottom'}}),
+        ('id_original', 'EQUALS', 'src-1', 1, {'term': {'id_original': 'src-1'}}),         # was _id
+        ('deep.inner_original', 'EQUALS', 'in', 1, {'term': {'deep.inner_original': 'in'}}),
+        ('a.b', 'EQUALS', 'two dots', 1, {'term': {'a.b': 'two dots'}}),                   # was a..b
+        ('embedded_list', 'EQUALS', '[1, 2, 3]', 1, {'term': {'embedded_list': '[1, 2, 3]'}}),
+        ('mixed', 'EQUALS', '3', 1, {'term': {'mixed': 3}}),                               # its odd value ignored
+        ('long_text', 'EQUALS', '*', 0, {'exists': {'field': 'long_text'}}),               # over ignore_above
+    ], pipeline_uuid=pipeline['uuid'])
+    kept = (await es.post(f'/{index}/_search', json={'query': {'term': {'kind': 'order'}}})).json()['hits']['hits']
+    p2.check(len(kept[0]['_source'].get('long_text', '')) == 1100,
+             'the over-long string is in the stored document, though not searchable')
+    crossed = (await es.post(f'/{index}/_count', json={'query': {'bool': {'must': [
+        {'term': {'items.sku': 'A1'}}, {'term': {'items.qty': 1}}]}}})).json()['count']
+    p2.check(crossed == 1, 'flattened: sku A1 with qty 1 matches, though A1 had qty 2 (as the documentation warns)')
 
 
 if __name__ == '__main__':

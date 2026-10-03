@@ -384,3 +384,30 @@ def test_the_users_own_fields_are_matched_by_path_before_convention_names():
     assert {f['source']: f['name'] for f in fields} == {
         '@StreamId': 'StreamId', 'EventSource/User/Id': 'user.id', 'EventSource/User/Name': 'user.name',
         'EventSource/User/EmailAddress': 'user.emailAddress'}
+
+
+def test_an_example_with_subobjects_false_maps_names_flat_and_allows_a_value_beside_its_dotted_names():
+    # subobjects: false: the index maps user.id as a field of its own (no user object), and time beside time.min.
+    from utils.templatecheck import from_example
+    plan = FieldPlan(backend='elasticsearch', index_name='metrics-v1', time_field='@timestamp', subobjects=False, fields=[
+        PlannedField(name='StreamId', type='id', source='@StreamId'), PlannedField(name='EventId', type='id', source='@EventId'),
+        PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+        PlannedField(name='time', type='keyword', source='EventDetail/Data[@Name="time"]/@Value'),
+        PlannedField(name='time.min', type='keyword', source='EventDetail/Data[@Name="min"]/@Value'),
+        PlannedField(name='user.id', type='keyword', source='EventSource/User/Id')])
+    assert plan.required() == []
+    planned = plan.elastic_template('metrics-v1')['body']
+    assert planned['template']['mappings']['subobjects'] is False
+    assert set(planned['template']['mappings']['properties']) == {'StreamId', 'EventId', '@timestamp', 'time', 'time.min', 'user.id'}
+    example = {'index_patterns': ['metrics-sibling*'], 'template': {'mappings': {'subobjects': False, 'properties': {
+        'user.id': {'type': 'keyword', 'ignore_above': 512}, 'time': {'type': 'keyword'}}}}}
+    body, _ = from_example(planned, example, {})
+    props = body['template']['mappings']['properties']
+    assert body['template']['mappings']['subobjects'] is False and 'user' not in props
+    assert props['user.id'] == {'type': 'keyword', 'ignore_above': 512} and 'time' in props and 'time.min' in props
+    nested = FieldPlan(**{**plan.model_dump(), 'subobjects': True})
+    assert any("'time' is a value and also the object holding ['time.min']" in p for p in nested.required())
+    # The document is nested either way; only time.min, beside its value time, is a flat key.
+    xslt = plan.xslt()
+    assert '<map key="user">' in xslt and 'key="user.id"' not in xslt
+    assert 'key="time"' in xslt and 'key="time.min"' in xslt

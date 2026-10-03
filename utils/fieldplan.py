@@ -86,9 +86,10 @@ class FieldPlan(BaseModel):
     shared: list[SharedTemplate] = Field(default_factory=list, description=(
         "Named templates from shared XSLTs (xsl:import) the environment's indexing XSLTs call, each writing a field "
         "(at: its name, e.g. 'guid'); the XSLT calls them instead of writing those fields itself."))
-    nest: bool = Field(default=True, description=(
-        "Elasticsearch: write dotted names as nested objects (user.id, user.name -> \"user\": {\"id\", \"name\"}); "
-        "false writes them as flat dotted keys, for an index template with subobjects: false."))
+    subobjects: bool = Field(default=True, description=(
+        "Elasticsearch: the index template's subobjects setting, from the user's example. Documents are written "
+        "nested either way (user.id, user.name -> \"user\": {\"id\", \"name\"}). With false, the template maps "
+        "each dotted name as a field of its own, and a value may sit beside its dotted names (time, time.min)."))
 
     @classmethod
     def for_discovery(cls, index_name: str, discovery: Discovery) -> 'FieldPlan':
@@ -124,7 +125,9 @@ class FieldPlan(BaseModel):
             if hidden:
                 problems.append(f"{hidden}: Stroom's Elasticsearch indexing filter drops fields whose names start with _ "
                                 f"(silently); rename them")
-            for name in sorted(names):
+            # Nested names make 'time' an object if 'time.min' exists; with subobjects: false (flat names) both
+            # are fields of their own.
+            for name in sorted(names) if self.subobjects else []:
                 inner = sorted(n for n in names if n.startswith(name + '.'))
                 if inner:
                     problems.append(f"'{name}' is a value and also the object holding {inner}: an Elasticsearch field "
@@ -140,14 +143,18 @@ class FieldPlan(BaseModel):
             return {'name': template_name, 'body': self._discovery_template(priority)}
         properties: dict[str, Any] = {}
         for f in self.fields:
+            if not self.subobjects:     # each dotted name is a field of its own
+                properties[f.name] = {'type': ELASTIC[f.type]}
+                continue
             node = properties
             parts = f.name.split('.')
             for part in parts[:-1]:
                 node = node.setdefault(part, {'properties': {}})['properties']
             node[parts[-1]] = {'type': ELASTIC[f.type]}
+        mappings: dict[str, Any] = {'dynamic': False, **({} if self.subobjects else {'subobjects': False}),
+                                    'properties': properties}
         return {'name': template_name, 'body': {
-            'index_patterns': [f'{self.index_name}*'], 'priority': priority,
-            'template': {'mappings': {'dynamic': False, 'properties': properties}}}}
+            'index_patterns': [f'{self.index_name}*'], 'priority': priority, 'template': {'mappings': mappings}}}
 
     def _discovery_template(self, priority: int) -> dict[str, Any]:
         """Permissive: dynamic mapping, strings as keywords, guardrails; explicit types only for the fields Stroom
@@ -238,8 +245,9 @@ class FieldPlan(BaseModel):
 
     def _elastic_lines(self) -> list[str]:
         """The document's fields: dotted names nested as objects (user.id -> <map key="user"><string key="id">),
-        each object written only when one of its fields is present, unless nest is off (flat dotted keys). A name
-        that is also another field's object stays flat (required() reports it)."""
+        each object written only when one of its fields is present. A name below another field's name (time.min
+        beside time) cannot be nested, so it is written as a flat key: an index with subobjects: false takes it,
+        and otherwise required() reports it."""
         def leaf(f: Any, key: str, indent: str) -> str:
             if isinstance(f, SharedTemplate):
                 return _call(f, indent)
@@ -252,7 +260,7 @@ class FieldPlan(BaseModel):
         def name_of(item: Any) -> str:
             return item.at if isinstance(item, SharedTemplate) else item.name
         names = {name_of(i) for i in items}
-        flat = [i for i in items if not self.nest or '.' not in name_of(i)
+        flat = [i for i in items if '.' not in name_of(i)
                 or any('.'.join(name_of(i).split('.')[:n]) in names for n in range(1, name_of(i).count('.') + 1))]
         tree: dict[str, Any] = {}
         for item in items:

@@ -183,7 +183,10 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
     without it. Then create_processor_filter on the Events stream ids with source_pipeline_uuid = the events
     pipeline from stage 1 (the filter then only selects Events from that pipeline): its approval asks the user to
     confirm the agreed template is committed, and processing starts. Lucene: create_processor_filter likewise.
-    Then wait_for_processing expect_events=false, and verify_index. Then write_documentation for the indexing
+    Then wait_for_processing expect_events=false, and verify_index with pipeline_uuid = the indexing pipeline (each
+    hit traced back to its event) and searches as people will make them, from stepped values: an exact match, a
+    value in another case (keywords on Elasticsearch: expected 0), IN, a wildcard, a numeric or IP range. Then
+    write_documentation for the indexing
     pipeline with stream_ids = its Events streams.
 
 Finish: promote_build to the folders sibling sources use.
@@ -266,7 +269,8 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    settings and components. Without an example it is not offered to agree: ask for one first. The user confirms it, or corrects it (check_index_template). Give them its dev_tools
    for the cluster admin; once they say it is committed, create_processor_filter on the raw streams (its approval
    asks them to confirm that) starts indexing. wait_for_processing expect_events=false; create_index_doc for the
-   index; verify_index; write_documentation with stream_ids = the raw streams; promote.
+   index; verify_index (pipeline_uuid = the discovery pipeline, so hits are traced to their records, and searches
+   on a few of the fields the documents showed); write_documentation with stream_ids = the raw streams; promote.
 
 {_RULES}{f'''
 

@@ -137,6 +137,8 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_shared_xslt.py` | Shared XSLTs (`xsl:import`): found through sibling pipelines and read by name; a translation and an indexing XSLT call them in place (Event/Meta and EventSource/Device from `stroom:meta()`, a JSON object), mapping an element twice refused, Events valid with one of each |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 
+Every Elasticsearch index the suites build is searched both ways (`dev/searching.py`): through Stroom's dashboards, as people will search, with each hit traced back to its record, and directly in Elasticsearch, as an independent check; both must return the expected count. Lucene (Phase 3) is searched through Stroom only.
+
 To call one tool directly (no MCP client or sign-in): `uv run python dev/try_tool.py find_pipeline_templates
 stage=translation`, or `--live` for the instance in `.ai/secrets` (read-only tools only). `dev/live_readonly.py [FEED]`
 runs the read-only tools against that instance through a gateway that refuses any request that could change

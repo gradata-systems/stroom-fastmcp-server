@@ -5,12 +5,12 @@ import json
 import time
 import uuid as uuidlib
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import yaml
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from security.guard import guard_from
 from tools.explorer import _redact
@@ -145,7 +145,7 @@ async def draft_index_mapping(
             fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
         else:
             unused.append(path)
-    example_notes, nest = [], True
+    example_notes, subobjects = [], True
     if example_template:
         try:
             _, example = parse_template(example_template)
@@ -161,10 +161,11 @@ async def draft_index_mapping(
         named, example_notes = names_from_example(
             [f.model_dump() for f in fields], read_mapping_fields(composed), known, sorted(p for p in populated if populated[p]))
         fields = [PlannedField(**f) for f in named]
-        # Dotted names are written as nested objects, unless the example stores them as flat keys.
+        # Documents are written nested whatever the example; subobjects: false changes how the index maps them.
         if ((composed.get('template') or {}).get('mappings') or {}).get('subobjects') is False:
-            nest = False
-            example_notes.append('flat dotted keys ("user.id"), as the example sets subobjects: false')
+            subobjects = False
+            example_notes.append('the example sets subobjects: false: the index maps each dotted name (user.id) as a '
+                                 'field of its own; documents are still written nested')
     fields += [f for f in extra_fields if f.name not in {x.name for x in fields}]
     time_field = next((f.name for f in fields if f.source == 'EventTime/TimeCreated'), 'EventTime')
     if backend == 'elasticsearch' and not any(f.name == '@timestamp' for f in fields):
@@ -186,7 +187,7 @@ async def draft_index_mapping(
         example_notes.append(f"{sorted(values)}: written by the shared template {use.template} ({use.href})"
                              + ('' if found else '; not found as an XSLT document, so typed as a keyword'))
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
-                     nest=nest, shared=list(shared))
+                     subobjects=subobjects, shared=list(shared))
     rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
     unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
     return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
@@ -491,6 +492,48 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
     return {'rows': rows, 'errors': (result.get('errors') or []) + (table_result.get('errors') or [])}
 
 
+Condition = Literal['EQUALS', 'NOT_EQUALS', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH', 'MATCHES_REGEX', 'GREATER_THAN',
+                    'GREATER_THAN_OR_EQUAL_TO', 'LESS_THAN', 'LESS_THAN_OR_EQUAL_TO', 'BETWEEN', 'IN', 'IS_NULL',
+                    'IS_NOT_NULL']
+
+
+class SearchCheck(BaseModel):
+    """One search, as a person would make it on a dashboard."""
+    field: str
+    condition: Condition = 'EQUALS'
+    value: str = Field('', description="BETWEEN: 'from,to'; IN: values separated by commas; EQUALS takes * wildcards.")
+    expected: int | None = Field(None, description="Rows it must return; none: at least one; 0: none (e.g. another case).")
+
+
+async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
+    """A hit back to its record: step the indexing pipeline at the hit's StreamId and EventId (the record number,
+    from 1) and read the document it writes there. The hit is traced when that document has the same EventId and
+    holds the value searched for."""
+    from tools.pipelines import translation_docs
+    from utils.fielddoc import index_documents
+    stroom = gateway_from(ctx)
+    try:
+        stream, event = int(float(row['StreamId'])), int(float(row['EventId']))
+    except (KeyError, TypeError, ValueError):
+        return {'traced': False, 'why': 'the hit has no StreamId and EventId to go back with'}
+    element = next((e['element'] for e in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid))
+                    if e['doc'].get('type') == 'XSLT' and not e['inherited_from_template']), None)
+    from tools.stepping import step_pipeline
+    stepped = await step_pipeline(ctx, pipeline_uuid, stream, event - 1)
+    output = ((stepped.get('elements') or {}).get(element) or {}).get('output') or ''
+    documents = index_documents([output]) if output else []
+    document = next((d for d in documents if str(event) in [v.split('.')[0] for v in d.get('EventId', [])]), None)
+    if document is None:
+        return {'traced': False, 'stream': stream, 'event': event,
+                'why': f'stepping record {event} of stream {stream} gives no document with EventId {event}'}
+    field, value = check.get('field'), check.get('value')
+    # A pattern (wildcard, or a CIDR range on an ip field) only needs the hit's record; a plain value must be there.
+    holds = (check.get('condition', 'EQUALS') != 'EQUALS' or any(c in (value or '') for c in '*?/') or field not in document
+             or any((value or '').lower() in v.lower() for v in document.get(field, [])))   # text fields match words
+    return {'traced': holds, 'stream': stream, 'event': event,
+            **({} if holds else {'why': f"record {event}'s document has {field} = {document.get(field)}, not {value}"})}
+
+
 async def run_test_searches(
         ctx: Context,
         dashboard_uuid: Annotated[str, Field(description="A verification dashboard.")],
@@ -502,11 +545,15 @@ async def run_test_searches(
         time_range: Annotated[dict[str, Any] | None, Field(
             description="{'field': ..., 'from': ISO, 'to': ISO, 'expected': n}")] = None,
         retries: Annotated[int, Field(ge=0, le=20, description="Retries while the index catches up.")] = 6,
+        searches: list[SearchCheck] | None = None,
+        pipeline_uuid: str | None = None,
 ) -> dict[str, Any]:
     """
     Run test searches through the verification dashboard, the way people will search: all documents for the
-    indexed stream ids (count must match), an exact match per key field, and a time range. Each check passes
-    or fails with the rows it returned. A failure points at the mapping or the indexing XSLT.
+    indexed stream ids (count must match), an exact match per key field, a time range, and any other searches
+    (ranges, IN, wildcards, a value in another case that must find nothing). Each check passes or fails with the
+    rows it returned. With the indexing pipeline, each check's first hit is traced back to its record. A
+    failure points at the mapping or the indexing XSLT.
     """
     dashboard = await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
     term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
@@ -530,6 +577,28 @@ async def run_test_searches(
         checks.append({'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
                        'expected': time_range.get('expected'), 'returned': len(res['rows']),
                        'pass': len(res['rows']) == time_range.get('expected', len(res['rows'])), 'errors': res['errors']})
+    for search in searches or []:
+        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
+            term(search.field, search.condition, search.value)]})
+        n = len(res['rows'])
+        checks.append({'check': f"{search.field} {search.condition} {search.value}".rstrip(), 'expected': search.expected,
+                       'returned': n, 'pass': (n >= 1 if search.expected is None else n == search.expected)
+                       and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],
+                       '_first': res['rows'][0] if res['rows'] else None,
+                       '_spec': {'field': search.field, 'condition': search.condition, 'value': search.value}})
+    if pipeline_uuid:
+        for check, item in zip(checks[1:1 + len(exact)], exact):
+            check['_first'] = check.get('sample', [None])[0] if check.get('sample') else None
+            check['_spec'] = {'field': item['field'], 'condition': 'EQUALS', 'value': item['value']}
+        first = found['rows'][0] if found['rows'] else None
+        checks[0]['_first'], checks[0]['_spec'] = first, {}
+        for check in checks:
+            if check.get('_first'):
+                check['trace'] = await _traced(ctx, pipeline_uuid, check['_first'], check['_spec'])
+                check['pass'] = check['pass'] and check['trace']['traced']
+    for check in checks:
+        check.pop('_first', None)
+        check.pop('_spec', None)
     return {'passed': all(c['pass'] for c in checks), 'checks': checks}
 
 
@@ -721,6 +790,28 @@ async def check_index_template(
     return result
 
 
+def _searchable(backend: str, searches: list[SearchCheck]) -> None:
+    """Searches whose answer would mislead: on Elasticsearch, Stroom (7.13) finds nothing for STARTS_WITH and
+    CONTAINS and matches every document for IS_NULL and IS_NOT_NULL, without an error; IN takes values separated
+    by commas."""
+    problems = []
+    for s in searches:
+        if s.condition == 'IN' and ',' not in s.value and ' ' in s.value.strip():
+            problems.append(f"{s.field} IN '{s.value}': separate the values with commas")
+        if backend == 'elasticsearch' and s.condition in ('STARTS_WITH', 'CONTAINS'):
+            pattern = f"{s.value}*" if s.condition == 'STARTS_WITH' else f"*{s.value}*"
+            problems.append(f"{s.field} {s.condition} '{s.value}': Stroom finds nothing with {s.condition} on "
+                            f"Elasticsearch; use EQUALS '{pattern}' (a wildcard) or MATCHES_REGEX")
+        if backend == 'elasticsearch' and s.condition == 'IS_NOT_NULL':
+            problems.append(f"{s.field} IS_NOT_NULL: Stroom matches every document with IS_NOT_NULL on Elasticsearch; "
+                            f"use EQUALS '*' (any value) instead")
+        if backend == 'elasticsearch' and s.condition == 'IS_NULL':
+            problems.append(f"{s.field} IS_NULL: Stroom matches every document with IS_NULL on Elasticsearch; check "
+                            f"EQUALS '*' (any value) with the expected count instead")
+    if problems:
+        raise ToolError('These searches would give a misleading answer: ' + '; '.join(problems))
+
+
 async def verify_index(
         ctx: Context,
         build: Build,
@@ -737,18 +828,29 @@ async def verify_index(
             description="{'field': ..., 'from': ISO, 'to': ISO, 'expected': n}")] = None,
         dashboard_name: Annotated[str | None, Field(description="Defaults to the index name with a -VERIFY suffix.")] = None,
         retries: Annotated[int, Field(ge=0, le=20, description="Retries while the index catches up.")] = 6,
+        searches: Annotated[list[SearchCheck] | str, ONE_OR_MORE, Field(
+            description="More searches, as people will make them: numeric ranges (GREATER_THAN, BETWEEN), IN, "
+                        "wildcards (EQUALS 'adm*'), CONTAINS on text, and a value in another case that must find "
+                        "nothing (expected 0). Use values from stepped documents.")] = [],
+        pipeline_uuid: Annotated[str | None, Field(
+            description="The indexing pipeline: each check's first hit is traced back to its record by stepping it "
+                        "at the hit's StreamId and EventId.")] = None,
 ) -> dict[str, Any]:
     """
     Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc
     (created once per build, with a table of the given fields), then the test searches: the sample stream
-    ids, an exact match on each key field, and a time range. Passes when every check returns what it should.
+    ids, an exact match on each key field, a time range and any further searches; with the indexing pipeline,
+    each hit traced back to the record it came from. Passes when every check returns what it should.
     """
+    searches = [SearchCheck.model_validate(s) if isinstance(s, dict) else s for s in searches]
+    _searchable(backend, searches)
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
     name = dashboard_name or f"{index.get('name')}-VERIFY"
     existing = next((d for d in await guard_from(ctx).folder_contents(build) if d['type'] == 'Dashboard' and d['name'] == name), None)
     dashboard = existing or await create_verification_dashboard(ctx, build, name, index_uuid, backend, fields)
-    searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries)
+    searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
+                                       searches=list(searches), pipeline_uuid=pipeline_uuid)
     return {'dashboard': {'uuid': dashboard['uuid'], 'name': name}, **searched}
 
 

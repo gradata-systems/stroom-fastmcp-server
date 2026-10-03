@@ -55,6 +55,7 @@ from utils.fieldplan import FieldPlan  # noqa: E402
 from utils.templatecheck import compose  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
+from searching import paired  # noqa: E402
 
 FIXTURE_TEMPLATE = 'E2E Events to Elasticsearch'
 FIXTURE_CLUSTER = 'E2E_LOCAL_ES'
@@ -389,13 +390,23 @@ async def live(ctx, stroom: StroomGateway, csv: dict, events: list[int], es_temp
         p2.check(_properties(resolved['properties']) == _properties(built['template']['mappings']['properties'])
                  and resolved.get('dynamic') == 'strict', 'Elasticsearch resolves it with nothing added or lost')
 
-        print('\n### verified through Stroom')
+        print('\n### searched through Stroom and in Elasticsearch, each hit traced to its event')
         doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=csv['build'], backend='elasticsearch',
                               name=index, time_field=plan.time_field, index_name=index, cluster_uuid=cluster['uuid'])
-        verified = await indexing.verify_index(ctx, csv['build'], doc['uuid'], 'elasticsearch', events, 3,
-                                               ['StreamId', 'EventId', '@timestamp', 'User.Id', 'TypeId'],
-                                               exact=[{'field': 'User.Id', 'value': 'bob'}])
-        p2.check(verified.get('passed', verified.get('ok')) is True, f"Stroom's searches: {json.dumps(verified)[:400]}")
+        await paired(ctx, es, csv['build'], index, doc['uuid'], events, 3,
+                     ['StreamId', 'EventId', '@timestamp', 'User.Id', 'TypeId'], [
+                         ('User.Id', 'EQUALS', 'bob', 1, {'term': {'User.Id': 'bob'}}),
+                         ('User.Id', 'EQUALS', 'Bob', 0, {'term': {'User.Id': 'Bob'}}),
+                         ('User.Id', 'IN', 'alice,carol', 2, {'terms': {'User.Id': ['alice', 'carol']}}),
+                         ('User.Id', 'EQUALS', 'a*', 1, {'wildcard': {'User.Id': 'a*'}}),
+                         ('TypeId', 'EQUALS', 'Logon', 3, {'term': {'TypeId': 'Logon'}}),
+                         ('Device.HostName', 'EQUALS', 'ws02', 1, {'term': {'Device.HostName': 'ws02'}}),
+                         ('Device.IPAddress', 'EQUALS', '10.0.0.2', 1, {'term': {'Device.IPAddress': '10.0.0.2'}}),
+                         ('Device.IPAddress', 'EQUALS', '10.0.0.0/24', 3, {'term': {'Device.IPAddress': '10.0.0.0/24'}}),
+                         ('Description', 'EQUALS', 'logon', 3, {'match': {'Description': 'logon'}}),
+                         ('@timestamp', 'BETWEEN', '2026-09-28T10:04:00.000Z,2026-09-28T10:08:00.000Z', 2,
+                          {'range': {'@timestamp': {'gte': '2026-09-28T10:04:00.000Z', 'lte': '2026-09-28T10:08:00.000Z'}}}),
+                     ], pipeline_uuid=pipeline['uuid'])
 
         print('\n### documented')
         written = await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
@@ -472,6 +483,50 @@ async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: s
         print('    ' + json.dumps(source))
         p2.check(source.get('user') == {'id': 'john.smith1', 'name': 'John Smith', 'emailAddress': 'john.smith1@email.com'}
                  and not any('.' in k for k in source), 'the stored document keeps the structure: "user": {...}')
+        doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=people['build'], backend='elasticsearch',
+                              name=index, time_field=plan.time_field, index_name=index, cluster_uuid=cluster['uuid'])
+        await paired(ctx, es, people['build'], index, doc['uuid'], events, 2,
+                     ['StreamId', 'EventId', '@timestamp', 'user.id', 'user.name'], [
+                         ('user.id', 'EQUALS', 'john.smith1', 1, {'term': {'user.id': 'john.smith1'}}),
+                         ('user.name', 'EQUALS', 'Jane Doe', 1, {'term': {'user.name': 'Jane Doe'}}),
+                         ('user.emailAddress', 'EQUALS', '*@email.com', 2, {'wildcard': {'user.emailAddress': '*@email.com'}}),
+                         ('host.ip', 'EQUALS', '10.0.0.2', 1, {'term': {'host.ip': '10.0.0.2'}}),
+                     ], pipeline_uuid=pipeline['uuid'])
+
+        print('\n### subobjects: false: the same events, the index mapping each dotted name as a field of its own')
+        flat_index = f'people-flat-{stamp}-v1'
+        flat_example = PEOPLE_EXAMPLE.replace('"mappings": {"dynamic": "strict",', '"mappings": {"dynamic": "strict", "subobjects": false,')
+        draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', flat_index, 'ecs', events,
+                                                   example_template=flat_example)
+        flat = FieldPlan.model_validate(draft['plan'])
+        p2.check(flat.subobjects is False and '<map key="user">' in draft['xslt'],
+                 'the plan records subobjects: false; documents are still written nested')
+        xslt = await translation.save_xslt(ctx, people['build'], f'{flat_index}-XSLT', index_plan=flat)
+        flat_pipeline = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=people['build'],
+                                        name=f'{flat_index} - Indexing', template_uuid=es_template['uuid'],
+                                        xslt_uuid=xslt['uuid'], index_name=flat_index, cluster_uuid=cluster['uuid'])
+        p2.check((await stepping.step_sample(ctx, flat_pipeline['uuid'], events))['verdict'] == 'clean', 'stepped clean')
+        final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=flat_pipeline['uuid'], plan=flat,
+                                events_stream_ids=events, example_template=flat_example)
+        mapping = final['template']['template']['mappings']
+        p2.check(mapping.get('subobjects') is False and 'user.id' in mapping['properties'] and 'user' not in mapping['properties'],
+                 'the template maps user.id, user.name and user.emailAddress as fields of their own')
+        path, request = _request(final['dev_tools'])
+        p2.check((await es.put(f'/{path}', json=request)).status_code == 200, f'PUT {path}')
+        started = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=flat_pipeline['uuid'],
+                                  stream_ids=events, source_pipeline_uuid=people['pipeline']['uuid'])
+        done = await processing_writes.wait_for_processing(ctx, flat_pipeline['uuid'], events, expect_events=False,
+                                                           filter_id=started['filter_id'])
+        p2.check(done.get('gate') == 'pass', 'indexed with no Error stream')
+        doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=people['build'], backend='elasticsearch',
+                              name=flat_index, time_field=flat.time_field, index_name=flat_index,
+                              cluster_uuid=cluster['uuid'])
+        await paired(ctx, es, people['build'], flat_index, doc['uuid'], events, 2,
+                     ['StreamId', 'EventId', '@timestamp', 'user.id', 'user.name'], [
+                         ('user.id', 'EQUALS', 'john.smith1', 1, {'term': {'user.id': 'john.smith1'}}),
+                         ('user.emailAddress', 'EQUALS', 'jane.doe2@email.com', 1,
+                          {'term': {'user.emailAddress': 'jane.doe2@email.com'}}),
+                     ], pipeline_uuid=flat_pipeline['uuid'])
 
 
 if __name__ == '__main__':

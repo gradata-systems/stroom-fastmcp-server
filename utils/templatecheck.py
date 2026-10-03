@@ -408,8 +408,8 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     missing = [n for n in composed_of if n not in components]
     in_example = read_mapping(own).fields
     plan_fields = read_mapping(((planned.get('template') or {}).get('mappings')) or {}).fields
-    leaves = {path: spec for path, spec in plan_fields.items()
-              if not any(other.startswith(path + '.') for other in plan_fields)}
+    # The plan's values: not its object nodes (with subobjects: false, time and time.min are both values).
+    leaves = {path: spec for path, spec in plan_fields.items() if spec.get('type') not in (None, 'object')}
     every = {**from_components, **in_example}
     # A discovery index keeps the source's names and Elasticsearch's dynamic mapping: the example gives its
     # settings and components, not its field conventions.
@@ -444,7 +444,9 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     else:
         mappings = {k: copy.deepcopy(own[k]) for k in _MAPPING_PARAMS if k in own}
         mappings.setdefault('dynamic', planned_mappings.get('dynamic', False))
-    mappings['properties'] = _nest(final, objects, typed)
+    # subobjects: false keeps each dotted name a field of its own (time beside time.min): no objects to nest.
+    mappings['properties'] = ({path: copy.deepcopy(spec) for path, spec in final.items()}
+                              if mappings.get('subobjects') is False else _nest(final, objects, typed))
     template: dict[str, Any] = {'mappings': mappings}
     settings = (example.get('template') or {}).get('settings')
     if settings:

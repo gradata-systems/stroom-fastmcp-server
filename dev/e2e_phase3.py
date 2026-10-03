@@ -55,12 +55,23 @@ async def index_stage(ctx, csv: dict, stamp: str):
     check(gate['gate'] == 'pass', f"indexing finished with no Error stream: {gate['streams']}")
     dash = await indexing.create_verification_dashboard(ctx, csv['build'], f'{index_name}-VERIFY', index['uuid'], 'lucene',
                                                         ['StreamId', 'EventId', 'EventTime', 'UserId', 'HostName'])
+    # Lucene is searched only through Stroom; each hit is traced back to its event by stepping the pipeline.
+    S = indexing.SearchCheck
     result = await indexing.run_test_searches(
         ctx, dash['uuid'], events, 3, exact=[{'field': 'UserId', 'value': 'bob'}, {'field': 'HostName', 'value': 'ws03'}],
-        time_range={'field': 'EventTime', 'from': '2026-09-28T10:04:00.000Z', 'to': '2026-09-28T10:08:00.000Z', 'expected': 2})
+        time_range={'field': 'EventTime', 'from': '2026-09-28T10:04:00.000Z', 'to': '2026-09-28T10:08:00.000Z', 'expected': 2},
+        searches=[S(field='UserId', value='Bob', expected=1),          # the plan's Lucene fields are case-insensitive
+                  S(field='UserId', condition='IN', value='alice,carol', expected=2),
+                  S(field='UserId', value='a*', expected=1),
+                  S(field='HostName', value='ws0*', expected=3),
+                  S(field='UserId', condition='NOT_EQUALS', value='bob', expected=2),
+                  S(field='EventTime', condition='GREATER_THAN', value='2026-09-28T10:04:00.000Z', expected=2)],
+        pipeline_uuid=pipeline['uuid'])
     for c in result['checks']:
-        print(f"    {'ok ' if c['pass'] else 'BAD'} {c['check']}: {c['returned']}")
-    check(result['passed'], 'verification searches pass')
+        trace = c.get('trace')
+        print(f"    {'ok ' if c['pass'] else 'BAD'} {c['check']}: {c['returned']}"
+              + (f" (traced to record {trace['event']})" if trace and trace['traced'] else f" (trace: {trace})" if trace else ''))
+    check(result['passed'], 'verification searches pass, each hit traced to its event')
     await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
                                      f"# {pipeline['name']}\n\n## Output\n\nLucene index {index_name}.\n", 'Created')
     return {'events': events, 'template': template, 'index': index, 'pipeline': pipeline, 'plan': plan}
