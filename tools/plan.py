@@ -128,6 +128,51 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
             or profiled['format'] == 'xml fragments'}
 
 
+def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
+              translation: str | None, indexing: str | None) -> tuple[dict[str, Any], str]:
+    """The step's first call, with the arguments the build already gives and <...> for those still to decide, and what
+    follows it. One call rather than a list of tools: a small model given several options deliberated between them
+    until its context ran out."""
+    tr, ix = translation or '<the events pipeline uuid>', indexing or '<the indexing pipeline uuid>'
+    calls = {
+        'feed': (('create_feed', {'build': build, 'name': '<the feed name the user confirmed>'}),
+                 'then upload_sample once per sample file'),
+        'samples': (('upload_sample', {'feed': feeds[0] if feeds else '<the feed>', 'sample': "<one file's text>"}),
+                    'once per sample file; from then on give tools stream_ids, not the text'),
+        'converter': (('build_data_splitter', {'stream_ids': raw, 'build': build, 'save_as': '<converter name>'}),
+                      'it saves the converter once every line parses'),
+        'translation': (('draft_translation_mapping', {'stream_ids': raw}),
+                        'decide what its notes ask, then build_translation_xslt with the mapping, stream_ids, the '
+                        'splitter, build and name: it saves the XSLT with the mapping'),
+        'pipeline': (('find_pipeline_templates', {'stage': 'translation'}),
+                     "then create_pipeline from the best candidate: it takes the build's converter and XSLT"),
+        'stepped': (('step_sample', {'pipeline_uuid': tr, 'stream_ids': raw}),
+                    'until the verdict is clean: fix the mapping and build_translation_xslt uuid=... in between'),
+        'processed': (('create_processor_filter', {'pipeline_uuid': tr, 'stream_ids': raw}),
+                      'then wait_for_processing and check_events'),
+        'validated': (('check_events', {'events_xml': '<a record of the Events stream (read_stream)>'}),
+                      'one record of each kind of event'),
+        'documented': (('write_documentation', {'build': build, 'pipeline_uuid': tr, 'stream_ids': raw,
+                                                'markdown': '<the documentation, from the documentation guide>'}),
+                       'the Field mapping section is generated'),
+        'index': (('draft_index_mapping', {'backend': '<the agreed backend>', 'index_name': '<the agreed name>',
+                                           'convention': '<the agreed convention>', 'events_stream_ids': events}),
+                  'then create_index_doc with plan= once the user confirms'),
+        'indexing_pipeline': (('save_xslt', {'build': build, 'name': '<index name>-XSLT',
+                                             'index_plan': '<the plan from draft_index_mapping>'}),
+                              'then create_indexing_pipeline with that XSLT and the index'),
+        'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events, 'source_pipeline_uuid': tr}),
+                    'then wait_for_processing expect_events=false, and verify_index'),
+        'index_documented': (('write_documentation', {'build': build, 'pipeline_uuid': ix, 'stream_ids': events,
+                                                      'markdown': '<the documentation, from the documentation guide>'}),
+                             'the Field mapping section is generated'),
+        'promoted': (('promote_build', {'build': build, 'destinations': '<the folders sibling sources use, by type>'}),
+                     "with the user's approval"),
+    }
+    (tool, arguments), then = calls[step]
+    return {'tool': tool, 'arguments': arguments}, then
+
+
 async def status(ctx: Context, build: str) -> dict[str, Any]:
     """Each plan step's state, read from the build."""
     from tools.builds import _build_docs, build_checks, kept_mapping
@@ -190,6 +235,9 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
                       else 'not recorded' if state is None else 'to do'})
     pending = [s for s in steps if s['state'] == 'to do']
     nxt = pending[0] if pending else None
+    call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
+                           [m['id'] for m in raw], events[:20], translation[0]['uuid'] if translation else None,
+                           indexing[0]['uuid'] if indexing else None)
     return {
         'build': build,
         'documents': docs,
@@ -201,9 +249,9 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'events_streams': events[:20],
         'before_promotion': checks,
         'steps': steps,
-        'next': {'step': nxt['step'], 'do': nxt['what'], 'tools': nxt['tools']} if nxt else
-                {'step': 'promoted', 'do': 'Everything is in place: build_status, then promote_build with the user\'s approval',
-                 'tools': 'promote_build'},
+        'next': {'step': nxt['step'], 'do': nxt['what'], 'call': call, 'then': then} if nxt else
+                {'step': 'promoted', 'do': 'Everything is in place: promote_build with the user\'s approval',
+                 'call': call, 'then': then},
     }
 
 
@@ -287,7 +335,8 @@ async def start_onboarding(
                            'needed: the XML fragment wrapper (profile text_converter)' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),
         'plan': plan,
-        'next': nxt or {'step': 'feed', 'do': plan[0]['what'], 'tools': plan[0]['tools']},
+        'next': nxt or dict(zip(('step', 'do', 'call', 'then'),
+                                ('feed', plan[0]['what'], *next_call('feed', name, [], [], [], None, None)))),
         'done': False,
         'standing_instructions': await applicable_instructions(ctx, folders, []),
         'hint': ("Propose the feed name from sibling feeds and create_feed; upload each file as its own stream; from then "

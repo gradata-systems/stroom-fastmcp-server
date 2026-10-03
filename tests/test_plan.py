@@ -39,6 +39,8 @@ async def test_start_onboarding_profiles_every_file_and_returns_the_plan():
     assert result['profile']['format'] == 'key=value' and result['parser'] == 'DSParser'
     assert result['template'].startswith('Event Data (Text)') and result['text_converter'].startswith('needed: build_data_splitter')
     assert result['next']['step'] == 'feed' and len(result['plan']) == 14
+    assert result['next']['call'] == {'tool': 'create_feed', 'arguments': {
+        'build': 'onboard-fortios-firewall', 'name': '<the feed name the user confirmed>'}}
     with pytest.raises(ToolError, match='Give the sample files'):
         await plan.start_onboarding(None, 'x', {})
 
@@ -69,3 +71,19 @@ async def test_create_pipeline_refuses_a_parser_that_cannot_read_the_sample():
         await pipeline_writes._parser_reads_sample(None, 'b', merged, None, allowed=True)
     with patch('tools.plan.sample_format', AsyncMock(return_value=None)):   # no sample uploaded yet: nothing to check
         await pipeline_writes._parser_reads_sample(None, 'b', merged, None, allowed=False)
+
+
+def test_next_is_one_call_with_what_the_build_already_knows():
+    # A small model given a list of tools for the next step deliberated between them until its context ran out.
+    call, then = plan.next_call('stepped', 'acme-v1', ['ACME'], [7, 8], [], 'p-1', None)
+    assert call == {'tool': 'step_sample', 'arguments': {'pipeline_uuid': 'p-1', 'stream_ids': [7, 8]}}
+    assert 'build_translation_xslt uuid=' in then
+    call, _ = plan.next_call('indexed', 'acme-v1', ['ACME'], [7], [9], 'p-1', 'p-2')
+    assert call['arguments'] == {'pipeline_uuid': 'p-2', 'stream_ids': [9], 'source_pipeline_uuid': 'p-1'}
+    # Every step has one, naming a tool that exists, with arguments it takes.
+    import inspect
+    import main_tools
+    tools = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
+    for step in [i['step'] for i in plan.checklist()]:
+        call, _ = plan.next_call(step, 'b', ['F'], [1], [2], 'p', 'q')
+        assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), step

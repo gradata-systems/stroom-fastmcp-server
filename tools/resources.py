@@ -123,28 +123,28 @@ Stage 1, events:
    the parser and template, whether a text converter is needed), creates the build and returns the plan. Follow `next`
    in each result until it says promote; build_status shows what remains. A file's text is sent once more, to
    upload_sample; after that every tool takes the sample streams (stream_ids) and reads them itself.
-2. find_pipeline_templates stage=translation; describe_template on the best
-   candidate to see how this environment specialises it. find_documents (content=...) for existing XSLTs to reuse.
-3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a
+2. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a
    stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
    every kind gets a rule and step_records can check each. Values the records do not carry (a user's department, a
    host's site): find_reference_data for maps the environment loads, or build the reference data (reference-data guide).
-4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample streams infers
-   the spec and runs it until every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON
-   and single-document XML need none: the JSONParser or XMLParser reads them. draft_translation_mapping with the
-   sample streams gives a mapping to edit (its notes say what to decide: the action element per kind of event, System
-   Name, Environment, a time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams,
-   splitter=the spec) with it: which input field or constant goes to which event-logging path, one rule per kind of event,
-   any_of where files name a field differently, extract for text fields holding several values, lookup or
-   dictionary for values from reference data. Give it build and name: it saves the XSLT with the mapping (kept
-   with it, so the documentation is generated from it) and returns the document, not the code. Fix reported
-   problems in the mapping and call again with uuid= the saved XSLT; hand-edit only what a mapping cannot express.
-5. save_text_converter (if any), create_pipeline from the template (with the pipeline_properties
-   build_translation_xslt returned, e.g. jsonParser.addRootObject, and references for any lookup maps), then
-   step_sample over every sample stream until the verdict is clean, fixing the mapping and saving again (uuid=)
-   in between; step_pipeline on single records to debug.
+3. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample streams infers
+   the spec and runs it until every line parses; save_text_converter saves it. XML fragments need the wrapper
+   (xmlFragmentParser.textConverter). JSON and single-document XML need none: the JSONParser or XMLParser reads them.
+4. find_documents (content=...) for existing XSLTs to reuse. draft_translation_mapping with the sample streams gives a
+   mapping to edit (its notes say what to decide: the action element per kind of event, System Name, Environment, a
+   time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams, splitter=the spec) with
+   it: which input field or constant goes to which event-logging path, one rule per kind of event, any_of where files
+   name a field differently, extract for text fields holding several values, lookup or dictionary for values from
+   reference data. Give it build and name: it saves the XSLT with the mapping (kept with it, so the documentation is
+   generated from it) and returns the document, not the code. Fix reported problems in the mapping and call again
+   with uuid= the saved XSLT; hand-edit only what a mapping cannot express.
+5. find_pipeline_templates stage=translation; describe_template on the best candidate to see how this environment
+   specialises it. create_pipeline from it (with the pipeline_properties build_translation_xslt returned, e.g.
+   jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
+   verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
-   check_events on the output.
+   check_events on the output. Then write_documentation for the events pipeline with stream_ids = the sample streams:
+   its Field mapping section is generated from the kept mapping.
 
 Stage 2, indexing:
 7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch). get_field_conventions;
@@ -160,12 +160,10 @@ Stage 2, indexing:
 11. create_processor_filter on the Events stream ids with source_pipeline_uuid = the events pipeline from stage 1
     (the filter then only selects Events from that pipeline). Elasticsearch: the user confirms they have committed
     the template, the filter is created disabled, and you give them pipeline_link and say it is ready to enable;
-    once they have enabled it, continue. Then wait_for_processing expect_events=false, verify_index
-    and verify_index.
+    once they have enabled it, continue. Then wait_for_processing expect_events=false, and verify_index. Then
+    write_documentation for the indexing pipeline with stream_ids = its Events streams.
 
-Finish: write_documentation for both pipelines, with stream_ids (the sample raw streams for the events pipeline, its
-Events streams for the indexing one): the Field mapping section is generated from the kept mapping. Then
-promote_build to the folders sibling sources use.
+Finish: promote_build to the folders sibling sources use.
 
 {_RULES}{_docs(source_docs)}
 
@@ -183,7 +181,8 @@ Sample:
    for a reported issue, find example records in the production feed (find_streams, read_stream, step_pipeline).
 4. Draft the change and prove it with compare_outputs (draft_code) on the test records and recent production
    records: only the targeted fields may change. step_sample must stay clean.
-5. save_xslt (uuid=...) on the copy; write_documentation noting the change; promote_build (approval).
+5. Save the change on the copy: build_translation_xslt (uuid=...) from the changed mapping, or save_xslt (uuid=...)
+   for code a mapping cannot express; write_documentation noting the change; promote_build (approval).
    Reprocessing historical data is the user's decision: propose it, do not do it.
 
 {_RULES}{_docs(source_docs)}{f'''
@@ -302,8 +301,8 @@ pipeline once the user approves.{_docs(source_docs)}"""
    should change. Revise until ready is true.
 5. Present the fix: the diff, the fields that change and how many records, and any template warning. Ask whether
    to apply it to the pipeline, or to give them the manual steps.
-   - Apply: follow update_events_pipeline (ask new version or in place, confirm names, copy_pipeline, save_xslt (uuid=...)
-     or save_text_converter with the draft, compare_outputs, write_documentation, promote_build).
+   - Apply: follow update_events_pipeline (ask new version or in place, confirm names, copy_pipeline, build_translation_xslt
+     (uuid=...) from the changed mapping, or save_xslt (uuid=...) or save_text_converter with the draft, compare_outputs, write_documentation, promote_build).
    - Manual: give summarise_fix's manual_steps and diff.
    Either way, reprocessing production data is the user's to do.
 
