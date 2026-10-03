@@ -18,6 +18,7 @@ from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
 from utils.samples import SampleTexts, check_sample
 from utils.localcheck import check_mapping, sample_records
+from utils.xpathcheck import check_xpaths
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
 from utils.fielddoc import field_mapping_markdown, sampled_events
@@ -109,6 +110,7 @@ async def build_translation_xslt(
             check_sample(text)
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
+        check['warnings'] += check_xpaths(mapping, sample, splitter)
         result['sample_check'] = {**check, **({'note': note} if note else {})}
         result['warnings'] += [f"sample: {w}" for w in check['warnings']]
         if check['problems']:
