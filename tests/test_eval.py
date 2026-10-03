@@ -81,3 +81,18 @@ def test_a_case_number_names_that_case_only():
     # '16' once also picked 07_syslog3164_sudo, whose name contains it.
     assert [c['id'][:2] for c in ev.load_cases(['13', '16'])] == ['13', '16']
     assert {c['id'][:2] for c in ev.load_cases(['json'])} >= {'02', '03', '04', '11', '13', '16', '18', '19'}
+
+
+def test_expected_types_and_paths_may_name_alternatives():
+    from lxml import etree
+    door = etree.fromstring('<Event xmlns="event-logging:3"><EventSource><User><UserDetails><Unit>Sales</Unit>'
+                            '</UserDetails></User></EventSource><EventDetail><TypeId>badge</TypeId><Authorise>'
+                            '<Action>Access</Action></Authorise></EventDetail></Event>')
+    dept = 'EventSource/User/UserDetails/Organisation|EventSource/User/UserDetails/Unit'
+    assert ev.has_path(door, dept) and not ev.has_path(door, 'EventSource/User/UserDetails/Organisation')
+    assert ev.path_values([door], dept) == {'Sales'}
+    xml = etree.tostring(etree.fromstring(f'<Events xmlns="event-logging:3">{etree.tostring(door).decode()}</Events>')).decode()
+    score = ev.Score('x', 'test')
+    ev.score_events(score, {'expected': {'records': 1, 'event_types': ['Authenticate|Authorise'],
+                                         'paths': [dept, 'EventDetail/Authenticate/Action|EventDetail/Authorise/Action']}}, [xml], [True])
+    assert score.stage1 and not score.missing_types and not score.missing_paths

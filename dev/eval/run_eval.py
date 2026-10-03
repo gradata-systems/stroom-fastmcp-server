@@ -128,18 +128,20 @@ def _steps(path: str) -> str:
 
 
 def has_path(event: etree._Element, path: str) -> bool:
-    return any((node.text or '').strip() or len(node) for node in event.findall(_steps(path)))
+    """Whether the event has the path, or one of its alternatives (a|b), with a value or children."""
+    return any((node.text or '').strip() or len(node) for alt in path.split('|') for node in event.findall(_steps(alt)))
 
 
 def path_values(events: list[etree._Element], path: str) -> set[str]:
-    return {(node.text or '').strip() for e in events for node in e.findall(_steps(path))}
+    return {(node.text or '').strip() for e in events for alt in path.split('|') for node in e.findall(_steps(alt))}
 
 
 def score_events(score: Score, case: dict[str, Any], records: list[str], validity: list[bool]) -> None:
     expected = case['expected']
     events, types = event_facts(records)
     score.events, score.valid_events, score.event_types = len(events), sum(validity), sorted(types)
-    score.missing_types = sorted(set(expected['event_types']) - types)
+    # An expected type may name alternatives the source fits equally (Authenticate|Authorise for a badge at a door).
+    score.missing_types = sorted(t for t in expected['event_types'] if not set(t.split('|')) & types)
     score.missing_paths = sorted({p for p in expected['paths'] for e in events if not has_path(e, p)})
     if len(events) != expected['records']:
         score.problems.append(f"{len(events)} events, expected {expected['records']}")

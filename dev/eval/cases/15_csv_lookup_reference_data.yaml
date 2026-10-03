@@ -7,9 +7,12 @@ request: >
   Index the events.
 expected:
   records: 3
-  event_types: [Authenticate]
-  paths: [EventTime/TimeCreated, EventSource/User/Id, EventSource/User/Name, EventSource/User/UserDetails/Organisation,
-          EventDetail/Authenticate/Action]
+  # A badge at a door is as well an Authorise (access to a resource) as an Authenticate, and a department as well a
+  # UserDetails Unit or Group as an Organisation: any of them passes, as long as the lookup filled it.
+  event_types: ['Authenticate|Authorise']
+  paths: [EventTime/TimeCreated, EventSource/User/Id, EventSource/User/Name,
+          'EventSource/User/UserDetails/Organisation|EventSource/User/UserDetails/Unit|EventSource/User/UserDetails/Group',
+          'EventDetail/Authenticate/Action|EventDetail/Authorise/Action']
 sample: |
   time,badge_user,door,result
   2026-10-01T07:58:00Z,ALICE,Main entrance,granted

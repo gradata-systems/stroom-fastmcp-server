@@ -31,7 +31,7 @@ case), not a margin to spend.
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have (`*` for one element any of several may fill, such as
-`Network/*/Source` for Open, Permit or Deny), and optionally `values` some event must hold exactly, such as a
+`Network/*/Source` for Open, Permit or Deny; `a|b` for alternatives, in types as in paths), and optionally `values` some event must hold exactly, such as a
 free-text message carried whole or a time read from the right field), an optional list of `hints`, and a reference solution (a Data
 Splitter where the format needs one, and a `build_translation_xslt` mapping).
 
