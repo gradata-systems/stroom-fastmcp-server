@@ -49,7 +49,7 @@ SERVER = 'stroom'
 PROMPT = 'onboard_data_source'
 # Besides the server's own tools: reading its resources (the guides and conventions the prompt points to).
 RESOURCE_TOOLS = ['ListMcpResourcesTool', 'ReadMcpResourceTool']
-PENDING_ID = re.compile(r'(?:conf|appr)-[A-Za-z0-9_-]+\.[0-9a-f]{32}')   # utils/consent.py's pending ids
+PENDING_ID = re.compile(r'(?:conf|appr)-[a-z2-7]+\.[a-z2-7]{16}')   # utils/consent.py's pending ids
 
 USER_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['action', 'reply'],

@@ -26,23 +26,28 @@ async def test_ids_are_self_contained_and_verifiable_by_any_replica_with_the_key
     ctx = SimpleNamespace()
     pending = await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, None)
     token = pending['confirmation_id']
-    assert token.startswith('conf-') and '.' in token
+    # Short enough to pass back exactly: Haiku changed one character of a 281-character id, every time.
+    assert token.startswith('conf-') and '.' in token and len(token) == 46 and token == token.lower()
     # Another replica with the same (or a rotated set including the) key accepts it; one without refuses.
     assert await two.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token) is None
-    with pytest.raises(ToolError, match='Unknown or expired'):
+    with pytest.raises(ToolError, match='not one the server issued: pass it back exactly'):
         await other.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token)
-    # Tampered or expired tokens are refused; a kept token survives until discarded.
+    # One character changed, or a forged signature, is refused with that hint; an expired id says so.
+    slip = token[:10] + ('a' if token[10] != 'a' else 'b') + token[11:]
     body, _, sig = token.rpartition('.')
-    with pytest.raises(ToolError, match='Unknown or expired'):
-        await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, f'{body}.{"0" * 32}')
-    stale = 'conf-' + one._seal({'kind': 'confirmation', 'action': 'create_feed', 'digest': 'd', 'user': None, 'expires': 1})
-    with pytest.raises(ToolError, match='Unknown or expired'):
+    for bad in (slip, f'{body}.{"a" * len(sig)}'):
+        with pytest.raises(ToolError, match='pass it back exactly as it was given'):
+            await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, bad)
+    stale = one._seal('confirmation', one._binding('confirmation', 'create_feed', 'd', None), 1)
+    with pytest.raises(ToolError, match='has expired'):
         await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, stale)
-    assert await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token, keep=True) is None
+    # Case and stray spaces don't matter, and don't make a spent id new again; a kept id survives until discarded.
+    assert await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, f' {token.upper()} ', keep=True) is None
     assert await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token, keep=True) is None
     one.discard(token)
-    with pytest.raises(ToolError, match='already used'):
-        await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, token)
+    for again in (token, token.upper()):
+        with pytest.raises(ToolError, match='already used'):
+            await one.require(ctx, 'confirmation', 'create_feed', 'Create', {'feed name': 'A'}, again)
 
 
 class Answer:

@@ -97,25 +97,39 @@ class ConsentStore:
         self._spent: dict[str, float] = {}      # token -> expiry: used (or discarded) on this replica
         self._granted: dict[str, float] = {}    # token -> expiry: already audited as granted (keep rounds)
 
-    def _seal(self, payload: dict[str, Any]) -> str:
-        body = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).decode().rstrip('=')
-        return f"{body}.{self._sign(body, self._keys[0])}"
+    # An id is short enough for a small model to pass back exactly: a 281-character id came back from Haiku with one
+    # character changed, every time. It packs the expiry, a nonce and a binding to the exact request (kind, action,
+    # details digest, user) into 15 bytes, signed with 10 bytes of HMAC, in lower-case base32 (no case or -/_ to
+    # confuse): kind-xxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxx, 46 characters.
+    @staticmethod
+    def _binding(kind: str, action: str, digest: str, user: str | None) -> bytes:
+        return hashlib.sha256(json.dumps([kind, action, digest, user]).encode()).digest()[:8]
 
     @staticmethod
-    def _sign(body: str, key: str) -> str:
-        return hmac.new(key.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+    def _b32(data: bytes) -> str:
+        return base64.b32encode(data).decode().rstrip('=').lower()
+
+    def _sign(self, body: str, key: str) -> str:
+        return self._b32(hmac.new(key.encode(), body.encode(), hashlib.sha256).digest()[:10])
+
+    def _seal(self, kind: str, binding: bytes, expires: int) -> str:
+        body = self._b32(expires.to_bytes(4, 'big') + secrets.token_bytes(3) + binding)
+        return f"{kind[:4]}-{body}.{self._sign(body, self._keys[0])}"
 
     def _unseal(self, token: str) -> dict[str, Any] | None:
-        """The payload of a token this server (any replica sharing the keys) issued and that has not expired."""
-        _, _, rest = token.partition('-')
+        """{'expires', 'binding'} of an id this server (any replica sharing the keys) issued, expired or not; None
+        when it is not one (not signed by these keys, or altered)."""
+        _, _, rest = token.strip().lower().partition('-')
         body, _, signature = rest.rpartition('.')
         if not body or not any(hmac.compare_digest(self._sign(body, key), signature) for key in self._keys):
             return None
         try:
-            payload = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
-        except (ValueError, UnicodeDecodeError):
+            raw = base64.b32decode(body.upper() + '=' * (-len(body) % 8))
+        except ValueError:
             return None
-        return payload if isinstance(payload, dict) and payload.get('expires', 0) > time.time() else None
+        if len(raw) != 15:
+            return None
+        return {'expires': int.from_bytes(raw[:4], 'big'), 'binding': raw[7:]}
 
     def _sweep(self) -> None:
         now = time.time()
@@ -133,10 +147,14 @@ class ConsentStore:
         """
         digest = _digest(action, details)
         if token:
+            token = token.strip().lower()   # one id however it is cased, so single use holds
             payload = self._unseal(token)
             if payload is None:
-                raise ToolError(f"Unknown or expired {kind} id; request the {kind} again")
-            if (payload.get('kind'), payload.get('action'), payload.get('digest'), payload.get('user')) != (kind, action, digest, _user()):
+                raise ToolError(f"This {kind} id is not one the server issued: pass it back exactly as it was given "
+                                f"(46 characters, e.g. {kind[:4]}-…….……), or request the {kind} again")
+            if payload['expires'] <= time.time():
+                raise ToolError(f"This {kind} id has expired; request the {kind} again")
+            if payload['binding'] != self._binding(kind, action, digest, _user()):
                 raise ToolError(f"This {kind} id was issued for a different request; request the {kind} again")
             self._sweep()
             if token in self._spent:
@@ -164,8 +182,7 @@ class ConsentStore:
                     raise ToolError(f"The user did not agree to: {summary}")
                 return None
 
-        pending_id = f"{kind[:4]}-" + self._seal({'kind': kind, 'action': action, 'digest': digest, 'user': _user(),
-                                                  'expires': int(time.time()) + TTL_SECONDS, 'nonce': secrets.token_hex(4)})
+        pending_id = self._seal(kind, self._binding(kind, action, digest, _user()), int(time.time()) + TTL_SECONDS)
         audit(kind, action=action, details=details, outcome='requested', id=pending_id[-16:])
         return {'status': f'needs_{kind}', f'{kind}_id': pending_id, 'summary': summary, 'details': details,
                 'hint': f"Show the summary and details to the user. If they agree, call {action} again with the "
@@ -211,6 +228,7 @@ class ConsentStore:
     def discard(self, token: str | None) -> None:
         """Spend a kept token once the action it covered is done."""
         if token:
+            token = token.strip().lower()
             payload = self._unseal(token)
             self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
 
