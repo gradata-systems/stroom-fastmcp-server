@@ -83,7 +83,7 @@ def test_the_sample_check_looks_in_items_and_records_by_scope():
     records, _ = sample_records(m, CASE['sample'])
     check = check_mapping(m, records)
     assert check['records'] == 3
-    [warning] = check['warnings']
+    [warning] = [w for w in check['warnings'] if not w.startswith('fields in the sample that nothing reads')]
     assert warning.startswith("field 'nickname' (used for EventSource/User/Name) is in none of the 5 sample items")
     assert 'roles' in check['fields_seen'] and 'host' in check['fields_seen']
 

@@ -194,6 +194,20 @@ class Extraction(BaseModel):
         return self
 
 
+def reads_input(m: 'TranslationMapping', name: str) -> bool:
+    """Whether the mapping reads an input field (or a name from extract) anywhere: an output's field, any_of or lookup
+    key, a condition, an extraction's source, or by name in an xpath (as JSON held in a string is read)."""
+    entries = list(m.common) + [f for r in m.events for f in r.fields]
+    conditions = [c for r in m.events for c in r.when] + [c for d in m.drop_when for c in d.when]
+    names = ({e.field for e in entries} | {f for e in entries for f in (e.any_of or [])}
+             | {e.lookup.field for e in entries if e.lookup} | {c.field for c in conditions} | {x.field for x in m.extract})
+    if name in names:
+        return True
+    xpaths = [e.xpath for e in entries] + [e.lookup.xpath for e in entries if e.lookup] + [c.xpath for c in conditions] \
+        + [x.xpath for x in m.extract] + [m.for_each]
+    return any(x and re.search(rf"""['"]{re.escape(name)}['"]""", x) for x in xpaths)
+
+
 def style_name(text: str, naming: str) -> str:
     """text (a field name, a path such as 'Authenticate-User', or 'src_ip') in the naming style, as an
     XML name: 'EventSource' -> event_source, eventSource, EventSource or event-source."""
@@ -689,6 +703,13 @@ class _Generator:
                                       f"describes them (Alert, Authenticate, Network, Process, Create, Update, Delete, "
                                       f"View, ...), with its own child elements. Only if none fits, set allow_unknown: "
                                       f"true on the rule.")
+        source = root.kids.get('EventSource')
+        acted = [f"{name}/User" for name, node in (detail.kids.items() if detail is not None else []) if 'User' in node.kids]
+        if acted and (source is None or 'User' not in source.kids):
+            self._note(self.warnings, f"[{rule.name}] maps EventDetail/{acted[0]} but not EventSource/User: "
+                                      f"EventSource/User/Id is the account that acted (for a logon, the account logging "
+                                      f"on), and searches by user read it. Map it as well, from the same input when it "
+                                      f"is the same account.")
         if self._conditional:
             self._note(self.warnings, f"[{rule.name}] required {self._conditional} are left out when their input "
                                       f"fields are empty, which makes the event invalid. Fine if those fields are "
@@ -956,6 +977,10 @@ class _Generator:
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
                                       f"put the rule without conditions last")
+        unread = [n for ex in m.extract for n in ex.names if n and not reads_input(m, n)]
+        if unread:
+            self._note(self.warnings, f"extract names {unread}, which nothing reads: map each to the element that means "
+                                      f"it (a Data entry if nothing else fits), or leave it out of names ('').")
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),

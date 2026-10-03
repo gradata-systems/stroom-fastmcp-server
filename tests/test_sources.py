@@ -86,7 +86,9 @@ def test_the_mapping_is_checked_against_the_sample_before_stepping():
                                  "values, e.g. ['2026-10-01T10:00:00Z', '2026-10-01T10:00:01Z']; the values look like "
                                  "\"yyyy-MM-dd'T'HH:mm:ssX\""]
     assert check['warnings'] == ["field 'usr' (used for EventSource/User/Id) is in none of the 2 sample records. Fields "
-                                 "seen: ['ts', 'user.name']"]
+                                 "seen: ['ts', 'user.name']",
+                                 "fields in the sample that nothing reads: ['user.name']: map each to the element that "
+                                 "means it (a Data entry if nothing else fits), or leave it out on purpose."]
     # XML fragments: paths with attributes and predicates, by local name whatever the namespace
     case = yaml.safe_load((CASES / '12_xml_fragments_events.yaml').read_text(encoding='utf-8'))
     xml_mapping = TranslationMapping.model_validate(case['reference']['mapping'])

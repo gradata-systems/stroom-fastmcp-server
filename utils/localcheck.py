@@ -15,7 +15,7 @@ from lxml import etree
 from utils.dsgen import SplitterSpec, dry_run
 from utils.profile import _XML_DECL, _flatten, xml_fragments
 from utils.timefmt import check_time_format
-from utils.xsltgen import TranslationMapping
+from utils.xsltgen import TranslationMapping, reads_input
 
 _STEP = re.compile(r"^(?:@(?P<attr>[\w.-]+)|(?P<name>[\w.-]+|\*)(?:\[@(?P<pattr>[\w.-]+)=(?P<q>['\"])(?P<pval>.*?)(?P=q)\])?)$")
 
@@ -161,6 +161,7 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
     for ex in mapping.extract:
         if ex.field:
             wanted.setdefault((ex.field, ex.scope), []).append('extract')
+    suggested: set[str] = set()   # offered as 'did you mean': not said again as unread
     for (name, scope), used in wanted.items():
         if name in derived:
             continue
@@ -168,6 +169,7 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         values = [v for v in (_value_of(r, name) for r in pool) if v is not None]
         if not values:
             close = difflib.get_close_matches(name, seen, n=3, cutoff=0.6) if seen else []
+            suggested.update(close)
             what = 'sample items' if pool is items else 'sample records'
             warnings.append(f"field '{name}' (used for {used[0]}{' and more' if len(used) > 1 else ''}) is in none of "
                             f"the {len(pool)} {what}" + (f"; did you mean {close}?" if close else '')
@@ -182,4 +184,10 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         if message:
             fitting = len(values) - len([v for v in values if check_time_format(entry.time_format, [v])])
             (problems if fitting == 0 else warnings).append(f"{entry.path}: {message}")
+    unread = [k for k in seen if k not in derived and k not in suggested and not reads_input(mapping, k)]
+    if unread:
+        # A parsed field no output reads is lost from every event: often one the request asked for (a source address).
+        warnings.append(f"fields in the sample that nothing reads: {unread[:12]}{' ...' if len(unread) > 12 else ''}: "
+                        f"map each to the element that means it (a Data entry if nothing else fits), or leave it out on "
+                        f"purpose.")
     return {'records': len(records), 'problems': problems, 'warnings': warnings, 'fields_seen': seen[:60]}

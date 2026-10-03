@@ -402,3 +402,17 @@ def test_expressions_in_the_documentation_name_fields_not_selectors():
     assert '| `normalize-space(user)` |' in text
     assert "`concat(action, '-', a/b)` = login-x" in text
     assert readable("*[@key='user']/*[@key='name']") == 'user.name'
+
+
+def test_an_action_user_without_the_acting_user_and_unread_extractions_are_warnings():
+    # Haiku mapped the user to Authenticate/User only (case 13), and extracted src without reading it.
+    no_source_user = [f for f in BASE if f['path'] != 'EventSource/User/Id']
+    m = mapping(common=no_source_user, extract=[{'field': 'msg', 'regex': r'^(\S+) src=(\S+)$', 'names': ['who', 'src']}],
+                events=[{'name': 'logon', 'fields': LOGON[:2] + [{'path': 'EventDetail/Authenticate/User/Id', 'field': 'who'}]}])
+    warnings = generate(m, SCHEMA, '4.1.0')['warnings']
+    assert any(w.startswith('[logon] maps EventDetail/Authenticate/User but not EventSource/User') for w in warnings)
+    assert "extract names ['src'], which nothing reads" in ' '.join(warnings)
+    # With both users mapped and every extracted name read, neither is said.
+    fine = mapping(extract=[{'field': 'msg', 'regex': r'^(\S+)$', 'names': ['who']}],
+                   events=[{'name': 'logon', 'fields': LOGON[:2] + [{'path': 'EventDetail/Authenticate/User/Id', 'field': 'who'}]}])
+    assert not any('EventSource/User' in w or 'nothing reads' in w for w in generate(fine, SCHEMA, '4.1.0')['warnings'])
