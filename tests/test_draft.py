@@ -16,6 +16,17 @@ FW_JSON = ('{"timestamp":"2026-10-01T09:00:12+10:00","device":"FW-EDGE-01","even
 INVENTORY = [{'field': 'timestamp', 'type': 'timestamp'}, {'field': 'device', 'type': 'string'}, {'field': 'src_ip', 'type': 'ip'}]
 
 
+def decided(mapping: dict) -> dict:
+    """The draft as an agent leaves it once its placeholder kinds are decided; here, kept as Unknown on purpose."""
+    return {**mapping, 'events': [{**r, 'allow_unknown': True} if any('/Unknown/' in f['path'] for f in r.get('fields', []))
+                                  and r.get('when') else r for r in mapping['events']]}
+
+
+def only_placeholders(result: dict) -> bool:
+    """The draft's only problems are its Unknown placeholders, a rule with conditions each."""
+    return bool(result['problems']) and all('writes EventDetail/Unknown' in p for p in result['problems'])
+
+
 def test_the_draft_is_a_valid_mapping_with_the_obvious_homes_and_a_rule_per_kind():
     draft = draft_mapping({'fw.jsonl': FW_JSON}, 'FortiOS firewall')
     m = draft['mapping']
@@ -34,8 +45,10 @@ def test_the_draft_is_a_valid_mapping_with_the_obvious_homes_and_a_rule_per_kind
     assert {'path': 'EventDetail/Authenticate/User/Id', 'field': 'username'} in login['fields']
     assert any(f.get('data_name') == 'protocol' for f in m['events'][0]['fields'])   # unmapped fields ride as Data
     assert any('replace EventDetail/Unknown' in n for n in draft['notes']) and any('Environment' in n for n in draft['notes'])
-    # It generates, validates against the schema, and the events come out right.
-    result = generate(TranslationMapping.model_validate({**m, 'unmatched': 'skip'}), SCHEMA, '4.1.0')
+    # As drafted, its only problems are the placeholders to decide; decided, it generates, validates against the
+    # schema, and the events come out right.
+    assert only_placeholders(generate(TranslationMapping.model_validate(m), SCHEMA, '4.1.0'))
+    result = generate(TranslationMapping.model_validate({**decided(m), 'unmatched': 'skip'}), SCHEMA, '4.1.0')
     assert result['ok'], result['problems']
     xml = ('<map xmlns="http://www.w3.org/2013/XSL/json"><map><string key="timestamp">2026-10-01T09:01:00.000Z</string>'
            '<string key="device">FW</string><string key="event_type">LOGIN</string><string key="username">alice</string>'
@@ -58,7 +71,8 @@ def test_text_formats_come_with_their_splitter_and_naive_times_get_a_zone_note()
     assert by_path['EventTime/TimeCreated'] == {'path': 'EventTime/TimeCreated', 'timezone': 'UTC', 'time_format': 'yyyy-MM-dd HH:mm:ss',
                                                 'xpath': "concat(data[@name='date']/@value, ' ', data[@name='time']/@value)"}
     assert any("'date' and 'time' are joined" in n for n in draft['notes'])
-    assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0')['ok']
+    assert only_placeholders(generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0'))
+    assert generate(TranslationMapping.model_validate(decided(draft['mapping'])), SCHEMA, '4.1.0')['ok']
 
 
 async def test_a_field_inventory_sent_as_the_mapping_gets_the_draft_back():
@@ -68,8 +82,10 @@ async def test_a_field_inventory_sent_as_the_mapping_gets_the_draft_back():
         result = await generation.build_translation_xslt(ctx, INVENTORY, sample=FW_JSON)
         assert result['status'] == 'needs_mapping' and result['problems'][0] == 'mapping is a list of fields, not a translation mapping'
         assert result['draft_mapping']['input'] == 'json' and 'Edit draft_mapping' in result['hint']
-        # The draft, sent back as the mapping, generates.
+        # The draft, sent back as the mapping, generates once its placeholders are decided.
         again = await generation.build_translation_xslt(ctx, result['draft_mapping'], sample=FW_JSON)
+        assert only_placeholders(again)
+        again = await generation.build_translation_xslt(ctx, decided(result['draft_mapping']), sample=FW_JSON)
         assert again['ok'] and again['xslt']
         drafted = await generation.draft_translation_mapping(ctx, {'fw.jsonl': FW_JSON}, 'FortiOS firewall', environment='Prod')
-        assert drafted['schema_check']['ok'] and drafted['mapping']['common'][2]['value'] == 'Prod'
+        assert only_placeholders(drafted['schema_check']) and drafted['mapping']['common'][2]['value'] == 'Prod'

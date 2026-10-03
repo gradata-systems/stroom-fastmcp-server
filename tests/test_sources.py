@@ -135,7 +135,7 @@ MAPPING = {
                {'path': 'EventSource/User/Domain', 'field': 'user', 'transform': 'domain'},
                {'path': 'EventSource/User/UserDetails/Organisation', 'lookup': {'map': 'USER_TO_ORG', 'field': 'user', 'path': 'org'}},
                {'path': 'EventSource/User/Name', 'field': 'user', 'dictionary': 'User names', 'default': 'unknown'}],
-    'events': [{'name': 'vip', 'when': [{'field': 'user', 'in_dictionary': 'VIP users'}],
+    'events': [{'name': 'vip', 'allow_unknown': True, 'when': [{'field': 'user', 'in_dictionary': 'VIP users'}],
                 'fields': [{'path': 'EventDetail/TypeId', 'value': 'vip'}, {'path': 'EventDetail/Unknown/Data', 'data_name': 'u', 'field': 'user'}]},
                {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}, {'path': 'EventDetail/Unknown/Data', 'data_name': 'u', 'field': 'user'}]}]}
 RECORDS = """<records xmlns="records:2">

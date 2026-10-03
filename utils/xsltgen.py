@@ -147,6 +147,9 @@ class EventRule(BaseModel):
                                                                           "override common fields with the same path.")
     drop: bool = Field(False, description="True: records matching this rule are left untranslated on purpose "
                                           "(no Event, no warning), e.g. kinds set_shape_handling marked drop. No fields.")
+    allow_unknown: bool = Field(False, description="True only when no action element describes this kind of event, so "
+                                                   "EventDetail/Unknown is the right one; a rule with conditions that "
+                                                   "writes Unknown is otherwise a problem.")
 
 
 class DropRule(BaseModel):
@@ -678,12 +681,14 @@ class _Generator:
         self._root = root
         self._check_structure(rule.name, root, self.schema.event)
         detail = root.kids.get('EventDetail')
-        if rule.when and detail is not None and 'Unknown' in detail.kids:
-            # A catch-all rule (no conditions) may rightly say Unknown; a kind told apart by conditions usually has an action.
-            self._note(self.warnings, f"[{rule.name}] writes EventDetail/Unknown, which says what happened is not known, "
-                                      f"yet its conditions single these records out. If they are an activity another "
-                                      f"action element describes (Alert, Authenticate, Network, Process, Create, Update, "
-                                      f"Delete, View, ...), use that; keep Unknown only when none fits.")
+        if rule.when and detail is not None and 'Unknown' in detail.kids and not rule.allow_unknown:
+            # A catch-all rule (no conditions) may rightly say Unknown; a kind told apart by conditions has an action
+            # element nearly always, and the draft's Unknown placeholders were being kept as they were.
+            self._note(self.problems, f"[{rule.name}] writes EventDetail/Unknown, which says what happened is not known, "
+                                      f"yet its conditions single these records out: use the action element that "
+                                      f"describes them (Alert, Authenticate, Network, Process, Create, Update, Delete, "
+                                      f"View, ...), with its own child elements. Only if none fits, set allow_unknown: "
+                                      f"true on the rule.")
         if self._conditional:
             self._note(self.warnings, f"[{rule.name}] required {self._conditional} are left out when their input "
                                       f"fields are empty, which makes the event invalid. Fine if those fields are "

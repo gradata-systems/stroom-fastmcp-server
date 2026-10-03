@@ -234,14 +234,20 @@ def test_a_missing_choice_points_to_the_same_member_mapped_elsewhere():
     assert any(p.endswith("Authenticate needs one of ['User', 'Device', 'Group']") for p in plain), plain
 
 
-def test_unknown_in_a_rule_with_conditions_is_a_warning():
-    # The default mapping's 'other' rule has no conditions: Unknown is its job, so no warning.
-    assert not any('Unknown' in w for w in generate(mapping(), SCHEMA, '4.1.0')['warnings'])
+def test_unknown_in_a_rule_with_conditions_is_a_problem_unless_allowed():
+    # The default mapping's 'other' rule has no conditions: Unknown is its job, so nothing is said.
+    plain = generate(mapping(), SCHEMA, '4.1.0')
+    assert plain['ok'] and not any('Unknown' in m for m in plain['problems'] + plain['warnings'])
     kind = {'name': 'status', 'when': [{'field': 'action', 'equals': 'status'}],
             'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
                        {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}
-    result = generate(mapping(events=[kind, mapping().events[-1].model_dump(exclude_none=True)]), SCHEMA, '4.1.0')
-    assert not result['problems'] and any(w.startswith('[status] writes EventDetail/Unknown') for w in result['warnings'])
+    other = mapping().events[-1].model_dump(exclude_none=True)
+    # Haiku kept the draft's Unknown placeholder through a warning in 6 of 36 runs: now nothing is generated.
+    result = generate(mapping(events=[kind, other]), SCHEMA, '4.1.0')
+    assert not result['ok'] and result['problems'][0].startswith('[status] writes EventDetail/Unknown')
+    assert 'allow_unknown' in result['problems'][0] and result['xslt'] is None
+    allowed = generate(mapping(events=[{**kind, 'allow_unknown': True}, other]), SCHEMA, '4.1.0')
+    assert allowed['ok'] and not any('Unknown' in m for m in allowed['problems'] + allowed['warnings'])
 
 
 def test_extracted_fields_read_through_any_of_are_declared_in_shared_templates():

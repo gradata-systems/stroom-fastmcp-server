@@ -313,7 +313,8 @@ async def draft_translation_mapping(
     kind and layout from the profile, the obvious event-logging homes for fields by name (time with its
     pattern, host, client and server addresses and ports, user, event type, message), one rule per kind of
     event the naming field shows (Authenticate for logon and logoff kinds, Unknown with Data for the rest, to
-    replace with the right action element), every other field carried as Data, and notes on what is left to
+    replace with the right action element: build_translation_xslt refuses a rule with conditions that keeps
+    Unknown, unless it sets allow_unknown), every other field carried as Data, and notes on what is left to
     decide. For text formats the Data Splitter spec comes with it. Then build_translation_xslt with the edited
     mapping, the sample and the splitter.
     """
