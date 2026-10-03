@@ -66,3 +66,27 @@ async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_sectio
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         with pytest.raises(ToolError, match="needs a '## Field mapping' section"):
             await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
+
+
+async def test_a_field_mapping_with_no_sampled_events_is_not_written_and_says_why():
+    # A section of "(not in the sample)" was written, given an Events stream where the raw input belongs.
+    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'),
+                             find_meta=AsyncMock(return_value={'values': [{'meta': {'id': 873, 'feedName': 'ACME', 'typeName': 'Events'}}]}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    kept = {'kind': 'translation', 'payload': {'mapping': mapping().model_dump(exclude_none=True)},
+            'element': 'translationFilter', 'xslt': {'data': ''}}
+    pipeline = SimpleNamespace()
+    with patch.object(builds, 'gateway_from', lambda c: stroom), \
+            patch('tools.generation.event_schema', AsyncMock(return_value=SCHEMA)), \
+            patch.object(builds._Pipeline, 'load', AsyncMock(return_value=pipeline)), \
+            patch.object(builds, '_outputs', AsyncMock(return_value={'873:0': '<Events xmlns="event-logging:3"/>'})), \
+            patch('tools.stepping._step', AsyncMock(return_value={'foundRecord': True})):
+        with pytest.raises(ToolError, match=r"no events \(1 records stepped\)\. stream 873 \(ACME, Events\): its records "
+                                            r"produced no Event\. An events pipeline's stream_ids are its raw sample streams"):
+            await builds.field_mapping_section(ctx, {'uuid': 'p'}, kept, [873])
+        # An index plan's Events streams with nothing in them are refused the same way.
+        plan = FieldPlan(backend='lucene', index_name='acme', time_field='EventTime',
+                         fields=[PlannedField(name='StreamId', type='id', source='@StreamId')])
+        with patch.object(builds, 'summarise_events', AsyncMock(return_value={'path_population': {}})):
+            with pytest.raises(ToolError, match=r"streams \['873 \(ACME, Events\)'\] hold no events"):
+                await builds.field_mapping_section(ctx, {'uuid': 'p'}, {'kind': 'index', 'payload': plan.model_dump()}, [873])

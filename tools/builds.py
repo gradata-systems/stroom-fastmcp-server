@@ -22,7 +22,7 @@ from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, gateway_from, set_body_text
 
-Build = Annotated[str, Field(description="Build name, e.g. 'keycloak-v1.3'.")]
+Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
 
 
@@ -131,18 +131,54 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
         loaded = await _Pipeline.load(stroom, pipeline['uuid'])
         outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], {kept['element']: marked['xslt']}, 200)
         events = sampled_events(list(outputs.values()))
-        section = field_mapping_markdown(mapping, schema, events)
         if not events:
-            section += (f"\nThe {len(outputs)} sampled records produced no events: check the stream ids are the "
-                        f"pipeline's input.\n")
+            # A section of "(not in the sample)" documents nothing: say what the streams are and what stopped them.
+            raise ToolError(await _no_events(stroom, loaded, stream_ids, kept['element'], marked['xslt'], len(outputs)))
+        section = field_mapping_markdown(mapping, schema, events)
         drift = await _drift(ctx, kept)
         if drift:
             section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
     else:
         plan = FieldPlan.model_validate(kept['payload'])
         population = (await summarise_events(ctx, stream_ids, 200))['path_population'] if stream_ids else None
+        if stream_ids and not population:
+            kinds = [f"{m.get('id')} ({m.get('feedName')}, {m.get('typeName')})" for m in
+                     [await _meta_or_none(stroom, sid) or {'id': sid} for sid in stream_ids]]
+            raise ToolError(f"Field mapping not written: streams {kinds} hold no events to document. An indexing "
+                            f"pipeline's stream_ids are the Events streams it indexes (wait_for_processing on the events "
+                            f"pipeline lists them).")
         section = index_field_mapping_markdown(plan, population)
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
+
+
+async def _meta_or_none(stroom, stream_id: int) -> dict[str, Any] | None:
+    from tools.streams import _meta
+    try:
+        return await _meta(stroom, stream_id)
+    except ToolError:
+        return None
+
+
+async def _no_events(stroom, pipeline: _Pipeline, stream_ids: list[int], element: str, code: str, records: int) -> str:
+    """Why stepping an events pipeline over stream_ids gave no events, stream by stream: missing, of another type
+    (an Events stream where the raw input belongs), or stopped by an error before the first record."""
+    from tools.stepping import _markers, _step
+    found = []
+    for stream_id in stream_ids:
+        meta = await _meta_or_none(stroom, stream_id)
+        if meta is None:
+            found.append(f"stream {stream_id} does not exist")
+            continue
+        what = f"stream {stream_id} ({meta.get('feedName')}, {meta.get('typeName')})"
+        first = await _step(stroom, pipeline, stream_id, 'FIRST', None, {element: code})
+        if first.get('foundRecord'):
+            found.append(f"{what}: its records produced no Event")
+        else:
+            errors = list(dict.fromkeys(m['message'] for m in _markers(first, stream_id)))[:2]
+            found.append(f"{what}: no record stepped" + (f" ({'; '.join(errors)})" if errors else ''))
+    return (f"Field mapping not written: stepping the pipeline over stream_ids gave no events ({records} records "
+            f"stepped). {'; '.join(found)}. An events pipeline's stream_ids are its raw sample streams (Raw Events, "
+            f"as uploaded); build_status lists them.")
 
 
 async def list_build(ctx: Context, build: Build) -> dict[str, Any]:
