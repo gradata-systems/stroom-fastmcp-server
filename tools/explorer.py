@@ -26,7 +26,7 @@ def _redact(value: Any) -> Any:
 async def find_documents(
         ctx: Context,
         name: Annotated[str, Field(
-            description="Name to match, as in the Stroom explorer quick filter, e.g. 'Keycloak'. "
+            description="Name to match, as in the Stroom explorer quick filter, e.g. 'Acme'. "
                         "Use '*' to match everything of the given types.")] = '*',
         types: Annotated[list[DocType] | str | None, ONE_OR_MORE, Field(
             description="Document types to include, e.g. ['Pipeline', 'XSLT']. All types when omitted.")] = None,

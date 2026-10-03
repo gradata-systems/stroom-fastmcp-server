@@ -40,7 +40,7 @@ async def _meta(stroom: StroomGateway, stream_id: int) -> dict[str, Any]:
 
 async def find_streams(
         ctx: Context,
-        feed: Annotated[str | None, Field(description="Feed name, e.g. 'KEYCLOAK-V1.2'.")] = None,
+        feed: Annotated[str | None, Field(description="Feed name, e.g. 'ACME-DOOR-V1.2'.")] = None,
         stream_type: Annotated[str | None, Field(
             description="Stream type: 'Raw Events', 'Events', 'Error', 'Reference', ...")] = None,
         parent_id: Annotated[int | None, Field(description="Only streams produced from this stream.")] = None,

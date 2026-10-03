@@ -18,7 +18,7 @@ from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples
 from utils.stroom import gateway_from
 
-Build = Annotated[str, Field(description="Build name, e.g. 'fortios-v1.0'.")]
+Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.0'.")]
 # Which parser element reads which profiled format.
 PARSER_FOR_FORMAT = {
     'json array': ('JSONParser', 'CombinedParser'), 'json lines': ('JSONParser', 'CombinedParser'),
@@ -84,7 +84,7 @@ def resolve_build(ctx: Context, build: str | None, tool: str) -> str:
     if current:
         return current
     raise ToolError(f"{tool} needs build: the build this work belongs to, as start_onboarding or start_build named it "
-                    f"(e.g. 'onboard-fortios'). build_status shows a build's state.")
+                    f"(e.g. 'onboard-acme-door'). build_status shows a build's state.")
 
 
 async def build_of(ctx: Context, ref: dict[str, Any]) -> str | None:
@@ -290,7 +290,7 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
 
 async def start_onboarding(
         ctx: Context,
-        source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall' (names the build).")],
+        source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller' (names the build).")],
         samples: Annotated[SampleTexts | None, Field(
             description="The text of every sample file the user has (read each file and pass its content, every line), "
                         "by file name or as a list. Not paths: this server cannot read the client's files.")] = None,

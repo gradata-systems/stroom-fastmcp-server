@@ -14,7 +14,7 @@ from utils.mappingstore import normalise_xslt, with_mapping
 from utils.stroom import gateway_from
 from utils.xsltgen import TranslationMapping
 
-Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed, e.g. 'keycloak-v1.3'.")]
+Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed, e.g. 'acme-door-v1.3'.")]
 Version = Annotated[str | None, Field(
     description="The document version from the last read; the save is refused if it changed since.")]
 

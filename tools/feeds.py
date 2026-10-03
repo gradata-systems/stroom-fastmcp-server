@@ -142,7 +142,7 @@ class EventNote(BaseModel):
 async def record_source_notes(
         ctx: Context,
         build: Build,
-        source: Annotated[str, Field(description="Source name, e.g. 'Keycloak'.")],
+        source: Annotated[str, Field(description="Source name, e.g. 'Acme door controller'.")],
         summary: Annotated[str, Field(description="What the documentation says about the source, in a few lines.")],
         fields: Annotated[list[FieldNote] | str, ONE_OR_MORE, Field(description="Field dictionary condensed from the documentation.")] = [],
         events: Annotated[list[EventNote] | str, ONE_OR_MORE, Field(description="Event catalogue condensed from the documentation.")] = [],

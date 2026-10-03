@@ -325,7 +325,7 @@ async def copy_pipeline(
         ctx: Context,
         build: Build,
         source_uuid: Annotated[str, Field(description="Pipeline to copy.")],
-        new_name: Annotated[str, Field(description="Name of the copy, e.g. 'Keycloak-V1.3-Events'.")],
+        new_name: Annotated[str, Field(description="Name of the copy, e.g. 'Acme-Door-V1.3-Events'.")],
         rename: Annotated[dict[str, str] | None, Field(
             description="Text replacements applied to the names of the copied XSLTs and text converters, "
                         "e.g. {'V1.2': 'V1.3'}.")] = None,
@@ -353,7 +353,7 @@ async def copy_pipeline(
         raise ToolError(f"'{source.get('name')}' is a template ({reason}): templates are inherited, not copied. A new source's "
                         f"pipeline is a child of it: create_pipeline(name=..., template_uuid='{source_uuid}'), which keeps the "
                         f"template's structure and takes later fixes to it. copy_pipeline is for a new version or a working "
-                        f"copy of a source's own pipeline (e.g. Keycloak-V1.2-Events).")
+                        f"copy of a source's own pipeline (e.g. Acme-Door-V1.2-Events).")
     data = copy.deepcopy(source.get('pipelineData') or {})
     owned = [p['value']['entity'] for p in (data.get('properties') or {}).get('add') or []
              if (p.get('value') or {}).get('entity', {}).get('type') in OWNED_TYPES]
