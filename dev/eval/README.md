@@ -1,7 +1,11 @@
 # Evaluation set
 
-Sixteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: at least
-80% of them (13 of 16) reach indexed events with at most one human hint each.
+Seventeen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
+model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
+against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
+weaker model. A case below the bar is a finding to chase (in the server's messages, prompts or guides, or in the
+case), not a margin to spend.
 
 | Case | Format | Events | What it tests |
 | --- | --- | --- | --- |
@@ -21,6 +25,7 @@ Sixteen samples to measure how well an agent builds with the server, whatever ru
 | `14_csv_two_files_variants` | Two CSV exports of one source: renamed columns, an extra column, a new action | Authenticate | Several sample files (one stream each, all stepped), `any_of`, the mapping checked against every file first |
 | `15_csv_lookup_reference_data` | CSV events plus a CSV user directory | Authenticate | Reference data end to end: Raw Reference feed, `build_reference_xslt`, Reference Data pipeline, `references` on the events pipeline, `lookup` with case-normalised keys, `transform` |
 | `16_json_batches_items` | JSON array of batches, each holding an events array and role arrays | Authenticate | `for_each` (one record, several events) with `scope: record` fields, `repeat` (one Group per role), `drop_when` on records and items |
+| `17_csv_firewall_mixed` | CSV with a header: traffic, admin and system records in one file | Network, Authenticate, Update, Export, Alert | Rules on two fields (`event_type` and `action`), five event types from one file, sparse and space-only columns, a time with an offset, `Rule` and `Data` on Network, mapped Alert type and severity |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data
@@ -51,5 +56,29 @@ uv run python dev/eval/run_eval.py --request 06         # the request (with its 
 
 Play the user: agree to confirmations and approvals, accept the proposed index template, enable the indexing
 filter when it is handed over, and when the agent asks for help give the case's next hint, counting each one
-(only one is allowed). A case passes when its Events hold the expected record count, event types and paths, and
+(a hint fails the case). A case passes when its Events hold the expected record count, event types and paths, and
 the verification search finds them in the index.
+
+**Headless Claude Code** (on the `claude` CLI's sign-in, no API key): `run_agent.py` does all of the above
+unattended.
+
+```
+uv run python dev/eval/run_agent.py                                 # every case, Claude Code's default model
+uv run python dev/eval/run_agent.py --model haiku 06 json           # some cases, a lighter model
+uv run python dev/eval/run_agent.py --model default --model haiku   # both, one after the other
+uv run python dev/eval/run_agent.py --repeat 3                      # each case three times, a pass rate per case
+```
+
+It starts this checkout's server (no sign-in, the local stack, confirmations as pending ids rather than forms)
+and, per case, gives `claude -p` the server's `onboard_data_source` prompt rendered with the case's sample, then
+the request and the build and feed names to use. The agent has only the server's tools and resources: no file,
+shell or web tools, and none of your settings, hooks or other MCP servers. Each time it stops, a second model
+(`--user-model`, Haiku by default) plays the user on its last message: it agrees, answers from the request, says
+to carry on, says not to promote, or, when the agent asks for help, the case's next hint is given (counted). The
+build is then scored from Stroom with the same checks as `--reference`.
+
+Results are written to `results/<time>-agent-<model>.json` with the user turns, help requests, tool calls and
+the API-equivalent cost Claude Code reports; each case's transcript (stream-json) and the server log are in
+`results/<time>-agent/`. A model's run is one sample, so one run can pass or fail by chance: with `--repeat N`
+each case runs N times, the summary shows its passed runs, and it passes when most do; a case passing some runs
+but not most is flaky rather than broken. `--effort`, `--max-user-turns` and `--turn-timeout` tune a run.

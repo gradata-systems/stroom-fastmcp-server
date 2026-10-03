@@ -1,9 +1,11 @@
-"""The evaluation set: sixteen samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: seventeen samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
 
-Pass criterion: at least 80% of the samples reach indexed events with at most one human hint each.
+Pass criterion: every case reaches indexed events with no hints, for the reference solutions and for an agent on
+the default model (run_agent.py, with --repeat: each case passing in most of its runs). Lighter models are measured
+against the same bar, not held to it.
 
 --reference proves the cases and the scoring against the local Stroom stack (dev/stroom): each case's
 reference converter and field mapping go through build_translation_xslt, stepping, processing, a Lucene index
@@ -18,7 +20,6 @@ Results go to dev/eval/results/<time>-reference.json with a summary table.
 import argparse
 import asyncio
 import json
-import math
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -37,7 +38,7 @@ CASES = Path(__file__).parent / 'cases'
 RESULTS = Path(__file__).parent / 'results'
 EVT = 'event-logging:3'
 DETAIL_META = {'TypeId', 'Description', 'Classification', 'Purpose'}
-PASS_RATIO, MAX_HINTS = 0.8, 1
+MAX_HINTS = 0
 DOC_SKELETON = """## Purpose and data
 
 Evaluation case.
@@ -67,15 +68,20 @@ def samples_of(case: dict[str, Any]) -> list[str]:
     return list(case.get('samples') or [case['sample']])
 
 
-def request_text(case: dict[str, Any]) -> str:
-    """What to ask an agent for this case."""
+def sample_text(case: dict[str, Any]) -> str:
+    """The case's sample files (and any reference data export), as shown to an agent."""
     samples = samples_of(case)
     shown = (f"Sample:\n{samples[0]}" if len(samples) == 1 else
              '\n\n'.join(f"Sample file {n}:\n{s}" for n, s in enumerate(samples, 1)))
     ref = case.get('reference', {}).get('reference_data')
     if ref:
         shown += f"\n\nUser directory export (reference data):\n{ref['sample']}"
-    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{shown}"
+    return shown
+
+
+def request_text(case: dict[str, Any]) -> str:
+    """What to ask an agent for this case."""
+    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{sample_text(case)}"
 
 
 # --- scoring ---
@@ -146,30 +152,37 @@ async def check_output(call: Call, score: Score, case: dict[str, Any], events_st
     score_events(score, case, records, validity)
 
 
-# --- the scripted user ---
-# --- reference mode: the case's own solution through the tools, no model ---
-async def run_reference(case: dict[str, Any], stamp: str) -> Score:
+def local_ctx() -> SimpleNamespace:
+    """A tool context on the local stack (dev/stroom), calling the tools directly as the admin key; close
+    ctx.lifespan_context['stroom'] when done."""
     import e2e_phase2 as p2
     from config import Settings
     from security.policy import AccessPolicy
+    from utils.consent import ConsentStore
+    from utils.stroom import StroomGateway
+    from utils.triage import ErrorRules
+
+    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
+    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
+    return SimpleNamespace(lifespan_context={
+        'stroom': StroomGateway(settings), 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
+        'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
+
+
+# --- reference mode: the case's own solution through the tools, no model ---
+async def run_reference(case: dict[str, Any], stamp: str) -> Score:
+    import e2e_phase2 as p2
     from tools import (feeds, generation, indexing, pipeline_writes, processing_writes, stepping, templates,
                        translation, validation, streams)
     from tools.pipeline_writes import PipelineReference, PropertyValue
     from utils.dsgen import SplitterSpec
     from utils.refgen import ReferenceMapping
-    from utils.consent import ConsentStore
     from utils.fieldplan import FieldPlan
-    from utils.stroom import StroomGateway
-    from utils.triage import ErrorRules
     from utils.xsltgen import TranslationMapping
 
-    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
-    stroom = StroomGateway(settings)
-    ctx = SimpleNamespace(lifespan_context={
-        'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
-        'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
+    ctx = local_ctx()
+    stroom = ctx.lifespan_context['stroom']
     tools = {'read_stream': streams.read_stream, 'validate_events': validation.validate_events}
 
     async def call(name: str, **kwargs):
@@ -303,18 +316,22 @@ def print_score(s: Score) -> None:
         print(f"    - {p}")
 
 
+def criterion(passed: int, scored: int) -> str:
+    """The exit criterion, given how many cases passed out of how many were scored: every case, no hints."""
+    total = len(load_cases())
+    text = f"the exit criterion (all {total} cases, no hints)"
+    if scored < total:
+        return f"a partial run, not scored against {text}"
+    return f"meets {text}" if passed >= total else f"does not meet {text}"
+
+
 def summary(scores: list[Score]) -> str:
     rows = ['| Case | Result | Stage 1 | Indexed | Hints | Valid events | Seconds |', '| --- | --- | --- | --- | --- | --- | --- |']
     for s in scores:
         rows.append(f"| {s.case} | {'pass' if s.passed else 'fail'} | {s.stage1} | {s.indexed} | {s.hints} | "
                     f"{s.valid_events}/{s.events} | {s.seconds} |")
     passed = sum(s.passed for s in scores)
-    total = len(load_cases())
-    needed = math.ceil(PASS_RATIO * total)
-    criterion = f"the exit criterion ({needed} of {total}, at most {MAX_HINTS} hint each)"
-    verdict = (f"meets {criterion}" if passed >= needed and len(scores) >= total else
-               f"does not meet {criterion}" if len(scores) >= total else f"a partial run, not scored against {criterion}")
-    rows.append(f"\n{passed} of {len(scores)} passed; {verdict}.")
+    rows.append(f"\n{passed} of {len(scores)} passed; {criterion(passed, len(scores))}.")
     return '\n'.join(rows)
 
 
