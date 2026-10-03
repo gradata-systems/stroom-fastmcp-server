@@ -76,12 +76,20 @@ CONTINUE = ("Please carry on. The work is done when the events are processed and
 PROMOTE = ("Don't promote the build: this is a scratch environment. Stop once the index is verified and both pipelines "
            "are documented.")
 NO_HINT = "I can't help with that; do what you think is right."
+# Claude Code's own refusal to run (the plan's session or usage limit): not the agent's failure, and every run after
+# it would fail the same way in seconds.
+LIMIT = re.compile(r'(session|usage|weekly|rate) limit', re.I)
+
+
+class UsageLimit(Exception):
+    pass
 
 
 @dataclass
 class AgentScore(Score):
     model: str = ''
     run: int = 1
+    build: str = ''
     user_turns: int = 0
     help_requests: int = 0
     tool_calls: int = 0
@@ -212,7 +220,8 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
     name = f"{case['id']}-run{run}.jsonl" if args.repeat > 1 else f"{case['id']}.jsonl"
     transcript = out / (model or 'default') / name
     transcript.parent.mkdir(parents=True, exist_ok=True)
-    score = AgentScore(case['id'], 'agent', model=model or 'default', run=run, transcript=str(transcript.relative_to(ROOT)))
+    score = AgentScore(case['id'], 'agent', model=model or 'default', run=run, build=build,
+                       transcript=str(transcript.relative_to(ROOT)))
     started = time.monotonic()
     hints = list(case.get('hints') or [])
     with tempfile.TemporaryDirectory(prefix='stroom-eval-') as tmp:
@@ -223,8 +232,9 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
             while True:
                 result = await agent.send(message)
                 if result.get('is_error'):
+                    if LIMIT.search(str(result.get('result'))):
+                        raise UsageLimit(str(result.get('result'))[:200])
                     score.ended = f"agent error: {str(result.get('result'))[:300]}"
-                    break
                 if score.user_turns >= args.max_user_turns:
                     score.ended = f"stopped after {score.user_turns} user turns"
                     break
@@ -244,6 +254,8 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
                 else:
                     message = {'continue': CONTINUE, 'promote': PROMOTE}.get(action) or decision['reply'] or CONTINUE
                 score.user_turns += 1
+        except UsageLimit:
+            raise
         except Exception as e:  # a case failing must not stop the evaluation
             score.ended = f"{type(e).__name__}: {e}"
         score.cost_usd, score.tool_calls, score.self_confirmed = round(agent.cost, 4), agent.tool_calls, agent.self_confirmed
@@ -291,11 +303,18 @@ async def score_build(score: AgentScore, case: dict[str, Any], build: str, feed:
             return
         if not events:
             return
-        verified = await indexing.verify_index(ctx, build, indexes[0]['uuid'], 'lucene', events, score.events,
-                                               ['StreamId', 'EventId'], retries=4)
-        score.indexed = bool(verified.get('passed'))
+        # An agent may abandon an index (one made without fields, say) and index into another: any index of the build
+        # that finds the events counts, newest first.
+        failed = []
+        for index in reversed(indexes):
+            verified = await indexing.verify_index(ctx, build, index['uuid'], 'lucene', events, score.events,
+                                                   ['StreamId', 'EventId'], retries=4 if not failed else 1)
+            if verified.get('passed'):
+                score.indexed = True
+                break
+            failed.append(f"{index['name']}: {[c for c in verified.get('checks', []) if not c.get('pass')]}")
         if not score.indexed:
-            score.problems.append(f"index searches: {[c for c in verified.get('checks', []) if not c.get('pass')]}")
+            score.problems.append(f"index searches: {failed}")
         warnings = await builds.build_checks(ctx, docs)
         if warnings:
             score.notes.append(f"before promotion: {warnings}")
@@ -320,6 +339,40 @@ def repeated_summary(scores: list[AgentScore], repeat: int) -> str:
     cases = len(rows) - 2
     rows.append(f"\n{passing} of {cases} cases passed in most of their {repeat} runs; {criterion(passing, cases)}.")
     return '\n'.join(rows)
+
+
+async def rescore(path: Path) -> None:
+    """Score an earlier run's builds again from Stroom, with the current checks; the agent's own figures are kept."""
+    import re
+    cases = {c['id']: c for c in load_cases()}
+    rescored = []
+    for old in json.loads(path.read_text(encoding='utf-8')):
+        if LIMIT.search(old.get('ended') or ''):
+            print(f"  {old['case']} run {old.get('run', 1)}: never ran (Claude Code's limit); left out")
+            continue
+        build = old.get('build')
+        if not build:   # results from before builds were recorded: the agent's tool calls name it
+            tag = old['case'].split('_', 1)[0]
+            found = re.search(rf'"build":\s*"(eval-{tag}-[0-9]+)"', (ROOT / old['transcript']).read_text(encoding='utf-8'))
+            if not found:
+                print(f"  {old['case']} run {old.get('run', 1)}: no build in its transcript; kept as it was")
+                rescored.append(AgentScore(**{k: v for k, v in old.items() if k in AgentScore.__dataclass_fields__}))
+                continue
+            build = found.group(1)
+        feed = re.sub(r'^eval-', 'EVAL-', build)
+        keep = {k: old[k] for k in ('model', 'run', 'user_turns', 'help_requests', 'tool_calls', 'self_confirmed',
+                                    'cost_usd', 'ended', 'transcript', 'seconds', 'hints') if k in old}
+        score = AgentScore(old['case'], 'agent', build=build, **keep)
+        await score_build(score, cases[old['case']], build, feed)
+        score.passed = score.stage1 and score.indexed and score.hints <= MAX_HINTS
+        if score.passed != old.get('passed'):
+            print(f"  {old['case']} run {score.run}: {'pass' if old.get('passed') else 'fail'} -> "
+                  f"{'pass' if score.passed else 'fail'}")
+        rescored.append(score)
+    out = path.with_name(path.stem + '-rescored.json')
+    out.write_text(json.dumps([asdict(s) for s in rescored], indent=1), encoding='utf-8')
+    runs = max((s.run for s in rescored), default=1)
+    print('\n' + (repeated_summary(rescored, runs) if runs > 1 else summary(rescored)) + f"\nResults: {out}")
 
 
 # --- the server ---
@@ -365,7 +418,12 @@ async def main() -> None:
     parser.add_argument('--turn-timeout', type=float, default=2700, help="Seconds one agent turn may take.")
     parser.add_argument('--port', type=int, default=8767, help="Port for this checkout's server.")
     parser.add_argument('--server-url', help="Use a server already running (dev_no_auth, local stack) instead.")
+    parser.add_argument('--rescore', type=Path, metavar='RESULTS',
+                        help="Score an earlier results file's builds again from Stroom, without running the agent.")
     args = parser.parse_args()
+    if args.rescore:
+        await rescore(args.rescore)
+        return
     cases = load_cases(args.cases)
     if not cases:
         raise SystemExit(f"No cases match {args.cases}")
@@ -387,21 +445,35 @@ async def main() -> None:
     models = [None if m == 'default' else m for m in (args.models or ['default'])]
     try:
         by_model = {}
+        stopped = None
         for model in models:
             scores = []
             for case in cases:
                 for run in range(1, args.repeat + 1):
                     label = f" run {run}/{args.repeat}" if args.repeat > 1 else ''
                     print(f"### {case['id']} ({model or 'default'}){label}")
-                    scores.append(await run_case(case, args, model, url, out, run))
+                    try:
+                        scores.append(await run_case(case, args, model, url, out, run))
+                    except UsageLimit as e:
+                        stopped = (model or 'default', case['id'], str(e))
+                        break
                     s = scores[-1]
                     print_score(s)
                     print(f"    {s.ended}; {s.user_turns} user turns, {s.help_requests} help requests, {s.tool_calls} "
                           f"tool calls, {s.self_confirmed} confirmed without asking, ${s.cost_usd}")
+                if stopped:
+                    break
             name = model or 'default'
             path = RESULTS / f'{when}-agent-{name}.json'
             path.write_text(json.dumps([asdict(s) for s in scores], indent=1), encoding='utf-8')
             by_model[name] = (scores, path)
+            if stopped:
+                break
+        if stopped:
+            left = [c['id'] for c in cases[[c['id'] for c in cases].index(stopped[1]):]]
+            print()
+            print(f"Stopped: Claude Code would not run ({stopped[2]}). The runs before it are kept; to finish, once "
+                  f"the limit resets, run {stopped[0]} on: {' '.join(c.split('_', 1)[0] for c in left)}")
         for name, (scores, path) in by_model.items():
             cost = sum(s.cost_usd for s in scores)
             table = repeated_summary(scores, args.repeat) if args.repeat > 1 else summary(scores)

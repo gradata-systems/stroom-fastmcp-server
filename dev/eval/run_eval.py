@@ -120,14 +120,18 @@ def event_facts(records: list[str]) -> tuple[list[etree._Element], set[str]]:
     return events, types
 
 
+def _steps(path: str) -> str:
+    """An expected path as an ElementPath; * is any one element, for choices the schema allows equally (a firewall
+    decision under Network/Open, Permit or Deny)."""
+    return '/'.join(f'{{{EVT}}}{p}' for p in path.split('/'))
+
+
 def has_path(event: etree._Element, path: str) -> bool:
-    node = event.find('/'.join(f'{{{EVT}}}{p}' for p in path.split('/')))
-    return node is not None and bool((node.text or '').strip() or len(node))
+    return any((node.text or '').strip() or len(node) for node in event.findall(_steps(path)))
 
 
 def path_values(events: list[etree._Element], path: str) -> set[str]:
-    return {(node.text or '').strip() for e in events
-            for node in e.findall('/'.join(f'{{{EVT}}}{p}' for p in path.split('/')))}
+    return {(node.text or '').strip() for e in events for node in e.findall(_steps(path))}
 
 
 def score_events(score: Score, case: dict[str, Any], records: list[str], validity: list[bool]) -> None:
@@ -205,18 +209,18 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         reference = case['reference']
         samples = samples_of(case)
         splitter = SplitterSpec.model_validate(reference['splitter']) if reference.get('splitter') else None
-        # The mapping is checked against every sample file first, as an agent would do with profile_sample's files;
-        # the XSLT is saved with it in the build, so its code never comes back, as an agent should do it.
+        # As an agent should: the samples' text is sent once, to upload_sample; the mapping is then checked against
+        # every sample stream, read by the server, and the XSLT saved with it in the build, so its code never comes back.
+        await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+        raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
+        raw = raws[0]
         generated = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(reference['mapping']),
-                                                            sample=samples, splitter=splitter, build=build,
+                                                            stream_ids=raws, splitter=splitter, build=build,
                                                             name=f'{feed}-Events')
         if not generated['ok']:
             raise RuntimeError(f"mapping problems: {generated['problems']}")
         if generated.get('sample_check', {}).get('warnings'):
             score.notes.append(f"sample check: {generated['sample_check']['warnings']}")
-        await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
-        raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
-        raw = raws[0]
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == case['template'])
         references = []

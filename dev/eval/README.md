@@ -30,7 +30,8 @@ case), not a margin to spend.
 | `19_jsonl_message_layouts` | JSON lines; the message's layout depends on its first word, with quoted values, optional and extra keys, and free text | Authenticate, Alert, Unknown | Several `extract` regexes over one field, `any_of` for a quoted or bare value, rules per kind, a catch-all rule for unrecognised lines, `values` checks that quoted names are read whole |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
-count, event types, paths every event must have, and optionally `values` some event must hold exactly, such as a
+count, event types, paths every event must have (`*` for one element any of several may fill, such as
+`Network/*/Source` for Open, Permit or Deny), and optionally `values` some event must hold exactly, such as a
 free-text message carried whole or a time read from the right field), an optional list of `hints`, and a reference solution (a Data
 Splitter where the format needs one, and a `build_translation_xslt` mapping).
 

@@ -6,7 +6,8 @@ request: >
 expected:
   records: 3
   event_types: [Network]
-  paths: [EventTime/TimeCreated, EventSource/Device/HostName, EventDetail/Network/Open/Source/Device/IPAddress]
+  # Allow and deny are as well modelled by Network/Permit and /Deny as by Open with an outcome.
+  paths: [EventTime/TimeCreated, EventSource/Device/HostName, EventDetail/Network/*/Source/Device/IPAddress]
 sample: |
   2026-09-28T15:00:00Z fw01 action=allow src=10.0.0.5 dst=93.184.216.34 dport=443 proto=tcp
   2026-09-28T15:00:03Z fw01 action=deny src=203.0.113.77 dst=10.0.0.10 dport=3389 proto=tcp

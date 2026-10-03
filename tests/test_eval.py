@@ -64,3 +64,14 @@ def test_repeated_runs_pass_a_case_when_most_runs_pass():
     assert '| c0 | 2/3 |' in run_agent.repeated_summary(runs, 3)
     flaky = [run_agent.AgentScore('c0', 'agent', passed=r == 0, run=r) for r in range(3)]   # 1 of 3: not passing
     assert '0 of 1 cases passed' in run_agent.repeated_summary(flaky, 3)
+
+
+def test_an_expected_path_may_leave_one_element_open():
+    # A firewall decision is as well modelled under Network/Permit or /Deny as under Open: * takes any of them.
+    from lxml import etree
+    for action in ('Open', 'Permit', 'Deny'):
+        event = etree.fromstring(f'<Event xmlns="event-logging:3"><EventDetail><Network><{action}><Source><Device>'
+                                 f'<IPAddress>192.0.2.1</IPAddress></Device></Source></{action}></Network></EventDetail></Event>')
+        assert ev.has_path(event, 'EventDetail/Network/*/Source/Device/IPAddress')
+        assert ev.has_path(event, 'EventDetail/Network/Open/Source/Device/IPAddress') == (action == 'Open')
+        assert ev.path_values([event], 'EventDetail/Network/*/Source/Device/IPAddress') == {'192.0.2.1'}
