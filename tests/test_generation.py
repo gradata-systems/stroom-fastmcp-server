@@ -35,6 +35,7 @@ async def test_a_single_stream_id_is_taken_as_a_list_of_one():
             patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(
                 settings=SimpleNamespace(event_logging_version='4.1.0'))), \
             patch.object(generation._Pipeline, 'load', AsyncMock(return_value=pipeline)), \
+            patch.object(generation, 'read_sample_streams', AsyncMock(return_value=({}, []))), \
             patch.object(generation, '_outputs', stepped):
         async with Client(server) as client:
             result = await client.call_tool('build_translation_xslt', {
@@ -86,3 +87,43 @@ async def test_save_xslt_generates_the_code_it_is_not_given():
         assert create.await_args.args[3] == generate(mapping(), SCHEMA, '4.1.0')['xslt']
         with pytest.raises(ToolError, match='Give code'):
             await translation.save_xslt(ctx, 'acme-v1', 'ACME-Events')
+
+
+async def test_tools_read_the_sample_from_its_streams_instead_of_its_text():
+    # The text goes through the model once, to upload_sample; the tools after it take stream_ids.
+    from tools import feeds
+    csv = 'time,user,action\n2026-10-01T10:00:00Z,alice,login\n2026-10-01T10:05:00Z,bob,logout\n'
+    read = AsyncMock(return_value=({'stream 7': csv}, []))
+    ctx, (schema, instructions) = ctx_and_patches()
+    with schema, instructions, patch.object(generation, 'read_sample_streams', read), \
+            patch.object(feeds, 'read_sample_streams', read), \
+            patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))):
+        splitter = await generation.build_data_splitter(ctx, stream_ids=[7])
+        assert splitter['records'] == 2 and splitter['spec']['kind'] == 'delimited'
+        draft = await generation.draft_translation_mapping(ctx, stream_ids=[7])
+        assert draft['mapping']['input'] == 'data_splitter'
+        assert (await feeds.profile_sample(ctx, stream_ids=[7]))['format'].startswith('delimited')
+        typo = mapping(common=[{'path': 'EventTime/TimeCreated', 'field': 'tiem'}] + mapping().common[1:])
+        from utils.dsgen import SplitterSpec
+        checked = await generation.build_translation_xslt(ctx, typo, stream_ids=[7],
+                                                          splitter=SplitterSpec.model_validate(splitter['spec']))
+        assert any("'tiem'" in w for w in checked['warnings'])   # checked against the stream's records
+    assert [c.args[1] for c in read.await_args_list] == [[7]] * 4
+
+
+async def test_raw_streams_are_read_in_pages_up_to_the_limit():
+    from tools import streams
+    text = ''.join(f'line {n}\n' for n in range(100))
+    pages = []
+
+    async def post(path, body):
+        start = body['sourceLocation']['dataRange']['charOffsetFrom']
+        pages.append(start)
+        return {'data': text[start:start + body['sourceLocation']['dataRange']['length'] + 1]}   # Stroom returns one more
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value={'data': text[:50], 'totalCharacterCount': {'count': len(text)}}),
+                             post=post)
+    with patch.object(streams, 'RAW_PAGE_CHARS', 200):
+        whole, truncated = await streams.raw_text(stroom, 7, 10_000)
+        assert whole == text and not truncated and len(pages) > 1
+        head, truncated = await streams.raw_text(stroom, 7, 300)
+        assert truncated and text.startswith(head) and head.endswith('\n') and len(head) <= 300

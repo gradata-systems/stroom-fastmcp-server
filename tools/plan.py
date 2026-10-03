@@ -12,6 +12,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import MANAGED, build_tag, guard_from
+from tools.streams import SampleStreams, read_sample_streams
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples
@@ -31,7 +32,7 @@ TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'u
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
     ('samples', 'Upload every sample file as its own stream', 'upload_sample'),
-    ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter sample=<the file text>, save_text_converter'),
+    ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter stream_ids=<the sample streams>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams; fix the mapping and build_translation_xslt uuid=... in between'),
@@ -242,22 +243,30 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
 async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall' (names the build).")],
-        samples: Annotated[SampleTexts, Field(
+        samples: Annotated[SampleTexts | None, Field(
             description="The text of every sample file the user has (read each file and pass its content, every line), "
-                        "by file name or as a list. Not paths: this server cannot read the client's files.")],
+                        "by file name or as a list. Not paths: this server cannot read the client's files.")] = None,
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
+        stream_ids: SampleStreams = [],
 ) -> dict[str, Any]:
     """
     Start onboarding a source: profiles every sample file (format, fields, timestamp patterns, what differs
     between files, which parser and template to use, whether a text converter is needed), creates the build,
     and returns the plan with its first step and the standing instructions that apply. The work is not done
     until build_status shows every step done and promote_build has run; each tool's result says what is next.
+    For a large file, create the feed and upload_sample first, then give stream_ids instead of the text: the
+    server reads the streams itself, so the text is sent once.
     """
     from tools.instructions import applicable_instructions
-    named = as_named_samples(samples)
+    notes = []
+    if stream_ids and samples is None:
+        named, notes = await read_sample_streams(ctx, stream_ids)
+    else:
+        named = as_named_samples(samples)
     if not named:
-        raise ToolError("Give the sample files' text (samples by file name); ask the user for every file they have")
+        raise ToolError("Give the sample files' text (samples by file name), or stream_ids once they are uploaded; ask "
+                        "the user for every file they have")
     name = build or ('onboard-' + ''.join(c if c.isalnum() else '-' for c in source_name.lower()).strip('-')[:40])
     folder = await guard_from(ctx).build_folder(name)
     remember_build(ctx, name)
@@ -267,7 +276,10 @@ async def start_onboarding(
     template = {'JSONParser': 'Event Data (JSON)', 'XMLParser': 'Event Data (XML)',
                 'XMLFragmentParser': "Event Data (XML) with replace_parser='XMLFragmentParser'"}.get(parser, 'Event Data (Text)')
     plan = checklist()
+    # Given streams, the feed and samples exist already: the build itself says what is next.
+    nxt = await next_step(ctx, name) if stream_ids else None
     return {
+        **({'read': notes} if notes else {}),
         'build': name, 'folder': folder['_path'], 'source': source_name,
         'profile': profiled,
         'parser': parser, 'template': f"{template} (confirm with find_pipeline_templates stage=translation)",
@@ -275,13 +287,13 @@ async def start_onboarding(
                            'needed: the XML fragment wrapper (profile text_converter)' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),
         'plan': plan,
-        'next': {'step': 'feed', 'do': plan[0]['what'], 'tools': plan[0]['tools']},
+        'next': nxt or {'step': 'feed', 'do': plan[0]['what'], 'tools': plan[0]['tools']},
         'done': False,
         'standing_instructions': await applicable_instructions(ctx, folders, []),
-        'hint': ("Propose the feed name from sibling feeds and create_feed; upload each file as its own stream; then the "
-                 "converter (if needed), build_translation_xslt with the sample and build and name (it saves the XSLT "
-                 "with the mapping), the pipeline, step_sample over all streams until clean, process, validate, "
-                 "write_documentation, index. "
+        'hint': ("Propose the feed name from sibling feeds and create_feed; upload each file as its own stream; from then "
+                 "on give tools the sample streams (stream_ids), not the text again: the converter (if needed), "
+                 "build_translation_xslt with the streams and build and name (it saves the XSLT with the mapping), the "
+                 "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
                  "build_status shows what remains at any point."),
     }
 

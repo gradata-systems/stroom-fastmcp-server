@@ -1,4 +1,5 @@
 """Tools for finding and reading streams, and triaging their errors."""
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
@@ -107,6 +108,67 @@ async def read_stream(
     return result
 
 
+RAW_PAGE_CHARS = 200_000
+SampleStreams = Annotated[list[int] | int | str, ONE_OR_MORE, Field(
+    description="Sample streams to read the data from, in place of its text (e.g. after upload_sample), so the "
+                "text need not be sent again; the server reads them itself.")]
+
+
+async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tuple[str, bool]:
+    """(text, truncated): a raw stream's text, read in pages up to max_chars and then cut at a line end."""
+    body = await stroom.fetch_data(stream_id, 0, 1)
+    if body.get('errors'):
+        raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
+    total = (body.get('totalCharacterCount') or {}).get('count') or 0
+    parts, have = [body.get('data') or ''], len(body.get('data') or '')
+    while have < min(total, max_chars):
+        # Stroom's ranges end one past the length asked for, so the next page starts after what came back.
+        page = await stroom.post('/data/v1/fetch', {
+            'sourceLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': 0, 'childType': None,
+                               'dataRange': {'charOffsetFrom': have, 'length': min(RAW_PAGE_CHARS, max_chars - have)}},
+            'displayMode': 'TEXT', 'recordCount': 1, 'expandedSeverities': []})
+        data = page.get('data') or ''
+        if not data:
+            break
+        parts.append(data)
+        have += len(data)
+    text = ''.join(parts)
+    truncated = len(text) > max_chars or len(text) < total
+    if truncated:
+        text = text[:max_chars]
+        text = text[:text.rfind('\n') + 1] or text
+    return text, truncated
+
+
+async def read_sample_streams(ctx: Context, stream_ids: list[int]) -> tuple[dict[str, str], list[str]]:
+    """({name: text}, notes): sample streams' raw text, read by the server in place of text sent by the client,
+    so a sample passes through the model once (upload_sample) however many tools then read it."""
+    stroom = gateway_from(ctx)
+    texts, notes = {}, []
+    for stream_id in stream_ids:
+        text, truncated = await raw_text(stroom, stream_id, stroom.settings.max_sample_chars)
+        texts[f'stream {stream_id}'] = text
+        if truncated:
+            notes.append(f"stream {stream_id} is read up to its first {len(text):,} characters (max_sample_chars)")
+    return texts, notes
+
+
+_PREFIXED_ROOT = re.compile(r'^\s*(?:<\?xml[^>]*\?>\s*)?<([\w.-]+):([\w.-]+)[\s/>]')
+
+
+def _root_closed(record: str) -> str:
+    """A segmented record as a well-formed document. Stroom wraps each record in the stream's root element, but closes
+    a prefixed root (<evt:Events>, written by an XSLT with a namespace prefix) by its local name alone (</Events>)."""
+    m = _PREFIXED_ROOT.match(record)
+    if not m:
+        return record
+    prefix, local = m.groups()
+    body = record.rstrip()
+    if body.endswith(f'</{local}>'):
+        return body[:-len(f'</{local}>')] + f'</{prefix}:{local}>' + record[len(body):]
+    return record
+
+
 async def read_records(stroom: StroomGateway, stream_id: int, first: int, count: int, child_type: str | None,
                        char_budget: int) -> tuple[list[str], dict[str, Any]]:
     """Up to `count` records from `first`, within a character budget.
@@ -123,7 +185,7 @@ async def read_records(stroom: StroomGateway, stream_id: int, first: int, count:
     index = first
     while True:
         data = (body.get('data') or '')[:char_budget - used]
-        records.append(data)
+        records.append(_root_closed(data) if body.get('dataType') == 'SEGMENTED' else data)
         used += len(data)
         index += 1
         if len(records) >= count or index >= total or used >= char_budget or body.get('dataType') != 'SEGMENTED':

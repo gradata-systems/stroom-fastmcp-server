@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from security.guard import guard_from
+from tools.streams import SampleStreams, read_sample_streams
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
@@ -25,6 +26,7 @@ async def profile_sample(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
                         "built from one file breaks on the others. Prefer this whenever the user has more than one file.")] = None,
+        stream_ids: SampleStreams = [],
 ) -> dict[str, Any]:
     """
     Profile raw data locally (nothing is sent to Stroom): its format (XML document or fragments, JSON array or
@@ -33,10 +35,15 @@ async def profile_sample(
     their values; string fields holding JSON are flagged. Says which parser and template to use, whether a text
     converter is needed, and for JSON the parser setting. With several files, also what differs between them.
     """
-    named = as_named_samples(samples, sample)
+    notes = []
+    if stream_ids and sample is None and samples is None:
+        named, notes = await read_sample_streams(ctx, stream_ids)
+    else:
+        named = as_named_samples(samples, sample)
     if not named:
-        raise ToolError("Give sample (the file's text), or samples: several files' texts")
-    return profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
+        raise ToolError("Give sample (the file's text), samples (several files' texts), or stream_ids")
+    result = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
+    return {**result, 'read': notes} if notes else result
 
 
 async def create_feed(

@@ -121,19 +121,20 @@ Stage 1, events:
 1. Ask whether there are more sample files than the one below (other appliances, versions or days) and get them all.
    start_onboarding with every file by name: it profiles them (fields and timestamp shapes that differ between files,
    the parser and template, whether a text converter is needed), creates the build and returns the plan. Follow `next`
-   in each result until it says promote; build_status shows what remains.
+   in each result until it says promote; build_status shows what remains. A file's text is sent once more, to
+   upload_sample; after that every tool takes the sample streams (stream_ids) and reads them itself.
 2. find_pipeline_templates stage=translation; describe_template on the best
    candidate to see how this environment specialises it. find_documents (content=...) for existing XSLTs to reuse.
 3. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a
    stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
    every kind gets a rule and step_records can check each. Values the records do not carry (a user's department, a
    host's site): find_reference_data for maps the environment loads, or build the reference data (reference-data guide).
-4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample text infers the
-   spec and runs it until every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON
-   and single-document XML need none: the JSONParser or XMLParser reads them. draft_translation_mapping with all the
-   files gives a mapping to edit (its notes say what to decide: the action element per kind of event, System Name,
-   Environment, a time zone); then build_translation_xslt (feeds=[the feed], sample=all the files, splitter=the
-   spec) with it: which input field or constant goes to which event-logging path, one rule per kind of event,
+4. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample streams infers
+   the spec and runs it until every line parses; XML fragments need the wrapper (xmlFragmentParser.textConverter). JSON
+   and single-document XML need none: the JSONParser or XMLParser reads them. draft_translation_mapping with the
+   sample streams gives a mapping to edit (its notes say what to decide: the action element per kind of event, System
+   Name, Environment, a time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams,
+   splitter=the spec) with it: which input field or constant goes to which event-logging path, one rule per kind of event,
    any_of where files name a field differently, extract for text fields holding several values, lookup or
    dictionary for values from reference data. Give it build and name: it saves the XSLT with the mapping (kept
    with it, so the documentation is generated from it) and returns the document, not the code. Fix reported

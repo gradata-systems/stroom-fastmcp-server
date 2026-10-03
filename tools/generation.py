@@ -12,6 +12,7 @@ from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
+from tools.streams import SampleStreams, read_sample_streams
 from pydantic import ValidationError
 
 from utils.draftmap import draft_mapping
@@ -46,7 +47,9 @@ async def build_translation_xslt(
             description="With stream_ids: step this pipeline with the generated XSLT over the sample (nothing is "
                         "saved), so field_mapping gives the TypeId and Description values the events actually get. "
                         "Do this before write_documentation.")] = None,
-        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Sample streams to step for field_mapping.")] = [],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
+            description="The sample streams: the mapping is checked against them (when no sample text is given, so "
+                        "the text need not be sent again), and with pipeline_uuid stepped for field_mapping.")] = [],
         max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 200,
         sample: Annotated[str | list[str] | None, Field(
             description="The raw sample, or a list of sample files, to check the mapping against before stepping: "
@@ -105,9 +108,15 @@ async def build_translation_xslt(
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
-    if sample is not None:
+    if sample is None and stream_ids:
+        texts, read_notes = await read_sample_streams(ctx, stream_ids)
+        sample = list(texts.values())
+        if read_notes:
+            result['warnings'] += [f"sample: {n}" for n in read_notes]
+    elif sample is not None:
         for text in (sample if isinstance(sample, list) else [sample]):
             check_sample(text)
+    if sample is not None:
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
         check['warnings'] += check_xpaths(mapping, sample, splitter)
@@ -188,18 +197,24 @@ async def build_data_splitter(
         save_as: Annotated[str | None, Field(description="Also save the converter in the build under this document name "
                                                          "(the build this session is on, or `build`), when every line parsed.")] = None,
         build: Annotated[str | None, Field(description="With save_as: the build; defaults to the one this session is on.")] = None,
+        stream_ids: SampleStreams = [],
 ) -> dict[str, Any]:
     """
-    Write a Data Splitter (text converter) from the sample: its format is profiled (delimited with or without
+    Write a Data Splitter (text converter) from the sample (its text, or stream_ids to read it from the sample
+    streams; with several, the spec comes from the first and is run on each): its format is profiled (delimited with or without
     a header line, key=value pairs, syslog RFC 5424 or 3164 with the message parsed further) and the spec
     inferred, unless one is given; the spec is run on the sample locally and the records it produces, the lines
     that match nothing and the field names a mapping may use come back (give the same spec to
     build_translation_xslt as splitter). JSON and XML need no converter. Saves nothing: save_text_converter saves it.
     """
-    if sample is None and spec is None:
-        raise ToolError("Give the sample (the file's text): the spec is inferred from it")
-    if sample is not None:
+    others: dict[str, str] = {}
+    if sample is None and stream_ids:
+        texts, _ = await read_sample_streams(ctx, stream_ids)
+        sample, others = next(iter(texts.values())), dict(list(texts.items())[1:])
+    elif sample is not None:
         check_sample(sample)
+    if sample is None and spec is None:
+        raise ToolError("Give the sample (the file's text, or stream_ids): the spec is inferred from it")
     profiled: dict[str, Any] | None = None
     if spec is None:
         inferred, profiled = infer_spec(sample)
@@ -224,6 +239,10 @@ async def build_data_splitter(
                               **({'format': profiled['format']} if profiled else {})}
     if sample is not None:
         run = dry_run(chosen, sample)
+        for text in others.values():   # every sample stream must parse, not just the first
+            more = dry_run(chosen, text)
+            run = {**run, 'records': run['records'] + more['records'],
+                   'unmatched_lines': run['unmatched_lines'] + more['unmatched_lines']}
         result.update({'records': len(run['records']), 'fields': _inventory(run['records']),
                        'first_records': run['records'][:5], 'unmatched_lines': run['unmatched_lines'][:10],
                        'unmatched_count': len(run['unmatched_lines'])})
@@ -281,12 +300,13 @@ async def build_reference_xslt(
 
 async def draft_translation_mapping(
         ctx: Context,
-        samples: Annotated[SampleTexts, Field(description="The sample files' text (every line), by "
-                                                                            "file name or as a list; not paths.")],
+        samples: Annotated[SampleTexts | None, Field(description="The sample files' text (every line), by "
+                                                                                   "file name or as a list; not paths.")] = None,
         source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall': names the system and generator "
                                                       "until the user confirms them.")] = '',
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,
         environment: Annotated[str | None, Field(description="EventSource/System/Environment, if the user has said, e.g. Prod.")] = None,
+        stream_ids: SampleStreams = [],
 ) -> dict[str, Any]:
     """
     A starting translation mapping drafted from the sample, to edit rather than write from nothing: the input
@@ -297,6 +317,10 @@ async def draft_translation_mapping(
     decide. For text formats the Data Splitter spec comes with it. Then build_translation_xslt with the edited
     mapping, the sample and the splitter.
     """
+    if samples is None and stream_ids:
+        samples, _ = await read_sample_streams(ctx, stream_ids)
+    if not samples:
+        raise ToolError("Give the samples' text, or stream_ids of the uploaded sample streams")
     result = draft_mapping(samples, source_name, system_name, environment)
     version = gateway_from(ctx).settings.event_logging_version
     try:
@@ -305,7 +329,8 @@ async def draft_translation_mapping(
     except ToolError as e:
         result['schema_check'] = {'ok': None, 'note': str(e)}
     result['hint'] = ("Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
-                      "time zone), then build_translation_xslt(mapping=this mapping, sample=the texts, splitter=this splitter).")
+                      "time zone), then build_translation_xslt(mapping=this mapping, stream_ids=the sample streams (or sample=the "
+                      "texts), splitter=this splitter, build and name to save it).")
     return result
 
 

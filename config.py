@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # Upper bound on serialized tool output, to protect the model's context window.
     max_response_chars: int = 100_000
     max_stream_chars: int = 20_000
+    # Raw text the server reads itself from sample streams (stream_ids in place of sample text) to profile, infer a
+    # splitter, draft and check a mapping: never returned whole, so it is bounded by the server, not the model.
+    max_sample_chars: int = 1_000_000
     # Records stepped per step_sample call before stopping.
     max_sample_records: int = 500
     # Error triage rules (see error_rules.yaml).
