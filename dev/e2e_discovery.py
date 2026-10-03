@@ -18,11 +18,24 @@ numbers, so the dynamic mapping has something to do.
 5. The cluster admin applies it; indexing on the raw stream; Elasticsearch has mapped every field dynamically
    (strings as keywords), the JSON message unpacked, the dropped field absent; Stroom's searches find the
    documents; the pipeline is documented with the fields the sample documents held.
+
+Then for an existing raw feed (outside the build, already holding three streams sent over time, whose data
+drifts: an older stream's latency_ms is "n/a", only the newest has a geo object):
+
+6. The feed's Raw Events streams are found; one record is read to confirm the time field, nothing more.
+7. The discovery pipeline steps the two newest streams. The template is not offered to agree until the user
+   gives an example: the first discovery index's template and its component template, as GET returns them. Built
+   from it, the template is agreed and committed.
+8. The existing streams are indexed by id, and a feed-wide filter from now on indexes what is sent next: a
+   fourth stream sent afterwards is indexed with no change. Every record of the four streams is in the index;
+   the drift is absorbed (malformed numbers ignored, new fields mapped as they arrive); Stroom's searches find
+   them all.
 """
 import asyncio
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,7 +50,7 @@ from e2e_elastic_handover import ES, _request, live_cluster  # noqa: E402
 from config import Settings  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import builds, feeds, indexing, processing_writes, stepping, templates, translation  # noqa: E402
+from tools import builds, feeds, indexing, processing_writes, stepping, streams, templates, translation  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import Discovery, FieldPlan  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
@@ -114,13 +127,14 @@ async def main():
             except httpx.HTTPError:
                 raise SystemExit(f"No Elasticsearch at {ES}: cd dev/stroom && docker compose --profile elastic up -d")
             p2.check(version.startswith('9.'), f'Elasticsearch {version}')
-            await run(ctx, stroom, es, stamp)
+            sibling = await run(ctx, stroom, es, stamp)
+            await existing_feed(ctx, stroom, es, stamp, sibling)
         print('\nALL PASSED')
     finally:
         await stroom.close()
 
 
-async def run(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> None:
+async def run(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> str:
     build, feed = f'e2e-discovery-{stamp}', f'E2E-WEB-{stamp}'
     index = f'stroom-discovery-web-{stamp}-v1'
     print('\n### the raw sample')
@@ -232,6 +246,126 @@ async def run(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> 
              and '| `message_json.client.ip` | 33% of documents | `10.1.1.1` |' in section
              and f'Elasticsearch index template `{index}`, agreed with the user' in section,
              'documented: the explicit fields, then the fields the sample held, and the agreed template')
+    return index
+
+
+# An existing feed's streams, oldest first, as a sending system sent them over time. The data drifts: the
+# oldest has latency_ms as "n/a" (later ones are numbers), the newest adds a geo object.
+FEED_STREAMS = [
+    [{'time': '2026-09-01T08:00:00Z', 'app': 'billing', 'level': 'INFO', 'latency_ms': 'n/a', 'msg': 'started'},
+     {'time': '2026-09-01T08:00:05Z', 'app': 'billing', 'level': 'WARN', 'latency_ms': 'n/a', 'msg': 'slow disk'}],
+    [{'time': '2026-09-15T10:00:00Z', 'app': 'billing', 'level': 'INFO', 'latency_ms': 31, 'msg': 'invoice 1001'},
+     {'time': '2026-09-15T10:00:09Z', 'app': 'billing', 'level': 'ERROR', 'latency_ms': 950,
+      'msg': json.dumps({'error': 'timeout', 'upstream': 'payments'})}],
+    [{'time': '2026-10-01T12:00:00Z', 'app': 'billing', 'level': 'INFO', 'latency_ms': 12, 'msg': 'invoice 1002',
+      'geo': {'country': 'NZ', 'city': 'Wellington'}}],
+]
+LATER = [{'time': '2026-10-04T07:30:00Z', 'app': 'billing', 'level': 'INFO', 'latency_ms': 8, 'msg': 'invoice 1003',
+          'geo': {'country': 'AU', 'city': 'Sydney'}, 'retry': True}]
+
+
+async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str, sibling: str) -> None:
+    source, build = f'SRC-BILLING-{stamp}', f'e2e-discovery-existing-{stamp}'
+    index = f'stroom-discovery-billing-{stamp}-v1'
+    print('\n### an existing raw feed, outside the build, already holding data')
+    await p2.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=source)
+    for records in FEED_STREAMS:
+        await feeds.upload_sample(ctx, source, json.dumps(records))
+    await asyncio.sleep(2)
+
+    print('\n### its raw streams; one record read to confirm the time field, no survey')
+    found = await streams.find_streams(ctx, feed=source, stream_type='Raw Events')
+    ids = sorted(s['id'] for s in found['streams'])
+    p2.check(len(ids) == 3, f'the feed holds three raw streams: {ids}')
+    record = (await streams.read_stream(ctx, ids[-1], 0, 1))['records'][0]
+    p2.check('"time": "2026-10-01T12:00:00Z"' in record, 'the newest record shows the time field the user named')
+
+    print('\n### the discovery pipeline, stepped on the two newest streams')
+    template = await fixture_template(stroom)
+    cluster = await live_cluster(stroom)
+    draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index,
+                                               discovery=Discovery(timestamp_field='time'))
+    plan = FieldPlan.model_validate(draft['plan'])
+    xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
+    pipeline = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Discovery',
+                               template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_name=index,
+                               cluster_uuid=cluster['uuid'])
+    newest = ids[-2:]
+    sample = await stepping.step_sample(ctx, pipeline['uuid'], newest)
+    p2.check(sample['verdict'] == 'clean', f"stepped {sample.get('records_stepped')} records of {newest} clean, in place")
+
+    print("\n### the template waits for the user's example, then is built from it and agreed")
+    unasked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, newest)
+    p2.check('status' not in unasked and unasked['hint'].startswith('No example was given: ask the user')
+             and 'sibling discovery index' in unasked['hint'], 'without an example, the user is asked for one first')
+    # What the user pastes: the sibling discovery index's template and its component, as GET returns them.
+    example = json.dumps((await es.get(f'/_index_template/{sibling}')).json())
+    component = json.dumps((await es.get('/_component_template/e2e-discovery-base')).json())
+    final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
+                            events_stream_ids=newest, example_template=example, component_templates=[component])
+    body = final['template']
+    for note in final.get('from_example') or []:
+        print(f'    {note}')
+    p2.check(final.get('agreed') and body['index_patterns'] == [f'{index}*'] and body['priority'] == 250
+             and body['composed_of'] == ['e2e-discovery-base']
+             and body['template']['settings']['index']['number_of_shards'] in (1, '1'),
+             "agreed: the new index's pattern, with the sibling's priority, settings and component")
+    p2.check(body['template']['mappings']['dynamic'] is True and body['template']['mappings']['properties'] ==
+             {'@timestamp': {'type': 'date'}} and sibling not in json.dumps(body),
+             'still permissive: StreamId and EventId left to the component, nothing of the sibling index copied')
+    path, request = _request(final['dev_tools'])
+    response = await es.put(f'/{path}', json=request)
+    p2.check(response.status_code == 200, f'PUT {path}: {response.status_code}')
+
+    print('\n### the existing streams by id, and what is sent from now on by feed')
+    backfill = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                               stream_ids=ids)
+    done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], ids, expect_events=False,
+                                                       filter_id=backfill['filter_id'])
+    p2.check(done.get('gate') == 'pass', f"the existing streams indexed with no Error stream: {done.get('streams')}")
+    since = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    ongoing = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                              feed=source, stream_type='Raw Events', created_after=since)
+    later = (await feeds.upload_sample(ctx, source, json.dumps(LATER)))['stream_id']
+    done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [later], expect_events=False,
+                                                       filter_id=ongoing['filter_id'])
+    p2.check(done.get('gate') == 'pass', f'stream {later}, sent afterwards, indexed by the feed filter')
+    # Local only: stop the feed filter again, so nothing else sent to this feed is indexed in the background.
+    await p2.agreed(processing_writes.set_processor_filter_enabled, ctx=ctx, filter_id=ongoing['filter_id'],
+                    enabled=False)
+
+    print('\n### every record, the drift absorbed')
+    await es.post(f'/{index}/_refresh')
+    total = sum(len(r) for r in FEED_STREAMS) + len(LATER)
+    count = (await es.get(f'/{index}/_count')).json().get('count')
+    p2.check(count == total, f'the index holds all {total} records of the four streams: {count}')
+    per_stream = (await es.post(f'/{index}/_search', json={'size': 0, 'aggs': {'s': {'terms': {'field': 'StreamId'}}}})).json()
+    by_stream = {int(b['key']): b['doc_count'] for b in per_stream['aggregations']['s']['buckets']}
+    p2.check(by_stream == {**{i: len(r) for i, r in zip(ids, FEED_STREAMS)}, later: len(LATER)},
+             f'each stream complete: {by_stream}')
+    props = (await es.get(f'/{index}/_mapping')).json()[index]['mappings']['properties']
+    p2.check(props['geo']['properties']['country']['type'] == 'keyword' and props['retry']['type'] == 'boolean'
+             and 'msg_json' in props, 'fields that appeared later were mapped as they arrived, the JSON message unpacked')
+    latency = props['latency_ms']['type']
+    if latency == 'long':
+        ignored = (await es.post(f'/{index}/_count', json={'query': {'term': {'_ignored': 'latency_ms'}}})).json()['count']
+        p2.check(ignored == 2, f'latency_ms mapped as a number; the two "n/a" values ignored, their records kept: {ignored}')
+    else:
+        p2.check(latency == 'keyword', f'latency_ms mapped from "n/a" first, as a keyword; the numbers kept as text')
+
+    print('\n### verified through Stroom, and documented')
+    doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
+                          time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
+    verified = await indexing.verify_index(ctx, build, doc['uuid'], 'elasticsearch', ids + [later], total,
+                                           ['StreamId', 'EventId', '@timestamp', 'app', 'level'],
+                                           exact=[{'field': 'level', 'value': 'ERROR'}])
+    p2.check(verified.get('passed') is True, f"Stroom's searches: {json.dumps(verified)[:300]}")
+    written = await builds.write_documentation(ctx, build, pipeline['uuid'],
+                                               f'## Purpose and data\n\nThe {source} feed, indexed as it is for '
+                                               f'exploration.\n', 'Created', stream_ids=newest)
+    section = written.get('field_mapping') or ''
+    p2.check('| `geo.country` |' in section and '| `@timestamp` | date | `time` |' in section,
+             'documented from the streams stepped')
 
 
 if __name__ == '__main__':

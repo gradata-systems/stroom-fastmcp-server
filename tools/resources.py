@@ -251,9 +251,10 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    holding a JSON object into a sibling <field>_json. save_xslt index_plan=plan with no code;
    create_indexing_pipeline from the discovery template; step_sample on the raw streams: the documents show what
    the source holds.
-4. propose_index_template with the plan, the raw streams and the user's example (if any): a permissive template
+4. propose_index_template with the plan, the raw streams and the user's example index template and its component
+   templates (as GET _index_template/<name> and GET _component_template/<name> return them): a permissive template
    (dynamic mapping, strings as keywords, a total-fields limit, malformed values ignored) with the example's
-   settings and components. The user confirms it, or corrects it (check_index_template). Give them its dev_tools
+   settings and components. Without an example it is not offered to agree: ask for one first. The user confirms it, or corrects it (check_index_template). Give them its dev_tools
    for the cluster admin; once they say it is committed, create_processor_filter on the raw streams (its approval
    asks them to confirm that) starts indexing. wait_for_processing expect_events=false; create_index_doc for the
    index; verify_index; write_documentation with stream_ids = the raw streams; promote.

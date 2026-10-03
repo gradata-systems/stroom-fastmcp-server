@@ -191,3 +191,22 @@ def test_a_discovery_template_takes_the_examples_settings_but_not_its_fields_or_
     assert body['template']['settings']['index'] == {'number_of_shards': 3, 'mapping': {
         'total_fields': {'limit': 2000}, 'ignore_malformed': True}}
     assert any(n.startswith('a discovery index') for n in notes) and not any('named unlike' in n for n in notes)
+
+
+async def test_a_discovery_template_waits_for_the_users_example_like_any_other():
+    from config import Settings
+    from utils.consent import ConsentStore
+    from utils.fieldplan import Discovery
+    settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=settings), 'consent': ConsentStore(False)})
+    plan = FieldPlan.for_discovery('stroom-discovery-acme-v1', Discovery(timestamp_field='ts'))
+    documents = [{'StreamId': ('number', '7'), 'EventId': ('number', '1'), '@timestamp': ('string', '2026-10-01T09:00:00Z'),
+                  'host': ('string', 'web01')}]
+    with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'stroom-discovery-acme-v1',
+                                                                       'cluster': 'ES'})), \
+            patch('tools.indexing._documents', AsyncMock(return_value=documents)):
+        result = await indexing.propose_index_template(ctx, 'p1', plan, [7])
+    assert 'status' not in result and result['self_check']['compatible']
+    assert result['hint'].startswith("No example was given: ask the user for the index template (or an index's "
+                                     "mapping) a sibling discovery index uses")
+    assert 'check_index_template with dev_tools' in result['hint']

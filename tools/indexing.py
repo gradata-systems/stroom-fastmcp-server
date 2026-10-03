@@ -616,9 +616,11 @@ async def propose_index_template(
               'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
               **({'from_example': notes} if example_template else {}),
               'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid)}
-    if not example_template and not plan.discovery:
+    if not example_template:
         result['hint'] = ("No example was given: ask the user for the index template (or an index's mapping) a "
-                          "sibling source's index uses, and its component templates, and call again with them.")
+                          "sibling " + ("discovery index" if plan.discovery else "source's index") + " uses, and its "
+                          "component templates, and call again with them. Only if they have none and want this "
+                          "template as it is: check_index_template with dev_tools, where they confirm it.")
         return result
     if not check['compatible']:
         result['hint'] = ("It does not fit the documents the pipeline writes (self_check): show the user and ask "
