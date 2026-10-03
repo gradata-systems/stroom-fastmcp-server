@@ -79,9 +79,10 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
                      ('elasticIndexingFilter', 'cluster'): 'c'}
 
 
-async def test_an_indexing_pipeline_needs_the_index_to_have_the_fields_it_writes():
-    # Haiku created the Lucene index without its plan: every value was dropped with only a warning
-    # ("Attempt to index unknown field") and the searches found nothing.
+async def test_an_indexing_pipeline_gets_the_fields_its_xslt_writes():
+    # Haiku created the Lucene index without its plan: every value was dropped with only a warning ("Attempt to index
+    # unknown field"). The refusal that followed told it to call set_index_fields, which is not a tool; now the plan
+    # kept with the XSLT supplies the fields, and only an XSLT written by hand is refused, naming steps it can take.
     from utils.mappingstore import with_mapping
     plan = FieldPlan(backend='lucene', index_name='acme', time_field='EventTime',
                      fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
@@ -94,9 +95,18 @@ async def test_an_indexing_pipeline_needs_the_index_to_have_the_fields_it_writes
         return SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[t]),
                                post=AsyncMock(return_value={'values': [{'fldName': f} for f in fields]}))
 
-    for xslt in (generated, by_hand):   # the plan kept with the XSLT, or the data elements it writes
-        with pytest.raises(ToolError, match=r"has no fields for \['StreamId', 'EventTime'\].*set_index_fields"):
-            await indexing._index_has_fields(stroom([], xslt), 'i-1', 'x-1')
-        with pytest.raises(ToolError, match=r"has no field for \['EventTime'\]"):
-            await indexing._index_has_fields(stroom(['StreamId'], xslt), 'i-1', 'x-1')
-        await indexing._index_has_fields(stroom(['StreamId', 'EventTime', 'Extra'], xslt), 'i-1', 'x-1')
+    missing, kept = await indexing._missing_index_fields(stroom([], generated), 'i-1', 'x-1')
+    assert missing == ['StreamId', 'EventTime'] and kept == plan
+    assert (await indexing._missing_index_fields(stroom(['StreamId'], generated), 'i-1', 'x-1'))[0] == ['EventTime']
+    with pytest.raises(ToolError, match=r"has no fields for \['StreamId', 'EventTime'\].*save_xslt index_plan=") as e:
+        await indexing._missing_index_fields(stroom([], by_hand), 'i-1', 'x-1')
+    assert 'set_index_fields' not in str(e.value)   # not a tool the agent has
+    assert await indexing._missing_index_fields(stroom(['StreamId', 'EventTime', 'Extra'], by_hand), 'i-1', 'x-1') == ([], None)
+
+    # Created (after confirmation), the pipeline's index gets the plan's fields.
+    shape = {'stage': 'indexing', 'backend': 'lucene', 'child_must_supply': [
+        {'element': 'xsltFilter', 'property': 'xslt', 'type': 'XSLTFilter'}, {'element': 'indexingFilter', 'property': 'index'}]}
+    gateway = stroom([], generated)
+    with patch.object(indexing, 'gateway_from', lambda ctx: gateway),             patch.object(indexing, '_shape', AsyncMock(return_value=shape)),             patch.object(indexing, '_events_available', AsyncMock()),             patch.object(indexing, 'create_pipeline', AsyncMock(return_value={'uuid': 'p-1'})),             patch.object(indexing, 'set_index_fields', AsyncMock(return_value={'added': ['StreamId', 'EventTime']})) as add:
+        result = await indexing.create_indexing_pipeline(SimpleNamespace(), 'acme-v1', 'ACME - Indexing', 't-1', 'x-1', index_uuid='i-1')
+    assert result['index_fields_added'] == ['StreamId', 'EventTime'] and add.await_args.args[1:] == ('i-1', plan)
