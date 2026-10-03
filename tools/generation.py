@@ -10,6 +10,7 @@ from tools.instructions import applicable_instructions
 from utils.eventschema import EventSchema
 from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id
+from utils.consent import consent_from
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
 from tools.streams import SampleStreams, read_sample_streams
@@ -65,6 +66,8 @@ async def build_translation_xslt(
             description="Replace an XSLT this server created (the one an earlier call saved) with the code "
                         "generated now; build is then not needed.")] = None,
         include_xslt: Annotated[bool, Field(description="When saving, also return the code (to read it).")] = False,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (rules kept "
+                                                                 "as Unknown).")] = None,
 ) -> dict[str, Any]:
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
@@ -154,6 +157,19 @@ async def build_translation_xslt(
                                          "streams before write_documentation, for the values the events get.")
     saved = None
     if result['ok'] and (build or uuid):
+        kept = [r for r in mapping.events if r.allow_unknown]
+        if kept:
+            # Unknown says what happened is not known: the user agrees to that per rule, seeing what its records hold
+            # (a form when the client has them, so the model cannot agree for them).
+            sampled = {k['rule']: k for k in (result.get('sample_check') or {}).get('kept_unknown') or []}
+            details = {'rules kept as EventDetail/Unknown': [
+                f"{r.name}: {r.allow_unknown}" + (f" (sample: {sampled[r.name]['records']} records; {sampled[r.name]['sample']})"
+                                                  if r.name in sampled else ' (no sample records checked)') for r in kept]}
+            gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
+                                                   f"Keep {', '.join(r.name for r in kept)} as Unknown (what happened is "
+                                                   f"not known) in the saved XSLT", details, confirmation_id)
+            if gate:
+                return gate
         from tools.translation import create_xslt, update_xslt
         if uuid:
             saved = await update_xslt(ctx, uuid, result['xslt'], mapping=mapping)
@@ -302,7 +318,7 @@ async def draft_translation_mapping(
         ctx: Context,
         samples: Annotated[SampleTexts | None, Field(description="The sample files' text (every line), by "
                                                                                    "file name or as a list; not paths.")] = None,
-        source_name: Annotated[str, Field(description="The source, e.g. 'FortiOS firewall': names the system and generator "
+        source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller': names the system and generator "
                                                       "until the user confirms them.")] = '',
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,
         environment: Annotated[str | None, Field(description="EventSource/System/Environment, if the user has said, e.g. Prod.")] = None,

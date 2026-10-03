@@ -106,7 +106,8 @@ async def test_tools_read_the_sample_from_its_streams_instead_of_its_text():
         from utils.dsgen import SplitterSpec
         checked = await generation.build_translation_xslt(ctx, typo, stream_ids=[7],
                                                           splitter=SplitterSpec.model_validate(splitter['spec']))
-        assert any("'tiem'" in w for w in checked['warnings'])   # checked against the stream's records
+        # Checked against the stream's records: a near miss of a sample field is a problem, so nothing is generated.
+        assert any("'tiem'" in p and "did you mean ['time']" in p for p in checked['problems']) and not checked['ok']
     assert [c.args[1] for c in read.await_args_list] == [[7]] * 4
 
 
@@ -126,3 +127,24 @@ async def test_raw_streams_are_read_in_pages_up_to_the_limit():
         assert whole == text and not truncated and len(pages) > 1
         head, truncated = await streams.raw_text(stroom, 7, 300)
         assert truncated and text.startswith(head) and head.endswith('\n') and len(head) <= 300
+
+
+async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
+    from tools import translation
+    from utils.consent import ConsentStore
+    kept = mapping(events=[{'name': 'status', 'when': [{'field': 'action', 'equals': 'status'}],
+                            'allow_unknown': 'status lines carry no activity',
+                            'fields': [{'path': 'EventDetail/TypeId', 'value': 'status'},
+                                       {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]},
+                           mapping().events[-1].model_dump(exclude_none=True)])
+    ctx, (schema, instructions) = ctx_and_patches()
+    ctx.lifespan_context['consent'] = ConsentStore(use_elicitation=False)
+    with schema, instructions, patch.object(translation, 'create_xslt', AsyncMock(return_value={
+            'type': 'XSLT', 'uuid': 'x-1', 'name': 'N', 'version': 'v'})) as create:
+        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N')
+        assert asked['status'] == 'needs_confirmation' and not create.await_count
+        assert asked['details']['rules kept as EventDetail/Unknown'] == ['status: status lines carry no activity (no sample records checked)']
+        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', confirmation_id=asked['confirmation_id'])
+        assert done['saved']['uuid'] == 'x-1'
+        # Checking without saving asks nothing.
+        assert 'status' not in await generation.build_translation_xslt(ctx, kept)

@@ -139,8 +139,9 @@ The generated XSLT holds `analyze-string(message, regex)` in a variable per temp
 it. XPath regular expressions have no lookaround and no named groups; use `(?:...)` for groups that are not
 fields, and anchor the pattern. A record the pattern does not match gets no values from it, so its elements are
 left out; a rule can test that with `{"field": "ts", "present": false}` (and `drop` it, or map it to `Unknown`
-with `allow_unknown: true`: a rule with conditions that writes `Unknown` is refused without it, as the kind it
-singles out nearly always has an action element).
+with `allow_unknown` set to the reason, in the user's words: a rule that writes `Unknown` for sample records is
+refused without it, as the kind it singles out nearly always has an action element, and the user confirms the
+reason when the XSLT is saved, seeing what those records hold).
 
 ## Style
 

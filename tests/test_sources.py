@@ -137,7 +137,7 @@ MAPPING = {
                {'path': 'EventSource/User/Domain', 'field': 'user', 'transform': 'domain'},
                {'path': 'EventSource/User/UserDetails/Organisation', 'lookup': {'map': 'USER_TO_ORG', 'field': 'user', 'path': 'org'}},
                {'path': 'EventSource/User/Name', 'field': 'user', 'dictionary': 'User names', 'default': 'unknown'}],
-    'events': [{'name': 'vip', 'allow_unknown': True, 'when': [{'field': 'user', 'in_dictionary': 'VIP users'}],
+    'events': [{'name': 'vip', 'allow_unknown': 'a VIP list match has no action of its own', 'when': [{'field': 'user', 'in_dictionary': 'VIP users'}],
                 'fields': [{'path': 'EventDetail/TypeId', 'value': 'vip'}, {'path': 'EventDetail/Unknown/Data', 'data_name': 'u', 'field': 'user'}]},
                {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}, {'path': 'EventDetail/Unknown/Data', 'data_name': 'u', 'field': 'user'}]}]}
 RECORDS = """<records xmlns="records:2">
@@ -182,3 +182,57 @@ def test_source_rules_are_enforced_by_the_model():
         TranslationMapping.model_validate({**MAPPING, 'common': [{'path': 'EventSource/User/Name', 'value': 'x', 'transform': 'lower'}]})
     with pytest.raises(ValueError, match='exactly one of field or xpath for the key'):
         TranslationMapping.model_validate({**MAPPING, 'common': [{'path': 'EventSource/User/Name', 'lookup': {'map': 'M'}}]})
+
+
+def test_a_near_miss_of_a_sample_field_is_a_problem_and_a_field_nothing_like_is_a_warning():
+    # Haiku mapped srcip, dstport and msg (FortiOS names) over a CSV with src_ip, dst_port and message.
+    from utils.dsgen import SplitterSpec
+    csv = 'timestamp,src_ip,dst_port,message\n2026-10-01T09:00:12+10:00,192.0.2.10,443,allowed\n'
+    m = TranslationMapping.model_validate({'input': 'data_splitter', 'common': [
+        {'path': 'EventTime/TimeCreated', 'field': 'timestamp', 'time_format': "yyyy-MM-dd'T'HH:mm:ssXXX"},
+        {'path': 'EventSource/Client/IPAddress', 'field': 'srcip'},
+        {'path': 'EventSource/Device/HostName', 'field': 'appliance'}],
+        'events': [{'name': 'any', 'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}]}]})
+    records, _ = sample_records(m, csv, SplitterSpec.model_validate({'kind': 'delimited', 'delimiter': ',', 'header': True}))
+    check = check_mapping(m, records)
+    [problem] = check['problems']
+    assert problem.startswith("field 'srcip' (used for EventSource/Client/IPAddress)") and "did you mean ['src_ip']" in problem
+    assert any(w.startswith("field 'appliance'") for w in check['warnings'])   # may be in other data
+
+
+FIREWALL = ('timestamp,device,event_type,action,username,message\n'
+            '2026-10-01T09:00:12+10:00,FW-EDGE-01,TRAFFIC,ALLOW,,Outbound HTTPS allowed\n'
+            '2026-10-01T09:11:15+10:00,FW-EDGE-01,ADMIN,LOGIN_SUCCESS,admin,Administrator logged in via web console\n'
+            '2026-10-01T09:16:08+10:00,FW-EDGE-01,ADMIN,LOGOUT,admin,Administrator logged out\n'
+            '2026-10-01T09:17:24+10:00,FW-EDGE-01,SYSTEM,VPN_TUNNEL_DOWN,,Site-to-site VPN tunnel branch-01 went down\n')
+
+
+def firewall_mapping(**admin) -> TranslationMapping:
+    base = [{'path': 'EventTime/TimeCreated', 'field': 'timestamp', 'time_format': "yyyy-MM-dd'T'HH:mm:ssXXX"},
+            {'path': 'EventSource/Device/HostName', 'field': 'device'}, {'path': 'EventDetail/TypeId', 'field': 'action'}]
+    unknown = [{'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]
+    return TranslationMapping.model_validate({'input': 'data_splitter', 'common': base, 'events': [
+        {'name': 'traffic', 'when': [{'field': 'event_type', 'equals': 'TRAFFIC'}],
+         'fields': [{'path': 'EventDetail/Network/Permit/Source/Device/HostName', 'field': 'device'}]},
+        {'name': 'admin', 'when': [{'field': 'event_type', 'equals': 'ADMIN'}], 'fields': unknown, **admin},
+        {'name': 'other', 'fields': unknown}]})
+
+
+def test_the_records_rules_keep_as_unknown_are_named_by_what_they_hold():
+    # Haiku kept a firewall's ADMIN records (logins) and SYSTEM records as Unknown, through allow_unknown: true.
+    from utils.localcheck import rule_of
+    spec = SplitterSpec.model_validate({'kind': 'delimited', 'delimiter': ',', 'header': True})
+    m = firewall_mapping()
+    records, _ = sample_records(m, FIREWALL, spec)
+    assert [rule_of(m, r) for r in records] == ['traffic', 'admin', 'admin', 'other']
+    problems = check_mapping(m, records)['problems']
+    admin = next(p for p in problems if p.startswith('[admin]'))
+    assert 'keeps EventDetail/Unknown for 2 of the 4 sample records' in admin and 'action: LOGIN_SUCCESS, LOGOUT' in admin
+    assert 'username: admin' in admin and 'e.g. message: "Administrator logged in via web console"' in admin
+    other = next(p for p in problems if p.startswith('[other]'))
+    assert 'the rule for records no other rule matches' in other and 'VPN_TUNNEL_DOWN' in other and 'allow_unknown' in other
+    # With a reason, the rule's records are reported for the user to confirm instead.
+    kept = check_mapping(firewall_mapping(allow_unknown='admin console activity has no action element'), records)
+    assert not any(p.startswith('[admin]') for p in kept['problems'])
+    assert kept['kept_unknown'] == [{'rule': 'admin', 'reason': 'admin console activity has no action element',
+                                     'records': 2, 'sample': kept['kept_unknown'][0]['sample']}]

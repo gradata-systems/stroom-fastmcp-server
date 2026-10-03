@@ -179,6 +179,12 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
     if mapping.for_each:
         lines += [f'Each record holds several events: one per `{mapping.for_each}` item. Sources marked "of the record" '
                   f'read the record round the items.', '']
+    kept = [r for r in mapping.events if r.allow_unknown]
+    if kept:
+        lines += ['### Kept as Unknown', '']
+        lines += [f"- `{r.name}` ({' and '.join(condition_text(c) for c in r.when) or 'records no other rule matches'}): "
+                  f"{r.allow_unknown}" for r in kept]
+        lines.append('')
     if mapping.drop_when:
         lines += ['### Left untranslated', '']
         lines += [f"- {' and '.join(condition_text(c) for c in d.when)}: {d.reason}" for d in mapping.drop_when]

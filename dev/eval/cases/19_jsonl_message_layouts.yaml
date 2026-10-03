@@ -70,5 +70,7 @@ reference:
           - {path: EventDetail/Alert/Network/Destination/Device/IPAddress, field: peer}
           - {path: EventDetail/Alert/Data, data_name: tunnel, field: tunnel}
       - name: other
+        # The request: anything else is free text, kept as an event with the text.
+        allow_unknown: free text with no recognised layout, kept with its text as the request asks
         fields:
           - {path: EventDetail/Unknown/Data, data_name: severity, field: severity}

@@ -123,6 +123,98 @@ def _items_of(record: Any, path: str) -> list[Any]:
     return nodes
 
 
+_TOKEN = re.compile(r'^[A-Za-z][\w.:-]{0,39}$')
+
+
+def _holds(c: Any, record: Any, derived: set[str]) -> bool | None:
+    """Whether a field condition holds for a record, as the XSLT would test it; None when it cannot be told here (an
+    xpath, a dictionary, or a field an extraction produces)."""
+    if c.xpath is not None or c.in_dictionary is not None or c.field in derived or c.scope == 'record':
+        return None
+    value = _value_of(record, c.field)
+    if c.present is not None:
+        return bool(value and value.strip()) == c.present
+    if value is None:
+        return False
+    if c.equals is not None:
+        return value == c.equals
+    if c.one_of is not None:
+        return value in c.one_of
+    try:
+        return re.search(c.matches, value) is not None
+    except re.error:
+        return None
+
+
+def rule_of(mapping: TranslationMapping, record: Any) -> str | None:
+    """The rule a record falls into: a drop rule ('drop: reason'), an event rule's name, '' when none matches, or None
+    when a condition on the way cannot be told here."""
+    derived = {n for ex in mapping.extract for n in ex.names if n}
+    candidates = [(f'drop: {d.reason}', d.when) for d in mapping.drop_when] + [(r.name, r.when) for r in mapping.events]
+    for name, when in candidates:
+        tests = [_holds(c, record, derived) for c in when]
+        if any(t is None for t in tests):
+            return None
+        if all(tests):
+            return name
+    return ''
+
+
+def traits(records: list[Any]) -> str:
+    """What a set of records holds, for a person to judge: each field's distinct short, word-like values (kinds,
+    actions, levels, users), then an example of the first free-text field. Times, addresses and numbers are left out."""
+    fields: dict[str, list[str]] = {}
+    text: tuple[str, str] | None = None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for name, raw in record.items():
+            value = raw if isinstance(raw, str) else None
+            if not value or not value.strip():
+                continue
+            if _TOKEN.match(value):
+                seen = fields.setdefault(name, [])
+                if value not in seen:
+                    seen.append(value)
+            elif text is None and len(value.split()) > 2:
+                text = (name, value[:80])
+    parts = [f"{name}: {', '.join(values[:8])}{' ...' if len(values) > 8 else ''}" for name, values in list(fields.items())[:6]]
+    if text:
+        parts.append(f'e.g. {text[0]}: "{text[1]}"')
+    return '; '.join(parts)
+
+
+def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    """(problems, kept): sample records that rules writing EventDetail/Unknown catch. A rule without allow_unknown that
+    catches any is a problem naming what the records hold (the conditions' rule is refused by the generator too; the
+    rule for the rest is refused here); a rule with it is reported for the user to confirm."""
+    if mapping.for_each or not records:
+        return [], []
+    writes_unknown = {r.name: r for r in mapping.events
+                      if any(f.path.strip('/').startswith('EventDetail/Unknown') for f in r.fields)
+                      or (not r.drop and any(f.path.strip('/').startswith('EventDetail/Unknown') for f in mapping.common))}
+    caught: dict[str, list[Any]] = {}
+    for record in records:
+        name = rule_of(mapping, record)
+        if name in writes_unknown:
+            caught.setdefault(name, []).append(record)
+    problems, kept = [], []
+    for name, found in caught.items():
+        rule, held = writes_unknown[name], traits(found)
+        if rule.allow_unknown:
+            kept.append({'rule': name, 'reason': rule.allow_unknown, 'records': len(found), 'sample': held})
+        elif rule.when:
+            problems.append(f"[{name}] keeps EventDetail/Unknown for {len(found)} of the {len(records)} sample records: "
+                            f"{held}. Give them the action element these values describe, a rule per kind if they "
+                            f"differ (split on the field that tells them apart).")
+        else:
+            problems.append(f"[{name}] (the rule for records no other rule matches) writes EventDetail/Unknown for "
+                            f"{len(found)} of the {len(records)} sample records: {held}. Give them rules with the action "
+                            f"elements these values describe; only if none fits, set allow_unknown on this rule to the "
+                            f"reason, which the user confirms.")
+    return problems, kept
+
+
 def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, Any]:
     """Fields the mapping names that no sample record has (with close matches), and time formats the sample's
     values do not fit. Fields an extraction produces are known, not looked for."""
@@ -171,9 +263,17 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
             close = difflib.get_close_matches(name, seen, n=3, cutoff=0.6) if seen else []
             suggested.update(close)
             what = 'sample items' if pool is items else 'sample records'
-            warnings.append(f"field '{name}' (used for {used[0]}{' and more' if len(used) > 1 else ''}) is in none of "
-                            f"the {len(pool)} {what}" + (f"; did you mean {close}?" if close else '')
-                            + (f". Fields seen: {seen[:30]}" if seen and not close else ''))
+            message = (f"field '{name}' (used for {used[0]}{' and more' if len(used) > 1 else ''}) is in none of "
+                       f"the {len(pool)} {what}" + (f"; did you mean {close}?" if close else '')
+                       + (f". Fields seen: {seen[:30]}" if seen and not close else ''))
+            # A near miss of a field the sample has is a slip (srcip for src_ip, or names recalled from another
+            # source's logs), and its element would be empty in every event; with nothing close, the field may be
+            # one other data carries.
+            if close:
+                problems.append(message + " Use the sample's field names; a field only other data carries needs a "
+                                          "sample that has it.")
+            else:
+                warnings.append(message)
     for entry in entries:
         if not entry.time_format or not entry.field or entry.field in derived:
             continue
@@ -190,4 +290,7 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         warnings.append(f"fields in the sample that nothing reads: {unread[:12]}{' ...' if len(unread) > 12 else ''}: "
                         f"map each to the element that means it (a Data entry if nothing else fits), or leave it out on "
                         f"purpose.")
-    return {'records': len(records), 'problems': problems, 'warnings': warnings, 'fields_seen': seen[:60]}
+    unknown_problems, kept = unknown_coverage(mapping, records)
+    problems += unknown_problems
+    return {'records': len(records), 'problems': problems, 'warnings': warnings, 'fields_seen': seen[:60],
+            **({'kept_unknown': kept} if kept else {})}

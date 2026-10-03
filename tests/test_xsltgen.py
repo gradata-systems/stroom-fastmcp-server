@@ -246,7 +246,8 @@ def test_unknown_in_a_rule_with_conditions_is_a_problem_unless_allowed():
     result = generate(mapping(events=[kind, other]), SCHEMA, '4.1.0')
     assert not result['ok'] and result['problems'][0].startswith('[status] writes EventDetail/Unknown')
     assert 'allow_unknown' in result['problems'][0] and result['xslt'] is None
-    allowed = generate(mapping(events=[{**kind, 'allow_unknown': True}, other]), SCHEMA, '4.1.0')
+    assert any('takes the reason' in p for p in generate(mapping(events=[{**kind, 'allow_unknown': True}, other]), SCHEMA, '4.1.0')['problems'])
+    allowed = generate(mapping(events=[{**kind, 'allow_unknown': 'status lines carry no activity'}, other]), SCHEMA, '4.1.0')
     assert allowed['ok'] and not any('Unknown' in m for m in allowed['problems'] + allowed['warnings'])
 
 

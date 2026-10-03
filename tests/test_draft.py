@@ -18,13 +18,16 @@ INVENTORY = [{'field': 'timestamp', 'type': 'timestamp'}, {'field': 'device', 't
 
 def decided(mapping: dict) -> dict:
     """The draft as an agent leaves it once its placeholder kinds are decided; here, kept as Unknown on purpose."""
-    return {**mapping, 'events': [{**r, 'allow_unknown': True} if any('/Unknown/' in f['path'] for f in r.get('fields', []))
-                                  and r.get('when') else r for r in mapping['events']]}
+    return {**mapping, 'events': [{**r, 'allow_unknown': 'kept unknown for the test'}
+                                  if any('/Unknown/' in f['path'] for f in r.get('fields', [])) else r
+                                  for r in mapping['events']]}
 
 
 def only_placeholders(result: dict) -> bool:
     """The draft's only problems are its Unknown placeholders, a rule with conditions each."""
-    return bool(result['problems']) and all('writes EventDetail/Unknown' in p for p in result['problems'])
+    # The generator's, and with a sample the records each placeholder catches.
+    return bool(result['problems']) and all(('writes EventDetail/Unknown' in p or 'keeps EventDetail/Unknown' in p)
+                                            for p in result['problems'])
 
 
 def test_the_draft_is_a_valid_mapping_with_the_obvious_homes_and_a_rule_per_kind():

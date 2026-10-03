@@ -190,8 +190,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}): replace EventDetail/Unknown by the right action "
                      f"element for each (Authenticate, Network, Process, View, Create, Update, Delete, Alert, Send, Receive...) and "
                      f"move its Data entries to the elements that mean them; 'other' catches the rest. build_translation_xslt "
-                     f"refuses a rule with conditions that still writes Unknown, unless the rule says allow_unknown: true "
-                     f"because no action element fits.")
+                     f"refuses a rule that still writes Unknown for sample records, unless the rule's allow_unknown gives the "
+                     f"reason no action element fits, which the user then confirms.")
     else:
         notes.append("No field names the kind of event: every record is one 'other' event with Unknown/Data. Add rules "
                      "with conditions once you know how kinds are told apart.")

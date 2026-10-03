@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from lxml import etree
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from utils.eventschema import Child, EventSchema
 
@@ -147,9 +147,17 @@ class EventRule(BaseModel):
                                                                           "override common fields with the same path.")
     drop: bool = Field(False, description="True: records matching this rule are left untranslated on purpose "
                                           "(no Event, no warning), e.g. kinds set_shape_handling marked drop. No fields.")
-    allow_unknown: bool = Field(False, description="True only when no action element describes this kind of event, so "
-                                                   "EventDetail/Unknown is the right one; a rule with conditions that "
-                                                   "writes Unknown is otherwise a problem.")
+    allow_unknown: str | None = Field(None, description=(
+        "Only when no action element describes this kind of event, so EventDetail/Unknown is right: the reason, in the "
+        "user's words. It is kept in the XSLT and the documentation, and the user confirms it when the XSLT is saved. "
+        "Without it, a rule with conditions that writes Unknown is a problem, as is the rule for the rest when it "
+        "catches sample records."))
+
+    @field_validator('allow_unknown', mode='before')
+    @classmethod
+    def _reason(cls, value):
+        # allow_unknown: true has no reason, which the generator reports; false is no allowance.
+        return '' if value is True else None if value is False else value
 
 
 class DropRule(BaseModel):
@@ -695,14 +703,17 @@ class _Generator:
         self._root = root
         self._check_structure(rule.name, root, self.schema.event)
         detail = root.kids.get('EventDetail')
-        if rule.when and detail is not None and 'Unknown' in detail.kids and not rule.allow_unknown:
+        if detail is not None and 'Unknown' in detail.kids and rule.allow_unknown is not None and not rule.allow_unknown.strip():
+            self._note(self.problems, f"[{rule.name}] allow_unknown takes the reason no action element describes these "
+                                      f"records, as text (in the user's words), not true.")
+        if rule.when and detail is not None and 'Unknown' in detail.kids and rule.allow_unknown is None:
             # A catch-all rule (no conditions) may rightly say Unknown; a kind told apart by conditions has an action
             # element nearly always, and the draft's Unknown placeholders were being kept as they were.
             self._note(self.problems, f"[{rule.name}] writes EventDetail/Unknown, which says what happened is not known, "
                                       f"yet its conditions single these records out: use the action element that "
                                       f"describes them (Alert, Authenticate, Network, Process, Create, Update, Delete, "
-                                      f"View, ...), with its own child elements. Only if none fits, set allow_unknown: "
-                                      f"true on the rule.")
+                                      f"View, ...), with its own child elements. Only if none fits, set allow_unknown to "
+                                      f"the reason, in the user's words; they confirm it when the XSLT is saved.")
         source = root.kids.get('EventSource')
         acted = [f"{name}/User" for name, node in (detail.kids.items() if detail is not None else []) if 'User' in node.kids]
         if acted and (source is None or 'User' not in source.kids):
@@ -1018,6 +1029,9 @@ class _Generator:
                     holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
                     summary.append({'event': rule.name, 'when': when, 'dropped': True})
                 else:
+                    if rule.allow_unknown:
+                        reason = rule.allow_unknown.replace('--', '-')
+                        holder.append(etree.Comment(f' {rule.name}: EventDetail/Unknown on purpose: {reason} '))
                     event = etree.SubElement(holder, f'{{{EVT}}}Event')
                     if self.mark_rules:
                         event.append(etree.Comment(f'{RULE_MARK}{rule.name}'))

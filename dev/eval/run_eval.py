@@ -217,9 +217,9 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
         raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
         raw = raws[0]
-        generated = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(reference['mapping']),
-                                                            stream_ids=raws, splitter=splitter, build=build,
-                                                            name=f'{feed}-Events')
+        generated = await p2.agreed(generation.build_translation_xslt, ctx=ctx,
+                                    mapping=TranslationMapping.model_validate(reference['mapping']),
+                                    stream_ids=raws, splitter=splitter, build=build, name=f'{feed}-Events')
         if not generated['ok']:
             raise RuntimeError(f"mapping problems: {generated['problems']}")
         if generated.get('sample_check', {}).get('warnings'):
