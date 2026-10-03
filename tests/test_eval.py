@@ -75,3 +75,9 @@ def test_an_expected_path_may_leave_one_element_open():
         assert ev.has_path(event, 'EventDetail/Network/*/Source/Device/IPAddress')
         assert ev.has_path(event, 'EventDetail/Network/Open/Source/Device/IPAddress') == (action == 'Open')
         assert ev.path_values([event], 'EventDetail/Network/*/Source/Device/IPAddress') == {'192.0.2.1'}
+
+
+def test_a_case_number_names_that_case_only():
+    # '16' once also picked 07_syslog3164_sudo, whose name contains it.
+    assert [c['id'][:2] for c in ev.load_cases(['13', '16'])] == ['13', '16']
+    assert {c['id'][:2] for c in ev.load_cases(['json'])} >= {'02', '03', '04', '11', '13', '16', '18', '19'}

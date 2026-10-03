@@ -58,7 +58,8 @@ def load_cases(only: list[str] | None = None) -> list[dict[str, Any]]:
     for path in sorted(CASES.glob('*.yaml')):
         case = yaml.safe_load(path.read_text(encoding='utf-8'))
         case['id'] = path.stem
-        if not only or any(o in path.stem for o in only):
+        # A number names a case by its number (16 is 16_..., not 07_syslog3164_...); other text matches the name.
+        if not only or any(path.stem.split('_', 1)[0] == o if o.isdigit() else o in path.stem for o in only):
             cases.append(case)
     return cases
 
