@@ -40,9 +40,12 @@ def test_elastic_plan_renders_a_nested_template_and_a_json_xml_xslt():
         'event.outcome': 'boolean', 'source.ip': 'ip'}
     output = run(plan.xslt())
     assert '<number key="StreamId">7</number>' in output
-    assert '<string key="user.name">alice</string>' in output
-    assert '<boolean key="event.outcome">false</boolean>' in output
-    assert 'source.ip' not in output  # absent in the event, so left out rather than written empty
+    # Structure kept: dotted names become nested objects, not flat "user.name" keys.
+    assert '<map key="user"><string key="name">alice</string></map>' in output
+    assert '<map key="event"><boolean key="outcome">false</boolean></map>' in output
+    assert 'user.name' not in output
+    # Absent in the event, so left out rather than written empty, and so is the object holding only it.
+    assert 'key="source"' not in output and 'key="ip"' not in output
 
 
 def test_lucene_plan_maps_keywords_to_text_with_keyword_analyzer():
@@ -210,3 +213,35 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
     assert result['hint'].startswith("No example was given: ask the user for the index template (or an index's "
                                      "mapping) a sibling discovery index uses")
     assert 'check_index_template with dev_tools' in result['hint']
+
+
+
+def test_flat_dotted_keys_only_when_the_template_says_so_and_a_value_cannot_also_be_an_object():
+    fields = FIELDS[:4]
+    flat = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields, nest=False)
+    assert '<string key="user.name">alice</string>' in run(flat.xslt())
+    clash = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp',
+                      fields=fields + [PlannedField(name='user', type='keyword', source='EventSource/User/Id')])
+    assert any("'user' is a value and also the object holding ['user.name']" in p for p in clash.required())
+
+
+def test_a_field_starting_with_an_underscore_is_reported_as_dropped():
+    fields = FIELDS[:3] + [PlannedField(name='meta._source_host', type='keyword', source='EventSource/Device/HostName')]
+    plan = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields)
+    assert any("['meta._source_host']: Stroom's Elasticsearch indexing filter drops fields" in p for p in plan.required())
+
+
+def test_discovery_keys_stroom_or_elasticsearch_would_lose_are_renamed():
+    from utils.fieldplan import Discovery
+    raw = ('<array xmlns="http://www.w3.org/2013/XSL/json"><map><string key="ts">t</string><string key="_id">s</string>'
+           '<string key="">blank</string><number key="a..b">2</number><map key="deep"><string key="_x">in</string></map>'
+           '<string key="StreamId">theirs</string></map></array>')
+    plan = FieldPlan.for_discovery('d', Discovery(timestamp_field='ts'))
+    xslt = plan.xslt().replace('stroom:stream-id()', '7').replace('stroom:record-no()', '1')
+    with PySaxonProcessor(license=False) as proc:
+        output = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt).transform_to_string(
+            xdm_node=proc.parse_xml(xml_text=raw))
+    for kept in ('<string key="id_original">s</string>', '<string key="empty_key">blank</string>',
+                 '<number key="a.b">2</number>', '<map key="deep"><string key="x_original">in</string></map>',
+                 '<string key="StreamId_original">theirs</string>', '<number key="StreamId">7</number>'):
+        assert kept in output, kept

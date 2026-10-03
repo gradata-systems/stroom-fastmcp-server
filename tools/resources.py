@@ -131,7 +131,12 @@ Stage 1, events:
 3. Text formats need a Data Splitter (DSParser.textConverter): build_data_splitter with the sample streams infers
    the spec and runs it until every line parses; save_text_converter saves it. XML fragments need the wrapper
    (xmlFragmentParser.textConverter). JSON and single-document XML need none: the JSONParser or XMLParser reads them.
-4. find_documents (content=...) for existing XSLTs to reuse. draft_translation_mapping with the sample streams gives a
+4. find_pipeline_templates stage=translation; describe_template on the best candidate. Its shared_xslt lists the
+   shared XSLTs (xsl:import, found by name) its other pipelines' XSLTs use: each named template they call, where (at,
+   e.g. EventSource/Device or Meta), what it writes and reads (stroom:meta) and the parameters they pass. Use the same
+   ones: the mapping's shared entries (href, template, at, with_params), and map nothing below those elements, as
+   the shared template writes them (twice fails validation). find_documents (content=...) for other XSLTs to reuse.
+   draft_translation_mapping with the sample streams gives a
    mapping to edit (its notes say what to decide: the action element per kind of event, System Name, Environment, a
    time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams, splitter=the spec) with
    it: which input field or constant goes to which event-logging path, one rule per kind of event, any_of where files
@@ -139,8 +144,7 @@ Stage 1, events:
    reference data. Give it build and name: it saves the XSLT with the mapping (kept with it, so the documentation is
    generated from it) and returns the document, not the code. Fix reported problems in the mapping and call again
    with uuid= the saved XSLT; hand-edit only what a mapping cannot express.
-5. find_pipeline_templates stage=translation; describe_template on the best candidate to see how this environment
-   specialises it. create_pipeline from it (with the pipeline_properties build_translation_xslt returned, e.g.
+5. create_pipeline from that template (with the pipeline_properties build_translation_xslt returned, e.g.
    jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
@@ -155,19 +159,23 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
 7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch) and the Stroom pipeline
    template. get_field_conventions; ask the user which convention to follow. For Elasticsearch, find_elastic_clusters,
    and ask the user for an example: the Elasticsearch index template a sibling source's index uses (GET
-   _index_template/<name>), or an existing index's mapping (GET <index>/_mapping), and the component templates it
-   is composed of (GET _component_template/<name>). The new index's template is built from them.
+   _index_template/<name>), or an existing index's mapping (GET <index>/_mapping), and, only if it lists any in
+   composed_of, those component templates (GET _component_template/<name>). Many templates have none. The new
+   index's template is built from them.
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
    name (following the environment's versioned naming); create_index_doc once confirmed.
-9. draft_index_mapping (Elasticsearch: with the user's example and component templates, so field names follow
+9. describe_template on the indexing template: if its shared_xslt shows sibling indexing XSLTs calling shared
+   templates (a guid field, say), pass them to draft_index_mapping as shared; the XSLT calls them, not writing those
+   fields itself.
+   draft_index_mapping (Elasticsearch: with the user's example and any component templates, so field names follow
    theirs, e.g. User.Id for the user, TypeId for the event type; show its from_example notes); create_index_doc
    (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is generated from the plan);
    create_indexing_pipeline; step_sample on the Events streams.
-10. Elasticsearch: propose_index_template with the user's example and component templates builds the index
+10. Elasticsearch: propose_index_template with the user's example and any component templates builds the index
     template for the new index, following their naming, field type and structure conventions (its from_example
     notes say what came from where; names unlike the example's are renamed in the field plan, then build again).
     When it fits the documents, the user confirms it as shown. If they correct it instead, check_index_template
-    with their version (and the component templates): when it fits, they confirm it there; when it does not, show
+    with their version (and any component templates): when it fits, they confirm it there; when it does not, show
     the pipeline changes it needs and ask whether to make them (update the indexing XSLT, step again, check again)
     or to change the index template. The confirmed template is kept with the pipeline.
 11. Elasticsearch: give the user the agreed template's dev_tools request for the cluster admin to commit to the
@@ -244,15 +252,16 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    pipeline template, the field holding the event time{f' ({timestamp_field})' if timestamp_field else ''} (and its
    format, if it is not ISO 8601 or epoch milliseconds), any stream meta to add (describe_stream lists a stream's
    attributes), any fields to leave out (secrets, tokens), and an example Elasticsearch index template from a
-   sibling index, for its settings and component templates. If they don't know the time field, read one record
+   sibling index, for its settings (and component templates, if it has any). If they don't know the time field, read one record
    (read_stream), no more.
 3. draft_index_mapping backend=elasticsearch discovery={{timestamp_field, timestamp_format?, meta?, drop?}}: its XSLT
    copies every record as it is, adding StreamId, EventId (the record number) and @timestamp, and parses a string
    holding a JSON object into a sibling <field>_json. save_xslt index_plan=plan with no code;
    create_indexing_pipeline from the discovery template; step_sample on the raw streams: the documents show what
    the source holds.
-4. propose_index_template with the plan, the raw streams and the user's example index template and its component
-   templates (as GET _index_template/<name> and GET _component_template/<name> return them): a permissive template
+4. propose_index_template with the plan, the raw streams and the user's example index template, and its component
+   templates if it is composed of any (as GET _index_template/<name> and GET _component_template/<name> return
+   them): a permissive template
    (dynamic mapping, strings as keywords, a total-fields limit, malformed values ignored) with the example's
    settings and components. Without an example it is not offered to agree: ask for one first. The user confirms it, or corrects it (check_index_template). Give them its dev_tools
    for the cluster admin; once they say it is committed, create_processor_filter on the raw streams (its approval

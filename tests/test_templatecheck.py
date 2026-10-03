@@ -368,3 +368,19 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
                                             confirmation_id=asked['confirmation_id'])
         assert json.loads(read_agreed_template(saved['description'])['dev_tools'].split('\n', 1)[1])['priority'] == 500
         assert saved['description'].count('agreed index template (') == 1
+
+
+def test_the_users_own_fields_are_matched_by_path_before_convention_names():
+    # The user's example has user.id, user.name and user.emailAddress: the id is user.id, though ECS (the plan's
+    # convention) calls it user.name; the name and email, which the convention leaves out, are added from the sample.
+    from utils.templatecheck import names_from_example, read_mapping_fields
+    plan = [{'name': 'StreamId', 'type': 'id', 'source': '@StreamId'},
+            {'name': 'user.name', 'type': 'keyword', 'source': 'EventSource/User/Id'}]
+    example = {'template': {'mappings': {'properties': {'user': {'properties': {
+        'id': {'type': 'keyword'}, 'name': {'type': 'keyword'}, 'emailAddress': {'type': 'keyword'}}}}}}}
+    fields, notes = names_from_example(plan, read_mapping_fields(example), CONVENTION_NAMES,
+                                       ['EventSource/User/Id', 'EventSource/User/Name', 'EventSource/User/EmailAddress',
+                                        'EventDetail/Authenticate/User/Id'])
+    assert {f['source']: f['name'] for f in fields} == {
+        '@StreamId': 'StreamId', 'EventSource/User/Id': 'user.id', 'EventSource/User/Name': 'user.name',
+        'EventSource/User/EmailAddress': 'user.emailAddress'}

@@ -235,6 +235,17 @@ def unique_name(base: str, taken: set[str], naming: str) -> str:
     return base if base not in taken else next(f'{base}{sep}{n}' for n in range(2, 1000) if f'{base}{sep}{n}' not in taken)
 
 
+class SharedTemplate(BaseModel):
+    """A named template from a shared XSLT, called where the environment's other XSLTs call it."""
+    href: str = Field(description="The shared XSLT document, as the other pipelines import it, e.g. 'Common-Event-V1'.")
+    template: str = Field(description="The named template to call, e.g. 'eventSourceDevice'.")
+    at: str = Field(description="The element it writes, as a path below Event, e.g. 'EventSource/Device' or 'Meta' "
+                                "(describe_template's shared_xslt gives it). Nothing below it is mapped.")
+    with_params: dict[str, str] = Field(default_factory=dict, description=(
+        "Parameters to pass, name -> XPath read from the record (or item), as the other XSLTs pass them "
+        "(shared_xslt's with_params), e.g. {'ip': \"data[@name='ip']/@value\"}."))
+
+
 class TranslationMapping(BaseModel):
     input: Literal['data_splitter', 'json', 'xml', 'xml_fragments'] = Field(
         description="What the XSLT reads: data_splitter (Event Data (Text)), json (JSONParser), xml (the source XML, "
@@ -269,6 +280,10 @@ class TranslationMapping(BaseModel):
     unmatched: Literal['warn', 'skip'] = Field('warn', description="Records no rule matches: log a warning, or skip.")
     style: XsltStyle = Field(default_factory=XsltStyle, description="How the XSLT is written: naming, and when "
                                                                     "to use variables and xsl:maps.")
+    shared: list[SharedTemplate] = Field(default_factory=list, description=(
+        "Named templates from shared XSLTs (xsl:import) that the environment's other translations call, e.g. one "
+        "writing EventSource/Device from stream meta: the XSLT imports them and calls each in its element's place, "
+        "in every event. Map nothing below those elements; the shared template writes them."))
 
 
 def is_call(expr: str) -> bool:
@@ -321,6 +336,7 @@ class _Node:
     leaf: FieldMapping | None = None
     data: list[tuple[Child, FieldMapping]] = field(default_factory=list)
     repeat: FieldMapping | None = None       # this element is written once per value of the entry's input
+    shared: 'SharedTemplate | None' = None   # written by a shared XSLT's named template, called here
 
 
 class _Generator:
@@ -699,6 +715,27 @@ class _Generator:
                 self._note(self.problems, f"[{rule.name}] {anchor.path} is written once per value of "
                                           f"{anchor.repeat.field or anchor.repeat.xpath or anchor.repeat.any_of}; map "
                                           f"nothing else below it (found {[n.path for n in leaves]})")
+        for use in self.m.shared:
+            # The shared template writes the element: it is called in its place, and nothing below it is mapped,
+            # which would write it twice (or a second element the schema allows once).
+            try:
+                chain = self.schema.resolve(use.at.strip('/'))
+            except ValueError as e:
+                self._note(self.problems, f"shared {use.template} ({use.href}): at {use.at}: {e}")
+                continue
+            node = self._walk(root, chain, f"shared {use.template}")
+            if node is None:
+                continue
+            mapped = [n.path for n in self._nodes(node) if n is not node and (n.leaf is not None or n.data)] + \
+                ([node.path] if node.leaf is not None or node.data else [])
+            if mapped or node.shared is not None:
+                self._note(self.problems, f"[{rule.name}] {use.at} is written by the shared template {use.template} "
+                                          f"({use.href}), so it must not be mapped as well: it would be written twice, "
+                                          f"which fails schema validation. Remove "
+                                          f"{mapped or ['the other shared template for it']} from the mapping, or drop "
+                                          f"the shared template.")
+                continue
+            node.shared = use
         self._conditional: list[str] = []
         self._root = root
         self._check_structure(rule.name, root, self.schema.event)
@@ -777,7 +814,7 @@ class _Generator:
         return node
 
     def _check_structure(self, rule: str, node: _Node, decl) -> None:
-        if node.leaf is not None:
+        if node.leaf is not None or node.shared is not None:
             return
         allowed = self.schema.children(decl)
         chosen: dict[int, list[str]] = {}
@@ -802,6 +839,8 @@ class _Generator:
 
     # --- XSLT ---
     def test_of(self, node: _Node) -> str | None:
+        if node.shared is not None:
+            return None     # the shared template decides; its parent is written whatever the record holds
         if node.leaf is not None:
             return self.leaf_test(node.leaf)
         tests = [self.test_of(k) for k in node.kids.values()] + [self.leaf_test(e) for _, e in node.data]
@@ -825,6 +864,10 @@ class _Generator:
                     element.set('Value', entry.value)
                 else:
                     etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=self.value_expr(entry))
+            elif item.shared is not None:
+                call = etree.SubElement(parent, f'{{{XSL}}}call-template', name=item.shared.template)
+                for name, select in item.shared.with_params.items():
+                    etree.SubElement(call, f'{{{XSL}}}with-param', name=name, select=select)
             elif item.repeat is not None:
                 # One element per value: the loop stands in for the guard, and the leaf below reads the current value.
                 loop = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(item.repeat))
@@ -857,6 +900,8 @@ class _Generator:
     @staticmethod
     def shareable(node: _Node) -> bool:
         """Elements with children, or leaves read from the record; constant leaves aren't worth a template."""
+        if node.shared is not None:      # already a call: not wrapped in another template
+            return False
         return node.leaf is None or node.leaf.value is None
 
     def key(self, node: _Node) -> str:
@@ -963,7 +1008,8 @@ class _Generator:
             # The element's name, or as much of its path as tells it apart, e.g. authenticate_user; variants
             # of one path are numbered.
             naming = self.m.style.naming
-            taken = {name for name, _ in self._templates.values()}
+            # Not a shared template's name either: the importing XSLT's own template would override it.
+            taken = {name for name, _ in self._templates.values()} | {u.template for u in self.m.shared}
             parts = node.path.split('/')[1:]
             names = [style_name('-'.join(parts[-n:]), naming) for n in range(1, len(parts) + 1)]
             name = next((n for n in names if n not in taken), None) or unique_name(names[-1], taken, naming)
@@ -998,6 +1044,8 @@ class _Generator:
                  **({'map': MAP_NS} if uses_dict_map else {})}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
+        for href in dict.fromkeys(u.href for u in m.shared):     # imports come first in a stylesheet
+            etree.SubElement(sheet, f'{{{XSL}}}import', href=href)
         sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else '') + (' map' if uses_dict_map else ''))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)

@@ -69,3 +69,25 @@ def test_stepping_fatal_errors_are_blocking():
 
 def test_clean_when_no_markers():
     assert triage([], RULES, set())['verdict'] == 'clean'
+
+
+def test_an_elasticsearch_bulk_failure_is_split_into_the_documents_it_rejected():
+    # As Stroom reported it: one FATAL message holding the whole bulk response; one of three documents rejected.
+    import json
+    from pathlib import Path
+    from utils.triage import ErrorRules, marker, triage
+    response = {'errors': True, 'items': [
+        {'create': {'_id': 'a', 'status': 201, 'result': 'created'}},
+        {'create': {'_id': 'b', 'status': 400, 'error': {
+            'type': 'document_parsing_exception',
+            'reason': '[1:117] object mapping for [user] tried to parse field [user] as object, but found a concrete value'}}},
+        {'create': {'_id': 'c', 'status': 201, 'result': 'created'}}], 'took': 600}
+    rules = ErrorRules.load(Path(__file__).parents[1] / 'error_rules.yaml')
+    result = triage([marker('FATAL', 'elasticIndexingFilter',
+                            f'Bulk indexing request failed: BulkResponse: {json.dumps(response)}')],
+                    rules, {'elasticIndexingFilter'})
+    [group] = result['groups']
+    assert result['verdict'] == 'blocking' and group['count'] == 1
+    assert group['examples'][0]['message'].startswith(
+        'Elasticsearch rejected document 2 of 3 in a bulk request (document_parsing_exception): ')
+    assert group['reason'].startswith('A field is an object in some records and a plain value in others')

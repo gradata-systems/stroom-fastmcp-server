@@ -202,7 +202,9 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         pipelines.append({**d, 'stage': shape['stage'], 'parser': shape.get('parser'), 'stepped': await stepped_clean(ctx, d),
                           'missing': missing})
     translation = [p for p in pipelines if p['stage'] == 'translation']
-    indexing = [p for p in pipelines if p['stage'] == 'indexing']
+    # A discovery build indexes its raw streams as they are: no events pipeline, its discovery pipeline indexes.
+    discovery = bool([p for p in pipelines if p['stage'] == 'discovery']) and not translation
+    indexing = [p for p in pipelines if p['stage'] in ('indexing', 'discovery')]
     documented = {d['name'] for d in by_type.get('Documentation', [])}
     events = []
     for feed in by_type.get('Feed', []):
@@ -228,15 +230,19 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'index_documented': bool(indexing) and all(p['name'] in documented for p in indexing),
         'promoted': False,
     }
+    not_needed = {'converter'} | ({'converter', 'translation', 'pipeline', 'stepped', 'processed', 'validated',
+                                   'documented'} if discovery else set())
     steps = []
     for item in checklist():
         state = done.get(item['step'])
-        steps.append({**item, 'state': 'done' if state else 'not needed' if state is None and item['step'] == 'converter'
+        steps.append({**item, 'state': 'not needed' if discovery and item['step'] in not_needed else 'done' if state
+                      else 'not needed' if state is None and item['step'] in not_needed
                       else 'not recorded' if state is None else 'to do'})
     pending = [s for s in steps if s['state'] == 'to do']
     nxt = pending[0] if pending else None
     call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
-                           [m['id'] for m in raw], events[:20], translation[0]['uuid'] if translation else None,
+                           [m['id'] for m in raw], [m['id'] for m in raw] if discovery else events[:20],
+                           translation[0]['uuid'] if translation else None,
                            indexing[0]['uuid'] if indexing else None)
     return {
         'build': build,

@@ -417,3 +417,60 @@ def test_an_action_user_without_the_acting_user_and_unread_extractions_are_warni
     fine = mapping(extract=[{'field': 'msg', 'regex': r'^(\S+)$', 'names': ['who']}],
                    events=[{'name': 'logon', 'fields': LOGON[:2] + [{'path': 'EventDetail/Authenticate/User/Id', 'field': 'who'}]}])
     assert not any('EventSource/User' in w or 'nothing reads' in w for w in generate(fine, SCHEMA, '4.1.0')['warnings'])
+
+
+SHARED_DEVICE = """<xsl:stylesheet xmlns="event-logging:3" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
+  <xsl:template name="eventSourceDevice">
+    <Device><HostName>from-meta</HostName></Device>
+  </xsl:template>
+  <xsl:template name="eventMeta">
+    <Meta><Source><Type>stream</Type><Id>guid-1</Id></Source></Meta>
+  </xsl:template>
+</xsl:stylesheet>"""
+
+
+def test_shared_templates_are_imported_and_called_in_their_elements_place():
+    base = [e for e in BASE if not e['path'].startswith('EventSource/Device')]
+    shared = [{'href': 'Common-Event-V1', 'template': 'eventSourceDevice', 'at': 'EventSource/Device'}]
+    result = generate(mapping(common=base, shared=shared), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    sheet = etree.fromstring(result['xslt'].encode())
+    ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
+    assert etree.QName(sheet[0]).localname == 'import' and sheet[0].get('href') == 'Common-Event-V1'
+    assert len(sheet.findall(".//xsl:call-template[@name='eventSourceDevice']", ns)) == 1
+    assert sheet.find('.//e:Device', ns) is None
+    # Run with the shared XSLT beside it, as Stroom resolves the import by name: one Device, in its place.
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        (Path(folder) / 'Common-Event-V1').write_text(SHARED_DEVICE, encoding='utf-8')
+        main = Path(folder) / 'main.xsl'
+        main.write_text(result['xslt'], encoding='utf-8')
+        with PySaxonProcessor(license=False) as proc:
+            executable = proc.new_xslt30_processor().compile_stylesheet(stylesheet_file=str(main))
+            events = etree.fromstring(executable.transform_to_string(xdm_node=proc.parse_xml(xml_text=RECORDS)).encode())
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    for event in events.findall('e:Event', ns):
+        assert [etree.QName(c).localname for c in event.find('e:EventSource', ns)][:4] == ['System', 'Generator', 'Device', 'User'][:len(event.find('e:EventSource', ns))]
+        assert len(event.findall('e:EventSource/e:Device', ns)) == 1
+        assert event.findtext('e:EventSource/e:Device/e:HostName', namespaces=ns) == 'from-meta'
+
+
+def test_an_element_a_shared_template_writes_cannot_be_mapped_too():
+    shared = [{'href': 'Common-Event-V1', 'template': 'eventSourceDevice', 'at': 'EventSource/Device'}]
+    result = generate(mapping(shared=shared), SCHEMA, '4.1.0')     # BASE maps EventSource/Device/HostName
+    assert not result['ok']
+    assert any('EventSource/Device is written by the shared template eventSourceDevice (Common-Event-V1), so it must '
+               'not be mapped as well' in p and 'Event/EventSource/Device/HostName' in p for p in result['problems'])
+    nowhere = generate(mapping(shared=[{'href': 'C', 'template': 't', 'at': 'EventSource/Nowhere'}]), SCHEMA, '4.1.0')
+    assert any(p.startswith('shared t (C): at EventSource/Nowhere') for p in nowhere['problems'])
+
+
+def test_a_shared_template_at_event_level_and_generated_names_avoid_shared_ones():
+    shared = [{'href': 'Common-Event-V1', 'template': 'event_source', 'at': 'Meta'}]
+    result = generate(mapping(shared=shared), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    sheet = etree.fromstring(result['xslt'].encode())
+    ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform'}
+    named = {t.get('name') for t in sheet.findall('xsl:template[@name]', ns)}
+    # The generator's own EventSource template is not named event_source: that would override the shared one.
+    assert 'event_source' not in named and len(sheet.findall(".//xsl:call-template[@name='event_source']", ns)) == 2

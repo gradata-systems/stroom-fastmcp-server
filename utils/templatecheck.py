@@ -212,13 +212,12 @@ def _segments(source: str) -> list[str]:
 
 
 def _match(source: str, example: dict[str, dict[str, Any]], known: set[str]) -> str | None:
-    """The example field that holds this event-logging path: one a convention names for the path, else one whose
-    name is the path's trailing elements run together (User.Id, UserId <- EventSource/User/Id; TypeId <-
-    EventDetail/TypeId), longest first. A single generic element (Id, Name) is not enough on its own."""
+    """The example field that holds this event-logging path: one whose name is the path's trailing elements run
+    together (user.id, User.Id, UserId <- EventSource/User/Id; TypeId <- EventDetail/TypeId), longest first, else
+    one a convention names for the path (ECS's user.name for the user id). The path's own elements come first: an
+    example with user.id and user.name maps the id to user.id, not to the convention's user.name. A single generic
+    element (Id, Name) is not enough on its own."""
     leaves = [f for f, spec in example.items() if 'properties' not in spec and spec.get('type') != 'object']
-    for name in leaves:
-        if name in known:
-            return name
     parts = _segments(source)
     by_squash = {}
     for name in leaves:
@@ -230,7 +229,7 @@ def _match(source: str, example: dict[str, dict[str, Any]], known: set[str]) -> 
         hit = by_squash.get(_squash(''.join(run)))
         if hit:
             return hit
-    return None
+    return next((name for name in leaves if name in known), None)
 
 
 def _words(part: str) -> list[str]:

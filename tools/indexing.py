@@ -22,9 +22,11 @@ from tools.templates import _shape
 from utils.consent import consent_from
 from utils.fielddoc import index_field_mapping_markdown
 from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField
+from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from
+from utils.sharedxslt import json_values
 from utils.templatecheck import (compare, compose, from_example, json_xml_documents, names_from_example,
                                  parse_component_templates, read_mapping_fields,
                                  parse_template)
@@ -105,7 +107,11 @@ async def draft_index_mapping(
             description="Elasticsearch: the user's example index template or index mapping (as for "
                         "propose_index_template); field names then follow it.")] = None,
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="The component templates the example is composed_of, as the user gave them.")] = [],
+            description="Only if the example lists any in composed_of: those component templates, as the user gave "
+                        "them.")] = [],
+        shared: Annotated[list[SharedTemplate] | str, ONE_OR_MORE, Field(
+            description="Named templates from shared XSLTs that sibling indexing XSLTs call (describe_template's "
+                        "shared_xslt): each writes a field (at, e.g. 'guid'), which the XSLT then does not write.")] = [],
         discovery: Annotated[Discovery | None, Field(
             description="A discovery index instead: raw JSON indexed as it is into Elasticsearch, with no convention "
                         "and no Events. Give what the user confirmed: the timestamp field, any stream meta to add, "
@@ -139,7 +145,7 @@ async def draft_index_mapping(
             fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
         else:
             unused.append(path)
-    example_notes = []
+    example_notes, nest = [], True
     if example_template:
         try:
             _, example = parse_template(example_template)
@@ -155,18 +161,38 @@ async def draft_index_mapping(
         named, example_notes = names_from_example(
             [f.model_dump() for f in fields], read_mapping_fields(composed), known, sorted(p for p in populated if populated[p]))
         fields = [PlannedField(**f) for f in named]
+        # Dotted names are written as nested objects, unless the example stores them as flat keys.
+        if ((composed.get('template') or {}).get('mappings') or {}).get('subobjects') is False:
+            nest = False
+            example_notes.append('flat dotted keys ("user.id"), as the example sets subobjects: false')
     fields += [f for f in extra_fields if f.name not in {x.name for x in fields}]
     time_field = next((f.name for f in fields if f.source == 'EventTime/TimeCreated'), 'EventTime')
     if backend == 'elasticsearch' and not any(f.name == '@timestamp' for f in fields):
         fields.append(PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'))
         time_field = '@timestamp'
-    plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when)
+    stroom = gateway_from(ctx)
+    for use in shared:
+        # The shared template writes the fields: they stay in the plan (the index maps them) but the XSLT calls the
+        # template instead of writing them, so each is written once. Which fields, read from the shared XSLT itself,
+        # found by name as Stroom resolves the import.
+        found = [v['docRef'] for v in (await stroom.find_documents(use.href, ['XSLT'], 20)).get('values') or []
+                 if v['docRef'].get('name') == use.href]
+        values = json_values((await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') or '', use.template)             if found else {}
+        values = {k: v for k, v in values.items() if k == use.at or k.startswith(use.at + '.')} or {use.at: 'string'}
+        for name, element in values.items():
+            if not any(f.name == name for f in fields):
+                fields.append(PlannedField(name=name, type={'number': 'long', 'boolean': 'boolean'}.get(element, 'keyword'),
+                                           source=f'shared:{use.template}'))
+        example_notes.append(f"{sorted(values)}: written by the shared template {use.template} ({use.href})"
+                             + ('' if found else '; not found as an XSLT document, so typed as a keyword'))
+    plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
+                     nest=nest, shared=list(shared))
     rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
     unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
     return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
-            **({'from_example': example_notes} if example_template else {}),
+            **({'from_example': example_notes} if example_template or shared else {}),
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
                     "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
                     "write_documentation generates the Field mapping section."}
@@ -576,7 +602,7 @@ async def propose_index_template(
                         "_index_template/<name>, or a Dev Tools request), or an existing index's mapping (GET "
                         "<index>/_mapping). Ask the user for it: the final template follows it.")] = None,
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="The component templates the example is composed_of, as the user gave them (GET "
+            description="Only if the example lists any in composed_of: those component templates, as the user gave them (GET "
                         "_component_template/<name>, or PUT _component_template/<name> {...}).")] = [],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
@@ -585,7 +611,7 @@ async def propose_index_template(
     """
     Build the final Elasticsearch index template (not a Stroom pipeline template) for the indexing pipeline's
     destination index, for the cluster admin to apply: from the user's example index template or mapping and
-    the component templates it is composed of, following their conventions: their settings and composed_of,
+    any component templates it is composed of, following their conventions: their settings and composed_of,
     the new index's own pattern, fields they map left as they map them, new fields mapped in their style for
     the type (keyword ignore_above, text sub-fields, date formats), and names unlike theirs reported to rename
     in the field plan. Without an example, from the field plan alone. Checked against the documents the
@@ -646,7 +672,7 @@ async def check_index_template(
                                                    "<index>/_mapping) as the example.")],
         events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="The component templates the index template is composed_of, as the user gave them: each a Dev "
+            description="Only if the index template lists any in composed_of: those component templates, as the user gave them: each a Dev "
                         "Tools request (PUT _component_template/name {...}) or GET _component_template output.")] = [],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,

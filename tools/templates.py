@@ -277,6 +277,49 @@ async def find_similar_translations(
     return {'text': text, 'xslts': matches[:limit]}
 
 
+async def shared_xslt_usage(ctx: Context, pipelines: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    """The shared XSLTs (xsl:import / xsl:include) the pipelines' own XSLTs use: for each named template called,
+    where (the element it writes, below Event or the document map) and by which pipelines."""
+    from tools.pipelines import translation_docs
+    from utils.sharedxslt import describe, imports_of, usage
+    stroom = gateway_from(ctx)
+    texts: dict[str, str | None] = {}
+    docs: dict[str, dict[str, Any]] = {}
+
+    async def shared(href: str) -> str | None:
+        # Stroom resolves an import's href to the XSLT document of that name: read it the same way.
+        if href not in texts:
+            found = [v['docRef'] for v in (await stroom.find_documents(href, ['XSLT'], 20)).get('values') or []
+                     if v['docRef'].get('name') == href]
+            texts[href] = (await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') if found else None
+            if found:
+                docs[href] = {'uuid': found[0]['uuid'], 'name': href, **describe(texts[href])}
+        return texts[href]
+    seen: dict[tuple, dict[str, Any]] = {}
+    for pipeline in pipelines[:limit]:
+        try:
+            layers = await stroom.pipeline_layers(pipeline['uuid'])
+        except ToolError:
+            continue
+        for entry in translation_docs(pipeline['uuid'], layers):
+            if entry['inherited_from_template'] or entry['doc'].get('type') != 'XSLT':
+                continue
+            text = (await stroom.get_doc('XSLT', entry['doc']['uuid'])).get('data') or ''
+            hrefs = imports_of(text)
+            if not hrefs:
+                continue
+            for use in usage(text, {h: await shared(h) for h in hrefs}):
+                key = (use['href'], use.get('template'), tuple(use.get('at') or []))
+                row = seen.setdefault(key, {**{k: v for k, v in use.items() if k != 'within'}, 'used_by': []})
+                row['used_by'].append(pipeline['name'])
+    for row in seen.values():
+        if row['href'] in docs:
+            row['document'] = {'uuid': docs[row['href']]['uuid'], 'name': row['href']}
+    usages = sorted(seen.values(), key=lambda r: -len(r['used_by']))
+    # Everything each shared document offers, called or not (describe_document reads its full text).
+    return usages + [{'href': href, 'document_contents': doc} for href, doc in docs.items()]
+
+
 async def describe_template(
         ctx: Context,
         template_uuid: Annotated[str, Field(description="UUID of a template pipeline (find_pipeline_templates).")],
@@ -287,12 +330,21 @@ async def describe_template(
     each with what it overrides (properties set, elements removed or re-linked, reference data added) and
     the feeds it covers, as examples; and the template's contract, what a child's output must contain for
     the shared elements (a decoration XSLT, say) to work: the elements and expressions they read, the schema
-    group and the output stream type.
+    group and the output stream type. Also the shared XSLTs (xsl:import) those pipelines' XSLTs use: each named
+    template they call, where, and what it writes, to call the same way in the new XSLT.
     """
     children = await list_template_children(ctx, template_uuid)
     contract = await describe_template_contract(ctx, template_uuid)
-    return {'template_uuid': template_uuid, 'children': children['children'],
-            **{k: v for k, v in contract.items() if k != 'template_uuid'}}
+    result = {'template_uuid': template_uuid, 'children': children['children'],
+              **{k: v for k, v in contract.items() if k != 'template_uuid'}}
+    shared = await shared_xslt_usage(ctx, [c for c in children['children'] if 'unreadable' not in c])
+    if shared:
+        result['shared_xslt'] = shared
+        result['shared_xslt_hint'] = (
+            "These pipelines' XSLTs call named templates from shared XSLTs. Use the same ones in the new XSLT where "
+            "they are called (the mapping's or field plan's shared entries: href, template, at), and do not map the "
+            "elements they write: an element written twice fails schema validation.")
+    return result
 
 
 ALL_TOOLS = [find_pipeline_templates, describe_template]

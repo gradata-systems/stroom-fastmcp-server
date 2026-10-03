@@ -13,9 +13,9 @@ nowhere. The documents come from stepping the indexing XSLT, so no Elasticsearch
    the documents the pipeline writes.
 3. A user's changed template (a renamed field, a stricter type, dynamic strict) is checked: not compatible,
    with the pipeline changes it needs.
-4. Indexing is refused until an index template is agreed. The user's example (a sibling source's index
-   template and its component templates): the template for the new index follows its conventions, and the user
-   confirms it. Then they correct it (a priority), and the correction is confirmed and kept instead.
+4. Indexing is refused until an index template is agreed. A standalone example (no component templates) is
+   built from first; then the user's example composed of a component template: the template for the new index
+   follows its conventions, and the user confirms it. Then they correct it (a priority), and the correction is confirmed and kept instead.
 5. Once the user says the admin has committed it, the approval starts the indexing filter (here disabled again
    afterwards, as there is no Elasticsearch).
 
@@ -24,7 +24,14 @@ example is a sibling index's template in Stroom-style PascalCase with explicit o
 component template, holding fields this source lacks and lacking some it has. The plan is named from it, the
 built template agreed, then applied as the cluster admin would (component templates first); Elasticsearch's own
 composition (_simulate_index) is compared with ours; indexing starts; the index holds every event, and its
-mapping is the template's, with nothing added dynamically; and Stroom searches it.
+mapping is the template's, with nothing added dynamically; and Stroom searches it. Then a standalone example
+(no component templates): the template built from it is resolved by Elasticsearch (_index_template/_simulate)
+exactly as built.
+
+Then structure: Events whose user has an Id, a Name and an EmailAddress, indexed with an example that maps
+user: {id, name, emailAddress}. The plan takes those names (the id is user.id, not the convention's user.name)
+and the document Elasticsearch stores keeps the structure: "user": {"id", "name", "emailAddress"}, not flat
+"user.id" keys.
 """
 import asyncio
 import json
@@ -67,6 +74,15 @@ LIVE_EXAMPLE = """PUT _index_template/stroom-keyfob-v1
    "Device": {"type": "object", "properties": {"HostName": {"type": "keyword", "ignore_above": 512},
                                                "IPAddress": {"type": "ip"}}},
    "Keyfob": {"type": "object", "properties": {"Serial": {"type": "keyword", "ignore_above": 512}}}}}}}"""
+# The same conventions in a standalone template: no component templates, so it maps every field itself.
+LIVE_STANDALONE = """PUT _index_template/stroom-badge-v1
+{"index_patterns": ["stroom-badge-v1*"], "priority": 300,
+ "template": {"settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+  "mappings": {"dynamic": "strict", "properties": {
+   "StreamId": {"type": "long"}, "EventId": {"type": "long"}, "@timestamp": {"type": "date"},
+   "TypeId": {"type": "keyword", "ignore_above": 256},
+   "User": {"type": "object", "properties": {"Id": {"type": "keyword", "ignore_above": 256}}},
+   "Badge": {"type": "object", "properties": {"Number": {"type": "keyword", "ignore_above": 256}}}}}}}"""
 LIVE_COMPONENT = """PUT _component_template/e2e-stroom-base
 {"template": {"mappings": {"properties": {"StreamId": {"type": "long"}, "EventId": {"type": "long"},
                                           "@timestamp": {"type": "date"}}}}}"""
@@ -181,6 +197,24 @@ async def main():
             refused = str(e)
         p2.check(refused.startswith('No Elasticsearch index template has been agreed'), f"refused: {refused[:90]}")
 
+        print('\n### a standalone example: no component templates')
+        standalone = ('PUT _index_template/ecs-standalone-v1\n' + json.dumps({
+            'index_patterns': ['ecs-standalone-v1*'], 'priority': 120,
+            'template': {'mappings': {'dynamic': 'strict', 'properties': {
+                'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'}, '@timestamp': {'type': 'date'},
+                'user': {'properties': {'name': {'type': 'keyword', 'ignore_above': 128}}}}}}}))
+        alone = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=standalone)
+        built = json.loads(alone['details']['index template'].split('\n', 1)[1])
+        props = built['template']['mappings']['properties']
+        p2.check(alone.get('status') == 'needs_confirmation' and 'composed_of' not in built and built['priority'] == 120
+                 and 'component templates' not in alone['details']
+                 and not any('composed_of' in n for n in alone.get('from_example') or []),
+                 'built with no component templates, none asked for')
+        p2.check(props['StreamId'] == {'type': 'long'} and props['@timestamp'] == {'type': 'date'}
+                 and props['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128}
+                 and props['host']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128},
+                 "every field in the template itself, in the example's types and keyword style")
+
         print("\n### the template from the user's example, confirmed by the user")
         example = ('PUT _index_template/ecs-sibling-v1\n' + json.dumps({
             'index_patterns': ['ecs-sibling-v1*'], 'priority': 300, 'composed_of': ['ecs-base'],
@@ -228,6 +262,7 @@ async def main():
         await p2.agreed(processing_writes.set_processor_filter_enabled, ctx=ctx, filter_id=started['filter_id'], enabled=False)
         if '--live' in sys.argv:
             await live(ctx, stroom, csv, events, es_template, stamp)
+            await live_structure(ctx, stroom, es_template, stamp)
         print('\nALL PASSED')
     finally:
         await stroom.close()
@@ -338,6 +373,22 @@ async def live(ctx, stroom: StroomGateway, csv: dict, events: list[int], es_temp
         p2.check(hit['hits']['total']['value'] == 1 and hit['hits']['hits'][0]['_source']['TypeId'] == 'Logon',
                  'User.Id and TypeId searchable as indexed')
 
+        print('\n### a standalone example: Elasticsearch resolves the built template as built')
+        alone = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events,
+                                                      example_template=LIVE_STANDALONE)
+        built = json.loads(alone['details']['index template'].split('\n', 1)[1])
+        p2.check('composed_of' not in built and built['template']['mappings']['properties']['User']['properties']['Id']
+                 == {'type': 'keyword', 'ignore_above': 256}
+                 and built['template']['mappings']['properties']['Device']['type'] == 'object',
+                 "built from it alone: its types, objects and keyword style")
+        # The agreed template for this index is applied already, with the same pattern and priority, which
+        # Elasticsearch refuses even to simulate: one higher.
+        response = await es.post('/_index_template/_simulate', json={**built, 'priority': built['priority'] + 1})
+        p2.check(response.status_code == 200, f'simulated: {response.status_code} {response.text[:200]}')
+        resolved = response.json()['template']['mappings']
+        p2.check(_properties(resolved['properties']) == _properties(built['template']['mappings']['properties'])
+                 and resolved.get('dynamic') == 'strict', 'Elasticsearch resolves it with nothing added or lost')
+
         print('\n### verified through Stroom')
         doc = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=csv['build'], backend='elasticsearch',
                               name=index, time_field=plan.time_field, index_name=index, cluster_uuid=cluster['uuid'])
@@ -354,6 +405,73 @@ async def live(ctx, stroom: StroomGateway, csv: dict, events: list[int], es_temp
         p2.check(f"Elasticsearch index template `{index}`, agreed with the user" in section
                  and '| `User.Id` | keyword | `EventSource/User/Id` |' in section and '`alice`' in section,
                  'the field mapping names the agreed template, with each field and its sampled values')
+
+
+PEOPLE_SAMPLE = ("time,user,name,email,host,ip,result\n"
+                 "2026-09-28T10:00:00,john.smith1,John Smith,john.smith1@email.com,ws01,10.0.0.1,ok\n"
+                 "2026-09-28T10:05:00,jane.doe2,Jane Doe,jane.doe2@email.com,ws02,10.0.0.2,fail\n")
+PEOPLE_EXAMPLE = """PUT _index_template/people-sibling-v1
+{"index_patterns": ["people-sibling-v1*"], "priority": 300,
+ "template": {"settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+  "mappings": {"dynamic": "strict", "properties": {
+   "StreamId": {"type": "long"}, "EventId": {"type": "long"}, "@timestamp": {"type": "date"},
+   "user": {"properties": {"id": {"type": "keyword"}, "name": {"type": "keyword"}, "emailAddress": {"type": "keyword"}}},
+   "host": {"properties": {"name": {"type": "keyword"}, "ip": {"type": "ip"}}},
+   "event": {"properties": {"code": {"type": "keyword"}}}}}}}"""
+
+
+def people_case() -> dict:
+    """The CSV case, with the user's name and email address in the Events as well as their id."""
+    case = dict(p2.CASES['csv'], sample=PEOPLE_SAMPLE)
+    # The EventSource user (the Authenticate element has one too, indented deeper).
+    user = "\n        <User><Id><xsl:value-of select=\"data[@name='user']/@value\" /></Id></User>"
+    assert case['xslt'].count(user) == 1
+    case['xslt'] = case['xslt'].replace(user, (
+        "\n        <User><Id><xsl:value-of select=\"data[@name='user']/@value\" /></Id>"
+        "<Name><xsl:value-of select=\"data[@name='name']/@value\" /></Name>"
+        "<EmailAddress><xsl:value-of select=\"data[@name='email']/@value\" /></EmailAddress></User>"))
+    return case
+
+
+async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: str) -> None:
+    import httpx
+    people = await p2.onboard(ctx, 'people', people_case(), stamp)
+    events = (await processing_writes.wait_for_processing(ctx, people['pipeline']['uuid'], [people['raw']]))['streams'][0]['events']
+    async with httpx.AsyncClient(base_url=ES, timeout=30) as es:
+        cluster = await live_cluster(stroom)
+        index = f'people-{stamp}-v1'
+        print("\n### structure kept: the user's example maps user: {id, name, emailAddress}")
+        draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, 'ecs', events,
+                                                   example_template=PEOPLE_EXAMPLE)
+        plan = FieldPlan.model_validate(draft['plan'])
+        names = {f.source: f.name for f in plan.fields}
+        p2.check(names.get('EventSource/User/Id') == 'user.id' and names.get('EventSource/User/Name') == 'user.name'
+                 and names.get('EventSource/User/EmailAddress') == 'user.emailAddress',
+                 f"the example's names: {sorted(names.values())}")
+        p2.check('<map key="user">' in draft['xslt'] and 'key="user.id"' not in draft['xslt'],
+                 'the indexing XSLT writes the user as an object')
+        xslt = await translation.save_xslt(ctx, people['build'], f'{index}-XSLT', index_plan=plan)
+        pipeline = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=people['build'],
+                                   name=f'{index} - Indexing', template_uuid=es_template['uuid'],
+                                   xslt_uuid=xslt['uuid'], index_name=index, cluster_uuid=cluster['uuid'])
+        sample = await stepping.step_sample(ctx, pipeline['uuid'], events)
+        p2.check(sample['verdict'] == 'clean', f"stepped clean: {sample['verdict']}")
+        final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
+                                events_stream_ids=events, example_template=PEOPLE_EXAMPLE)
+        p2.check(final.get('agreed') and final['self_check']['compatible'], 'agreed, and fits the documents')
+        path, request = _request(final['dev_tools'])
+        p2.check((await es.put(f'/{path}', json=request)).status_code == 200, f'PUT {path}')
+        started = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                                  stream_ids=events, source_pipeline_uuid=people['pipeline']['uuid'])
+        done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, expect_events=False,
+                                                           filter_id=started['filter_id'])
+        p2.check(done.get('gate') == 'pass', 'indexed with no Error stream')
+        await es.post(f'/{index}/_refresh')
+        hit = (await es.post(f'/{index}/_search', json={'query': {'term': {'user.id': 'john.smith1'}}})).json()
+        source = hit['hits']['hits'][0]['_source'] if hit['hits']['hits'] else {}
+        print('    ' + json.dumps(source))
+        p2.check(source.get('user') == {'id': 'john.smith1', 'name': 'John Smith', 'emailAddress': 'john.smith1@email.com'}
+                 and not any('.' in k for k in source), 'the stored document keeps the structure: "user": {...}')
 
 
 if __name__ == '__main__':

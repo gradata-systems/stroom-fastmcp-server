@@ -7,9 +7,20 @@ rules:
   # - {element: decorationFilter, severity: [WARNING, INFO], message: 'lookup', class: benign,
   #    reason: 'User decoration miss for accounts not in reference data'}
 
+  # Elasticsearch rejecting documents (split out of its bulk response, one per document): the others were indexed.
+  - {message: 'Elasticsearch rejected .*as object, but found a concrete value', class: blocking,
+     reason: "A field is an object in some records and a plain value in others; the index keeps the shape it saw first, so these records are not indexed. Ask the user: leave the field out (discovery drop), or index it as it first appeared and accept the loss"}
+  - {message: 'Elasticsearch rejected .*(failed to parse field|mapper_parsing_exception)', class: blocking,
+     reason: "A value does not fit its field's type in the index; these records are not indexed. Fix the value in the indexing XSLT, change the field's type in the index template, or (discovery) set ignore_malformed"}
+  - {message: 'Elasticsearch rejected .*(metadata field|field name cannot)', class: blocking,
+     reason: "A field name Elasticsearch cannot take (a metadata field such as _id, or an empty name); these records are not indexed: rename it in the indexing XSLT"}
+  - {message: 'Elasticsearch rejected .*Limit of total fields', class: blocking,
+     reason: "The index has reached its total-fields limit, so documents adding fields are rejected: raise index.mapping.total_fields.limit in the index template, or drop the source fields that multiply (keys holding ids or dates)"}
+  - {message: 'Elasticsearch rejected', class: blocking,
+     reason: "Elasticsearch rejected these documents, so their records are not indexed (the rest of the batch was)"}
   - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
   - {message: 'Attempt to index unknown field', class: blocking,
-     reason: "The index has no such field, so the value is dropped: add the plan's fields to the index (set_index_fields)"}
+     reason: "The index has no such field, so the value is dropped: save the indexing XSLT from its plan (save_xslt index_plan=...), and create_indexing_pipeline adds the plan's fields to the index"}
   - {message: 'No effective stream', class: blocking,
      reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time)"}
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}

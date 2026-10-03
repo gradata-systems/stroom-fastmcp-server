@@ -189,6 +189,12 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
         lines += ['### Left untranslated', '']
         lines += [f"- {' and '.join(condition_text(c) for c in d.when)}: {d.reason}" for d in mapping.drop_when]
         lines.append('')
+    if mapping.shared:
+        lines += ['### Written by shared XSLTs', '']
+        lines += [f"- `{u.at}`: the named template `{u.template}` of `{u.href}`"
+                  + (f", given {', '.join(f'`{n}` = `{readable(v)}`' for n, v in u.with_params.items())}"
+                     if u.with_params else '') for u in mapping.shared]
+        lines.append('')
     if mapping.extract:
         lines += ['### Extracted fields', '']
         for ex in mapping.extract:
@@ -344,10 +350,12 @@ def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None 
     head = ['Index field', 'Type', 'From (event-logging path)'] + (['In sample'] if sampled else [])         + (['Sample values'] if documents is not None else [])
     lines += [_row(*head), _row(*['---'] * len(head))]
     for f in plan.fields:
-        cells = [f'`{f.name}`', f.type, f'`{f.source}`']
+        shared = plan.written_by(f.name) if hasattr(plan, 'written_by') else None
+        cells = [f'`{f.name}`', f.type, f"shared template `{shared.template}` of `{shared.href}`" if shared else f'`{f.source}`']
         if sampled:
             pct = population.get(f.source)
-            cells.append('always' if f.source.startswith('@') else f'{pct:g}% of events' if pct is not None else 'not in the sample')
+            cells.append('always' if f.source.startswith('@') or shared else f'{pct:g}% of events' if pct is not None
+                         else 'not in the sample')
         if documents is not None:
             values = list(dict.fromkeys(v for d in documents for v in d.get(f.name, []) if v != ''))
             cells.append(', '.join(f'`{v[:40]}`' for v in values[:3]) + (f' (+{len(values) - 3})' if len(values) > 3 else '')
@@ -362,7 +370,29 @@ def _values(values: list[str]) -> str:
             if distinct else '(none in the sample)')
 
 
-def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | None) -> str:
+def object_arrays(outputs: list[str]) -> list[str]:
+    """Fields the documents hold as arrays of objects (dotted paths). Elasticsearch flattens these: items.sku and
+    items.qty are searchable, but not which sku went with which qty."""
+    from utils.templatecheck import json_xml_documents
+    found: set[str] = set()
+
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                walk(sub, f'{path}.{key}' if path else key)
+        elif isinstance(value, list):
+            if any(isinstance(v, dict) for v in value):
+                found.add(path)
+            for sub in value:
+                walk(sub, path)
+    for xml in outputs:
+        for document in json_xml_documents(xml):
+            walk(document, '')
+    return sorted(found)
+
+
+def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | None,
+                             arrays: list[str] | None = None) -> str:
     """The Field mapping section of a discovery pipeline: how records become documents, the fields mapped
     explicitly, and the fields the sample's documents held (Elasticsearch maps those dynamically)."""
     d = plan.discovery
@@ -374,6 +404,12 @@ def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | 
         lines += ['A string holding a JSON object is also indexed parsed, as `<field>_json`; the string is kept.', '']
     if d.drop:
         lines += ['Left out: ' + ', '.join(f'`{k}`' for k in d.drop) + '.', '']
+    lines += ['Fields starting with `_` (Elasticsearch reserves `_id` and others; Stroom drops the rest) or top-level ones '
+              'named like a field written here are kept as `<field>_original`, without the leading `_` (`_id` is '
+              '`id_original`); keys Elasticsearch cannot take (empty, or with an empty dotted part) are repaired.', '']
+    if arrays:
+        lines += ['Arrays of objects are indexed flattened: each field inside is searchable, but not which values went '
+                  'together in one object: ' + ', '.join(f'`{a}`' for a in arrays) + '.', '']
     explicit = {'StreamId': 'the stream id', 'EventId': 'the record number in the stream',
                 '@timestamp': f"`{d.timestamp_field}`" + (f' (format `{d.timestamp_format}`)' if d.timestamp_format else '')}
     explicit.update({name: f'stream meta `{attr}`' for name, attr in d.meta.items()})

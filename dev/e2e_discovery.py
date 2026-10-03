@@ -24,12 +24,19 @@ drifts: an older stream's latency_ms is "n/a", only the newest has a geo object)
 
 6. The feed's Raw Events streams are found; one record is read to confirm the time field, nothing more.
 7. The discovery pipeline steps the two newest streams. The template is not offered to agree until the user
-   gives an example: the first discovery index's template and its component template, as GET returns them. Built
-   from it, the template is agreed and committed.
+   gives an example: this time a standalone template already on the cluster, with no component templates (the
+   first scenario's has one), as GET returns it. Built from it, the template is agreed and committed.
 8. The existing streams are indexed by id, and a feed-wide filter from now on indexes what is sent next: a
    fourth stream sent afterwards is indexed with no change. Every record of the four streams is in the index;
    the drift is absorbed (malformed numbers ignored, new fields mapped as they arrive); Stroom's searches find
    them all.
+
+With --shapes only (and last in a full run), awkward shapes: arrays of objects (indexed flattened, and documented
+so), arrays of numbers and of arrays, null and empty values, deep nesting, keys with spaces, a JSON array held in a
+string (left as text), a mixed array (its odd value ignored), keys Elasticsearch refuses or Stroom drops (_id, other
+_ keys at any depth, an empty key, a..b) or that repeat ours (@timestamp): renamed or repaired. One record has a
+value where an earlier one had an object: Elasticsearch rejects it, and that is reported as an Error stream that
+triage explains (which document, and why), while the others are indexed.
 """
 import asyncio
 import json
@@ -127,8 +134,10 @@ async def main():
             except httpx.HTTPError:
                 raise SystemExit(f"No Elasticsearch at {ES}: cd dev/stroom && docker compose --profile elastic up -d")
             p2.check(version.startswith('9.'), f'Elasticsearch {version}')
-            sibling = await run(ctx, stroom, es, stamp)
-            await existing_feed(ctx, stroom, es, stamp, sibling)
+            if '--shapes' not in sys.argv:
+                await run(ctx, stroom, es, stamp)
+                await existing_feed(ctx, stroom, es, stamp)
+            await shapes(ctx, stroom, es, stamp)
         print('\nALL PASSED')
     finally:
         await stroom.close()
@@ -264,7 +273,15 @@ LATER = [{'time': '2026-10-04T07:30:00Z', 'app': 'billing', 'level': 'INFO', 'la
           'geo': {'country': 'AU', 'city': 'Sydney'}, 'retry': True}]
 
 
-async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str, sibling: str) -> None:
+# A sibling discovery index's template already on the cluster: standalone, with no component templates, so it
+# maps StreamId, EventId and @timestamp itself.
+STANDALONE = {'index_patterns': ['e2e-discovery-legacy-v1*'], 'priority': 150, 'template': {
+    'settings': {'index': {'number_of_shards': 1, 'number_of_replicas': 0, 'refresh_interval': '5s'}},
+    'mappings': {'dynamic': True, 'properties': {'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'},
+                                                 '@timestamp': {'type': 'date'}, 'proxy': {'type': 'keyword'}}}}}
+
+
+async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> None:
     source, build = f'SRC-BILLING-{stamp}', f'e2e-discovery-existing-{stamp}'
     index = f'stroom-discovery-billing-{stamp}-v1'
     print('\n### an existing raw feed, outside the build, already holding data')
@@ -298,21 +315,22 @@ async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp
     unasked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, newest)
     p2.check('status' not in unasked and unasked['hint'].startswith('No example was given: ask the user')
              and 'sibling discovery index' in unasked['hint'], 'without an example, the user is asked for one first')
-    # What the user pastes: the sibling discovery index's template and its component, as GET returns them.
-    example = json.dumps((await es.get(f'/_index_template/{sibling}')).json())
-    component = json.dumps((await es.get('/_component_template/e2e-discovery-base')).json())
+    # What the user pastes: the sibling discovery index's template, as GET returns it. It has no components.
+    response = await es.put('/_index_template/e2e-discovery-legacy-v1', json=STANDALONE)
+    p2.check(response.status_code == 200, 'a standalone sibling template on the cluster (set up as the admin had)')
+    example = json.dumps((await es.get('/_index_template/e2e-discovery-legacy-v1')).json())
     final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
-                            events_stream_ids=newest, example_template=example, component_templates=[component])
+                            events_stream_ids=newest, example_template=example)
     body = final['template']
     for note in final.get('from_example') or []:
         print(f'    {note}')
-    p2.check(final.get('agreed') and body['index_patterns'] == [f'{index}*'] and body['priority'] == 250
-             and body['composed_of'] == ['e2e-discovery-base']
-             and body['template']['settings']['index']['number_of_shards'] in (1, '1'),
-             "agreed: the new index's pattern, with the sibling's priority, settings and component")
+    p2.check(final.get('agreed') and body['index_patterns'] == [f'{index}*'] and body['priority'] == 150
+             and 'composed_of' not in body and body['template']['settings']['index']['refresh_interval'] == '5s',
+             "agreed with no component templates: the new index's pattern, the sibling's priority and settings")
     p2.check(body['template']['mappings']['dynamic'] is True and body['template']['mappings']['properties'] ==
-             {'@timestamp': {'type': 'date'}} and sibling not in json.dumps(body),
-             'still permissive: StreamId and EventId left to the component, nothing of the sibling index copied')
+             {'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'}, '@timestamp': {'type': 'date'}}
+             and 'proxy' not in json.dumps(body) and not any('composed_of' in n for n in final.get('from_example') or []),
+             'StreamId, EventId and @timestamp mapped in the template itself; nothing of the sibling index copied')
     path, request = _request(final['dev_tools'])
     response = await es.put(f'/{path}', json=request)
     p2.check(response.status_code == 200, f'PUT {path}: {response.status_code}')
@@ -366,6 +384,93 @@ async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp
     section = written.get('field_mapping') or ''
     p2.check('| `geo.country` |' in section and '| `@timestamp` | date | `time` |' in section,
              'documented from the streams stepped')
+
+
+SHAPES = [
+    {'ts': '2026-10-02T08:00:00Z', 'kind': 'order', 'user': {'name': 'alice'},
+     'items': [{'sku': 'A1', 'qty': 2}, {'sku': 'B2', 'qty': 1}], 'scores': [3, 5, 8], 'matrix': [[1, 2], [3, 4]],
+     'nothing': None, 'empty_list': [], 'empty_obj': {}, 'deep': {'l1': {'l2': {'l3': {'l4': 'bottom'}}}, '_inner': 'in'},
+     'key with space': 'spaced', 'embedded_list': '[1, 2, 3]', '_id': 'src-1', '_other': 'kept', '@timestamp': 'theirs',
+     '': 'blank',
+     'a..b': 'two dots'},
+    # user was an object above: Elasticsearch must reject this one, and that must not go unnoticed.
+    {'ts': '2026-10-02T08:01:00Z', 'kind': 'order', 'user': 'bob'},
+    {'ts': '2026-10-02T08:02:00Z', 'kind': 'misc', 'mixed': [1, 'two', 3], 'user': {'name': 'carol'}},
+]
+
+
+async def shapes(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> None:
+    build, feed = f'e2e-discovery-shapes-{stamp}', f'E2E-SHAPES-{stamp}'
+    index = f'stroom-discovery-shapes-{stamp}-v1'
+    print('\n### awkward shapes, indexed as they are')
+    await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+    raw = (await feeds.upload_sample(ctx, feed, json.dumps(SHAPES)))['stream_id']
+    template = await fixture_template(stroom)
+    cluster = await live_cluster(stroom)
+    plan = FieldPlan.model_validate((await indexing.draft_index_mapping(
+        ctx, 'elasticsearch', index, discovery=Discovery(timestamp_field='ts')))['plan'])
+    xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
+    pipeline = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Discovery',
+                               template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_name=index,
+                               cluster_uuid=cluster['uuid'])
+    sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    p2.check(sample['verdict'] == 'clean', f"stepped {sample.get('records_stepped')} records clean")
+    first = (await indexing._documents(ctx, pipeline['uuid'], [raw], 5))[0]
+    p2.check(first.get('id_original') == ('string', 'src-1') and first.get('other_original') == ('string', 'kept')
+             and first.get('@timestamp_original') == ('string', 'theirs')
+             and first.get('@timestamp') == ('string', '2026-10-02T08:00:00Z') and first.get('empty_key') == ('string', 'blank')
+             and first.get('a.b') == ('string', 'two dots') and '_id' not in first and '' not in first,
+             'keys Elasticsearch refuses, or that repeat ours, renamed; keys it cannot take repaired')
+    final = await p2.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
+                            events_stream_ids=[raw], example_template='PUT _index_template/e2e-discovery-legacy-v1\n'
+                            + json.dumps(STANDALONE))
+    path, request = _request(final['dev_tools'])
+    p2.check((await es.put(f'/{path}', json=request)).status_code == 200, f'PUT {path}')
+    started = await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                              stream_ids=[raw])
+    done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
+                                                       filter_id=started['filter_id'])
+    p2.check(done.get('gate') == 'fail' and done['streams'][0]['errors'],
+             f"the rejected record is reported (an Error stream), not lost silently: {done.get('problems')}")
+    p2.check((done.get('next') or {}).get('step') != 'translation',
+             f"a discovery build is not sent to write a translation: next is {(done.get('next') or {}).get('step')}")
+    errors = await streams.summarise_streams(ctx, [raw], kind='errors')
+    groups = [g for s in errors.get('streams', {}).values() for g in (s.get('groups') or [])] if isinstance(
+        errors.get('streams'), dict) else [g for s in errors.get('streams') or [] for g in (s.get('groups') or [])]
+    groups = groups or errors.get('groups') or [g for v in errors.values() if isinstance(v, dict)
+                                                for g in v.get('groups') or []]
+    why = json.dumps(groups)
+    p2.check('Elasticsearch rejected document 2 of 3' in why and 'A field is an object in some records' in why,
+             f"triage names the document and why: {why[:400]}")
+    await es.post(f'/{index}/_refresh')
+    count = (await es.get(f'/{index}/_count')).json().get('count')
+    p2.check(count == 2, f'the other two records are indexed: {count}')
+    mapped = (await es.get(f'/{index}/_mapping')).json()[index]['mappings']['properties']
+
+    def kind(path: str) -> str | None:
+        node = {'properties': mapped}
+        for part in path.split('.'):
+            node = (node.get('properties') or {}).get(part)
+            if node is None:
+                return None
+        return node.get('type', 'object')
+    expected = {'items.sku': 'keyword', 'items.qty': 'long', 'scores': 'long', 'matrix': 'long',
+                'deep.l1.l2.l3.l4': 'keyword', 'key with space': 'keyword', 'embedded_list': 'keyword',
+                'id_original': 'keyword', 'other_original': 'keyword', 'deep.inner_original': 'keyword',
+                '@timestamp_original': 'keyword', 'empty_key': 'keyword', 'a.b': 'keyword',
+                'mixed': 'long', 'user.name': 'keyword', '@timestamp': 'date'}
+    actual = {path: kind(path) for path in expected}
+    p2.check(actual == expected, f'each shape mapped as expected: {actual}')
+    p2.check(kind('nothing') is None and kind('empty_list') is None,
+             'null and an empty array map nothing, and their records still index')
+    ignored = (await es.post(f'/{index}/_count', json={'query': {'term': {'_ignored': 'mixed'}}})).json()['count']
+    p2.check(ignored == 1, f'the string in a number array was ignored, its record kept: {ignored}')
+    written = await builds.write_documentation(ctx, build, pipeline['uuid'],
+                                               '## Purpose and data\n\nShapes, indexed as they are.\n', 'Created',
+                                               stream_ids=[raw])
+    section = written.get('field_mapping') or ''
+    p2.check('Arrays of objects are indexed flattened' in section and '`items`' in section
+             and 'kept as `<field>_original`' in section, 'documented: arrays of objects flattened, renamed keys')
 
 
 if __name__ == '__main__':

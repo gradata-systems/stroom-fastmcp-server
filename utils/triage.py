@@ -1,5 +1,6 @@
 """Group Stroom error markers and classify each group as blocking, review or benign."""
 import fnmatch
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -65,6 +66,32 @@ def from_stored_error(item: dict[str, Any]) -> dict[str, Any]:
                   item.get('message', ''), {'line': line, 'col': col} if line and line > 0 else None)
 
 
+_BULK = re.compile(r'BulkResponse:\s*(\{.*\})\s*$', re.S)
+
+
+def split_bulk(m: dict[str, Any]) -> list[dict[str, Any]]:
+    """Stroom reports an Elasticsearch bulk request that had failures as one message holding the whole response.
+    One marker per rejected document instead, saying which (its place in the batch) and why; [m] otherwise."""
+    found = _BULK.search(m.get('message') or '')
+    if not found:
+        return [m]
+    try:
+        items = json.loads(found.group(1)).get('items') or []
+    except ValueError:
+        return [m]
+    total, out = len(items), []
+    for n, item in enumerate(items, 1):
+        result = next(iter(item.values()), {}) if isinstance(item, dict) else {}
+        error = result.get('error') if isinstance(result, dict) else None
+        if not error:
+            continue
+        reason = error.get('reason') if isinstance(error, dict) else str(error)
+        kind = error.get('type') if isinstance(error, dict) else ''
+        out.append({**m, 'message': f"Elasticsearch rejected document {n} of {total} in a bulk request ({kind}): "
+                                    f"{reason}", 'batch_position': n})
+    return out or [m]
+
+
 def triage(markers: list[dict[str, Any]], rules: ErrorRules, own_elements: set[str],
            record_count: int | None = None, examples: int = 3) -> dict[str, Any]:
     """Group markers by (severity, element, normalised message) and classify each group.
@@ -73,7 +100,7 @@ def triage(markers: list[dict[str, Any]], rules: ErrorRules, own_elements: set[s
     lookup that fails for every record usually means our output is at fault, not the reference data.
     """
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for m in markers:
+    for m in [one for marker_ in markers for one in split_bulk(marker_)]:
         key = (m['severity'], m['element'], normalise(m['message']))
         group = groups.setdefault(key, {'severity': m['severity'], 'element': m['element'],
                                         'own_element': m['element'] in own_elements,
