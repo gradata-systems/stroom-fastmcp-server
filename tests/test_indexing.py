@@ -77,3 +77,26 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
     props = {(p.element, p.name): (p.value or p.doc_uuid) for p in create.call_args.args[3]}
     assert props == {('xsltFilter', 'xslt'): 'x', ('elasticIndexingFilter', 'indexName'): 'stroom-acme-v1',
                      ('elasticIndexingFilter', 'cluster'): 'c'}
+
+
+async def test_an_indexing_pipeline_needs_the_index_to_have_the_fields_it_writes():
+    # Haiku created the Lucene index without its plan: every value was dropped with only a warning
+    # ("Attempt to index unknown field") and the searches found nothing.
+    from utils.mappingstore import with_mapping
+    plan = FieldPlan(backend='lucene', index_name='acme', time_field='EventTime',
+                     fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
+                             PlannedField(name='EventTime', type='date', source='EventTime/TimeCreated')])
+    generated = {'description': with_mapping('', 'index', plan.model_dump()), 'data': plan.xslt()}
+    by_hand = {'description': '', 'data': plan.xslt()}
+
+    def stroom(fields, xslt):
+        docs = {'Index': {'name': 'ACME-INDEX'}, 'XSLT': xslt}
+        return SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[t]),
+                               post=AsyncMock(return_value={'values': [{'fldName': f} for f in fields]}))
+
+    for xslt in (generated, by_hand):   # the plan kept with the XSLT, or the data elements it writes
+        with pytest.raises(ToolError, match=r"has no fields for \['StreamId', 'EventTime'\].*set_index_fields"):
+            await indexing._index_has_fields(stroom([], xslt), 'i-1', 'x-1')
+        with pytest.raises(ToolError, match=r"has no field for \['EventTime'\]"):
+            await indexing._index_has_fields(stroom(['StreamId'], xslt), 'i-1', 'x-1')
+        await indexing._index_has_fields(stroom(['StreamId', 'EventTime', 'Extra'], xslt), 'i-1', 'x-1')

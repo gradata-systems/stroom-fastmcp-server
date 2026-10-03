@@ -8,6 +8,8 @@ rules:
   #    reason: 'User decoration miss for accounts not in reference data'}
 
   - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
+  - {message: 'Attempt to index unknown field', class: blocking,
+     reason: "The index has no such field, so the value is dropped: add the plan's fields to the index (set_index_fields)"}
   - {message: 'No effective stream', class: blocking,
      reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time)"}
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}

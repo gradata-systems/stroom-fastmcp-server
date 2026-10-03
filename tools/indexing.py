@@ -1,5 +1,6 @@
 """Indexing tools for either backend: Stroom's Lucene index or Elasticsearch."""
 import asyncio
+import re
 import json
 import time
 import uuid as uuidlib
@@ -21,6 +22,7 @@ from tools.templates import _shape
 from utils.consent import consent_from
 from utils.fielddoc import index_field_mapping_markdown
 from utils.fieldplan import Backend, FieldPlan, PlannedField
+from utils.mappingstore import read_mapping
 from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from
 from utils.templatecheck import compare, json_xml_documents, parse_template
@@ -221,6 +223,9 @@ async def create_index_doc(
     extra: dict[str, Any] = {}
     if backend == 'lucene' and plan is not None:
         extra['fields'] = await set_index_fields(ctx, doc['uuid'], plan)
+    elif backend == 'lucene':
+        extra['fields'] = ("none yet: the index indexes nothing until it has the plan's fields. "
+                           "set_index_fields(index_uuid, plan) with draft_index_mapping's plan.")
     elif backend == 'elasticsearch':
         try:
             extra['test'] = await test_elastic_index(ctx, doc['uuid'])
@@ -248,6 +253,28 @@ async def _events_available(ctx: Context, build: str, events_stream_ids: list[in
     if meta.get('typeName') != 'Events':
         raise ToolError(f"Stream {events_stream_ids[0]} is {meta.get('typeName')!r}, not Events. An indexing pipeline "
                         f"reads the Events streams an events pipeline produces; build that first (stage 1).")
+
+
+async def _index_has_fields(stroom, index_uuid: str, xslt_uuid: str) -> None:
+    """Refuse a Lucene index that lacks fields the indexing XSLT writes: Stroom drops each value with only a warning
+    ("Attempt to index unknown field"), so the pipeline runs and indexes nothing searchable."""
+    index = await stroom.get_doc('Index', index_uuid)
+    ref = {'type': 'Index', 'uuid': index_uuid, 'name': index.get('name')}
+    found = await stroom.post('/dataSource/v1/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
+    have = {f['fldName'] for f in found.get('values') or []}
+    xslt = await stroom.get_doc('XSLT', xslt_uuid)
+    kept = read_mapping(xslt.get('description'))
+    if kept and kept[0] == 'index':
+        written = [f['name'] for f in kept[1].get('fields') or []]
+    else:   # written by hand: the records:2 data elements it writes
+        written = list(dict.fromkeys(re.findall(r'<data\s+name="([^"{]+)"', xslt.get('data') or '')))
+    missing = [name for name in written if name not in have]
+    if missing:
+        raise ToolError(f"Index '{index.get('name')}' has {'no fields' if not have else 'no field'} for "
+                        f"{missing[:10]}{' ...' if len(missing) > 10 else ''}, which the indexing XSLT writes: Stroom "
+                        f"would drop those values ('Attempt to index unknown field') and the searches would find "
+                        f"nothing. Add them with set_index_fields(index_uuid, plan) using draft_index_mapping's plan "
+                        f"(create_index_doc takes plan= for this), then create the pipeline.")
 
 
 async def create_indexing_pipeline(
@@ -283,6 +310,7 @@ async def create_indexing_pipeline(
     if shape['backend'] == 'lucene':
         if not index_uuid:
             raise ToolError("This template indexes into Lucene: give index_uuid")
+        await _index_has_fields(stroom, index_uuid, xslt_uuid)
         element = next(e for e, p in open_props if p == 'index')
         props.append(PropertyValue(element=element, name='index', doc_uuid=index_uuid, doc_type='Index'))
     else:
