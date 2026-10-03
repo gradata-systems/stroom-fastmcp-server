@@ -244,6 +244,28 @@ def test_unknown_in_a_rule_with_conditions_is_a_warning():
     assert not result['problems'] and any(w.startswith('[status] writes EventDetail/Unknown') for w in result['warnings'])
 
 
+def test_extracted_fields_read_through_any_of_are_declared_in_shared_templates():
+    # The user is in two rules, so it is written once as a named template; it reads the extraction through any_of,
+    # and the template has its own scope, so the extraction's variable must be declared there too.
+    user = {'path': 'EventSource/User/Id', 'any_of': ['user_quoted', 'user_plain']}
+    rules = [{'name': name, 'when': [{'field': 'action', 'equals': name}],
+              'fields': [user, {'path': 'EventDetail/TypeId', 'value': name},
+                         {'path': 'EventDetail/Authenticate/Action', 'value': action},
+                         {'path': 'EventDetail/Authenticate/User/Id', 'any_of': ['user_quoted', 'user_plain']}]}
+             for name, action in (('login', 'Logon'), ('logout', 'Logoff'))]
+    m = mapping(common=[f for f in BASE if f['path'] != 'EventSource/User/Id'], events=rules,
+                extract=[{'field': 'msg', 'regex': ' user=(?:"([^"]*)"|(\\S+))', 'names': ['user_quoted', 'user_plain']}])
+    result = generate(m, SCHEMA, '4.1.0')
+    assert not result['problems'], result['problems']
+    root = etree.fromstring(result['xslt'].encode())
+    xsl = '{http://www.w3.org/1999/XSL/Transform}'
+    for template in root.iter(f'{xsl}template'):
+        declared = {v.get('name') for v in template.iter(f'{xsl}variable', f'{xsl}param')}
+        read = set(re.findall(r'\$([\w.-]+)', ' '.join((el.get('select') or '') + ' ' + (el.get('test') or '')
+                                                         for el in template.iter())))
+        assert read <= declared, (template.get('name') or template.get('match'), read - declared)
+
+
 def test_a_rule_without_conditions_must_be_last():
     rules = [{'name': 'any', 'fields': LOGON}, {'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON}]
     assert any("Rules ['any'] have no conditions" in p for p in generate(mapping(events=rules), SCHEMA, '4.1.0')['problems'])

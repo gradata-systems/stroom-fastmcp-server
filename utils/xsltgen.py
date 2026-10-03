@@ -383,6 +383,9 @@ class _Generator:
         scope 'record' reads the record through $record instead."""
         if field_name in self.derived:
             ex, nr = self.derived[field_name]
+            # Declared in the template being written, whatever reads it (a variable, any_of, a lookup or dictionary
+            # key, a repeat): a named template shared between rules has its own scope.
+            self.declare_parts(ex)
             return f"${self.parts_name(ex)}/fn:match//fn:group[@nr={nr}]"
         if xpath is not None:
             selector = xpath
