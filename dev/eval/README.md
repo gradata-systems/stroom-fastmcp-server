@@ -1,6 +1,6 @@
 # Evaluation set
 
-Seventeen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Nineteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -26,9 +26,12 @@ case), not a margin to spend.
 | `15_csv_lookup_reference_data` | CSV events plus a CSV user directory | Authenticate | Reference data end to end: Raw Reference feed, `build_reference_xslt`, Reference Data pipeline, `references` on the events pipeline, `lookup` with case-normalised keys, `transform` |
 | `16_json_batches_items` | JSON array of batches, each holding an events array and role arrays | Authenticate | `for_each` (one record, several events) with `scope: record` fields, `repeat` (one Group per role), `drop_when` on records and items |
 | `17_csv_firewall_mixed` | CSV with a header: traffic, admin and system records in one file | Network, Authenticate, Update, Export, Alert | Rules on two fields (`event_type` and `action`), five event types from one file, sparse and space-only columns, a time with an offset, `Rule` and `Data` on Network, mapped Alert type and severity |
+| `18_json_event_string_freetext` | JSON array; the event is JSON in a string field: timestamp, username, event_type, an optional resource and a free-form message | Authenticate (logon, logoff, password change), View, Delete | `json-to-xml()` through `xpath` for every field, the event's own time (millisecond, offset) rather than the shipper's, free text kept whole as the Description (quotes, colons, text that looks like key=value), `values` checks |
+| `19_jsonl_message_layouts` | JSON lines; the message's layout depends on its first word, with quoted values, optional and extra keys, and free text | Authenticate, Alert, Unknown | Several `extract` regexes over one field, `any_of` for a quoted or bare value, rules per kind, a catch-all rule for unrecognised lines, `values` checks that quoted names are read whole |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
-count, event types, paths every event must have), an optional list of `hints`, and a reference solution (a Data
+count, event types, paths every event must have, and optionally `values` some event must hold exactly, such as a
+free-text message carried whole or a time read from the right field), an optional list of `hints`, and a reference solution (a Data
 Splitter where the format needs one, and a `build_translation_xslt` mapping).
 
 ## Running

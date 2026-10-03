@@ -1,4 +1,4 @@
-"""The evaluation set: seventeen samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: nineteen samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
@@ -125,6 +125,11 @@ def has_path(event: etree._Element, path: str) -> bool:
     return node is not None and bool((node.text or '').strip() or len(node))
 
 
+def path_values(events: list[etree._Element], path: str) -> set[str]:
+    return {(node.text or '').strip() for e in events
+            for node in e.findall('/'.join(f'{{{EVT}}}{p}' for p in path.split('/')))}
+
+
 def score_events(score: Score, case: dict[str, Any], records: list[str], validity: list[bool]) -> None:
     expected = case['expected']
     events, types = event_facts(records)
@@ -135,8 +140,14 @@ def score_events(score: Score, case: dict[str, Any], records: list[str], validit
         score.problems.append(f"{len(events)} events, expected {expected['records']}")
     if score.valid_events != len(validity) or not validity:
         score.problems.append(f"{len(validity) - score.valid_events} of {len(validity)} Events records invalid")
+    # Values some event must hold exactly, e.g. a free-text message carried whole, or a time from the right field.
+    missing_values = {path: [v for v in values if v not in path_values(events, path)]
+                      for path, values in (expected.get('values') or {}).items()}
+    for path, values in missing_values.items():
+        if values:
+            score.problems.append(f"no event has {path} = {values}")
     score.stage1 = (len(events) == expected['records'] and bool(validity) and all(validity)
-                    and not score.missing_types and not score.missing_paths)
+                    and not score.missing_types and not score.missing_paths and not any(missing_values.values()))
 
 
 Call = Callable[..., Awaitable[dict[str, Any]]]

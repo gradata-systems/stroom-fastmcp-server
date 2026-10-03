@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 17 and len({c['id'] for c in cases}) == 17
+    assert len(cases) == 19 and len({c['id'] for c in cases}) == 19
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']
@@ -36,6 +36,16 @@ def test_scoring_counts_events_types_and_missing_paths():
     good = ev.Score('y', 'test')
     ev.score_events(good, {'expected': {**case['expected'], 'paths': ['EventSource/User/Id']}}, [EVENTS], [True])
     assert good.stage1 and not good.problems
+
+
+def test_scoring_checks_values_some_event_must_hold():
+    expected = {'records': 2, 'event_types': ['Authenticate'], 'paths': ['EventSource/User/Id']}
+    held = ev.Score('x', 'test')
+    ev.score_events(held, {'expected': {**expected, 'values': {'EventSource/User/Id': ['alice', 'bob']}}}, [EVENTS], [True])
+    assert held.stage1 and not held.problems
+    lost = ev.Score('y', 'test')   # e.g. a quoted name cut at its space
+    ev.score_events(lost, {'expected': {**expected, 'values': {'EventSource/User/Id': ['alice smith']}}}, [EVENTS], [True])
+    assert not lost.stage1 and lost.problems == ["no event has EventSource/User/Id = ['alice smith']"]
 
 
 def test_summary_applies_the_exit_criterion():

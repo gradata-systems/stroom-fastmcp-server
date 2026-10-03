@@ -142,7 +142,7 @@ Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (
 `dev/e2e_cleanup.py STAMP --apply` removes the run afterwards: filters, streams (marked deleted), documents and
 folders.
 
-The evaluation set in [dev/eval](dev/eval/README.md) has 17 cases across CSV, JSON, XML, syslog and key=value, each
+The evaluation set in [dev/eval](dev/eval/README.md) has 19 cases across CSV, JSON, XML, syslog and key=value, each
 with a reference solution: `--reference` runs those through the local stack without a model, and `--request` prints
 the request to give an agent, whatever runs it. `dev/eval/run_agent.py [--model haiku]` runs them with headless
 Claude Code as the agent and a scripted user, on the CLI's sign-in. The Phase 0 spike (`spike/phase0.py`) proved the risky Stroom APIs;
