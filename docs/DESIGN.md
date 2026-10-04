@@ -40,6 +40,7 @@ flowchart LR
     U -- "index fields to add or change" --> UI["update_indexing_pipeline"]
     U -- "an event that came out wrong" --> FX["fix_pipeline_issue"]
     U -- "what does this pipeline do?" --> EV["evaluate_events_pipeline"]
+    U -- "what does this index hold?" --> DX["document_index"]
     ON --> S1["Stage 1: translation<br/>mapping, XSLT, step, process"]
     EF --> SV["Survey the feed,<br/>step in place"] --> S1
     S1 --> S2["Stage 2: indexing<br/>field plan, indexing XSLT, step"]
@@ -53,6 +54,8 @@ flowchart LR
     UE --> CO["Draft code compared with<br/>the current, record by record"]
     FX --> LF["Locate the event, prove a fix"] --> CO
     EV --> RP["Report and<br/>Documentation doc"]
+    DX --> SU["Survey the index through Stroom,<br/>draft its Documentation doc"]
+    SU --> PR
     VR & CO & S1 --> PR["Document, promote<br/>on approval"]
 ```
 
@@ -66,6 +69,7 @@ flowchart LR
 | `update_indexing_pipeline` | An indexing pipeline, field changes | Update an indexing pipeline |
 | `fix_pipeline_issue` | A Stream ID, optionally an Event ID | Fix a reported pipeline issue |
 | `evaluate_events_pipeline` | An events pipeline | Evaluate and document an events pipeline |
+| `document_index` | An Elastic Index or Lucene Index doc | Document an existing index |
 
 ## End-to-end workflow
 
@@ -280,6 +284,28 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 | Event types | `EventDetail` types, `TypeId`s and `Action`s, with counts and examples |
 | Errors and schema conformance | Whether anything is worth worrying about: blocking and review error groups with records affected, records against events stored, validation and quality pass rates, schema version gap |
 | Suggestions | Prioritised changes with rationale and draft XSLT |
+
+**Document an existing index**
+
+An index can predate the server, or be fed by something other than Stroom. The agent documents it as the indexing
+pipeline pathway would: every field, what it holds and its values. Nothing but the documentation is written.
+
+```mermaid
+flowchart TD
+    A["find_documents: the Elastic Index or<br/>Lucene Index doc"] --> C{"The user confirms<br/>which index doc"}
+    C --> S["describe_document: a survey through Stroom.<br/>Its fields, the newest documents through a<br/>dashboard that is not saved, the feeding pipelines"]
+    S --> P{"A feeding pipeline keeps<br/>an index plan?"}
+    P -- "yes" --> F["Each field's source path,<br/>described from the schema"]
+    P -- "no" --> N["Described from the sample"]
+    F & N --> W["write_documentation index_uuid=:<br/>drafted in a build, the link to the user"]
+    W --> R{"The user agrees,<br/>and says where"}
+    R -- "beside the index doc (default)<br/>or a folder they choose" --> PR["promote_build"]
+```
+
+1. **Locate and confirm.** `find_documents` with `types=['ElasticIndex', 'Index']`; the user confirms which index doc, from its name and folder. `write_documentation` asks again, naming the doc, before anything is written.
+2. **Survey through Stroom.** `describe_document` on the index doc: the fields Stroom has for it (`dataSource/v1/findFields`, which for Elasticsearch come from the index mapping; for Lucene `index/v2/findFields`, which also says whether each field is stored); the newest documents, up to 100, read through dashboard searches on a dashboard that is never saved, sorted on the time field (how often each field is populated, its values, the time range covered); and the pipelines that feed it, each with the index plan kept with its XSLT when there is one. A wide index is read in groups of up to 100 columns, each with StreamId, EventId and the time field, joined on the ids; past 600 fields the rest are listed as not surveyed, and the doc says how many were read. Feeding pipelines are found by content (a Lucene IndexingFilter names the index doc, an Elasticsearch one the index name) and each confirmed from its effective properties, so a mention elsewhere does not count; an index name built from values (`ecs-windows{_suffix}v1`) or an index doc naming a pattern or alias matches. A pipeline that cannot be found this way is not claimed absent: the doc says none was found, and how they were looked for. A Lucene field that is not stored is searchable but has no values to show; the table says so. When the survey cannot run (the cluster unreachable, say), `describe_document` still returns the doc, with the reason. Stroom returns a hit only when its `StreamId` is a stream in this Stroom that the user may read, so documents written from outside Stroom without one (or with another system's) never come back, with no error: such an index is documented from its mapping, every field marked not read, and the doc says why. The server never queries Elasticsearch directly.
+3. **Draft.** `write_documentation index_uuid=...` asks the user to confirm the index doc (named with its folder) before the index is read, then writes a Documentation doc named after the index doc in a workspace build. A doc already beside the index doc is changed through a working copy, so promotion writes it back after a backup, keeping its change log, rather than adding a second doc of the same name. The agent writes Purpose and data; the Field mapping section is generated from the survey like an indexing pipeline's: every field with a description, its type, its event-logging source path when a feeding pipeline's plan records it, how often the surveyed documents held it, and sample values. Descriptions come from the plan, else the event-logging schema for the source path, then what the sample shows. The reply has the doc's link, which the agent gives the user.
+4. **Promote on consent.** `promote_build` moves the doc beside the index doc (the default for a Documentation doc named after an index doc), or to a folder the user chooses.
 
 **Build a pipeline for a feed that already holds data**
 
@@ -801,6 +827,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | Stroom API access | Sign-in for scripts, datafeed upload, pipeline JSON round trip, stepping, against a local Stroom 7.13 stack | `dev/api_checks`: one CSV sample to a valid Events stream; what was found is in [FINDINGS.md](FINDINGS.md) |
 | Reading and validating | Explorer, template discovery (with the shared XSLTs pipelines import), streams, errors, stepping, pipeline evaluation, validation, resources | Errors in a broken pipeline explained and an evaluation report for a working one; read-only tools run against the live instance (`dev/live_readonly.py`) |
 | Translation | Feeds, translation from a mapping (shared templates called in place), pipelines, processing, the write guard, confirmations and approvals, updates with backups and output diffs, documentation, promotion | `dev/e2e_translation.py`: CSV, JSON, XML and syslog samples each reach valid Events, and a field fix lands with a diff limited to that field; `dev/e2e_generator.py`, `dev/e2e_existing_feed.py`, `dev/e2e_shared_xslt.py` |
+| Documenting an existing index | An index nothing in Stroom feeds, one a pipeline with a kept plan feeds, and a Lucene index: located, confirmed, surveyed through an unsaved dashboard, drafted with the field table and a link, promoted beside the index doc or where the user chooses | `dev/e2e_document_index.py` |
 | Errors and invalid data | The agent's own errors fixed first; errors the user accepts as benign, documented and not raised again; Elasticsearch rejections reported per document; data that is not well-formed caught | `dev/e2e_errors.py` |
 | Evaluating and fixing existing pipelines | A health check of a production pipeline (errors and schema compliance first, then its mapping and events), suggested fixes proven, a reported issue located, reproduced, proven and applied in place | `dev/e2e_evaluate_and_fix.py`: on a pipeline the server did not build, a schema failure found (one record lost), a proven fix for it, and a reported issue fixed in place with a backup |
 | Indexing | Lucene and Elasticsearch; field plans from conventions or the user's example index template; templates agreed, then committed; discovery indices; versioned copies; verification | `dev/e2e_lucene_indexing.py` (a v2 copy indexes an added field beside v1); `dev/e2e_index_versions.py` (a v2 of a production Elasticsearch indexing pipeline: only the added field differs, its template from v1's, new Events only, v1 still running); `dev/e2e_elastic_handover.py --live` and `dev/e2e_discovery.py` against Elasticsearch 9: events indexed, every search found through Stroom and directly, each hit traced to its record |

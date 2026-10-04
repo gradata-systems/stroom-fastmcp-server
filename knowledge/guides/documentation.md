@@ -62,6 +62,19 @@ path is populated in the sampled Events, and Sample values: the values the docum
 sample got, up to three. A discovery pipeline lists the fields it maps explicitly, then every field the sample's
 documents held, with how often and sample values. The agreed Elasticsearch index template is named too.
 
+### An existing index
+
+`write_documentation index_uuid=<the Elastic Index or Lucene Index doc>` documents an index rather than a pipeline;
+the user confirms the index doc first. The doc is named after the index doc and its Field mapping section is
+generated from a survey through Stroom (`describe_document` on the index doc shows the same survey): every field
+Stroom has for the index, with a description, its type, its event-logging source path when a feeding pipeline
+keeps an index plan, how often the newest documents (up to 100) held it, and sample values. Write Purpose and
+data yourself: what the index is for, what feeds it, the time range surveyed. Give the user the reply's link;
+`promote_build` puts the doc beside the index doc, or where the user chooses. Documenting an index again changes
+the doc beside it (through a working copy, written back with its change log). A wide index is surveyed in groups
+of columns; past 600 fields the rest are listed as not surveyed. Leave out `stream_ids` and `accept_errors`: they
+are for a pipeline's documentation.
+
 ## Errors: generated, with the ones the user accepted
 
 `write_documentation` generates the Errors section from the Error streams processing the given streams produced:

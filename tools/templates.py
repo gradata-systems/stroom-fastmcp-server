@@ -37,8 +37,8 @@ async def _pipeline_index(ctx: Context) -> dict[str, dict[str, Any]]:
     if cached and time.monotonic() - cached[0] < _INDEX_TTL:
         return cached[1]
     stroom = gateway_from(ctx)
-    found = await stroom.find_documents('type:Pipeline', ['Pipeline'], 1000)
-    refs = [v for v in found.get('values') or [] if v['docRef'].get('type') == 'Pipeline']
+    found = await stroom.find_all_documents('type:Pipeline', ['Pipeline'])
+    refs = [v for v in found if v['docRef'].get('type') == 'Pipeline']
     semaphore = asyncio.Semaphore(8)
 
     async def load(value):

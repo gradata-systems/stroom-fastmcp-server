@@ -360,6 +360,13 @@ def schema_description(schema: EventSchema | None, source: str) -> str:
             said = schema.describe(schema.resolve(path))
         except (ValueError, IndexError, AttributeError):
             said = ''
+    parts = path.strip('/').split('/')
+    if said and len(parts) > 1:
+        # Ids and names inherit a base type's words ('the object', 'the device'): name the element they belong to.
+        parent = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', parts[-2]).lower()
+        generic = re.search(r'\bthe (object|device)\b', said)
+        if generic and generic.group(1) != parent:
+            said = re.sub(r',?\s+e\.?g\.?\s.*$', '.', said.replace(generic.group(0), f'the {parent}', 1))
     if data:
         return f"The `{data.group(1)}` value recorded in a Data element" + (f" of {path.split('/')[-1]}: {said}" if said else '.')
     if attribute:
@@ -400,6 +407,68 @@ def field_description(what: str, per_document: list[list[str]] | None) -> str:
     if per_document is not None:
         parts.append(sample_description(per_document))
     return ' '.join(p if p.endswith('.') else p + '.' for p in parts)
+
+
+def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], schema: EventSchema | None) -> str:
+    """The Field mapping section for an existing index, from its survey: every field Stroom has for it, with a
+    description (the feeding pipeline's plan, else the event-logging schema for the field's source, then what the
+    sample shows), its type, where it comes from when a feeding pipeline's plan records it, how often the surveyed
+    documents held it, and their values."""
+    index, documents = survey['index'], survey.get('documents') or []
+    target = (f"Elasticsearch index `{survey['index_name']}`" if survey['backend'] == 'elasticsearch'
+              else 'a Lucene index')
+    lines = [f"`{index['name']}` is {target}; the time field is `{survey.get('time_field')}`.", '']
+    fed = survey.get('fed_by') or []
+    lines += ([f"Fed by {', '.join(f'`{p['name']}`' for p in fed)}." +
+               ('' if any(p.get('plan') for p in fed) else ' No index plan is kept with its XSLT, so where each '
+                'field comes from is not recorded here.'), '']
+              if fed else ['No pipeline was found that writes to it (pipelines are looked for by the index name '
+                           'they write; one that builds the name from values, or writes through an alias, is not '
+                           'found this way).', ''])
+    if documents:
+        lines += [f"Surveyed through Stroom: the {len(documents)} newest documents"
+                  + (f" ({survey['earliest']} to {survey['latest']})" if survey.get('earliest') else '')
+                  + '. In sample and Sample values are what they held.', '']
+    else:
+        lines += [survey.get('note') or 'No documents came back through Stroom.', '']
+    head = ['Index field', 'Description', 'Type', 'From (event-logging path)', 'In sample', 'Sample values']
+    lines += [_row(*head), _row(*['---'] * len(head))]
+    fields = survey.get('fields') or []
+    first = ('StreamId', 'EventId', survey.get('time_field'), '@timestamp')
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for f in fields:
+        if f['name'] not in first:
+            groups.setdefault(f['name'].split('.')[0], []).append(f)
+    ordered = [f for name in first for f in fields if f['name'] == name] + [f for g in groups.values() for f in g]
+    surveyed = set(survey.get('surveyed_fields') or [x['name'] for x in fields])
+    unsurveyed = [x['name'] for x in fields if x['name'] not in surveyed]
+    if documents and unsurveyed:
+        lines[-3:-3] = [f"The survey read {len(surveyed)} of the {len(fields)} fields; the other {len(unsurveyed)} "
+                        f"are listed as not surveyed.", '']
+    for f in list(dict.fromkeys(f['name'] for f in ordered)):
+        field = next(x for x in fields if x['name'] == f)
+        plan = planned.get(f)
+        source = getattr(plan, 'source', '') if plan else ''
+        per_document = [d.get(f, []) for d in documents]
+        if field.get('stored') is False:
+            description, held, values = 'Indexed but not stored: searchable, its values cannot be shown.', 'not stored', '-'
+        elif documents and f not in surveyed:
+            what = (getattr(plan, 'description', '') if plan else '') or (schema_description(schema, source) if source else '')
+            description = field_description(what, None) or 'Not surveyed: past the fields the survey reads.'
+            held, values = 'not surveyed', '-'
+        elif not documents:
+            what = (getattr(plan, 'description', '') if plan else '') or (schema_description(schema, source) if source else '')
+            description = field_description(what, None) or 'Not read: no documents came back through Stroom.'
+            held, values = 'not read', '-'
+        else:
+            what = (getattr(plan, 'description', '') if plan else '') or (schema_description(schema, source) if source
+                                                                          else _IDS.get('@' + f, '') if f in ('StreamId', 'EventId') else '')
+            description = field_description(what, per_document)
+            count = sum(1 for vs in per_document if any(v != '' for v in vs))
+            held = f'{100 * count / len(documents):.0f}% of documents' if documents else 'no documents'
+            values = _values([v for vs in per_document for v in vs])
+        lines.append(_row(f'`{f}`', description, field['type'], f'`{source}`' if source else '(not recorded)', held, values))
+    return '\n'.join(lines) + '\n'
 
 
 def written_fields_markdown(documents: list[dict[str, list[str]]]) -> str:

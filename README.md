@@ -10,7 +10,7 @@ The server has 52 tools:
 
 | Group | Tools |
 | --- | --- |
-| Explorer and pipelines | `find_documents` (by name, type or content), `describe_document` (content plus how Stroom runs a pipeline or what an XSLT does) |
+| Explorer and pipelines | `find_documents` (by name, type or content), `describe_document` (content plus how Stroom runs a pipeline, what an XSLT does, or a survey of what an index holds) |
 | Templates | `find_pipeline_templates`, `describe_template` (its children, its contract, and the shared XSLTs they import: each named template called, where, and what it writes and reads) |
 | Samples and feeds | `profile_sample`, `create_feed`*, `upload_sample`, `record_source_notes` |
 | Translation | `save_text_converter`, `save_xslt` (written by hand, or an indexing XSLT from its plan), `save_dictionary`; `uuid=` replaces an existing one |
@@ -27,14 +27,15 @@ The server has 52 tools:
 | Indexing | `get_field_conventions`, `draft_index_mapping` (a field plan from a convention or the user's example index template, or a discovery plan), `create_index_doc`* (with the plan's fields), `create_indexing_pipeline`*, `verify_index`* (a dashboard of the columns the user confirms, opening on the time field from the sample through today, with a stepping text pane; searches through Stroom, each hit traced back to its record) |
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`* (built from the user's example, agreed by the user), `check_index_template`* (the user's correction, agreed when it fits), `create_index_doc` |
 | Plan | `start_onboarding` (profile every file, create the build, return the plan), `build_status` (each step's state from the build; every write tool's result carries `next`) |
-| Builds | `start_build`, `build_status`, `write_documentation` (with a generated Errors section, and errors the user accepts as benign*), `promote_build`** |
+| Builds | `start_build`, `build_status`, `write_documentation` (a pipeline's, with a generated Errors section and errors the user accepts as benign*; or an existing index's*, from a survey), `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the
 model never holds the answer; a client without forms gets an id to pass back once the user has agreed.
 
 Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts (the workflows, e.g. as
 slash commands): `onboard_data_source`, `update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`,
-`create_discovery_index`, `evaluate_events_pipeline`, `onboard_existing_feed`, `fix_pipeline_issue`. Each is diagrammed
+`create_discovery_index`, `evaluate_events_pipeline`, `onboard_existing_feed`, `fix_pipeline_issue`,
+`document_index`. Each is diagrammed
 in [docs/DESIGN.md](docs/DESIGN.md#workflows), with which one fits what the user has and wants.
 
 ## Clients
@@ -150,6 +151,7 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_instructions.py` | Standing instructions (AGENTS docs) by folder |
 | `dev/e2e_elastic_handover.py` | The Elasticsearch index template: built from the user's example and component templates, agreed (and corrected), then indexing once committed. Without Elasticsearch, or with `--live` against Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): templates applied, composition compared with `_simulate_index`, documents indexed with no dynamic fields, and searched through Stroom |
 | `dev/e2e_discovery.py` | A discovery index on Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): raw JSON, CSV (a Data Splitter, numbers recognised from text) and XML (nested objects, repeated elements as arrays) indexed as it is, with nested objects, arrays and a JSON message unpacked, mapped dynamically; the permissive template agreed and committed; Stroom's searches; the documentation. Then for an existing raw feed holding streams sent over time, with drifting data: no survey, the existing streams indexed by id and new ones by a feed filter, every record indexed. Then awkward shapes (`--shapes` alone): arrays of objects, nulls, empty values, keys Elasticsearch refuses or Stroom drops, a record Elasticsearch rejects (reported and explained, the rest indexed) |
+| `dev/e2e_document_index.py` | An existing index documented: an Elasticsearch index nothing in Stroom feeds (and one whose documents have no StreamId, which Stroom never returns: documented from its mapping, saying why), one a production pipeline with a kept plan feeds, and a Lucene index; each located and confirmed, surveyed through Stroom (fields, the newest documents through an unsaved dashboard, the feeding pipelines), drafted with the generated field table and a link, and promoted beside the index doc or where the user chooses; documented again (the doc beside it written back, not duplicated); a 183-field index surveyed in groups of columns; a Lucene field that is not stored shown as such |
 | `dev/e2e_errors.py` | Invalid data, and the response: an error in the agent's own mapping fixed before the user sees it; an inherited error the user accepts as benign (confirmed, recorded in the documentation's Errors section, then reported as benign in stepping and Error streams); a record Elasticsearch rejects, reported per document in batches of 10, fixed, the stream's earlier documents deleted first as the approval asks, the default batch size restored; XML that is not well-formed, caught before the pipeline is made and located by stepping |
 | `dev/e2e_index_versions.py` | A new version of a production Elasticsearch indexing pipeline: v1 built, agreed, indexed and promoted; v2 copied with an added field (diff limited to it), its template from v1's agreed one, committed, started on new Events only; new data indexed by both (v1 unchanged, still running); searched both ways; v2 documented and promoted beside v1 |
 | `dev/e2e_evaluate_and_fix.py` | A production pipeline the server did not build, with a schema failure and a mistranslated field: evaluated (errors first: the failure, and the record it loses; inputs never read; the events), a fix suggested and proven, the report promoted beside it; then a reported issue located, reproduced, proven (an unrelated error not in its way) and applied in place, with backups and its documentation updated |

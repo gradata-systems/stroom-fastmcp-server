@@ -116,3 +116,32 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
     elsewhere, create, searched = await run([])
     assert elsewhere['dashboard']['saved'] is False and create.await_count == 0
     assert searched.await_args.kwargs['dashboard_doc']['dashboardConfig']['components'][0]['settings']['dataSource']['uuid'] == 'i'
+
+
+async def test_every_page_of_documents_is_read_when_there_are_more_than_one():
+    from utils.stroom import StroomGateway
+    pages = [[{'docRef': {'uuid': str(n)}} for n in range(start, min(start + 3, 7))] for start in (0, 3, 6)]
+    calls = []
+
+    async def find(name, types, limit, offset=0):
+        calls.append(offset)
+        return {'values': pages[offset // 3], 'pageResponse': {'total': 7}}
+    gateway = StroomGateway.__new__(StroomGateway)
+    gateway.find_documents = find
+    found = await StroomGateway.find_all_documents(gateway, 'type:Pipeline', ['Pipeline'], page=3)
+    assert [v['docRef']['uuid'] for v in found] == [str(n) for n in range(7)] and calls == [0, 3, 6]
+
+
+
+async def test_paging_stops_when_stroom_returns_the_same_page_again():
+    from utils.stroom import StroomGateway
+    page = [{'docRef': {'uuid': str(n)}} for n in range(3)]
+    calls = []
+
+    async def find(name, types, limit, offset=0):
+        calls.append(offset)
+        return {'values': page}               # the offset ignored, and no total
+    gateway = StroomGateway.__new__(StroomGateway)
+    gateway.find_documents = find
+    found = await StroomGateway.find_all_documents(gateway, 'type:Pipeline', ['Pipeline'], page=3)
+    assert [v['docRef']['uuid'] for v in found] == ['0', '1', '2'] and calls == [0, 3]

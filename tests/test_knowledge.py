@@ -16,7 +16,8 @@ NOT_TOOLS = {'data_splitter', 'xml_fragments', 'json_layout', 'xpath_default_nam
              'in_dictionary', 'data_name', 'xml_namespace', 'key_xpath', 'pair_separator', 'body_field',
              'strip_domain', 'event_logging_path', 'type_id', 'event_detail', 'stream_type', 'stream_ids',
              'loader_pipeline', 'replace_parser', 'output_type', 'source_pipeline_uuid', 'draft_code', 'pipeline_uuid',
-             'records_per_stream', 'skip_stream_ids', 'known_signatures', 'expect_events', 'filter_id', 'events_stream_ids',
+             'index_uuid', 'records_per_stream', 'skip_stream_ids', 'known_signatures', 'expect_events', 'filter_id',
+             'events_stream_ids',
              'source_confirmation_id', 'confirmation_id', 'approval_id', 'field_mapping', 'pipeline_link', 'extra_fields',
              'index_name', 'timestamp_field', 'source_docs', 'sample_size', 'input_fields', 'working_copy', 'set_properties',
              'dev_tools', 'pipeline_properties', 'xslt_input', 'text_converter', 'parser_properties', 'variable_min_reads',
@@ -40,7 +41,7 @@ def test_guides_and_instructions_name_tools_that_exist():
     for name, text in {**GUIDES, **PROMPTS}.items():
         unknown = tool_like(text) - TOOLS - {'onboard_data_source', 'onboard_existing_feed', 'update_events_pipeline',
                                              'update_indexing_pipeline', 'index_event_data', 'create_discovery_index',
-                                             'evaluate_events_pipeline', 'fix_pipeline_issue'}
+                                             'evaluate_events_pipeline', 'fix_pipeline_issue', 'document_index'}
         assert not unknown, (name, unknown)
 
 

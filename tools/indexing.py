@@ -1,5 +1,6 @@
 """Indexing tools for either backend: Stroom's Lucene index or Elasticsearch."""
 import asyncio
+import fnmatch
 import re
 import json
 import time
@@ -513,7 +514,144 @@ async def create_verification_dashboard(
     return {'type': 'Dashboard', 'uuid': doc['uuid'], 'name': doc['name'], 'data_source': source, 'fields': fields}
 
 
-async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any]) -> dict[str, Any]:
+SURVEY_FIELDS = 600        # fields read per survey; more are listed as not surveyed
+_SURVEY_COLUMNS = 100      # columns per dashboard search
+
+
+def writes_to(properties: dict[tuple[str, str], Any], doc_type: str, uuid: str, index_name: str | None) -> bool:
+    """Whether a pipeline's effective properties write to the index: a Lucene IndexingFilter's index doc, or an
+    Elasticsearch filter's index name (which may build the name from values, {_suffix}, or the doc may name a
+    pattern or alias, ecs-windows*)."""
+    for (_, name), held in properties.items():
+        value = held.get('value') if isinstance(held, dict) and 'value' in held else held
+        if doc_type == 'Index' and name == 'index' and isinstance(value, dict) and value.get('uuid') == uuid:
+            return True
+        if doc_type == 'ElasticIndex' and name == 'indexName' and isinstance(value, str) and index_name:
+            written = re.sub(r'\{[^}]*\}', '*', value)
+            if written == index_name or fnmatch.fnmatchcase(index_name, written) \
+                    or fnmatch.fnmatchcase(written.replace('*', ''), index_name):
+                return True
+    return False
+
+
+async def _index_fields(stroom, doc_type: str, ref: dict[str, Any]) -> list[dict[str, Any]]:
+    """The fields Stroom has for an index doc; for Lucene, whether each is stored (only stored values can be shown)."""
+    if doc_type == 'Index':
+        found = await stroom.post('/index/v2/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})
+        return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower(),
+                 **({'stored': False} if f.get('stored') is False else {})}
+                for f in found.get('values') or [] if f.get('fldName')]
+    found = await stroom.post('/dataSource/v1/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})
+    return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower()} for f in found.get('values') or [] if f.get('fldName')]
+
+
+async def feeding_pipelines(ctx: Context, doc_type: str, uuid: str, index: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pipelines that write to the index, each with the index plan kept with its XSLT when there is one. Found
+    by content (a Lucene IndexingFilter names the doc, an Elasticsearch one the index name), then each confirmed
+    from its effective properties, so a mention elsewhere (a description, foo-v10 for foo-v1) does not count."""
+    from tools.builds import kept_mapping
+    from tools.pipelines import merge_layers
+    stroom = gateway_from(ctx)
+    index_name = index.get('indexName')
+    needle = uuid if doc_type == 'Index' else re.split(r'[*{]', index_name or '')[0]
+    if not needle:
+        return []
+    hits = await stroom.post('/explorer/v2/findInContent', {
+        'filter': {'matchType': 'CONTAINS', 'pattern': needle, 'caseSensitive': False},
+        'pageRequest': {'offset': 0, 'length': 100}})
+    fed: list[dict[str, Any]] = []
+    for value in hits.get('values') or []:
+        doc = (value.get('docContentMatch') or {}).get('docRef') or {}
+        if doc.get('type') != 'Pipeline' or any(p['uuid'] == doc.get('uuid') for p in fed):
+            continue
+        try:
+            merged = merge_layers(await stroom.pipeline_layers(doc['uuid']))
+        except ToolError:
+            continue
+        properties = {(q['element'], q['name']): q['value'] for q in merged['properties']}
+        if not writes_to(properties, doc_type, uuid, index_name):
+            continue
+        kept = await kept_mapping(ctx, doc['uuid'])
+        fed.append({'uuid': doc['uuid'], 'name': doc.get('name'), 'path': (value.get('path') or '').replace(' / ', '/'),
+                    'plan': kept['payload'] if kept and kept['kind'] == 'index' else None})
+    return fed
+
+
+async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: int = 100) -> dict[str, Any]:
+    """What an existing index holds, surveyed through Stroom: the fields Stroom has for the index doc, the newest
+    documents read through dashboard searches that are never saved (each field: how often the sample held it, its
+    values), and the pipelines that feed it. A wide index is read in groups of columns, joined on StreamId and
+    EventId; past SURVEY_FIELDS fields, the rest are listed as not surveyed."""
+    stroom = gateway_from(ctx)
+    index = await stroom.get_doc(doc_type, uuid)
+    ref = {'type': doc_type, 'uuid': uuid, 'name': index.get('name')}
+    fields = await _index_fields(stroom, doc_type, ref)
+    names = [f['name'] for f in fields]
+    time_field = (index.get('timeField') or index.get('timeFieldName')
+                  or next((f['name'] for f in fields if f['type'] in ('date', 'date_field')), None))
+    ids = [n for n in ('StreamId', 'EventId') if n in names]
+    base = ids + ([time_field] if time_field in names and time_field not in ids else [])
+    readable = [n for n in names if n not in base][:max(0, SURVEY_FIELDS - len(base))]
+    width = max(1, _SURVEY_COLUMNS - len(base))
+    groups = [readable[i:i + width] for i in range(0, len(readable), width)] or [[]]
+    if len(ids) < 2:
+        groups = groups[:1]    # without both ids, groups of columns cannot be joined: the first is read
+
+    def probe(columns: list[str]) -> dict[str, Any]:
+        cols = [{**_column(n), **({'sort': {'order': 0, 'direction': 'DESCENDING'}} if n == time_field else {})}
+                for n in columns]
+        return {'uuid': str(uuidlib.uuid4()), 'name': f"{index.get('name')} survey", 'dashboardConfig': {'components': [
+            {'type': 'query', 'id': 'query-SURVEY', 'name': 'Query', 'settings': {
+                'type': 'query', 'dataSource': ref, 'expression': {'type': 'operator', 'op': 'AND', 'children': []}}},
+            {'type': 'table', 'id': 'table-SURVEY', 'name': 'Table', 'settings': {
+                'type': 'table', 'queryId': 'query-SURVEY', 'fields': cols, 'extractValues': False,
+                'maxResults': [max_documents], 'pageSize': max_documents}}]}}
+
+    expression = {'type': 'operator', 'op': 'AND', 'children': []}
+    first = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
+    if not first['rows'] and time_field:
+        # Some backends want a term: every time there is.
+        expression = {'type': 'operator', 'op': 'AND', 'children': [
+            {'type': 'term', 'field': time_field, 'condition': 'BETWEEN', 'value': '1970-01-01T00:00:00.000Z,day()+1d'}]}
+        first = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
+    errors = list(first['errors'])
+    rows = [dict(r) for r in first['rows']]
+    key = lambda r: tuple(str(r.get(n)) for n in ids)
+    by_key = {key(r): r for r in rows}
+    for group in groups[1:] if rows else []:
+        more = await _search(ctx, probe(base + group), expression, length=max_documents)
+        errors += more['errors']
+        for r in more['rows']:
+            if key(r) in by_key:
+                by_key[key(r)].update({n: r.get(n) for n in group})
+    surveyed = base + [n for g in groups for n in g]
+    documents = [{n: [str(r[n])] if r.get(n) not in (None, '') else [] for n in surveyed} for r in rows]
+    times = sorted(d[time_field][0] for d in documents if time_field and d.get(time_field))
+    total = len(documents)
+    note = None
+    if not total:
+        note = ("No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in "
+                "this Stroom that you may read (it checks the stream's feed for every hit), so documents written from "
+                "outside Stroom, without StreamId or with another system's, are not shown: the index is described "
+                "from its mapping only, its values not read." if doc_type == 'ElasticIndex' else
+                "No documents came back through Stroom: the index is empty, or holds no stored values to show.")
+    return {'index': {**ref, 'path': await _path_of(stroom, ref), 'link': doc_link(stroom.settings, doc_type, uuid)},
+            **({'note': note} if note else {}),
+            'backend': 'lucene' if doc_type == 'Index' else 'elasticsearch',
+            'index_name': index.get('indexName'), 'time_field': time_field, 'fields': fields,
+            'surveyed_fields': surveyed, 'documents_sampled': total,
+            'earliest': times[0] if times else None, 'latest': times[-1] if times else None,
+            'populated': {n: round(100 * sum(1 for d in documents if d.get(n)) / total, 1) for n in surveyed} if total else {},
+            'values': {n: list(dict.fromkeys(v for d in documents for v in d.get(n, [])))[:3] for n in surveyed},
+            'fed_by': await feeding_pipelines(ctx, doc_type, uuid, index), 'documents': documents, 'errors': errors}
+
+
+async def _path_of(stroom, ref: dict[str, Any]) -> str | None:
+    found = (await stroom.find_documents(ref['name'], [ref['type']], 20)).get('values') or []
+    return next(((v.get('path') or '').replace(' / ', '/') for v in found if v['docRef'].get('uuid') == ref['uuid']), None)
+
+
+async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any], length: int = 100) -> dict[str, Any]:
     stroom = gateway_from(ctx)
     components = dashboard['dashboardConfig']['components']
     query = next(c for c in components if c['type'] == 'query')
@@ -525,7 +663,7 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
         'search': {'dataSourceRef': query['settings']['dataSource'], 'expression': expression, 'incremental': True,
                    'componentSettingsMap': {table['id']: settings}},
         'componentResultRequests': [{'type': 'table', 'componentId': table['id'], 'fetch': 'ALL',
-                                     'requestedRange': {'offset': 0, 'length': 100}, 'tableName': table['name'],
+                                     'requestedRange': {'offset': 0, 'length': length}, 'tableName': table['name'],
                                      'tableSettings': {k: v for k, v in settings.items() if k in _TABLE_SETTINGS}}],
         'dateTimeSettings': {'localZoneId': 'UTC', 'referenceTime': int(time.time() * 1000)},
         'storeHistory': False, 'timeout': 5000}

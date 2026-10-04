@@ -23,7 +23,7 @@ from utils.xsltgen import TranslationMapping, generate
 from utils.accepted import entry as accepted_entry, merge as merge_accepted, read_accepted
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
-from utils.stroom import body_text, gateway_from, set_body_text
+from utils.stroom import body_text, gateway_from, set_body_text, doc_link
 
 class AcceptedError(BaseModel):
     """An error the user says is benign, as triage showed it."""
@@ -259,13 +259,13 @@ async def list_build(ctx: Context, build: Build) -> dict[str, Any]:
 async def write_documentation(
         ctx: Context,
         build: Build,
-        pipeline_uuid: Annotated[str, Field(description="The pipeline documented.")],
+        pipeline_uuid: Annotated[str | None, Field(description="The pipeline documented (or index_uuid).")] = None,
         markdown: Annotated[str, Field(description="The full documentation, with the sections in "
                                                    "stroom://guide/documentation (Purpose and data, Processing, Field "
                                                    "mapping, Output, Conformance, Open items). For Field mapping use "
                                                    "field_mapping from build_translation_xslt as it is. The change log "
-                                                   "is added by the tool.")],
-        change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")],
+                                                   "is added by the tool.")] = '',
+        change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")] = '',
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="The pipeline's sample streams (raw streams for an events pipeline, Events streams for an "
                         "indexing pipeline): the Field mapping section is generated from the mapping kept with the XSLT, "
@@ -276,9 +276,16 @@ async def write_documentation(
                         "not resolve in its own content. Recorded after the user confirms; later reviews then report "
                         "them as benign, not as problems.")] = [],
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+        index_uuid: Annotated[str | None, Field(
+            description="Instead of a pipeline, an existing index to document: its Elastic Index or Lucene Index doc, "
+                        "confirmed with the user. The Field mapping section is generated from a survey of the index "
+                        "through Stroom (describe_document shows it), and the doc is named after the index doc.")] = None,
 ) -> dict[str, Any]:
     """
-    Create or update the Documentation doc for a pipeline in the build (same name as the pipeline). The Field
+    Create or update the Documentation doc for a pipeline in the build (same name as the pipeline), or, with
+    index_uuid, for an existing index (same name as its index doc; the user confirms which index doc first). The
+    reply has the doc's link to give the user. Promotion puts it beside the pipeline or index doc of that name unless
+    the user chooses another folder. The Field
     mapping section is not taken from the markdown: it is generated from the mapping (or index plan) kept with the
     pipeline's XSLT, stepped over stream_ids, and put in place of whatever the markdown has there, so it always
     agrees with the XSLT. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
@@ -290,6 +297,15 @@ async def write_documentation(
     body = markdown.split('## Change log')[0].rstrip()
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
+    if not change.strip():
+        raise ToolError("Give change: one line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'")
+    if index_uuid:
+        if stream_ids or accept_errors:
+            raise ToolError("stream_ids and accept_errors are for a pipeline's documentation; an existing index is "
+                            "surveyed through Stroom instead. Leave them out with index_uuid.")
+        return await _document_index(ctx, build, index_uuid, body, change, confirmation_id)
+    if not pipeline_uuid:
+        raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
     stroom = gateway_from(ctx)
     pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
     kept = await kept_mapping(ctx, pipeline_uuid)
@@ -367,6 +383,88 @@ async def write_documentation(
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
                                         **({'field_mapping': generated_section} if generated_section else {})})
+
+
+async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, change: str,
+                          confirmation_id: str | None) -> dict[str, Any]:
+    """The documentation of an existing index, its Field mapping section generated from a survey through Stroom. A doc
+    already beside the index doc is changed through a working copy, written back (after a backup) on promotion."""
+    from tools.indexing import _path_of, survey_index
+    from utils.fielddoc import existing_index_markdown
+    stroom = gateway_from(ctx)
+    doc_type, index = None, None
+    for candidate in ('ElasticIndex', 'Index'):
+        try:
+            index = await stroom.get_doc(candidate, index_uuid)
+            doc_type = candidate
+            break
+        except ToolError:
+            continue
+    if not doc_type:
+        raise ToolError(f"No Elastic Index or Lucene Index doc {index_uuid}: find it with find_documents "
+                        f"types=['ElasticIndex', 'Index']")
+    ref = {'type': doc_type, 'uuid': index_uuid, 'name': index.get('name')}
+    folder = await _path_of(stroom, ref)                      # the explorer's path is the doc's folder
+    beside = await _documentation_beside(stroom, ref)
+    existing = next((d for d in await _build_docs(ctx, build)
+                     if d['type'] == 'Documentation' and d['name'] == ref['name']), None)
+    # Asked before the survey, so the index is read once, after the user confirms.
+    gate = await consent_from(ctx).require(
+        ctx, 'confirmation', 'write_documentation',
+        f"Document the existing {'Elastic Index' if doc_type == 'ElasticIndex' else 'Lucene Index'} doc "
+        f"'{ref['name']}' ({folder})",
+        {'index doc': f"{folder}/{ref['name']} ({doc_type})",
+         'drafted in': f"build '{build}', as Documentation '{ref['name']}'",
+         'promoted (once you agree)': (f"written back into the existing Documentation '{ref['name']}' beside it, after "
+                                       f"a backup" if beside else
+                                       f"beside the index doc, in {folder}, unless you choose another folder")},
+        confirmation_id)
+    if gate:
+        return gate
+    survey = await survey_index(ctx, doc_type, index_uuid)
+    planned: dict[str, Any] = {}
+    for p in survey['fed_by']:
+        if p['plan']:
+            for f in FieldPlan.model_validate(p['plan']).fields:
+                planned.setdefault(f.name, f)
+    schema = None
+    if planned:
+        from tools.generation import event_schema
+        try:
+            schema = await event_schema(ctx, stroom.settings.event_logging_version)
+        except Exception:   # descriptions then come from the plan and the sample alone
+            schema = None
+    section = existing_index_markdown(survey, planned, schema)
+    text = replace_section(body, 'Field mapping', section)
+    stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    async def write(target: dict[str, Any]) -> dict[str, Any]:
+        doc = await stroom.get_doc('Documentation', target['uuid'])
+        old = body_text(doc)
+        log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
+        set_body_text(doc, f"{text}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
+        return await stroom.put_doc(doc)
+
+    guard = guard_from(ctx)
+    if existing:
+        doc = await write(existing)
+    elif beside:
+        # A working copy of the doc beside the index doc: its change log carries on, and promotion writes it back.
+        copy_ref = await guard.create('Documentation', ref['name'], build, [copy_of_tag(beside['uuid'])])
+        copy, current = await stroom.get_doc('Documentation', copy_ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
+        copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
+        await stroom.put_doc(copy)
+        doc = await write(copy_ref)
+    else:
+        doc = await guard.create_filled('Documentation', ref['name'], build, write)
+    destination = (f"written back into the existing doc beside the index doc ({folder}), after a backup" if beside
+                   else f"beside the index doc ({folder}) unless they choose another folder "
+                        f"(destinations={{'Documentation': '<folder>'}})")
+    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
+            'link': doc_link(stroom.settings, 'Documentation', doc['uuid']), 'index': survey['index'],
+            'field_mapping': section,
+            'next': f"Give the user the link to review the draft. Once they agree, promote_build build='{build}': the "
+                    f"doc is {destination}."}
 
 
 async def _documentation_beside(stroom, pipeline: dict[str, Any]) -> dict[str, Any] | None:
@@ -460,11 +558,13 @@ async def promote_build(
         else:
             target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
             if not target and doc['type'] == 'Documentation':
-                # The documentation of a production pipeline (an in-place change's): beside that pipeline.
-                found = (await stroom.find_documents(doc['name'], ['Pipeline'], 20)).get('values') or []
+                # The documentation of a production pipeline (an in-place change's) or an existing index: beside it.
+                kinds = ('Pipeline', 'ElasticIndex', 'Index')
+                found = (await stroom.find_documents(doc['name'], list(kinds), 20)).get('values') or []
                 outside = [v['docRef'] for v in found if v['docRef'].get('name') == doc['name']
+                           and v['docRef'].get('type') in kinds
                            and not any(d['uuid'] == v['docRef'].get('uuid') for d in docs)]
-                target = await _folder_of(stroom, {**outside[0], 'type': 'Pipeline'}) if len(outside) == 1 else None
+                target = await _folder_of(stroom, outside[0]) if len(outside) == 1 else None
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
             plan.append({'doc': doc, 'action': 'move', 'target': '/'.join(folder_parts(target))})

@@ -334,6 +334,30 @@ Report sections: Purpose and data; Processing; Errors and schema conformance; Fi
 Suggestions. Return it in the chat and save it with write_documentation in a build, then promote_build beside the
 pipeline once the user approves.{_docs(source_docs)}"""
 
+    @mcp.prompt(description="Document an existing index (Elastic Index or Lucene Index doc).")
+    def document_index(index: str, purpose: str = '') -> str:
+        return f"""Document the existing index "{index}" in Stroom, as an indexing pipeline's documentation would be:
+every field, what it holds and the values it has. Change nothing except the documentation.
+
+1. Locate the index doc: find_documents with types=['ElasticIndex', 'Index'] (the name, or part of it). Show the
+   user each match with its folder and confirm which one; when none or several match, ask.
+2. Survey it through Stroom: describe_document on the index doc. Its survey has the fields Stroom has for it, the
+   newest documents read through a dashboard that is not saved (how often each field is populated, sample values),
+   the time range they cover, and the pipelines that feed it (with whether each keeps an index plan, which says
+   where each field comes from in the events). describe_document a feeding pipeline for its source feeds and what
+   it does. A field with no values in the survey: say so, rather than guessing what it holds.
+3. Draft the documentation in a build (start_build), with write_documentation index_uuid=the index doc: the user
+   confirms the index doc there. Write Purpose and data (what the index is for, its source and feeding pipelines,
+   the time range surveyed{', and: ' + purpose if purpose else ''}), and leave Field mapping to the tool: it is
+   generated from the survey, each field with a description, type, source path when a plan records it, how often
+   it is populated and sample values.
+4. Give the user the doc's link (the reply's link) and the field table in the chat. Ask where it should live:
+   beside the index doc (the default) or a folder they choose.
+5. Once the user agrees, promote_build: the doc goes beside the index doc, or with destinations=
+   {{'Documentation': '<their folder>'}}.
+
+{_RULES}"""
+
     @mcp.prompt(description="Build an events pipeline for a feed that already holds data.")
     def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
         return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only.

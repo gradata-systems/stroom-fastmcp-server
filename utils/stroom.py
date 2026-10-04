@@ -151,11 +151,28 @@ class StroomGateway:
     async def post(self, path: str, body: Any) -> Any:
         return await self.request('POST', path, body)
 
-    async def find_documents(self, name: str, types: list[str] | None, limit: int) -> dict[str, Any]:
+    async def find_documents(self, name: str, types: list[str] | None, limit: int, offset: int = 0) -> dict[str, Any]:
         return await self.post('/explorer/v2/find', {
             'filter': explorer_filter(types, name),
-            'pageRequest': {'offset': 0, 'length': limit},
+            'pageRequest': {'offset': offset, 'length': limit},
         })
+
+    async def find_all_documents(self, name: str, types: list[str] | None, page: int = 1000) -> list[dict[str, Any]]:
+        """Every match, page by page: an environment can hold more than one page of pipelines."""
+        values: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for _ in range(1000):
+            found = await self.find_documents(name, types, page, len(values))
+            batch = found.get('values') or []
+            fresh = [v for v in batch if (v.get('docRef') or {}).get('uuid') not in seen]
+            if not fresh:
+                return values     # an empty page, or the same page again: Stroom ignored the offset
+            seen.update((v.get('docRef') or {}).get('uuid') for v in fresh)
+            values += fresh
+            total = (found.get('pageResponse') or {}).get('total')
+            if len(batch) < page or (total is not None and len(values) >= total):
+                return values
+        return values
 
     async def pipeline_layers(self, uuid: str) -> list[dict[str, Any]]:
         return await self.post('/pipeline/v1/fetchPipelineLayers', {'type': 'Pipeline', 'uuid': uuid})

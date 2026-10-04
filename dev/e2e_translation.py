@@ -189,7 +189,7 @@ async def documented_to_the_field(stroom, written: dict, fields: list[str], valu
           f"every row ({len(rows)}) says what the sample gave: values, or that it had none" + (f": not {bare}" if bare else ''))
     # The Description column, after the field's name: what it is, then what the sample shows.
     undescribed = [f for f, cells in rows.items() if not cells or not any(
-        k in cells[0] for k in ('sample', 'sampled', 'document'))]
+        k in cells[0] for k in ('sample', 'sampled', 'document', 'not stored', 'Not read', 'Not surveyed'))]
     check('| Description |' in section and not undescribed,
           f"each field described, with what the sample shows, e.g. {fields[-1]}: {(rows.get(fields[-1]) or [''])[0]!r}"
           + (f": not {undescribed}" if undescribed else ''))
@@ -204,7 +204,7 @@ async def documented_to_the_field(stroom, written: dict, fields: list[str], valu
                 header = line
             elif line.startswith('| `') and 'In sample' in header:
                 counted += 1
-                if not any(k in line for k in ('always', '% of', 'not in the sample')):
+                if not any(k in line for k in ('always', '% of', 'not in the sample', 'not stored', 'not read', 'not surveyed')):
                     unsaid.append(line.split(' | ')[0].strip('| `'))
         check(counted and not unsaid, f"and how often each of the {counted} was populated in the sample"
                                       + (f": not {unsaid}" if unsaid else ''))

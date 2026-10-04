@@ -89,7 +89,9 @@ async def describe_document(
     'data'; cluster credentials redacted), with what the server can say about it: for a Pipeline, how Stroom
     runs it (template chain, effective elements and properties and which layer set each, reference data,
     what it removes from its template); for an XSLT, what the translation does (each output element's
-    source, the input fields read, imports, dictionaries and lookups).
+    source, the input fields read, imports, dictionaries and lookups); for an Elastic Index or Lucene Index doc, a
+    survey of what the index holds, read through Stroom: its fields, the newest documents (how often each field
+    is populated, sample values) and the pipelines that feed it.
     """
     from tools.pipelines import describe_pipeline
     from tools.validation import describe_translation
@@ -98,6 +100,17 @@ async def describe_document(
         doc['pipeline'] = await describe_pipeline(uuid, ctx)
     elif type == 'XSLT':
         doc['translation'] = await describe_translation(ctx, xslt=doc.get('data') or '')
+    elif type in ('ElasticIndex', 'Index'):
+        from tools.indexing import survey_index
+        try:
+            survey = await survey_index(ctx, type, uuid)
+        except ToolError as e:
+            # The cluster may be unreachable: the doc itself is still worth having (e.g. to copy its settings).
+            doc['survey_error'] = f"Could not survey the index through Stroom: {e}"
+        else:
+            survey.pop('documents', None)
+            survey['fed_by'] = [{**p, 'plan': bool(p['plan'])} for p in survey['fed_by']]
+            doc['survey'] = survey
     return doc
 
 

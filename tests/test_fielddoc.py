@@ -95,9 +95,8 @@ def test_each_index_field_is_described_from_the_schema_and_the_sample():
     assert described['agent'].startswith('The `agent` value recorded in a Data element')
     assert described['agent'].endswith('One value in the sample (`curl`), in 1 of 2 documents.')
     assert described['outcome'] == 'Whether the logon succeeded. Different in each sampled document.'   # the plan's own
-    # The schema's words for the user's id, ahead of what the sample shows.
-    schema_words = schema.describe(schema.resolve('EventSource/User/Id'))
-    assert schema_words and described['user.id'] == f'{schema_words} Different in each sampled document.'
+    # The schema's words for the user's id (its base type's 'the object' named for the user), then the sample.
+    assert described['user.id'] == 'An identifier for the user. Different in each sampled document.'
 
 
 async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_section_otherwise():
@@ -173,3 +172,116 @@ async def test_the_index_section_names_the_agreed_elasticsearch_template():
     with patch('tools.builds.gateway_from', return_value=SimpleNamespace()):
         section = await builds.field_mapping_section(None, pipeline, kept, [])
     assert "Elasticsearch index template `stroom-door-v1`, agreed with the user 2026-10-04, composed of `stroom-base`." in section
+
+
+def _survey(fed_by=None, stored=True):
+    return {'index': {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'legacy-web', 'path': 'System/Prod/legacy-web'},
+            'backend': 'elasticsearch', 'index_name': 'legacy-web', 'time_field': '@timestamp',
+            'fields': [{'name': 'message', 'type': 'text'}, {'name': '@timestamp', 'type': 'date'},
+                       {'name': 'user.name', 'type': 'keyword'}, {'name': 'http.status', 'type': 'long',
+                                                                  **({} if stored else {'stored': False})},
+                       {'name': 'source.ip', 'type': 'ip'}],
+            'documents': [{'@timestamp': ['2026-09-23T11:45:00.000Z'], 'user.name': ['alice'], 'source.ip': ['10.3.0.1'],
+                           'http.status': [], 'message': ['health check']},
+                          {'@timestamp': ['2026-09-20T08:00:00.000Z'], 'user.name': ['bob'], 'source.ip': ['10.3.0.2'],
+                           'http.status': ['200'], 'message': ['GET /']}],
+            'earliest': '2026-09-20T08:00:00.000Z', 'latest': '2026-09-23T11:45:00.000Z', 'fed_by': fed_by or []}
+
+
+def test_an_existing_index_is_documented_from_its_survey():
+    from utils.fielddoc import existing_index_markdown
+    text = existing_index_markdown(_survey(), {}, None)
+    rows = {line.split(' | ')[0].strip('| `'): line.split(' | ')[1:] for line in text.splitlines() if line.startswith('| `')}
+    assert list(rows) == ['@timestamp', 'message', 'user.name', 'http.status', 'source.ip']    # time first, then as Stroom lists
+    assert 'No pipeline was found that writes to it' in text and 'come from elsewhere' not in text
+    assert 'the 2 newest documents (2026-09-20T08:00:00.000Z to' in text
+    assert rows['http.status'] == ['Numbers, one value in the sample (`200`), in 1 of 2 documents.', 'long', '(not recorded)',
+                                   '50% of documents', '`200` |']
+    assert rows['source.ip'][0] == 'IP addresses, different in each sampled document.'
+    unstored = existing_index_markdown(_survey(stored=False), {}, None)
+    assert '| `http.status` | Indexed but not stored: searchable, its values cannot be shown. | long | (not recorded) | not stored | - |' in unstored
+
+
+def test_an_existing_index_fed_by_a_plan_says_where_each_field_comes_from():
+    from utils.eventschema import EventSchema
+    from utils.fielddoc import existing_index_markdown
+    schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
+    planned = {'user.name': PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')}
+    text = existing_index_markdown(_survey([{'name': 'Web - Indexing', 'uuid': 'p', 'plan': {'fields': []}}]), planned, schema)
+    row = next(line for line in text.splitlines() if line.startswith('| `user.name`'))
+    assert '| `user.name` | An identifier for the user. Different in each sampled document. | keyword | `EventSource/User/Id` |' in row
+    assert 'Fed by `Web - Indexing`.' in text and 'not recorded here' not in text
+
+
+def test_an_index_stroom_reads_no_documents_from_is_documented_from_its_mapping_saying_so():
+    from utils.fielddoc import existing_index_markdown
+    survey = {**_survey(), 'documents': [], 'earliest': None, 'latest': None,
+              'note': "No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in this Stroom"}
+    text = existing_index_markdown(survey, {}, None)
+    assert 'only when its StreamId is a stream in this Stroom' in text and 'Surveyed through Stroom' not in text
+    assert '| `user.name` | Not read: no documents came back through Stroom. | keyword | (not recorded) | not read | - |' in text
+
+
+def test_fields_past_what_the_survey_reads_are_listed_as_not_surveyed():
+    from utils.fielddoc import existing_index_markdown
+    survey = {**_survey(), 'surveyed_fields': ['@timestamp', 'user.name', 'message']}
+    text = existing_index_markdown(survey, {}, None)
+    assert 'The survey read 3 of the 5 fields; the other 2 are listed as not surveyed.' in text
+    assert '| `source.ip` | Not surveyed: past the fields the survey reads. | ip | (not recorded) | not surveyed | - |' in text
+    assert '| `user.name` | Different in each sampled document. |' in text
+
+
+async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids():
+    from tools import indexing
+    names = ['StreamId', 'EventId', '@timestamp'] + [f'f{n:03}' for n in range(250)]
+    docs = [{'StreamId': '7', 'EventId': str(e), '@timestamp': f'2026-10-0{e}T00:00:00.000Z',
+             **{f'f{n:03}': f'v{n}-{e}' for n in range(250)}} for e in (1, 2)]
+    searched = []
+
+    async def search(ctx, dashboard, expression, length=100):
+        columns = [c['name'] for c in dashboard['dashboardConfig']['components'][1]['settings']['fields']]
+        searched.append(columns)
+        return {'rows': [{c: d.get(c) for c in columns} for d in reversed(docs)], 'errors': []}
+
+    async def post(path, body):
+        if path == '/dataSource/v1/findFields':
+            return {'values': [{'fldName': n, 'fldType': 'KEYWORD'} for n in names]}
+        return {'values': []}       # findInContent: nothing feeds it
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'wide', 'indexName': 'wide', 'timeField': '@timestamp'}),
+                             post=post, find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(stroom_ui_url=None, stroom_url='http://s'))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with patch.object(indexing, '_search', search):
+        survey = await indexing.survey_index(ctx, 'ElasticIndex', 'i')
+    assert len(searched) == 3 and all(len(c) <= 100 and c[:3] == ['StreamId', 'EventId', '@timestamp'] for c in searched)
+    assert len(survey['surveyed_fields']) == 253 and survey['populated']['f249'] == 100.0
+    assert survey['values']['f249'] == ['v249-2', 'v249-1'] and survey['documents_sampled'] == 2
+
+
+def test_a_pipeline_writes_to_an_index_by_its_effective_properties_not_a_mention():
+    from tools.indexing import writes_to
+    lucene = {('indexingFilter', 'index'): {'value': {'type': 'Index', 'uuid': 'u1'}}}
+    assert writes_to(lucene, 'Index', 'u1', None) and not writes_to(lucene, 'Index', 'u2', None)
+    named = lambda value: {('elasticIndexingFilter', 'indexName'): {'value': value}}
+    assert writes_to(named('foo-v1'), 'ElasticIndex', 'x', 'foo-v1')
+    assert not writes_to(named('foo-v10'), 'ElasticIndex', 'x', 'foo-v1')
+    assert writes_to(named('ecs-windows{_suffix}v1'), 'ElasticIndex', 'x', 'ecs-windows-dc-v1')     # built from values
+    assert writes_to(named('ecs-windows-v1'), 'ElasticIndex', 'x', 'ecs-windows*')                  # a pattern or alias
+    assert not writes_to({('xsltFilter', 'xslt'): {'value': 'foo-v1'}}, 'ElasticIndex', 'x', 'foo-v1')
+
+
+async def test_describe_document_still_returns_an_index_doc_when_its_survey_fails():
+    from tools import explorer, indexing
+    with patch.object(explorer, 'get_document', AsyncMock(return_value={'name': 'IDX', 'indexName': 'idx'})), \
+            patch.object(indexing, 'survey_index', AsyncMock(side_effect=ToolError('cluster unreachable'))):
+        doc = await explorer.describe_document(None, 'ElasticIndex', 'i')
+    assert doc['name'] == 'IDX' and 'cluster unreachable' in doc['survey_error'] and 'survey' not in doc
+
+
+async def test_documenting_an_index_needs_a_change_line_and_takes_no_pipeline_arguments():
+    from tools import builds
+    with pytest.raises(ToolError, match='Give change'):
+        await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n')
+    with pytest.raises(ToolError, match='Leave them out with index_uuid'):
+        await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n',
+                                         change='Created', stream_ids=[1])
