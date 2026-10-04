@@ -17,7 +17,9 @@ _RULES = """Rules for every run:
 - Confirm key details with the user when a tool returns needs_confirmation, and ask for approval when it returns
   needs_approval: show the summary, and only pass the id back once the user has agreed.
 - Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
-  from, and let the user confirm or correct it.
+  from, and let the user confirm or correct it. For a name a tool confirms (create_feed, create_pipeline,
+  create_index_doc), propose it by calling the tool, not by asking in the chat first: the user confirms or corrects
+  it there (a form their client shows, the name editable in it; otherwise the needs_confirmation reply you relay).
 - Step every sample record (step_sample) before processing. Errors, when stepping or processing: first resolve
   those your own content causes (the XSLT, text converter, mapping or field plan), stepping again after each fix.
   Only what you cannot resolve there (an inherited template element, reference data, the source data itself) goes
@@ -137,7 +139,8 @@ Stage 1, events:
    the parser and template, whether a text converter is needed), creates the build and returns the plan. Follow `next`
    in each result until it says promote; build_status shows what remains. A file's text is sent once more, to
    upload_sample; after that every tool takes the sample streams (stream_ids) and reads them itself.
-2. Propose the feed name (following sibling feeds' naming) and create_feed; upload_sample once per file, so each is a
+2. Call create_feed with the feed name you propose (following sibling feeds' naming): the user confirms or corrects
+   it in its confirmation; upload_sample once per file, so each is a
    stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
    every kind gets a rule and step_records can check each. Values the records do not carry (a user's department, a
    host's site): find_reference_data for maps the environment loads, or build the reference data (reference-data guide).

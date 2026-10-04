@@ -20,7 +20,7 @@ from tools.processing_writes import elastic_destination, indexing_xslt_digest
 from tools.stepping import _outputs, _Pipeline
 from tools.streams import _meta, summarise_events
 from tools.templates import _shape
-from utils.consent import consent_from
+from utils.consent import consent_from, edited
 from utils.fielddoc import index_field_mapping_markdown
 from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField
 from utils.xsltgen import SharedTemplate
@@ -287,10 +287,16 @@ async def create_index_doc(
     else:
         target = {'volume group': volume_group}
     details = {'build': build, 'backend': backend, 'index doc': name, 'time field': time_field, **target}
+    names = {'name': ('Index doc name', name)}
+    if backend == 'elasticsearch' and index_name:
+        names['index_name'] = ('Elasticsearch index name', index_name)
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_index_doc', f"Create {backend} index doc '{name}'",
-                                           details, confirmation_id)
+                                           details, confirmation_id, editable=names)
     if gate:
         return gate
+    # The user may have corrected the names in the form.
+    name = edited(ctx, 'name', name)
+    index_name = edited(ctx, 'index_name', index_name) if index_name else index_name
     doc_type = INDEX_TYPE[backend]
     ref = await guard_from(ctx).create(doc_type, name, build)
     doc = await stroom.get_doc(doc_type, ref['uuid'])

@@ -129,3 +129,49 @@ async def test_a_form_answer_only_counts_for_the_request_it_was_asked_for():
 async def test_modern_clients_without_forms_get_an_id():
     pending = await ConsentStore().require(ModernCtx(forms=False), 'approval', 'x', 'X', {}, None)
     assert pending['status'] == 'needs_approval'
+
+
+async def test_a_proposed_name_can_be_corrected_in_the_modern_form():
+    from utils.consent import edited
+    store = ConsentStore()
+    details = {'feed name': 'FIREWALL-EDGE-V1.0'}
+    editable = {'name': ('Feed name', 'FIREWALL-EDGE-V1.0')}
+    asked = await store.require(ModernCtx(), 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable)
+    [(key, form)] = asked.input_requests.items()
+    field = form.params.requested_schema['properties']['name']
+    assert field['type'] == 'string' and field['default'] == 'FIREWALL-EDGE-V1.0' and field['title'] == 'Feed name'
+    # The user corrects the name and confirms: the tool goes ahead with theirs.
+    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'value': True, 'name': ' ACME-FW-V1.0 '}}},
+                    state=asked.request_state)
+    assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable) is None
+    assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'ACME-FW-V1.0'
+    # Left empty, the proposal stands.
+    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'value': True, 'name': ''}}}, state=asked.request_state)
+    assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable) is None
+    assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'FIREWALL-EDGE-V1.0'
+
+
+async def test_a_proposed_name_can_be_corrected_in_the_classic_form():
+    from utils.consent import edited
+    asked_with = {}
+
+    async def elicit(message, response_type):
+        asked_with['type'] = response_type
+        return SimpleNamespace(action='accept', data=response_type(confirm=True, name='ACME-FW-V1.0'))
+    ctx = SimpleNamespace(elicit=elicit)
+    assert await ConsentStore().require(ctx, 'confirmation', 'create_feed', 'Create feed', {}, None,
+                                        editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')}) is None
+    assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'ACME-FW-V1.0'
+    assert asked_with['type'](confirm=True).name == 'FIREWALL-EDGE-V1.0'       # the proposal is the field's default
+
+
+async def test_with_an_id_the_proposal_stands():
+    from utils.consent import edited
+    store = ConsentStore(use_elicitation=False)
+    editable = {'name': ('Feed name', 'FIREWALL-EDGE-V1.0')}
+    pending = await store.require(SimpleNamespace(), 'confirmation', 'create_feed', 'Create feed', {'n': 1}, None,
+                                  editable=editable)
+    ctx = SimpleNamespace()
+    assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', {'n': 1}, pending['confirmation_id'],
+                               editable=editable) is None
+    assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'FIREWALL-EDGE-V1.0'

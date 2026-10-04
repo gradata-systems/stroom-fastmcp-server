@@ -138,13 +138,20 @@ class ConsentStore:
                 table.pop(token, None)
 
     async def require(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
-                      token: str | None, keep: bool = False) -> dict[str, Any] | None:
+                      token: str | None, keep: bool = False,
+                      editable: dict[str, tuple[str, str]] | None = None) -> dict[str, Any] | None:
         """None when the user has agreed; otherwise the response the tool should return.
 
         Raises ToolError when the user declines or the id does not match this exact request. Ids are single
         use. When a later gate in the same call may still stop it, pass keep=True so the id survives the
         call being repeated for that gate, and discard() it once the action is done.
+
+        editable: values the user may correct in the form itself, {key: (title, proposed)}, e.g. {'name': ('Feed
+        name', 'ACME-VPN-V1.0')}; edited(ctx, key, proposed) then gives what they settled on. Without a form (an
+        id passed back), the proposal stands: a user who wants another value says so, and the tool is called again.
         """
+        editable = editable or {}
+        ctx_edits(ctx).clear()
         digest = _digest(action, details)
         if token:
             token = token.strip().lower()   # one id however it is cased, so single use holds
@@ -167,19 +174,25 @@ class ConsentStore:
             return None
 
         if self.use_elicitation and _modern(ctx):
-            outcome = self._form_round(ctx, kind, action, summary, details, digest)
+            outcome = self._form_round(ctx, kind, action, summary, details, digest, editable)
             if outcome is not False:
                 return outcome
         elif self.use_elicitation and hasattr(ctx, 'elicit'):
             try:
-                answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", bool)
+                answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", _answer_type(kind, editable))
             except Exception as e:  # client without elicitation support
                 logger.info("Elicitation unavailable, falling back to %s id: %s", kind, e)
             else:
-                agreed = getattr(answer, 'action', None) == 'accept' and bool(getattr(answer, 'data', False))
-                audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='elicitation')
+                data = getattr(answer, 'data', None)
+                confirmed = data if isinstance(data, bool) else getattr(data, 'confirm', False)
+                agreed = getattr(answer, 'action', None) == 'accept' and bool(confirmed)
+                edits = _settled(editable, {k: getattr(data, k, None) for k in editable})
+                changed = _changed(editable, edits)
+                audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='elicitation',
+                      **({'edited': changed} if agreed and changed else {}))
                 if not agreed:
                     raise ToolError(f"The user did not agree to: {summary}")
+                ctx_edits(ctx).update(edits)
                 return None
 
         pending_id = self._seal(kind, self._binding(kind, action, digest, _user()), int(time.time()) + TTL_SECONDS)
@@ -191,11 +204,14 @@ class ConsentStore:
 
 
     def _form_round(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
-                    digest: str) -> Any:
+                    digest: str, editable: dict[str, tuple[str, str]] | None = None) -> Any:
         """Modern connections: None if agreed, an input-required result to ask, False if the client cannot."""
+        editable = editable or {}
         state = _call_state(ctx)
         bound = f"{digest}:{_user()}"
         if bound in state['granted']:
+            # The call is repeated for a later gate: what the user settled on in this one still holds.
+            ctx_edits(ctx).update((state.get('edits') or {}).get(bound) or {})
             return None
         key = f"{kind}-{digest[:16]}"
         try:
@@ -207,11 +223,17 @@ class ConsentStore:
             action_taken = getattr(answer, 'action', None) or (answer.get('action') if isinstance(answer, dict) else None)
             content = getattr(answer, 'content', None) or (answer.get('content') if isinstance(answer, dict) else None) or {}
             agreed = action_taken == 'accept' and bool(content.get('value'))
-            audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='form')
+            edits = _settled(editable, {k: content.get(k) for k in editable})
+            changed = _changed(editable, edits)
+            audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='form',
+                  **({'edited': changed} if agreed and changed else {}))
             if not agreed:
                 raise ToolError(f"The user did not agree to: {summary}")
             state['granted'].append(bound)
+            if edits:
+                state.setdefault('edits', {})[bound] = edits
             state.pop('asked', None)
+            ctx_edits(ctx).update(edits)
             return None
         if not _client_can_answer_forms(ctx):
             return False
@@ -221,7 +243,10 @@ class ConsentStore:
             message=f"{summary}\n\n{_format(details)}",
             requested_schema={'type': 'object', 'required': ['value'], 'properties': {
                 'value': {'type': 'boolean', 'title': 'Approve' if kind == 'approval' else 'Confirm',
-                          'description': summary}}}))
+                          'description': summary},
+                **{key: {'type': 'string', 'title': title, 'default': proposed,
+                         'description': f"Proposed: {proposed}. Change it to use another; left empty, the proposal stands."}
+                   for key, (title, proposed) in editable.items()}}}))
         return mcp_types.InputRequiredResult(input_requests={key: form},
                                             request_state=json.dumps(state, sort_keys=True))
 
@@ -231,6 +256,43 @@ class ConsentStore:
             token = token.strip().lower()
             payload = self._unseal(token)
             self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
+
+
+def ctx_edits(ctx: Any) -> dict[str, str]:
+    """The values the user settled on in this request's confirmation forms."""
+    edits = getattr(ctx, '_consent_edits', None)
+    if edits is None:
+        edits = {}
+        try:
+            setattr(ctx, '_consent_edits', edits)
+        except Exception:   # a context that takes no attributes: nothing to carry
+            pass
+    return edits
+
+
+def edited(ctx: Any, key: str, proposed: str) -> str:
+    """What the user settled on for an editable value: their correction in the form, else the proposal."""
+    return ctx_edits(ctx).get(key) or proposed
+
+
+def _settled(editable: dict[str, tuple[str, str]], answered: dict[str, Any]) -> dict[str, str]:
+    """Each editable value as answered, or the proposal where the answer is empty."""
+    return {k: (str(answered.get(k) or '').strip() or proposed) for k, (_, proposed) in editable.items()}
+
+
+def _changed(editable: dict[str, tuple[str, str]], edits: dict[str, str]) -> dict[str, str]:
+    return {k: v for k, v in edits.items() if v != editable[k][1]}
+
+
+def _answer_type(kind: str, editable: dict[str, tuple[str, str]]) -> Any:
+    """The classic elicitation's answer: a yes/no, with a text field per editable value, its proposal as the default."""
+    if not editable:
+        return bool
+    from dataclasses import field, make_dataclass
+    return make_dataclass('Answer', [('confirm', bool, field(default=False, metadata={
+        'title': 'Approve' if kind == 'approval' else 'Confirm'}))]
+                          + [(key, str, field(default=proposed, metadata={'title': title}))
+                             for key, (title, proposed) in editable.items()])
 
 
 def _format(details: dict[str, Any]) -> str:

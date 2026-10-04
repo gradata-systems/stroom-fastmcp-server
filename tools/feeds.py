@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from security.guard import guard_from
 from tools.streams import SampleStreams, read_sample_streams
-from utils.consent import consent_from
+from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples, check_sample
@@ -56,14 +56,16 @@ async def create_feed(
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Create a feed in the build folder. The user confirms the name and encoding first. Stroom checks the
+    Create a feed in the build folder, under the name you propose: the user confirms it, or corrects it in the
+    confirmation form, before anything is made (call this rather than asking for the name in the chat first). Stroom checks the
     name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed.
     """
     details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', f"Create feed '{name}'", details,
-                                           confirmation_id)
+                                           confirmation_id, editable={'name': ('Feed name', name)})
     if gate:
         return gate
+    name = edited(ctx, 'name', name)       # the user may have corrected it in the form
     stroom = gateway_from(ctx)
     try:
         ref = await guard_from(ctx).create('Feed', name, build)

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from security.guard import MANAGED, build_tag, copy_of_tag, guard_from
 from tools.pipelines import chain_order, merge_layers
-from utils.consent import consent_from
+from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
 
@@ -297,9 +297,10 @@ async def create_pipeline(
                   if refs else {})}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_pipeline',
                                            f"Create pipeline '{name}' from template '{template.get('name')}'",
-                                           details, confirmation_id)
+                                           details, confirmation_id, editable={'name': ('Pipeline name', name)})
     if gate:
         return gate
+    name = edited(ctx, 'name', name)       # the user may have corrected it in the form
     ref = await guard_from(ctx).create('Pipeline', name, build)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
