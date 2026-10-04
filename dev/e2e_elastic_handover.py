@@ -50,6 +50,7 @@ from security.policy import AccessPolicy  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from utils.mappingstore import read_agreed_template  # noqa: E402
 from tools import builds, indexing, processing_writes, stepping, templates, translation  # noqa: E402
+from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import FieldPlan  # noqa: E402
 from utils.templatecheck import compose  # noqa: E402
@@ -208,8 +209,15 @@ async def main():
         await e2e.documented_to_the_field(stroom, doc, [f.name for f in plan.fields], {user_field: 'alice'})
 
         print('\n### the proposed template')
-        proposal = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events)
-        print('    ' + proposal['dev_tools'].splitlines()[0])
+        unasked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events)
+        e2e.check(unasked.get('needs') == 'example_template' and 'dev_tools' not in unasked,
+                  'without an example nothing is built to commit: the user is asked for theirs')
+        # This user has none: built from the plan, shown for them to confirm (not confirmed yet).
+        proposal = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, without_example=True)
+        e2e.check(proposal.get('status') == 'needs_confirmation', 'built from the plan alone only as the user confirms')
+        dev_tools = proposal['details']['index template']
+        proposal['template'] = json.loads(dev_tools.split(chr(10), 1)[1])
+        print('    ' + dev_tools.splitlines()[0])
         e2e.check(proposal['template']['index_patterns'] == [f'{index}*'], "template covers the pipeline's index")
         e2e.check(proposal['self_check']['compatible'] and proposal['self_check']['documents_checked'] == 3,
                  f"proposal fits the {proposal['self_check']['documents_checked']} documents the pipeline writes: "
@@ -235,6 +243,23 @@ async def main():
         except ToolError as e:
             refused = str(e)
         e2e.check(refused.startswith('No Elasticsearch index template has been agreed'), f"refused: {refused[:90]}")
+        e2e.check(f'propose_index_template pipeline_uuid={pipeline["uuid"]}' in refused and 'example_template=' in refused,
+                  'the refusal names the call that agrees it, with the example the user gave')
+
+        print('\n### stepped clean is not indexed: the plan waits for the template (seen in VS Code)')
+        status = await build_status(ctx, csv["build"])
+        state = {s['step']: s['state'] for s in status['steps']}
+        e2e.check(state['index_template'] == 'to do' and state['indexed'] == 'to do'
+                  and status['next']['step'] not in ('index_documented', 'promoted'),
+                  f"template and indexing still to do, promotion not next: {status['next']['step']}")
+        e2e.check(any('no Elasticsearch index template agreed' in c for c in status['before_promotion'])
+                  and any('has not been indexed and verified' in c for c in status['before_promotion']),
+                  "promotion's approval would warn of both")
+        started_wait = time.monotonic()
+        waited = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, timeout_seconds=60,
+                                                             expect_events=False)
+        e2e.check(time.monotonic() - started_wait < 30 and 'no processor filter' in waited['problems'][0],
+                  'no processor filter: nothing to wait for, said at once')
 
         print('\n### a standalone example: no component templates')
         standalone = ('PUT _index_template/ecs-standalone-v1\n' + json.dumps({
@@ -285,6 +310,8 @@ async def main():
                                 events_stream_ids=events, component_templates=[base])
         kept = read_agreed_template((await stroom.get_doc('Pipeline', pipeline['uuid'])).get('description'))
         e2e.check(fixed.get('agreed') and '"priority": 400' in kept['dev_tools'], 'the correction is the agreed template now')
+        state = {s['step']: s['state'] for s in (await build_status(ctx, csv["build"]))['steps']}
+        e2e.check(state['index_template'] == 'done' and state['indexed'] == 'to do', 'agreed; indexing still to do')
 
         print('\n### the admin has committed it: indexing starts')
         first = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
@@ -445,6 +472,13 @@ async def live(ctx, stroom: StroomGateway, csv: dict, events: list[int], es_temp
                          ('@timestamp', 'BETWEEN', '2026-09-28T10:04:00.000Z,2026-09-28T10:08:00.000Z', 2,
                           {'range': {'@timestamp': {'gte': '2026-09-28T10:04:00.000Z', 'lte': '2026-09-28T10:08:00.000Z'}}}),
                      ], pipeline_uuid=pipeline['uuid'])
+        ref = {'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']}
+        status = await build_status(ctx, csv['build'])
+        # The build's first indexing pipeline (without Elasticsearch, above) was never indexed: still to do, for it.
+        points_elsewhere = (status['next']['step'] != 'indexed'
+                            or status['next']['call']['arguments'].get('pipeline_uuid') != pipeline['uuid'])
+        e2e.check(await stepping.verified(ctx, ref) and points_elsewhere,
+                  'this pipeline is indexed once verify_index passed; the plan points at what is not')
 
         print('\n### documented')
         written = await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
@@ -534,8 +568,8 @@ async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: s
                          ('host.ip', 'EQUALS', '10.0.0.2', 1, {'term': {'host.ip': '10.0.0.2'}}),
                      ], pipeline_uuid=pipeline['uuid'])
         print('\n### following an existing index in Stroom, when the user has no template to paste')
-        like = await indexing.draft_index_mapping(ctx, 'elasticsearch', f'people-{stamp}-v2', events_stream_ids=events,
-                                                  like_index=doc['uuid'])
+        like = await e2e.agreed(indexing.draft_index_mapping, ctx=ctx, backend='elasticsearch',
+                                index_name=f'people-{stamp}-v2', events_stream_ids=events, like_index=doc['uuid'])
         names = {f['source']: f['name'] for f in like['plan']['fields']}
         e2e.check(names.get('EventSource/User/Id') == 'user.id' and names.get('EventSource/User/Name') == 'user.name'
                   and any(f"'{index}'" in n for n in like.get('from_example') or []),

@@ -281,26 +281,40 @@ async def indexing_xslt_digest(stroom: StroomGateway, pipeline_uuid: str) -> str
     return digest(*parts)
 
 
+async def agreement_problem(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any]) -> str | None:
+    """Why the Elasticsearch indexing pipeline has no index template agreed with the user for the documents its
+    current code writes, or None when it has one."""
+    index, cluster = destination['index name'], destination['cluster']
+    if not index:
+        return "This Elasticsearch indexing pipeline has no indexName set"
+    agreed = read_agreed_template(pipeline.get('description'))
+    if not agreed or agreed.get('index') != index or agreed.get('cluster') != cluster:
+        return (f"No Elasticsearch index template has been agreed with the user for index '{index}' (cluster "
+                f"{cluster}). Agreeing it is a step of its own, before any indexing: propose_index_template "
+                f"pipeline_uuid={pipeline['uuid']} with the field plan, the Events streams and example_template= the "
+                f"example index template (or index mapping) the user gave, exactly as they pasted it, with any component "
+                f"templates it is composed of; the user confirms the result in a form. Without an example, ask the "
+                f"user for one first. A template put on the cluster without that agreement does not count. Until it is "
+                f"agreed, committed and the sample indexed and verified, the build is not ready for promotion.")
+    if agreed.get('xslt') != await indexing_xslt_digest(stroom, pipeline['uuid']):
+        return (f"The indexing XSLT changed since index template '{agreed['name']}' was agreed: "
+                f"check_index_template with it (and its component templates {agreed.get('component_templates') or []}) "
+                f"over the Events streams, so the user confirms it again for the documents the pipeline now "
+                f"writes. The agreed template:\n{(agreed.get('dev_tools') or '')[:4000]}")
+    return None
+
+
 async def _committed(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any]) -> str:
     """Elasticsearch: the index template has to be on the cluster before documents arrive, or the index is created
     with dynamic mappings that the template can no longer change. Only a template the user agreed (kept with the
     pipeline by propose_index_template or check_index_template) is asked about, and the user confirms it is
     committed to the cluster in the approval."""
-    index, cluster = destination['index name'], destination['cluster']
-    if not index:
-        raise ToolError("This Elasticsearch indexing pipeline has no indexName set")
+    problem = await agreement_problem(stroom, pipeline, destination)
+    if problem:
+        raise ToolError(problem)
     agreed = read_agreed_template(pipeline.get('description'))
-    if not agreed or agreed.get('index') != index or agreed.get('cluster') != cluster:
-        raise ToolError(f"No Elasticsearch index template has been agreed with the user for index '{index}' (cluster "
-                        f"{cluster}). propose_index_template with the user's example index template (or index mapping) "
-                        f"and its component templates; the user confirms it there, or corrects it "
-                        f"(check_index_template with their version). Then they have it committed to the cluster.")
-    if agreed.get('xslt') != await indexing_xslt_digest(stroom, pipeline['uuid']):
-        raise ToolError(f"The indexing XSLT changed since index template '{agreed['name']}' was agreed: "
-                        f"check_index_template with it (and its component templates {agreed.get('component_templates') or []}) "
-                        f"over the Events streams, so the user confirms it again for the documents the pipeline now "
-                        f"writes. The agreed template:\n{(agreed.get('dev_tools') or '')[:4000]}")
-    return f"the agreed index template '{agreed['name']}' for Elasticsearch index '{index}' is committed to cluster {cluster}"
+    return (f"the agreed index template '{agreed['name']}' for Elasticsearch index '{destination['index name']}' is "
+            f"committed to cluster {destination['cluster']}")
 
 
 async def create_processor_filter(
@@ -485,8 +499,16 @@ async def wait_for_processing(
     """
     stroom = gateway_from(ctx)
     deadline = time.monotonic() + timeout_seconds
+    from tools.plan import build_of, with_next
     while True:
         status = await processing_status(ctx, pipeline_uuid)
+        if not status['filters']:
+            # Nothing was set to process: waiting would only run out the timeout, as if tasks were running.
+            return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
+                'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'fail',
+                'problems': ["This pipeline has no processor filter, so nothing is processing and there is nothing to "
+                             "wait for."],
+                'hint': "create_processor_filter first. If it was refused, do what its message says; don't wait."})
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
         all_have_output = all(outputs.values()) or not expect_events
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
@@ -508,7 +530,6 @@ async def wait_for_processing(
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
                             "ask the user which to keep")
-    from tools.plan import build_of, with_next
     result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
               'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
               'hint': None if finished else "Tasks were still running at the timeout; call again."}

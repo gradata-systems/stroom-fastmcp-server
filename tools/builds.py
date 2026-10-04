@@ -11,9 +11,9 @@ from pydantic import BaseModel, Field
 
 from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from, copy_of_tag
 from tools.instructions import applicable_instructions
-from tools.processing_writes import create_promotion_filters, promotion_processing
+from tools.processing_writes import agreement_problem, create_promotion_filters, elastic_destination, promotion_processing
 from tools.pipelines import translation_docs
-from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags
+from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags, verified, verified_tags
 from tools.streams import summarise_events
 from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents, object_arrays,
                             index_field_mapping_markdown, sampled_events, written_fields_markdown)
@@ -119,6 +119,15 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
                             "recorded")
         if not doc['working_copy_of'] and doc['name'] not in documented:
             problems.append(f"Pipeline '{doc['name']}': no documentation (write_documentation)")
+        if await _shape_stage(gateway_from(ctx), doc['uuid']) in ('indexing', 'discovery'):
+            destination = await elastic_destination(gateway_from(ctx), doc['uuid'])
+            if destination and await agreement_problem(gateway_from(ctx), await gateway_from(ctx).get_doc(
+                    'Pipeline', doc['uuid']), destination):
+                problems.append(f"Pipeline '{doc['name']}': no Elasticsearch index template agreed with the user for "
+                                f"its current code (propose_index_template with their example)")
+            if not await verified(ctx, doc):
+                problems.append(f"Pipeline '{doc['name']}': the sample has not been indexed and verified with its "
+                                f"current code (create_processor_filter, wait_for_processing, verify_index)")
         kept = await kept_mapping(ctx, doc['uuid'])
         if not kept:
             continue
@@ -656,8 +665,9 @@ async def promote_build(
             # Now production content: the agent may no longer change it directly.
             # mcp-generated stays, so it is still known as the server's own.
             ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
-            # Clean-step records only mean something inside a build.
-            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(await guard.tags(ref)))
+            # Clean-step and verification records only mean something inside a build.
+            tags = await guard.tags(ref)
+            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(tags) + verified_tags(tags))
             done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
         else:
             original = await stroom.get_doc(doc['type'], step['target'])

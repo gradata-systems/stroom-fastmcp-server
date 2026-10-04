@@ -16,7 +16,7 @@ def test_the_surface_is_smaller_and_every_core_tool_names_its_plan_step():
                  'set_pipeline_property', 'run_test_searches', 'summarise_events'):
         assert gone not in tools
     plan.annotate_tools(main_tools.TOOL_MODULES)
-    assert tools['create_pipeline'].__doc__.startswith('Onboarding step 5 of 14 (pipeline): ')
+    assert tools['create_pipeline'].__doc__.startswith('Onboarding step 5 of 15 (pipeline): ')
     assert tools['start_onboarding'].__doc__.startswith('Onboarding start: ')
     assert tools['build_status'].__doc__.startswith('Onboarding, any step: ')
     assert not tools['locate_event'].__doc__.lstrip().startswith('Onboarding')

@@ -118,6 +118,45 @@ async def stepped_clean(ctx: Context, pipeline: dict[str, Any]) -> bool:
     return any(t.endswith(f'-{digest}') for t in mine)
 
 
+# An indexing pipeline whose sample was indexed and found by verify_index's searches is recorded the same way,
+# 'mcp-verified-<UTC time>-<code digest>': the plan's 'indexed' step is done only then, not when it steps clean.
+VERIFIED = 'mcp-verified-'
+
+
+def verified_tags(tags: list[str]) -> list[str]:
+    return sorted(t for t in tags if t.startswith(VERIFIED))
+
+
+async def remember_verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Record that the indexing pipeline's current code indexed the sample and verify_index found it."""
+    guard = guard_from(ctx)
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    try:
+        tags = await guard.tags(ref)
+        if MANAGED not in tags:
+            return False
+        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+        mine = verified_tags(tags)
+        if not any(t.endswith(f'-{digest}') for t in mine):
+            await guard.tag([ref], [f"{VERIFIED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
+            if len(mine) >= KEEP_STEPPED:
+                await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
+        return True
+    except Exception as e:  # the record is a convenience; never fail the verification over it
+        logger.warning("Couldn't record a verified index on pipeline %s: %s", ref['uuid'], e)
+        return False
+
+
+async def verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Whether verify_index passed for the indexing pipeline's current code."""
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    mine = verified_tags(await guard_from(ctx).tags(ref))
+    if not mine:
+        return False
+    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+    return any(t.endswith(f'-{digest}') for t in mine)
+
+
 def record_key(stream_id: int, location: dict[str, Any]) -> str:
     """'stream:record', or 'stream:part:record' past the first part (record numbers restart in each part)."""
     part = location.get('partIndex') or 0

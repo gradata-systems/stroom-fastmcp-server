@@ -130,7 +130,7 @@ For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without sig
 `STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
 API key when authentication is on.
 
-Tests: `uv run pytest`.
+Tests: `uv run pytest`. `tests/test_off_path.py` holds every state of the onboarding plan (in order, and out of it, as real clients went) with the step and call `next` names, and the wrong moves agents make, each of which must be stopped with the call that puts it right.
 
 ## Development and testing
 
@@ -144,6 +144,7 @@ End-to-end suites, driving the real tools against that stack:
 
 | Script | Covers |
 | --- | --- |
+| `dev/e2e_plan_walk.py` | The plan followed as an agent would: from `start_onboarding`, every call is the one `next` names, with only its placeholders filled, to promotion, on Lucene and on Elasticsearch (with the user's example template agreed and committed). Following `next` is never refused; wrong moves on the way are refused with the right call named, and leave `next` where it was |
 | `dev/e2e_translation.py` | CSV, JSON, XML and syslog samples to valid Events; a field fix and reprocessing; promotion and a working copy written back |
 | `dev/e2e_lucene_indexing.py` | Indexing on the Lucene backend: field plan, index doc, indexing pipeline, verification searches, a v2 copy |
 | `dev/e2e_existing_feed.py` | Building a pipeline from a feed that already holds data: surveys, stepping in place, kinds left untranslated |

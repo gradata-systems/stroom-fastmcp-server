@@ -447,7 +447,7 @@ async def existing_feed(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp
 
     print("\n### the template waits for the user's example, then is built from it and agreed")
     unasked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, newest)
-    e2e.check('status' not in unasked and unasked['hint'].startswith('No example was given: ask the user')
+    e2e.check(unasked.get('needs') == 'example_template' and 'dev_tools' not in unasked
              and 'sibling discovery index' in unasked['hint'], 'without an example, the user is asked for one first')
     # What the user pastes: the sibling discovery index's template, as GET returns it. It has no components.
     response = await es.put('/_index_template/e2e-discovery-legacy-v1', json=STANDALONE)

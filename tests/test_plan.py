@@ -38,7 +38,7 @@ async def test_start_onboarding_profiles_every_file_and_returns_the_plan():
     assert result['build'] == 'onboard-fortios-firewall' and result['done'] is False
     assert result['profile']['format'] == 'key=value' and result['parser'] == 'DSParser'
     assert result['template'].startswith('Event Data (Text)') and result['text_converter'].startswith('needed: build_data_splitter')
-    assert result['next']['step'] == 'feed' and len(result['plan']) == 14
+    assert result['next']['step'] == 'feed' and len(result['plan']) == 15
     assert result['next']['call'] == {'tool': 'create_feed', 'arguments': {
         'build': 'onboard-fortios-firewall', 'name': '<the feed name the user confirmed>'}}
     with pytest.raises(ToolError, match='Give the sample files'):
@@ -87,3 +87,67 @@ def test_next_is_one_call_with_what_the_build_already_knows():
     for step in [i['step'] for i in plan.checklist()]:
         call, _ = plan.next_call(step, 'b', ['F'], [1], [2], 'p', 'q')
         assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), step
+
+
+async def _status_of(indexing_verified: bool, agreed: bool, filters: list[dict]) -> dict:
+    """The plan of an Elasticsearch build with an events pipeline, an index doc and an indexing pipeline, both
+    stepped clean, its events processed and documented."""
+    docs = [{'type': 'Feed', 'uuid': 'f', 'name': 'ACME', 'path': 'b', 'working_copy_of': None},
+            {'type': 'TextConverter', 'uuid': 'tc', 'name': 'ACME-CSV', 'path': 'b', 'working_copy_of': None},
+            {'type': 'XSLT', 'uuid': 'x', 'name': 'ACME-Translation', 'path': 'b', 'working_copy_of': None},
+            {'type': 'Pipeline', 'uuid': 'ev', 'name': 'ACME-Events', 'path': 'b', 'working_copy_of': None},
+            {'type': 'Documentation', 'uuid': 'd', 'name': 'ACME-Events', 'path': 'b', 'working_copy_of': None},
+            {'type': 'ElasticIndex', 'uuid': 'ix-doc', 'name': 'ACME-V1', 'path': 'b', 'working_copy_of': None},
+            {'type': 'Pipeline', 'uuid': 'ix', 'name': 'ACME-Indexing', 'path': 'b', 'working_copy_of': None}]
+    stroom = SimpleNamespace(
+        get_doc=AsyncMock(side_effect=lambda t, u: {'uuid': u, 'name': u, 'description': ''}),
+        pipeline_layers=AsyncMock(return_value=[]),
+        find_meta=AsyncMock(return_value={'values': [{'meta': {'id': 9, 'status': 'UNLOCKED'}}]}))
+    stages = {'ev': 'translation', 'ix': 'indexing'}
+    with patch('tools.builds._build_docs', AsyncMock(return_value=docs)), \
+            patch('tools.builds.build_checks', AsyncMock(return_value=[])), \
+            patch.object(plan, 'gateway_from', lambda c: stroom), \
+            patch.object(plan, 'guard_from', lambda c: None), \
+            patch.object(plan, 'sample_streams', AsyncMock(return_value={'Raw Events': [{'id': 7}]})), \
+            patch.object(plan, 'sample_format', AsyncMock(return_value={'needs_text_converter': True})), \
+            patch('utils.mappingstore.read_mapping', lambda d: ('translation', {})), \
+            patch('tools.templates._shape', AsyncMock(side_effect=lambda s, u: {'stage': stages[u], 'parser': None})), \
+            patch('tools.pipeline_writes.open_slots', AsyncMock(return_value=[])), \
+            patch('tools.pipelines.merge_layers', lambda layers: {}), \
+            patch('tools.stepping.stepped_clean', AsyncMock(return_value=True)), \
+            patch('tools.stepping.verified', AsyncMock(return_value=indexing_verified)), \
+            patch('tools.processing_writes.elastic_destination',
+                  AsyncMock(side_effect=lambda s, u: {'index name': 'acme-v1', 'cluster': 'ES'} if u == 'ix' else None)), \
+            patch('tools.processing_writes.agreement_problem', AsyncMock(return_value=None if agreed else 'not agreed')), \
+            patch('tools.processing.processing_status', AsyncMock(return_value={'filters': filters})):
+        return await plan.status(None, 'b')
+
+
+async def test_an_index_is_indexed_once_verified_not_once_stepped():
+    # Seen in VS Code: stepping the indexing pipeline clean counted as indexed, so the plan led on to promotion
+    # with nothing agreed, committed or indexed.
+    unagreed = await _status_of(indexing_verified=False, agreed=False, filters=[])
+    state = {s['step']: s['state'] for s in unagreed['steps']}
+    assert state['indexing_pipeline'] == 'done' and state['index_template'] == 'to do' and state['indexed'] == 'to do'
+    assert unagreed['next']['step'] == 'index_template'
+    assert unagreed['next']['call']['tool'] == 'propose_index_template'
+    assert unagreed['next']['call']['arguments']['pipeline_uuid'] == 'ix'
+    assert unagreed['next']['call']['arguments']['example_template'].startswith("<the user's example index template")
+    # Agreed: the processor filter, then the wait while it runs, then verify_index; done once that passes.
+    nxt = [(await _status_of(False, True, filters))['next'] for filters in
+           ([], [{'finished': False}], [{'finished': True}])]
+    assert [n['step'] for n in nxt] == ['indexed'] * 3
+    assert [n['call']['tool'] for n in nxt] == ['create_processor_filter', 'wait_for_processing', 'verify_index']
+    assert nxt[2]['call']['arguments']['index_uuid'] == 'ix-doc' and nxt[2]['call']['arguments']['backend'] == 'elasticsearch'
+    done = await _status_of(True, True, [{'finished': True}])
+    assert {s['step']: s['state'] for s in done['steps']}['indexed'] == 'done'
+    assert done['next']['step'] == 'index_documented'
+
+
+def test_every_indexing_call_takes_its_arguments():
+    import inspect
+    import main_tools
+    tools = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
+    for processing in (None, 'running', 'finished'):
+        call, _ = plan.next_call('indexed', 'b', ['F'], [1], [2], 'p', 'q', processing, {'uuid': 'i', 'backend': 'lucene'})
+        assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), processing

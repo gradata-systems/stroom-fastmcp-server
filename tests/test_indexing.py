@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -216,18 +217,25 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
     from utils.consent import ConsentStore
     from utils.fieldplan import Discovery
     settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=settings), 'consent': ConsentStore(False)})
+    stroom = SimpleNamespace(settings=settings, get_doc=AsyncMock(return_value={'uuid': 'p1', 'name': 'Acme'}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False)})
     plan = FieldPlan.for_discovery('stroom-discovery-acme-v1', Discovery(timestamp_field='ts'))
     documents = [{'StreamId': ('number', '7'), 'EventId': ('number', '1'), '@timestamp': ('string', '2026-10-01T09:00:00Z'),
                   'host': ('string', 'web01')}]
     with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'stroom-discovery-acme-v1',
                                                                        'cluster': 'ES'})), \
-            patch('tools.indexing._documents', AsyncMock(return_value=documents)):
+            patch('tools.indexing._documents', AsyncMock(return_value=documents)), \
+            patch('tools.indexing.guard_from', lambda c: SimpleNamespace(check_managed=AsyncMock())):
         result = await indexing.propose_index_template(ctx, 'p1', plan, [7])
-    assert 'status' not in result and result['self_check']['compatible']
-    assert result['hint'].startswith("No example was given: ask the user for the index template (or an index's "
-                                     "mapping) a sibling discovery index uses")
-    assert 'check_index_template with dev_tools' in result['hint']
+        # Without an example there is no template to commit: one applied to the cluster unagreed would still be
+        # refused at indexing (seen in VS Code: the user committed it, and indexing was refused again).
+        assert result['agreed'] is False and result['needs'] == 'example_template'
+        assert 'template' not in result and 'dev_tools' not in result
+        assert 'a sibling discovery index uses' in result['hint'] and 'without_example=true' in result['hint']
+        # Only when the user says they have none: built from the plan, and they confirm it as shown.
+        asked = await indexing.propose_index_template(ctx, 'p1', plan, [7], without_example=True)
+    assert asked['status'] == 'needs_confirmation' and asked['template_name'] == 'stroom-discovery-acme-v1'
+    assert asked['details']['notes'] == ['built from the field plan alone: the user has no example index template']
 
 
 
@@ -400,3 +408,27 @@ async def test_an_existing_index_in_stroom_becomes_the_example_template():
     props = template['template']['mappings']['properties']
     assert props['user']['properties']['name'] == {'type': 'keyword'} and props['source']['properties']['ip'] == {'type': 'ip'}
     assert props['@timestamp'] == {'type': 'date'} and "Keycloak" in note and 'settings are not visible' in note
+
+
+async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_form():
+    # Seen in VS Code: the user chose to paste their own template, and the agent drafted from FortiOS-V1 anyway.
+    from utils.consent import ConsentStore
+    stroom = SimpleNamespace(settings=SimpleNamespace(default_convention=None),
+                             get_doc=AsyncMock(return_value={'name': 'FortiOS-V1'}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(use_elicitation=False)})
+    example = ("PUT _index_template/fortios-v1\n" + json.dumps({'index_patterns': ['fortios-v1*'], 'template': {
+        'mappings': {'properties': {'source': {'properties': {'ip': {'type': 'ip'}}}}}}}),
+               "followed the fields of Elastic Index doc 'FortiOS-V1' (12 fields, read through Stroom); its template's "
+               "settings are not visible this way: ask the user for them, or keep the defaults")
+    read = AsyncMock(return_value=example)
+    summarise = AsyncMock(return_value={'path_population': {}})
+    with patch.object(indexing, '_example_from_index', read), \
+            patch.object(indexing, 'summarise_events', summarise), \
+            patch.object(indexing, '_conventions', lambda c: {'ecs': {}}):
+        gate = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'fortinet-firewall-v1', like_index='a96e',
+                                                  events_stream_ids=[9])
+    # Asked before anything is read from that index: an unreachable cluster can't stand in for the user's answer.
+    assert gate['status'] == 'needs_confirmation' and not summarise.called and not read.called
+    assert gate['summary'] == "Name the fields of index 'fortinet-firewall-v1' after an existing index in Stroom"
+    assert gate['details']['follow'] == "Elastic Index doc 'FortiOS-V1'"
+    assert 'paste your example index template' in gate['details']['instead']

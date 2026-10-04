@@ -17,7 +17,8 @@ from security.guard import guard_from
 from tools.explorer import _redact
 from tools.pipeline_writes import PropertyValue, create_pipeline
 from tools.processing_writes import elastic_destination, indexing_xslt_digest
-from tools.stepping import _outputs, _Pipeline
+from tools.pipelines import merge_layers
+from tools.stepping import _outputs, _Pipeline, remember_verified
 from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from, edited
@@ -109,7 +110,9 @@ async def get_field_conventions(
         return {'status': 'needs_guidance', 'options': [
             {'option': 'example index template (recommended)',
              'how': "The user pastes the Elasticsearch index template a similar source's index uses (Kibana Dev Tools: "
-                    "GET _index_template/<name>, or GET <index>/_mapping): draft_index_mapping example_template=..."},
+                    "GET _index_template/<name>, or GET <index>/_mapping) into the chat: ask for it there and end your "
+                    "turn, as a choice form cannot carry it. Once pasted: draft_index_mapping example_template= it, "
+                    "exactly as given, and keep it for propose_index_template."},
             {'option': 'follow an existing index in Stroom',
              'how': "The user picks one of existing_indexes (a similar source's): draft_index_mapping like_index=<its "
                     "uuid> takes its field names and types, read through Stroom. Its template's settings are not "
@@ -118,7 +121,9 @@ async def get_field_conventions(
             {'option': 'a convention profile',
              'how': "Only when the user has no example: draft_index_mapping convention=<one of profiles>.",
              'profiles': {n: p.get('description') for n, p in profiles.items()}}],
-            'hint': "Ask the user which, offering all three, the example first. Do not choose for them."}
+            'hint': "Ask the user which, offering all three, the example first, and recommend none: it is their call, "
+                    "not yours. Draft nothing until they answer; if they choose the example, wait for them to paste "
+                    "it. like_index and without_example are confirmed by the user in a form."}
     name = name or gateway_from(ctx).settings.default_convention
     if not name:
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
@@ -226,6 +231,21 @@ async def draft_index_mapping(
     profiles = _conventions(ctx)
     like_note = None
     if like_index and not example_template:
+        # Following another source's index is the user's choice, as the example is: they confirm which one, before
+        # anything is read from it.
+        try:
+            shown = (await gateway_from(ctx).get_doc('ElasticIndex', like_index)).get('name') or like_index
+        except ToolError:
+            shown = like_index
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', 'draft_index_mapping',
+            f"Name the fields of index '{index_name}' after an existing index in Stroom", {
+                'follow': f"Elastic Index doc '{shown}'",
+                'settings': "its index template's settings are not visible through Stroom: Elasticsearch defaults, "
+                            "unless you give them",
+                'instead': "paste your example index template into the chat"}, confirmation_id)
+        if gate:
+            return gate
         example_template, like_note = await _example_from_index(ctx, like_index)
     if not convention and example_template:
         # The example names the fields; a profile only says which event paths are worth indexing.
@@ -970,7 +990,10 @@ async def run_test_searches(
 async def _destination(ctx: Context, pipeline_uuid: str) -> dict[str, Any]:
     destination = await elastic_destination(gateway_from(ctx), pipeline_uuid)
     if not destination or not destination.get('index name'):
-        raise ToolError("That is not an Elasticsearch indexing pipeline with an indexName set")
+        raise ToolError("That is not an Elasticsearch indexing pipeline with an indexName set. An example index "
+                        "template the user gave before the indexing pipeline exists is used to draft it: "
+                        "draft_index_mapping example_template= it names the fields after it; once the indexing "
+                        "pipeline is made and stepped, propose_index_template with it builds the index template.")
     return destination
 
 
@@ -1040,6 +1063,9 @@ async def propose_index_template(
                         "_component_template/<name>, or PUT _component_template/<name> {...}).")] = [],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
+        without_example: Annotated[bool, Field(
+            description="Only when the user has said they have no example: the template is built from the field plan "
+                        "alone, and they confirm it as shown.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -1048,7 +1074,8 @@ async def propose_index_template(
     any component templates it is composed of, following their conventions: their settings and composed_of,
     the new index's own pattern, fields they map left as they map them, new fields mapped in their style for
     the type (keyword ignore_above, text sub-fields, date formats), and names unlike theirs reported to rename
-    in the field plan. Without an example, from the field plan alone. Checked against the documents the
+    in the field plan. Without an example, nothing is built until the user says they have none
+    (without_example), and then from the field plan alone. Checked against the documents the
     pipeline writes; when it fits, the user confirms it as shown (or corrects it: check_index_template), and the
     agreed template is kept with the pipeline. The user then has the cluster admin commit it, and
     create_processor_filter starts indexing once they confirm that.
@@ -1069,19 +1096,25 @@ async def propose_index_template(
             raise ToolError(str(e)) from e
         body, notes = from_example(body, example, components, discovery=plan.discovery is not None)
     stroom = gateway_from(ctx)
+    if not example_template and not without_example:
+        # No template to commit yet: one handed out now would be applied to the cluster without the user's
+        # conventions, and without being agreed here, so indexing would still be refused.
+        return {'agreed': False, 'needs': 'example_template', 'index': index, 'cluster': destination['cluster'],
+                'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
+                'hint': "No example was given, so no template is built: call again with example_template= the index "
+                        "template (or an index's mapping) a sibling " + ("discovery index" if plan.discovery else
+                        "source's index") + " uses, exactly as the user pasted it, and its component templates. If "
+                        "it is not in this conversation, ask the user to paste it and end your turn. Only if they say "
+                        "they have none: without_example=true, and they confirm the template built from the plan."}
     composed, _ = compose(body, components)
     check = compare(composed, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
     text = json.dumps(body, indent=2)
+    if not example_template:
+        notes = ["built from the field plan alone: the user has no example index template"]
     result = {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
               'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
               **({'from_example': notes} if example_template else {}),
               'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid)}
-    if not example_template:
-        result['hint'] = ("No example was given: ask the user for the index template (or an index's mapping) a "
-                          "sibling " + ("discovery index" if plan.discovery else "source's index") + " uses, and its "
-                          "component templates, and call again with them. Only if they have none and want this "
-                          "template as it is: check_index_template with dev_tools, where they confirm it.")
-        return result
     if not check['compatible']:
         result['hint'] = ("It does not fit the documents the pipeline writes (self_check): show the user and ask "
                           "whether to change the indexing XSLT or the template. Not yet shown for confirmation.")
@@ -1092,8 +1125,8 @@ async def propose_index_template(
         return _asking(gate, result)
     result.update({'agreed': True, 'hint': (
         "The user agreed this index template; it is kept with the pipeline. Give them dev_tools for the cluster admin "
-        "to commit to the cluster. Once they say it is committed, create_processor_filter: its approval asks them to "
-        "confirm that, and starts indexing.")})
+        "to commit to the cluster, and end your turn. Once they say it is committed, create_processor_filter: its "
+        "approval asks them to confirm that, and starts indexing.")})
     return result
 
 
@@ -1260,7 +1293,23 @@ async def verify_index(
         dashboard = {'uuid': made['uuid'], 'name': name, 'saved': True}
     searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
                                        searches=list(searches), pipeline_uuid=pipeline_uuid, dashboard_doc=doc)
-    return {'dashboard': {**dashboard, **design}, **searched}
+    result = {'dashboard': {**dashboard, **design}, **searched}
+    if searched['passed']:
+        # The plan's 'indexed' step is done for the build's pipelines that write to this index.
+        recorded = []
+        for d in contents:
+            if d['type'] != 'Pipeline':
+                continue
+            merged = merge_layers(await stroom.pipeline_layers(d['uuid']))
+            properties = {(q['element'], q['name']): q['value'] for q in merged['properties']}
+            if writes_to(properties, INDEX_TYPE[backend], index_uuid, index.get('indexName')) \
+                    and await remember_verified(ctx, {'type': 'Pipeline', 'uuid': d['uuid'], 'name': d['name']}):
+                recorded.append(d['name'])
+        if recorded:
+            result['verified'] = recorded
+            from tools.plan import with_next
+            return await with_next(ctx, build, result)
+    return result
 
 
 ALL_TOOLS = [get_field_conventions, draft_index_mapping, propose_index_template, check_index_template,

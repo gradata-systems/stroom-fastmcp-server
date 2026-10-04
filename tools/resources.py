@@ -181,7 +181,9 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
    component templates too, GET _component_template/<name>: many have none); (b) an existing index in Stroom to
    follow (its existing_indexes; draft_index_mapping like_index=); (c) a convention profile, only when they have no
    example (draft_index_mapping convention=... without_example=true, which the user confirms; without either an
-   example or that, draft_index_mapping drafts nothing and returns these options). With (a) or (b) there is no
+   example or that, draft_index_mapping drafts nothing and returns these options). Recommend none of them: the
+   choice is the user's. For (a), ask them to paste it into the chat and end your turn (a choice form cannot carry
+   it), and draft nothing until it arrives; (b), like (c), the user confirms in a form. With (a) or (b) there is no
    convention question: the example names the fields. Lucene:
    get_field_conventions, and ask the user which convention to follow.
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
@@ -193,19 +195,24 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
    so field names follow theirs, e.g. User.Id for the user, TypeId for the event type; show its from_example notes); create_index_doc
    (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is generated from the plan);
    create_indexing_pipeline; step_sample on the Events streams.
-10. Elasticsearch: propose_index_template with the user's example and any component templates builds the index
+10. Elasticsearch: propose_index_template with the user's example (exactly as they pasted it, the same text given to
+    draft_index_mapping) and any component templates builds the index
     template for the new index, following their naming, field type and structure conventions (its from_example
     notes say what came from where; names unlike the example's are renamed in the field plan, then build again).
     When it fits the documents, the user confirms it as shown. If they correct it instead, check_index_template
     with their version (and any component templates): when it fits, they confirm it there; when it does not, show
     the pipeline changes it needs and ask whether to make them (update the indexing XSLT, step again, check again)
-    or to change the index template. The confirmed template is kept with the pipeline.
+    or to change the index template. The confirmed template is kept with the pipeline. Without an example,
+    propose_index_template builds nothing: ask the user for it; only if they say they have none, without_example=true,
+    and they confirm the template built from the plan. A template put on the cluster without being agreed here does
+    not count: indexing stays refused until it is.
 11. Elasticsearch: give the user the agreed template's dev_tools request for the cluster admin to commit to the
     cluster, and wait until they say it is committed; indexing must not start before, or the index is created
     without it. Then create_processor_filter on the Events stream ids with source_pipeline_uuid = the events
     pipeline from stage 1 (the filter then only selects Events from that pipeline): its approval asks the user to
     confirm the agreed template is committed, and processing starts. Lucene: create_processor_filter likewise.
-    Then suggest the dashboard's columns (the time field and key fields: user, host, address, event type, outcome;
+    If it is refused, do what its message says: never go on to another stage or to promotion instead (the plan's
+    next step says what remains). Then suggest the dashboard's columns (the time field and key fields: user, host, address, event type, outcome;
     never StreamId or EventId) and confirm them with the user. Then wait_for_processing expect_events=false, and
     verify_index with those fields and pipeline_uuid = the indexing pipeline (each
     hit traced back to its event) and searches as people will make them, from stepped values: an exact match, a

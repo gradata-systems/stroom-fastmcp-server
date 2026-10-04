@@ -43,7 +43,8 @@ STAGE_1 = [
 STAGE_2 = [
     ('index', 'Index doc for the agreed backend, convention and name', 'get_field_conventions, draft_index_mapping, create_index_doc'),
     ('indexing_pipeline', 'Indexing pipeline from the plan (XSLT saved with index_plan)', 'save_xslt index_plan=... (no code), create_indexing_pipeline'),
-    ('indexed', 'Events indexed and found by the verification searches', 'create_processor_filter, wait_for_processing, verify_index'),
+    ('index_template', "Elasticsearch: the index template agreed with the user, built from the example index template they pasted (or confirmed without one), then committed to the cluster by them", 'propose_index_template example_template=<theirs>, check_index_template'),
+    ('indexed', "Sample Events indexed and found by verify_index's searches (stepping clean is not indexing)", 'create_processor_filter, wait_for_processing, verify_index'),
     ('index_documented', 'Indexing pipeline documented', 'write_documentation stream_ids=<Events streams>'),
 ]
 FINISH = [('promoted', 'Promoted beside sibling sources, filters handed over disabled', 'build_status, promote_build')]
@@ -129,7 +130,8 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
 
 
 def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
-              translation: str | None, indexing: str | None) -> tuple[dict[str, Any], str]:
+              translation: str | None, indexing: str | None, processing: str | None = None,
+              index: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     """The step's first call, with the arguments the build already gives and <...> for those still to decide, and what
     follows it. One call rather than a list of tools: a small model given several options deliberated between them
     until its context ran out."""
@@ -161,22 +163,46 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
         'indexing_pipeline': (('save_xslt', {'build': build, 'name': '<index name>-XSLT',
                                              'index_plan': '<the plan from draft_index_mapping>'}),
                               'then create_indexing_pipeline with that XSLT and the index'),
+        'index_template': (('propose_index_template', {
+            'pipeline_uuid': ix, 'plan': '<the index plan saved with the indexing XSLT>', 'events_stream_ids': events,
+            'example_template': "<the user's example index template, exactly as they pasted it>"}),
+            "the user confirms it in a form; give them its dev_tools to have it committed to the cluster, and wait for "
+            "them to say it is. No example in this conversation: ask them to paste it, and end your turn"),
+        'index_template:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),
+                                     'until the verdict is clean (fix the index plan and save_xslt in between); then '
+                                     'propose_index_template with the user\'s example'),
         'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events, 'source_pipeline_uuid': tr}),
                     'then wait_for_processing expect_events=false, and verify_index'),
+        'indexed:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),
+                              'until the verdict is clean; then create_processor_filter'),
+        'indexed:running': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
+                            'then verify_index'),
+        'indexed:no_index': (('create_index_doc', {
+            'build': build, 'backend': 'elasticsearch', 'name': '<the index name>', 'index_name': '<the index name>',
+            'cluster_uuid': '<the cluster the pipeline writes to>', 'time_field': '@timestamp'}),
+            'then verify_index through it'),
+        'indexed:finished': (('verify_index', {
+            'build': build, 'index_uuid': (index or {}).get('uuid', '<the index doc uuid>'),
+            'backend': (index or {}).get('backend', '<lucene or elasticsearch>'), 'stream_ids': events,
+            'expected_documents': '<the Events records in those streams>',
+            'fields': '<the columns the user chose>', 'pipeline_uuid': ix}),
+            'the step is done once its searches pass'),
         'index_documented': (('write_documentation', {'build': build, 'pipeline_uuid': ix, 'stream_ids': events,
                                                       'markdown': '<the documentation, from the documentation guide>'}),
                              'the Field mapping section is generated'),
         'promoted': (('promote_build', {'build': build, 'destinations': '<the folders sibling sources use, by type>'}),
                      "with the user's approval"),
     }
-    (tool, arguments), then = calls[step]
+    (tool, arguments), then = calls.get(f'{step}:{processing}') or calls[step]
     return {'tool': tool, 'arguments': arguments}, then
 
 
 async def status(ctx: Context, build: str) -> dict[str, Any]:
     """Each plan step's state, read from the build."""
     from tools.builds import _build_docs, build_checks, kept_mapping
-    from tools.stepping import stepped_clean
+    from tools.processing import processing_status
+    from tools.processing_writes import agreement_problem, elastic_destination
+    from tools.stepping import stepped_clean, verified
     from tools.templates import _shape
     from utils.mappingstore import read_mapping
     stroom = gateway_from(ctx)
@@ -211,6 +237,16 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed['name']},
                                         {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Events'}], 50)).get('values') or []
         events += [r['meta']['id'] for r in rows if r['meta'].get('status') != 'DELETED']
+    # Elasticsearch: the index template agreed with the user for each indexing pipeline's current code.
+    # Not needed for Lucene; to do for Elasticsearch until every such pipeline has one.
+    problems = []
+    for p in indexing:
+        destination = await elastic_destination(stroom, p['uuid'])
+        if destination:
+            problems.append(await agreement_problem(stroom, await stroom.get_doc('Pipeline', p['uuid']), destination))
+    # To do once the build is known to be Elasticsearch; otherwise (Lucene, or no index yet) not needed.
+    agreed: bool | None = (not any(problems) if problems else
+                           False if by_type.get('ElasticIndex') or discovery else None)
     checks = await build_checks(ctx, docs)
     stale = [c for c in checks if 'Field mapping' in c or 'differs' in c]
 
@@ -224,26 +260,47 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         'processed': bool(events),
         'validated': None,   # not recorded: the model validates after processing
         'documented': bool(translation) and all(p['name'] in documented for p in translation) and not stale,
-        'index': bool(by_type.get('Index') or by_type.get('ElasticIndex')),
+        # A discovery index's doc is made at verification, once documents are in it: its pipeline comes first.
+        'index': bool(by_type.get('Index') or by_type.get('ElasticIndex')) or (discovery and bool(indexing)),
         'indexing_pipeline': bool(indexing),
-        'indexed': bool(indexing) and all(p['stepped'] for p in indexing),
+        'index_template': agreed,
+        'indexed': bool(indexing) and all([await verified(ctx, p) for p in indexing]),
         'index_documented': bool(indexing) and all(p['name'] in documented for p in indexing),
         'promoted': False,
     }
-    not_needed = {'converter'} | ({'converter', 'translation', 'pipeline', 'stepped', 'processed', 'validated',
-                                   'documented'} if discovery else set())
+    # Not needed when their state is None: a converter for a format that needs none, a template for Lucene.
+    not_needed = {'converter', 'index_template'}
+    # A discovery build indexes its raw streams: no events pipeline at all (a converter only for delimited text).
+    skipped = {'translation', 'pipeline', 'stepped', 'processed', 'validated', 'documented'} if discovery else set()
     steps = []
     for item in checklist():
         state = done.get(item['step'])
-        steps.append({**item, 'state': 'not needed' if discovery and item['step'] in not_needed else 'done' if state
+        steps.append({**item, 'state': 'not needed' if item['step'] in skipped else 'done' if state
                       else 'not needed' if state is None and item['step'] in not_needed
                       else 'not recorded' if state is None else 'to do'})
     pending = [s for s in steps if s['state'] == 'to do']
     nxt = pending[0] if pending else None
+    processing, index = None, None
+    unstepped = [p for p in indexing if not p['stepped']]
+    if nxt and nxt['step'] in ('index_template', 'indexed') and unstepped:
+        # The template is checked against the documents a clean step writes, and processing needs one: step first.
+        indexing = unstepped + [p for p in indexing if p not in unstepped]
+        processing = 'unstepped'
+    elif nxt and nxt['step'] == 'indexed':
+        # Which call indexing needs next: a processor filter, the wait for it, or the searches that verify it.
+        pending_ix = [p for p in indexing if not await verified(ctx, p)][0]
+        indexing = [pending_ix] + [p for p in indexing if p is not pending_ix]
+        filters = (await processing_status(ctx, pending_ix['uuid']))['filters']
+        processing = None if not filters else 'finished' if all(f['finished'] for f in filters) else 'running'
+        found = (by_type.get('ElasticIndex') or by_type.get('Index') or [None])[0]
+        if found:
+            index = {'uuid': found['uuid'], 'backend': 'elasticsearch' if found['type'] == 'ElasticIndex' else 'lucene'}
+        elif processing == 'finished':
+            processing = 'no_index'    # searched through an index doc: a discovery build makes it now
     call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
                            [m['id'] for m in raw], [m['id'] for m in raw] if discovery else events[:20],
                            translation[0]['uuid'] if translation else None,
-                           indexing[0]['uuid'] if indexing else None)
+                           indexing[0]['uuid'] if indexing else None, processing, index)
     return {
         'build': build,
         'documents': docs,
@@ -373,7 +430,8 @@ STEP_OF = {
     'create_processor_filter': 'processed', 'wait_for_processing': 'processed',
     'check_events': 'validated', 'write_documentation': 'documented',
     'get_field_conventions': 'index', 'draft_index_mapping': 'index', 'create_index_doc': 'index',
-    'create_indexing_pipeline': 'indexing_pipeline', 'verify_index': 'indexed', 'promote_build': 'promoted',
+    'create_indexing_pipeline': 'indexing_pipeline', 'propose_index_template': 'index_template',
+    'check_index_template': 'index_template', 'verify_index': 'indexed', 'promote_build': 'promoted',
 }
 
 

@@ -20,6 +20,13 @@ object-level `dynamic`) and its settings. The example's own fields this source d
 The user confirms the template, or corrects it (`check_index_template`); once they say the cluster admin has
 committed it, `create_processor_filter` starts indexing.
 
+The choice of example is the user's: offer the options without recommending one. An example is pasted into the
+chat, as a choice form can't carry it, so ask for it there and wait for it before drafting. Following an existing
+index in Stroom (`like_index`) is confirmed by the user in a form, as is going without an example
+(`without_example`). Without an example, `propose_index_template` builds nothing for the cluster. A template put on
+the cluster without being agreed through it doesn't count, so indexing stays refused. Stepping clean is not
+indexing: the build's `indexed` step is done only once `verify_index` passes.
+
 A discovery index is different: raw data (JSON, delimited text, XML) indexed as it is into Elasticsearch, for
 exploration, with no translation. Don't survey the data first; Elasticsearch maps its fields dynamically. Give
 `draft_index_mapping` `discovery` with what the user confirmed (the input: `json`, `delimited`, which needs a Data

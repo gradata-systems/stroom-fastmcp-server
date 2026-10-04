@@ -108,11 +108,15 @@ async def test_proposed_template_targets_the_pipelines_index_and_links_to_it():
     with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'})), \
             patch('tools.indexing._documents', AsyncMock(return_value=DOCS)):
         result = await indexing.propose_index_template(ctx(), 'p1', plan, [8])
-    assert result['template']['index_patterns'] == ['ecs-acme-v2*'] and result['template_name'] == 'ecs-acme-v2'
-    assert result['dev_tools'].startswith('PUT _index_template/ecs-acme-v2\n{')
+        rendered = plan.model_copy(update={'index_name': 'ecs-acme-v2'}).elastic_template('ecs-acme-v2', 200)['body']
+        check = indexing.compare(rendered, DOCS, 'ecs-acme-v2')
+    # Without the user's example nothing is built to commit: they are asked for it first.
+    assert result['agreed'] is False and result['needs'] == 'example_template' and 'dev_tools' not in result
+    assert result['index'] == 'ecs-acme-v2' and result['cluster'] == 'ES_DEV'
     assert result['pipeline_link'] == 'https://stroom.example/?action=open-doc&docType=Pipeline&docUuid=p1'
+    assert rendered['index_patterns'] == ['ecs-acme-v2*']
     # the plan leaves some written fields unmapped (dynamic false): noted, not blocking
-    assert result['self_check']['compatible']
+    assert check['compatible']
 
 
 async def test_check_reports_changes_and_unchecked_component_templates():

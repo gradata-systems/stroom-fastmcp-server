@@ -1,4 +1,5 @@
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -210,6 +211,19 @@ async def test_wait_counts_only_the_given_filters_outputs(ctx):
     assert everything['gate'] == 'fail' and 'filter_id' in everything['problems'][0]
     latest = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
     assert latest['gate'] == 'pass' and latest['streams'] == [{'input': 5, 'events': [30], 'errors': []}]
+
+
+@respx.mock
+async def test_with_no_processor_filter_there_is_nothing_to_wait_for(ctx):
+    # Seen in VS Code: create_processor_filter was refused, and the agent waited out 200 seconds of "tasks still
+    # running" for a pipeline with nothing set to process.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    meta = respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    started = time.monotonic()
+    result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=60, expect_events=False)
+    assert time.monotonic() - started < 5 and not meta.called
+    assert result['gate'] == 'fail' and 'no processor filter' in result['problems'][0]
+    assert result['hint'].startswith('create_processor_filter first') and "don't wait" in result['hint']
 
 
 PIPELINE_TERM = {'type': 'term', 'field': 'Pipeline', 'condition': 'IS_DOC_REF',
