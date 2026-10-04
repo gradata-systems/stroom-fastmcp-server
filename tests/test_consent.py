@@ -140,15 +140,20 @@ async def test_a_proposed_name_can_be_corrected_in_the_modern_form():
     [(key, form)] = asked.input_requests.items()
     field = form.params.requested_schema['properties']['name']
     assert field['type'] == 'string' and field['default'] == 'FIREWALL-EDGE-V1.0' and field['title'] == 'Feed name'
+    assert list(form.params.requested_schema['properties']) == ['name']     # one prompt: accepting it confirms
     # The user corrects the name and confirms: the tool goes ahead with theirs.
-    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'value': True, 'name': ' ACME-FW-V1.0 '}}},
+    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'name': ' ACME-FW-V1.0 '}}},
                     state=asked.request_state)
     assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable) is None
     assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'ACME-FW-V1.0'
     # Left empty, the proposal stands.
-    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'value': True, 'name': ''}}}, state=asked.request_state)
+    ctx = ModernCtx(responses={key: {'action': 'accept', 'content': {'name': ''}}}, state=asked.request_state)
     assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable) is None
     assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'FIREWALL-EDGE-V1.0'
+    # Declining the form stops it.
+    ctx = ModernCtx(responses={key: {'action': 'decline'}}, state=asked.request_state)
+    with pytest.raises(ToolError, match='did not agree'):
+        await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable)
 
 
 async def test_a_proposed_name_can_be_corrected_in_the_classic_form():
@@ -157,12 +162,20 @@ async def test_a_proposed_name_can_be_corrected_in_the_classic_form():
 
     async def elicit(message, response_type):
         asked_with['type'] = response_type
-        return SimpleNamespace(action='accept', data=response_type(confirm=True, name='ACME-FW-V1.0'))
+        return SimpleNamespace(action='accept', data=response_type(name='ACME-FW-V1.0'))
     ctx = SimpleNamespace(elicit=elicit)
     assert await ConsentStore().require(ctx, 'confirmation', 'create_feed', 'Create feed', {}, None,
                                         editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')}) is None
     assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'ACME-FW-V1.0'
-    assert asked_with['type'](confirm=True).name == 'FIREWALL-EDGE-V1.0'       # the proposal is the field's default
+    assert asked_with['type']().name == 'FIREWALL-EDGE-V1.0'       # the proposal is the field's default
+    from dataclasses import fields
+    assert [f.name for f in fields(asked_with['type'])] == ['name']    # one prompt: accepting it confirms
+
+    async def decline(message, response_type):
+        return SimpleNamespace(action='decline', data=None)
+    with pytest.raises(ToolError, match='did not agree'):
+        await ConsentStore().require(SimpleNamespace(elicit=decline), 'confirmation', 'create_feed', 'Create feed', {},
+                                     None, editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')})
 
 
 async def test_with_an_id_the_proposal_stands():
@@ -175,3 +188,29 @@ async def test_with_an_id_the_proposal_stands():
     assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', {'n': 1}, pending['confirmation_id'],
                                editable=editable) is None
     assert edited(ctx, 'name', 'FIREWALL-EDGE-V1.0') == 'FIREWALL-EDGE-V1.0'
+
+
+
+async def test_the_result_tells_the_agent_the_user_changed_the_name():
+    from unittest.mock import AsyncMock, patch
+    from tools import plan
+
+    async def elicit(message, response_type):
+        return SimpleNamespace(action='accept', data=response_type(name='ACME-FW-V1.0'))
+    ctx = SimpleNamespace(elicit=elicit, lifespan_context={})
+    await ConsentStore().require(ctx, 'confirmation', 'create_feed', 'Create feed', {}, None,
+                                 editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')})
+    with patch.object(plan, 'next_step', AsyncMock(return_value=None)), patch.object(plan, 'remember_build', lambda c, b: None):
+        result = await plan.with_next(ctx, 'b', {'type': 'Feed', 'name': 'ACME-FW-V1.0'})
+    assert result['changed_by_user'] == {'name': 'ACME-FW-V1.0'}
+    assert "from 'FIREWALL-EDGE-V1.0' to 'ACME-FW-V1.0': use 'ACME-FW-V1.0' from here on" in result['note']
+    # Accepted as proposed: nothing to say.
+    ctx = SimpleNamespace(elicit=lambda m, t: _accept(t), lifespan_context={})
+    await ConsentStore().require(ctx, 'confirmation', 'create_feed', 'Create feed', {}, None,
+                                 editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')})
+    with patch.object(plan, 'next_step', AsyncMock(return_value=None)), patch.object(plan, 'remember_build', lambda c, b: None):
+        assert 'changed_by_user' not in await plan.with_next(ctx, 'b', {'type': 'Feed'})
+
+
+async def _accept(response_type):
+    return SimpleNamespace(action='accept', data=response_type())

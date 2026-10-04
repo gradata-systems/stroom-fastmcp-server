@@ -184,7 +184,8 @@ class ConsentStore:
                 logger.info("Elicitation unavailable, falling back to %s id: %s", kind, e)
             else:
                 data = getattr(answer, 'data', None)
-                confirmed = data if isinstance(data, bool) else getattr(data, 'confirm', False)
+                # With a value to edit, accepting the form is the confirmation; otherwise its yes/no is.
+                confirmed = True if editable else data
                 agreed = getattr(answer, 'action', None) == 'accept' and bool(confirmed)
                 edits = _settled(editable, {k: getattr(data, k, None) for k in editable})
                 changed = _changed(editable, edits)
@@ -193,6 +194,7 @@ class ConsentStore:
                 if not agreed:
                     raise ToolError(f"The user did not agree to: {summary}")
                 ctx_edits(ctx).update(edits)
+                ctx_changes(ctx).update({k: (editable[k][1], v) for k, v in changed.items()})
                 return None
 
         pending_id = self._seal(kind, self._binding(kind, action, digest, _user()), int(time.time()) + TTL_SECONDS)
@@ -211,7 +213,9 @@ class ConsentStore:
         bound = f"{digest}:{_user()}"
         if bound in state['granted']:
             # The call is repeated for a later gate: what the user settled on in this one still holds.
-            ctx_edits(ctx).update((state.get('edits') or {}).get(bound) or {})
+            kept = (state.get('edits') or {}).get(bound) or {}
+            ctx_edits(ctx).update(kept)
+            ctx_changes(ctx).update({k: (editable[k][1], v) for k, v in _changed(editable, kept).items() if k in editable})
             return None
         key = f"{kind}-{digest[:16]}"
         try:
@@ -222,7 +226,7 @@ class ConsentStore:
         if answer is not None and state.get('asked') == bound:
             action_taken = getattr(answer, 'action', None) or (answer.get('action') if isinstance(answer, dict) else None)
             content = getattr(answer, 'content', None) or (answer.get('content') if isinstance(answer, dict) else None) or {}
-            agreed = action_taken == 'accept' and bool(content.get('value'))
+            agreed = action_taken == 'accept' and (bool(editable) or bool(content.get('value')))
             edits = _settled(editable, {k: content.get(k) for k in editable})
             changed = _changed(editable, edits)
             audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='form',
@@ -234,6 +238,7 @@ class ConsentStore:
                 state.setdefault('edits', {})[bound] = edits
             state.pop('asked', None)
             ctx_edits(ctx).update(edits)
+            ctx_changes(ctx).update({k: (editable[k][1], v) for k, v in changed.items()})
             return None
         if not _client_can_answer_forms(ctx):
             return False
@@ -241,12 +246,16 @@ class ConsentStore:
         audit(kind, action=action, details=details, outcome='requested', via='form')
         form = mcp_types.ElicitRequest(params=mcp_types.ElicitRequestFormParams(
             message=f"{summary}\n\n{_format(details)}",
-            requested_schema={'type': 'object', 'required': ['value'], 'properties': {
-                'value': {'type': 'boolean', 'title': 'Approve' if kind == 'approval' else 'Confirm',
-                          'description': summary},
-                **{key: {'type': 'string', 'title': title, 'default': proposed,
-                         'description': f"Proposed: {proposed}. Change it to use another; left empty, the proposal stands."}
-                   for key, (title, proposed) in editable.items()}}}))
+            # With a value to edit, the form is just that field, prefilled: accepting it confirms (clients step
+            # through fields one at a time, so a yes/no beside it would be a second prompt).
+            requested_schema=({'type': 'object', 'properties': {
+                key: {'type': 'string', 'title': title, 'default': proposed,
+                      'description': f"Proposed: {proposed}. Accept to confirm it, or change it first; left empty, the "
+                                     f"proposal stands. Decline to stop."}
+                for key, (title, proposed) in editable.items()}} if editable else
+                {'type': 'object', 'required': ['value'], 'properties': {
+                    'value': {'type': 'boolean', 'title': 'Approve' if kind == 'approval' else 'Confirm',
+                              'description': summary}}})))
         return mcp_types.InputRequiredResult(input_requests={key: form},
                                             request_state=json.dumps(state, sort_keys=True))
 
@@ -270,6 +279,18 @@ def ctx_edits(ctx: Any) -> dict[str, str]:
     return edits
 
 
+def ctx_changes(ctx: Any) -> dict[str, tuple[str, str]]:
+    """The values the user changed in this request's forms: {key: (proposed, theirs)}."""
+    changes = getattr(ctx, '_consent_changes', None)
+    if changes is None:
+        changes = {}
+        try:
+            setattr(ctx, '_consent_changes', changes)
+        except Exception:
+            pass
+    return changes
+
+
 def edited(ctx: Any, key: str, proposed: str) -> str:
     """What the user settled on for an editable value: their correction in the form, else the proposal."""
     return ctx_edits(ctx).get(key) or proposed
@@ -285,14 +306,13 @@ def _changed(editable: dict[str, tuple[str, str]], edits: dict[str, str]) -> dic
 
 
 def _answer_type(kind: str, editable: dict[str, tuple[str, str]]) -> Any:
-    """The classic elicitation's answer: a yes/no, with a text field per editable value, its proposal as the default."""
+    """The classic elicitation's answer: a yes/no, or with values to edit, just a text field for each, its proposal
+    as the default (accepting the form confirms; clients step through fields one at a time)."""
     if not editable:
         return bool
     from dataclasses import field, make_dataclass
-    return make_dataclass('Answer', [('confirm', bool, field(default=False, metadata={
-        'title': 'Approve' if kind == 'approval' else 'Confirm'}))]
-                          + [(key, str, field(default=proposed, metadata={'title': title}))
-                             for key, (title, proposed) in editable.items()])
+    return make_dataclass('Answer', [(key, str, field(default=proposed, metadata={'title': title}))
+                                     for key, (title, proposed) in editable.items()])
 
 
 def _format(details: dict[str, Any]) -> str:

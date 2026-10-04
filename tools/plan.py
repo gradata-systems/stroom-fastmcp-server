@@ -285,6 +285,14 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
     """The tool result with `next`, the plan's next step, added (and a reminder that the work is not done)."""
     if not isinstance(result, dict) or 'status' in result:   # a confirmation or approval round, not an outcome
         return result
+    from utils.consent import ctx_changes
+    changes = ctx_changes(ctx) if ctx is not None else {}
+    if changes:
+        # The user corrected the proposal in the form: the agent must not carry on with its own value.
+        result['changed_by_user'] = {k: theirs for k, (_, theirs) in changes.items()}
+        said = '; '.join(f"the user changed {k.replace('_', ' ')} from '{proposed}' to '{theirs}': use '{theirs}' from "
+                         f"here on" for k, (proposed, theirs) in changes.items())
+        result['note'] = f"{result['note']} {said[0].upper()}{said[1:]}." if result.get('note') else said
     remember_build(ctx, build)
     nxt = await next_step(ctx, build)
     if nxt:
