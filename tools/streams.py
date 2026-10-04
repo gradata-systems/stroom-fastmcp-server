@@ -115,6 +115,9 @@ SampleStreams = Annotated[list[int] | int | str, ONE_OR_MORE, Field(
                 "text need not be sent again; the server reads them itself.")]
 
 
+NO_DATA = '## No Data ##'     # what Stroom's data fetch returns for a range past the end
+
+
 async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tuple[str, bool]:
     """(text, truncated): a raw stream's text, read in pages up to max_chars and then cut at a line end."""
     body = await stroom.fetch_data(stream_id, 0, 1)
@@ -129,11 +132,13 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
                                'dataRange': {'charOffsetFrom': have, 'length': min(RAW_PAGE_CHARS, max_chars - have)}},
             'displayMode': 'TEXT', 'recordCount': 1, 'expandedSeverities': []})
         data = page.get('data') or ''
-        if not data:
-            break
+        if not data or data.strip() == NO_DATA:
+            break       # past the end: Stroom answers a range beyond the data with its placeholder, not nothing
         parts.append(data)
         have += len(data)
     text = ''.join(parts)
+    if text.rstrip().endswith(NO_DATA):
+        text = text.rstrip()[:-len(NO_DATA)]
     truncated = len(text) > max_chars or len(text) < total
     if truncated:
         text = text[:max_chars]
@@ -307,7 +312,10 @@ async def describe_stream(ctx: Context, stream_id: StreamId) -> dict[str, Any]:
     A stream's family and attributes: the streams produced from it (the Events and Error streams from a Raw
     Events stream, with a count per type; exactly one Events child per processed raw stream is expected), and
     the attributes a raw stream carries (its receipt headers such as Feed, RemoteAddress, ReceivedTime or
-    custom ones), usable in XSLT as stroom:meta('Name').
+    custom ones), usable in XSLT as stroom:meta('Name'). A stream a pipeline wrote also has its processing
+    counts: records read and written, and errors, warnings and fatal errors, so how many events a large stream
+    produced is known without reading it. Stroom records them a few seconds after the stream completes: when a
+    stream just processed has none yet, describe it again shortly.
     """
     children = await get_stream_children(ctx, stream_id)
     result = {'stream_id': stream_id, 'children': children['children'], 'children_by_type': children['by_type']}
@@ -315,6 +323,16 @@ async def describe_stream(ctx: Context, stream_id: StreamId) -> dict[str, Any]:
         result['attributes'] = (await get_stream_attributes(ctx, stream_id)).get('attributes')
     except ToolError as e:   # an Events or Error stream has no receipt headers of its own
         result['attributes_note'] = str(e)
+    try:
+        rows = (await gateway_from(ctx).find_meta([_term('Id', stream_id)], 1)).get('values') or []
+    except Exception:   # the counts are extra: the stream's family and attributes stand without them
+        rows = []
+    meta_attributes = (rows[0].get('attributes') or {}) if rows else {}
+    counts = {key: meta_attributes[name] for key, name in (
+        ('records_read', 'Read Count'), ('records_written', 'Write Count'), ('errors', 'Error Count'),
+        ('warnings', 'Warning Count'), ('fatal_errors', 'Fatal Error Count')) if meta_attributes.get(name) not in (None, '')}
+    if counts:
+        result['processing'] = {k: int(v) if str(v).isdigit() else v for k, v in counts.items()}
     return result
 
 

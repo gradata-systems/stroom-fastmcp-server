@@ -129,6 +129,14 @@ async def build_translation_xslt(
             # A time format no sample value fits fails every record at stepping: as good as a schema problem.
             result['problems'] += [f"sample: {p}" for p in check['problems']]
             result['ok'], result['xslt'] = False, None
+    if build:
+        # The user's documentation, where the build keeps notes from it: a rule that contradicts the catalogue is reported.
+        from utils.sourcenotes import check_mapping as check_against_notes, merged, notes_in_build
+        catalogue = merged(await notes_in_build(ctx, build))
+        if catalogue['events']:
+            contradictions = check_against_notes(mapping.model_dump(exclude_none=True), catalogue)
+            result['source_notes_check'] = contradictions or 'the mapping agrees with the event catalogue'
+            result['warnings'] += [f"source documentation: {c}" for c in contradictions]
     if mapping.input == 'json':
         result['pipeline_properties'] = {
             'jsonParser.addRootObject': mapping.json_layout == 'lines',
@@ -323,6 +331,8 @@ async def draft_translation_mapping(
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,
         environment: Annotated[str | None, Field(description="EventSource/System/Environment, if the user has said, e.g. Prod.")] = None,
         stream_ids: SampleStreams = [],
+        build: Annotated[str | None, Field(description="The build holding the source notes (record_source_notes): the draft "
+                                                       "then follows the user's documentation.")] = None,
 ) -> dict[str, Any]:
     """
     A starting translation mapping drafted from the sample, to edit rather than write from nothing: the input
@@ -338,7 +348,11 @@ async def draft_translation_mapping(
         samples, _ = await read_sample_streams(ctx, stream_ids)
     if not samples:
         raise ToolError("Give the samples' text, or stream_ids of the uploaded sample streams")
-    result = draft_mapping(samples, source_name, system_name, environment)
+    source_notes = None
+    if build:
+        from utils.sourcenotes import merged, notes_in_build
+        source_notes = merged(await notes_in_build(ctx, build))
+    result = draft_mapping(samples, source_name, system_name, environment, source_notes)
     version = gateway_from(ctx).settings.event_logging_version
     try:
         checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)

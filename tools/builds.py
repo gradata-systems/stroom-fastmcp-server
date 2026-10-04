@@ -321,6 +321,12 @@ async def write_documentation(
                             f"{'mapping' if kept['kind'] == 'translation' else 'index plan'} kept with the XSLT by "
                             f"stepping them, each field with the values the sample gave")
         generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids)
+        if kept['kind'] == 'translation':
+            # What the user's documentation says each source field holds, where the build keeps notes from it.
+            from utils.sourcenotes import fields_markdown, merged, notes_in_build
+            described = fields_markdown(merged(await notes_in_build(ctx, build)))
+            if described:
+                generated_section = generated_section.rstrip() + '\n\n' + described
         body = replace_section(body, 'Field mapping', generated_section)
     elif (await _shape_stage(stroom, pipeline_uuid)) in ('indexing', 'discovery'):
         # An indexing XSLT written by hand keeps no plan: the section comes from the documents it writes.
@@ -576,6 +582,16 @@ async def promote_build(
             plan.append({'doc': doc, 'action': 'write back', 'target': doc['working_copy_of']})
         else:
             target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
+            if not target and doc['type'] == 'Documentation' and (
+                    doc['name'].endswith(' source notes') or ' reference - ' in doc['name']):
+                # The source's notes and reference documents: beside the feed, where later work on it looks.
+                feeds = [d for d in docs if d['type'] == 'Feed']
+                target = (destinations.get(feeds[0]['uuid']) or destinations.get('Feed')) if len(feeds) == 1 else None
+            if not target and doc['type'] == 'Documentation':
+                # The documentation of a pipeline promoted with it: wherever that pipeline goes.
+                same = next((d for d in docs if d['type'] == 'Pipeline' and d['name'] == doc['name']
+                             and not d['working_copy_of']), None)
+                target = (destinations.get(same['uuid']) or destinations.get('Pipeline')) if same else None
             if not target and doc['type'] == 'Documentation':
                 # The documentation of a production pipeline (an in-place change's) or an existing index: beside it.
                 kinds = ('Pipeline', 'ElasticIndex', 'Index')

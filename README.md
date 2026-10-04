@@ -12,7 +12,7 @@ The server has 52 tools:
 | --- | --- |
 | Explorer and pipelines | `find_documents` (by name, type or content), `describe_document` (content plus how Stroom runs a pipeline, what an XSLT does, or a survey of what an index holds) |
 | Templates | `find_pipeline_templates`, `describe_template` (its children, its contract, and the shared XSLTs they import: each named template called, where, and what it writes and reads) |
-| Samples and feeds | `profile_sample`, `create_feed`*, `upload_sample`, `record_source_notes` |
+| Samples and feeds | `profile_sample`, `create_feed`*, `upload_sample`, `record_source_notes` (the user's vendor documentation kept in Stroom, and notes from it the draft and checks follow) |
 | Translation | `save_text_converter`, `save_xslt` (written by hand, or an indexing XSLT from its plan), `save_dictionary`; `uuid=` replaces an existing one |
 | Pipelines | `create_pipeline`*, `copy_pipeline`*, `update_pipeline` |
 | Streams and errors | `find_streams`, `describe_stream` (children and attributes), `read_stream`, `summarise_streams` (errors triaged, or events by type and path) |
@@ -151,6 +151,8 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_instructions.py` | Standing instructions (AGENTS docs) by folder |
 | `dev/e2e_elastic_handover.py` | The Elasticsearch index template: built from the user's example and component templates, agreed (and corrected), then indexing once committed. Without Elasticsearch, or with `--live` against Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): templates applied, composition compared with `_simulate_index`, documents indexed with no dynamic fields, and searched through Stroom |
 | `dev/e2e_discovery.py` | A discovery index on Elasticsearch 9 (`docker compose --profile elastic up -d` in `dev/stroom`): raw JSON, CSV (a Data Splitter, numbers recognised from text) and XML (nested objects, repeated elements as arrays) indexed as it is, with nested objects, arrays and a JSON message unpacked, mapped dynamically; the permissive template agreed and committed; Stroom's searches; the documentation. Then for an existing raw feed holding streams sent over time, with drifting data: no survey, the existing streams indexed by id and new ones by a feed filter, every record indexed. Then awkward shapes (`--shapes` alone): arrays of objects, nulls, empty values, keys Elasticsearch refuses or Stroom drops, a record Elasticsearch rejects (reported and explained, the rest indexed) |
+| `dev/e2e_source_docs.py` | The user's vendor documentation kept in Stroom and used: notes drive the draft (fields where the dictionary puts them, a rule per catalogued event), a mapping that contradicts the catalogue is reported, the documentation lists the source fields' meanings, notes and documents promoted beside the feed; a long manual kept in parts and read a passage at a time |
+| `dev/e2e_large_sample.py` | A 15 MB, 200,000-record file sent to Stroom directly (never through the model) and onboarded from its stream id: every record processed, and no tool reply over 64,000 characters |
 | `dev/e2e_document_index.py` | An existing index documented: an Elasticsearch index nothing in Stroom feeds (and one whose documents have no StreamId, which Stroom never returns: documented from its mapping, saying why), one a production pipeline with a kept plan feeds, and a Lucene index; each located and confirmed, surveyed through Stroom (fields, the newest documents through an unsaved dashboard, the feeding pipelines), drafted with the generated field table and a link, and promoted beside the index doc or where the user chooses; documented again (the doc beside it written back, not duplicated); a 183-field index surveyed in groups of columns; a Lucene field that is not stored shown as such |
 | `dev/e2e_errors.py` | Invalid data, and the response: an error in the agent's own mapping fixed before the user sees it; an inherited error the user accepts as benign (confirmed, recorded in the documentation's Errors section, then reported as benign in stepping and Error streams); a record Elasticsearch rejects, reported per document in batches of 10, fixed, the stream's earlier documents deleted first as the approval asks, the default batch size restored; XML that is not well-formed, caught before the pipeline is made and located by stepping |
 | `dev/e2e_index_versions.py` | A new version of a production Elasticsearch indexing pipeline: v1 built, agreed, indexed and promoted; v2 copied with an added field (diff limited to it), its template from v1's agreed one, committed, started on new Events only; new data indexed by both (v1 unchanged, still running); searched both ways; v2 documented and promoted beside v1 |
@@ -167,8 +169,11 @@ Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (
 `dev/e2e_cleanup.py STAMP --apply` removes the run afterwards: filters, streams (marked deleted), documents and
 folders.
 
-The evaluation set in [dev/eval](dev/eval/README.md) has 19 cases across CSV, JSON, XML, syslog and key=value, each
+The evaluation set in [dev/eval](dev/eval/README.md) has 20 cases across CSV, JSON, XML, syslog and key=value, each
 with a reference solution: `--reference` runs those through the local stack without a model, and `--request` prints
-the request to give an agent, whatever runs it. `dev/eval/run_agent.py [--model haiku]` runs them with headless
-Claude Code as the agent and a scripted user, on the CLI's sign-in. The Stroom API checks (`dev/api_checks`) prove the APIs the server relies on, which were built for the Stroom UI;
+the request to give an agent, whatever runs it. `dev/eval/run_agent.py` runs them with headless Claude Code as the
+agent and a scripted user, on Haiku by default (`--model default` for Claude Code's own), on the CLI's sign-in: the
+Claude subscription, never an API key. `--workflow document_index` runs a workflow beyond onboarding
+(`dev/eval/workflows.py`: its setup, prompt, the user's facts and a scorer reading Stroom), and with `--reference`
+checks that setup and scorer without a model. The Stroom API checks (`dev/api_checks`) prove the APIs the server relies on, which were built for the Stroom UI;
 what has been found and tested, locally and live, is in [docs/FINDINGS.md](docs/FINDINGS.md).

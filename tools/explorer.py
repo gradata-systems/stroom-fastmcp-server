@@ -83,6 +83,10 @@ async def describe_document(
         ctx: Context,
         type: Annotated[DocType, Field(description="Document type, as returned by find_documents.")],
         uuid: Annotated[str, Field(description="Document UUID, as returned by find_documents.")],
+        find: Annotated[str | None, Field(
+            description="Documentation only: return just the passages mentioning this (case-insensitive; several "
+                        "terms separated by |), e.g. an event id, for a long reference document.")] = None,
+        context_lines: Annotated[int, Field(ge=0, le=60, description="With find: lines kept around each match.")] = 8,
 ) -> dict[str, Any]:
     """
     A document's full content by type and UUID (XSLT, TextConverter and Documentation content verbatim in
@@ -91,11 +95,14 @@ async def describe_document(
     what it removes from its template); for an XSLT, what the translation does (each output element's
     source, the input fields read, imports, dictionaries and lookups); for an Elastic Index or Lucene Index doc, a
     survey of what the index holds, read through Stroom: its fields, the newest documents (how often each field
-    is populated, sample values) and the pipelines that feed it.
+    is populated, sample values) and the pipelines that feed it. A long Documentation doc (a vendor manual) comes
+    back cut short with its outline; find= returns the passages about one thing instead.
     """
     from tools.pipelines import describe_pipeline
     from tools.validation import describe_translation
     doc = await get_document(ctx, type, uuid)
+    if type == 'Documentation':
+        return _passages(doc, find, context_lines)
     if type == 'Pipeline':
         doc['pipeline'] = await describe_pipeline(uuid, ctx)
     elif type == 'XSLT':
@@ -112,6 +119,51 @@ async def describe_document(
             survey['fed_by'] = [{**p, 'plan': bool(p['plan'])} for p in survey['fed_by']]
             doc['survey'] = survey
     return doc
+
+
+DOC_CHARS = 30_000     # a Documentation doc's text returned whole up to this; past it, the outline and find=
+
+
+def _passages(doc: dict[str, Any], find: str | None, context_lines: int) -> dict[str, Any]:
+    """A Documentation doc for the model: whole when short; otherwise its outline and the start, or with find the
+    passages that mention it, so a long manual is read where it matters, not all at once."""
+    import re
+    from utils.stroom import body_text
+    text = body_text(doc)
+    lines = text.splitlines()
+    out = {k: v for k, v in doc.items() if k not in ('data', 'documentation')}
+    out['characters'] = len(text)
+    if find:
+        terms = [t.strip().lower() for t in find.split('|') if t.strip()]
+        hits = [n for n, line in enumerate(lines) if any(t in line.lower() for t in terms)]
+        spans: list[list[int]] = []
+        for n in hits:
+            lo, hi = max(0, n - context_lines), min(len(lines), n + context_lines + 1)
+            if spans and lo <= spans[-1][1]:
+                spans[-1][1] = max(spans[-1][1], hi)
+            else:
+                spans.append([lo, hi])
+        shown, size = [], 0
+        for lo, hi in spans:
+            passage = '\n'.join(lines[lo:hi])
+            if size + len(passage) > DOC_CHARS:
+                break
+            shown.append({'lines': f'{lo + 1}-{hi}', 'text': passage})
+            size += len(passage)
+        out.update(find=find, matches=len(hits), passages=shown)
+        if len(shown) < len(spans):
+            out['note'] = f"{len(spans) - len(shown)} more passages: narrow find, or lower context_lines"
+        if not hits:
+            out['note'] = "Nothing mentions it: try another term (the vendor's name for the event or field)."
+        return out
+    if len(text) <= DOC_CHARS:
+        out['data'] = text
+        return out
+    out['outline'] = [line.strip() for line in lines if re.match(r'#{1,4} ', line)][:300]
+    out['data'] = text[:DOC_CHARS]
+    out['note'] = (f"Cut short: {DOC_CHARS:,} of {len(text):,} characters. Read the parts you need with find= (an event "
+                   f"id, a field name, a heading from the outline).")
+    return out
 
 
 ALL_TOOLS = [find_documents, describe_document]

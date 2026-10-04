@@ -129,6 +129,17 @@ async def test_raw_streams_are_read_in_pages_up_to_the_limit():
         assert truncated and text.startswith(head) and head.endswith('\n') and len(head) <= 300
 
 
+async def test_stroom_s_placeholder_past_the_end_is_not_read_as_data():
+    from tools import streams
+    csv = 'ts,evt\n2026-10-01T08:00:00Z,4624\n'
+    # The count says a character more than the first page holds; the range past the end comes back as Stroom's
+    # placeholder, which would end a CSV sample with a line of one column.
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value={'data': csv, 'totalCharacterCount': {'count': len(csv) + 1}}),
+                             post=AsyncMock(return_value={'data': '## No Data ##'}))
+    text, truncated = await streams.raw_text(stroom, 7, 10_000)
+    assert '## No Data ##' not in text and text.startswith(csv.rstrip())
+
+
 async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
     from tools import translation
     from utils.consent import ConsentStore

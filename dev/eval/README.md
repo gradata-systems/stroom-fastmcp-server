@@ -1,6 +1,6 @@
 # Evaluation set
 
-Nineteen samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Twenty samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -28,6 +28,7 @@ case), not a margin to spend.
 | `17_csv_firewall_mixed` | CSV with a header: traffic, admin and system records in one file | Network, Authenticate, Update, Export, Alert | Rules on two fields (`event_type` and `action`), five event types from one file, sparse and space-only columns, a time with an offset, `Rule` and `Data` on Network, mapped Alert type and severity |
 | `18_json_event_string_freetext` | JSON array; the event is JSON in a string field: timestamp, username, event_type, an optional resource and a free-form message | Authenticate (logon, logoff, password change), View, Delete | `json-to-xml()` through `xpath` for every field, the event's own time (millisecond, offset) rather than the shipper's, free text kept whole as the Description (quotes, colons, text that looks like key=value), `values` checks |
 | `19_jsonl_message_layouts` | JSON lines; the message's layout depends on its first word, with quoted values, optional and extra keys, and free text | Authenticate, Alert, Unknown | Several `extract` regexes over one field, `any_of` for a quoted or bare value, rules per kind, a catch-all rule for unrecognised lines, `values` checks that quoted names are read whole |
+| `20_csv_coded_with_docs` | CSV with a header, the vendor's own codes (`A17`, `R7`) | Authenticate (logon, failed logon, logoff) | The vendor's documentation (`source_docs`): only it says A18 is a failed logon and A40 a logoff; `values` checks Action and Outcome/Success. `run_agent.py --without-source-docs 20` runs it without the documentation, to measure what the documentation is worth |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have (`*` for one element any of several may fill, such as
@@ -63,12 +64,14 @@ filter when it is handed over, and when the agent asks for help give the case's 
 (a hint fails the case). A case passes when its Events hold the expected record count, event types and paths, and
 the verification search finds them in the index.
 
-**Headless Claude Code** (on the `claude` CLI's sign-in, no API key): `run_agent.py` does all of the above
-unattended.
+**Headless Claude Code** (on the `claude` CLI's sign-in: the Claude subscription, never an API key, as
+`ANTHROPIC_API_KEY` is kept from it): `run_agent.py` does all of the above unattended, on Haiku by default to spare
+the plan's usage.
 
 ```
-uv run python dev/eval/run_agent.py                                 # every case, Claude Code's default model
-uv run python dev/eval/run_agent.py --model haiku 06 json           # some cases, a lighter model
+uv run python dev/eval/run_agent.py                                 # every case, on Haiku
+uv run python dev/eval/run_agent.py 06 json                         # some cases
+uv run python dev/eval/run_agent.py --model default 01              # Claude Code's default model instead
 uv run python dev/eval/run_agent.py --model default --model haiku   # both, one after the other
 uv run python dev/eval/run_agent.py --repeat 3                      # each case three times, a pass rate per case
 ```
@@ -86,3 +89,19 @@ the API-equivalent cost Claude Code reports; each case's transcript (stream-json
 `results/<time>-agent/`. A model's run is one sample, so one run can pass or fail by chance: with `--repeat N`
 each case runs N times, the summary shows its passed runs, and it passes when most do; a case passing some runs
 but not most is flaky rather than broken. `--effort`, `--max-user-turns` and `--turn-timeout` tune a run.
+
+## Workflows beyond onboarding
+
+`dev/eval/workflows.py` holds agent cases for the other prompts. Each has a setup (the starting state, made on the
+local stack through the server's tools), the prompt and the user's request, the facts the scripted user may answer
+from, what finished means, and a scorer reading Stroom. A case passes when the scorer finds no problem, with no help
+requests and nothing confirmed without asking the user.
+
+```
+uv run python dev/eval/run_agent.py --workflow document_index              # the agent, on Haiku
+uv run python dev/eval/run_agent.py --workflow document_index --reference  # setup and scorer, no model
+```
+
+| Workflow | Starting state | Passes when |
+| --- | --- | --- |
+| `document_index` | A production Elasticsearch index another system loads (documents pointing at a stream in this Stroom), its Elastic Index doc in production | The doc is promoted beside the index doc, its field table has every field, it has the Data surveyed summary, and Purpose and data is the agent's own prose (150 characters or more) built on what the user said of the index's purpose: the agent has to ask, as the survey cannot say why the index exists |

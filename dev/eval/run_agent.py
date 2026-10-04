@@ -1,11 +1,14 @@
 """The evaluation set run by an agent: headless Claude Code, connected to this checkout's server, with a scripted user.
 
-    uv run python dev/eval/run_agent.py                          # every case, Claude Code's default model
-    uv run python dev/eval/run_agent.py --model haiku 06 json    # some cases, a lighter model
-    uv run python dev/eval/run_agent.py --model default --model haiku 01   # one case per model, side by side
+    uv run python dev/eval/run_agent.py                          # every case, on Haiku
+    uv run python dev/eval/run_agent.py 06 json                  # some cases
+    uv run python dev/eval/run_agent.py --model default 01       # Claude Code's default model instead
     uv run python dev/eval/run_agent.py --repeat 3                # each case three times: a pass rate per case
+    uv run python dev/eval/run_agent.py --workflow document_index              # another workflow (dev/eval/workflows.py)
+    uv run python dev/eval/run_agent.py --workflow document_index --reference  # its setup and scorer, no model
 
-Needs the local Stroom stack (dev/stroom) and the `claude` CLI signed in: it runs on that sign-in, no API key.
+Needs the local Stroom stack (dev/stroom) and the `claude` CLI signed in: it runs on that sign-in, on the Claude
+subscription, never an API key (ANTHROPIC_API_KEY is kept from it). Haiku by default, to spare the plan's usage.
 
 Per case: the server's onboard_data_source prompt, rendered with the case's sample, is the first message, with
 the case's request and the names to use. The agent (claude -p) has only this server's tools and its resources;
@@ -106,11 +109,15 @@ def first_message(prompt: str, case: dict[str, Any], build: str, feed: str) -> s
             f"feed `{feed}`. Stop once the index is verified and both pipelines are documented; don't promote the build.")
 
 
-async def render_prompt(url: str, case: dict[str, Any]) -> str:
-    """The server's onboarding prompt for the case, as a client gets it."""
+async def render_prompt(url: str, case: dict[str, Any], with_docs: bool = True) -> str:
+    """The server's onboarding prompt for the case, as a client gets it, with the case's source documentation
+    unless the run is measuring how the agent does without it."""
     from fastmcp import Client
+    args = {'sample': sample_text(case), 'source_name': case['name']}
+    if with_docs and case.get('source_docs'):
+        args['source_docs'] = case['source_docs']
     async with Client(url) as client:
-        result = await client.get_prompt(PROMPT, {'sample': sample_text(case), 'source_name': case['name']})
+        result = await client.get_prompt(PROMPT, args)
     return '\n\n'.join(m.content.text for m in result.messages if getattr(m.content, 'text', None))
 
 
@@ -124,9 +131,11 @@ def claude_exe() -> str:
 
 async def claude(args: list[str], message: str, cwd: Path, transcript: Path | None, timeout: float) -> list[dict[str, Any]]:
     """Run `claude -p` with the message on stdin; the stream-json events it printed (appended to the transcript)."""
+    # The subscription's sign-in only: with an API key in the environment, Claude Code would bill the API instead.
+    env = {k: v for k, v in os.environ.items() if k not in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN')}
     proc = await asyncio.create_subprocess_exec(
         claude_exe(), '-p', *args, cwd=cwd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, limit=64 * 1024 * 1024)
+        stderr=asyncio.subprocess.PIPE, limit=64 * 1024 * 1024, env=env)
     proc.stdin.write(message.encode('utf-8'))
     proc.stdin.close()
     events: list[dict[str, Any]] = []
@@ -198,11 +207,27 @@ class Agent:
         return result
 
 
-async def play_user(case: dict[str, Any], agent_said: str, model: str, workdir: Path) -> dict[str, str]:
+WORKFLOW_ROLE = """You play the user in an evaluation of an AI agent working in Stroom through an MCP server. You know
+only the request and the facts below. Read the agent's latest message and choose the action:
+
+- agree: it asks you to confirm or approve something within the request (a document, a name, a pending
+  confirmation or approval). Reply with a short agreement ("Yes, go ahead.").
+- answer: it asks a question the facts answer. Reply briefly, using only the facts.
+- help: it is stuck, reports a problem it cannot solve, or asks how to do something technical. Leave reply empty.
+- continue: it stopped without asking anything before the work is finished ({done}), or asks whether to carry on.
+  Leave reply empty.
+- promote: it asks whether or where to promote or publish its work. Leave reply empty.
+- done: it says the work is finished, or that it gives up. Leave reply empty.
+
+Never give technical guidance of your own."""
+
+
+async def play_user(case: dict[str, Any], agent_said: str, model: str, workdir: Path,
+                    role: str = USER_ROLE, context: str | None = None) -> dict[str, str]:
     """The scripted user's decision on the agent's last message: {'action', 'reply'}."""
     said = agent_said if len(agent_said) <= 8000 else agent_said[:2000] + '\n[...]\n' + agent_said[-6000:]
-    message = (f"{USER_ROLE}\n\n## The request\n\n{case['request'].strip()}\n\n{sample_text(case)}\n\n"
-               f"## The agent's latest message\n\n{said}")
+    context = context if context is not None else f"## The request\n\n{case['request'].strip()}\n\n{sample_text(case)}"
+    message = f"{role}\n\n{context}\n\n## The agent's latest message\n\n{said}"
     events = await claude([*isolation_args(model), '--tools', '', '--output-format', 'json', '--json-schema',
                            json.dumps(USER_SCHEMA), '--no-session-persistence'], message, workdir, None, 300)
     result = next((e for e in events if e.get('type') == 'result'), {})
@@ -228,7 +253,7 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
         workdir = Path(tmp)
         agent = Agent(model, args.effort, server_url, workdir, transcript, args.turn_timeout)
         try:
-            message = first_message(await render_prompt(server_url, case), case, build, feed)
+            message = first_message(await render_prompt(server_url, case, not args.without_source_docs), case, build, feed)
             while True:
                 result = await agent.send(message)
                 if result.get('is_error'):
@@ -262,6 +287,74 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
     await score_build(score, case, build, feed)
     score.seconds = round(time.monotonic() - started, 1)
     score.passed = score.stage1 and score.indexed and score.hints <= MAX_HINTS
+    return score
+
+
+async def run_workflow(workflow, args: argparse.Namespace, model: str | None, server_url: str | None,
+                       out: Path) -> AgentScore:
+    """One workflow case (dev/eval/workflows.py): its setup, then the agent from the workflow's prompt with the scripted
+    user, or with --reference the workflow done through the tools directly; scored from Stroom."""
+    from fastmcp import Client
+    stamp = time.strftime('%H%M%S')
+    transcript = out / (model or 'default') / f"{workflow.id}.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    score = AgentScore(workflow.id, 'reference' if args.reference else 'agent', model=model or 'default',
+                       transcript=str(transcript.relative_to(ROOT)))
+    started = time.monotonic()
+    ctx = local_ctx()
+    try:
+        prepared = await workflow.setup(ctx, stamp)
+        score.build = prepared.get('build', '')
+        if args.reference:
+            await workflow.reference(ctx, prepared)
+            score.ended = 'reference run'
+        else:
+            async with Client(server_url) as client:
+                rendered = await client.get_prompt(workflow.prompt, prepared['prompt_args'])
+            prompt = '\n\n'.join(m.content.text for m in rendered.messages if getattr(m.content, 'text', None))
+            role = WORKFLOW_ROLE.format(done=workflow.done)
+            context = f"## The request\n\n{prepared['request']}\n\n## The facts\n\n{prepared['facts']}"
+            with tempfile.TemporaryDirectory(prefix='stroom-eval-') as tmp:
+                workdir = Path(tmp)
+                agent = Agent(model, args.effort, server_url, workdir, transcript, args.turn_timeout)
+                message = f"{prompt}\n\n{prepared['request']}"
+                while True:
+                    result = await agent.send(message)
+                    if result.get('is_error'):
+                        if LIMIT.search(str(result.get('result'))):
+                            raise UsageLimit(str(result.get('result'))[:200])
+                        score.ended = f"agent error: {str(result.get('result'))[:300]}"
+                    if score.user_turns >= args.max_user_turns:
+                        score.ended = f"stopped after {score.user_turns} user turns"
+                        break
+                    decision = await play_user({}, result.get('result') or '', args.user_model, workdir, role, context)
+                    action = decision['action']
+                    print(f"    user: {action}{(' - ' + decision['reply'][:100]) if decision['reply'] else ''}")
+                    if action == 'done':
+                        score.ended = 'agent finished'
+                        break
+                    if action == 'help':
+                        score.help_requests += 1
+                        message = NO_HINT
+                    else:
+                        message = ({'continue': f"Please carry on. The work is done when {workflow.done}.",
+                                    'promote': workflow.promote}.get(action) or decision['reply']
+                                   or f"Please carry on. The work is done when {workflow.done}.")
+                    score.user_turns += 1
+                score.cost_usd, score.tool_calls = round(agent.cost, 4), agent.tool_calls
+                score.self_confirmed = agent.self_confirmed
+        problems, notes = await workflow.score(ctx, prepared)
+        score.problems += problems
+        score.notes += notes
+    except UsageLimit:
+        raise
+    except Exception as e:  # a case failing must not stop the evaluation
+        score.ended = score.ended or f"{type(e).__name__}: {e}"
+        score.problems.append(f"{type(e).__name__}: {e}")
+    finally:
+        await ctx.lifespan_context['stroom'].close()
+    score.seconds = round(time.monotonic() - started, 1)
+    score.passed = not score.problems and score.help_requests == 0 and score.self_confirmed == 0
     return score
 
 
@@ -377,6 +470,45 @@ async def rescore(path: Path) -> None:
     print('\n' + (repeated_summary(rescored, runs) if runs > 1 else summary(rescored)) + f"\nResults: {out}")
 
 
+async def main_workflows(args: argparse.Namespace) -> None:
+    from workflows import WORKFLOWS
+    unknown = [w for w in args.workflows if w not in WORKFLOWS]
+    if unknown:
+        raise SystemExit(f"No workflow {unknown}; there are {sorted(WORKFLOWS)}")
+    when = time.strftime('%Y%m%d-%H%M%S')
+    out = RESULTS / f"{when}-{'reference' if args.reference else 'agent'}-workflows"
+    out.mkdir(parents=True, exist_ok=True)
+    server, url = None, args.server_url
+    if not args.reference and not url:
+        server = await start_server(args.port, out / 'server.log')
+        url = f'http://127.0.0.1:{args.port}/mcp'
+    models = [None] if args.reference else [None if m == 'default' else m for m in (args.models or ['haiku'])]
+    scores = []
+    try:
+        for model in models:
+            for wid in args.workflows:
+                print(f"### {wid} ({'reference' if args.reference else model or 'default'})")
+                try:
+                    s = await run_workflow(WORKFLOWS[wid], args, model, url, out)
+                except UsageLimit as e:
+                    print(f"Stopped: Claude Code would not run ({e}).")
+                    break
+                scores.append(s)
+                print(f"  {'PASS' if s.passed else 'FAIL'} {s.ended}; {s.user_turns} user turns, {s.help_requests} help "
+                      f"requests, {s.tool_calls} tool calls, {s.self_confirmed} confirmed without asking, {s.seconds}s")
+                for line in s.problems:
+                    print(f"    - {line}")
+                for line in s.notes:
+                    print(f"    . {line}")
+    finally:
+        if server:
+            server.terminate()
+            await server.wait()
+    path = out.with_suffix('.json')
+    path.write_text(json.dumps([asdict(s) for s in scores], indent=1), encoding='utf-8')
+    print(f"\n{sum(s.passed for s in scores)} of {len(scores)} workflow cases passed. Results: {path}")
+
+
 # --- the server ---
 async def wait_healthy(url: str, seconds: float) -> None:
     deadline = time.monotonic() + seconds
@@ -411,8 +543,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('cases', nargs='*', help="Case ids or parts of them, e.g. 06 json")
     parser.add_argument('--model', action='append', dest='models', metavar='MODEL',
-                        help="Claude Code model for the agent (alias or full name), or 'default'; repeat to compare. "
-                             "Default: Claude Code's default model.")
+                        help="Claude Code model for the agent (alias or full name), or 'default' for Claude Code's "
+                             "default model; repeat to compare. Default: haiku.")
     parser.add_argument('--repeat', type=int, default=1, help="Runs per case and model; a case passes when most pass.")
     parser.add_argument('--user-model', default='haiku', help="Model playing the user (default: haiku).")
     parser.add_argument('--effort', choices=['low', 'medium', 'high', 'xhigh', 'max'], help="The agent's effort level.")
@@ -420,11 +552,21 @@ async def main() -> None:
     parser.add_argument('--turn-timeout', type=float, default=2700, help="Seconds one agent turn may take.")
     parser.add_argument('--port', type=int, default=8767, help="Port for this checkout's server.")
     parser.add_argument('--server-url', help="Use a server already running (dev_no_auth, local stack) instead.")
+    parser.add_argument('--without-source-docs', action='store_true',
+                        help="Leave out the cases' vendor documentation (source_docs), to measure what it is worth.")
+    parser.add_argument('--workflow', action='append', dest='workflows', metavar='ID',
+                        help="A workflow case from dev/eval/workflows.py instead of the onboarding cases; repeat for more.")
+    parser.add_argument('--reference', action='store_true',
+                        help="With --workflow: do the workflow through the tools directly (no model), to check its "
+                             "setup and scorer.")
     parser.add_argument('--rescore', type=Path, metavar='RESULTS',
                         help="Score an earlier results file's builds again from Stroom, without running the agent.")
     args = parser.parse_args()
     if args.rescore:
         await rescore(args.rescore)
+        return
+    if args.workflows:
+        await main_workflows(args)
         return
     cases = load_cases(args.cases)
     if not cases:
@@ -444,7 +586,7 @@ async def main() -> None:
     else:
         server = await start_server(args.port, out / 'server.log')
         url = f'http://127.0.0.1:{args.port}/mcp'
-    models = [None if m == 'default' else m for m in (args.models or ['default'])]
+    models = [None if m == 'default' else m for m in (args.models or ['haiku'])]
     try:
         by_model = {}
         stopped = None

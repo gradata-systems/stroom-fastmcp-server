@@ -93,8 +93,13 @@ select nothing for want of a namespace.
 
 
 def _docs(source_docs: str) -> str:
-    return (f"\n\nThe user supplied this source documentation. Record it with record_source_notes and use it for "
-            f"field meanings and event types:\n{source_docs}") if source_docs else ''
+    return (f"\n\nThe user supplied this source documentation. Keep it in Stroom with record_source_notes: the documents "
+            f"themselves (documents=[{{title, text}}], verbatim) and, condensed from them, the field dictionary (each "
+            f"field's meaning, its codes as values, the event-logging path it belongs in) and the event catalogue (each "
+            f"event with the field and value that show it in a record, its action element, TypeId, Action and outcome). "
+            f"Then draft_translation_mapping with build= drafts from the notes, and build_translation_xslt with build= "
+            f"checks the mapping against the catalogue: resolve what it reports, or tell the user where the "
+            f"documentation and the data disagree:\n{source_docs}") if source_docs else ''
 
 
 def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None:
@@ -346,19 +351,23 @@ every field, what it holds and the values it has. Change nothing except the docu
    the time range they cover, and the pipelines that feed it (with whether each keeps an index plan, which says
    where each field comes from in the events). describe_document a feeding pipeline for its source feeds and what
    it does. A field with no values in the survey: say so, rather than guessing what it holds.
-3. Draft the documentation in a build (start_build), with write_documentation index_uuid=the index doc: the user
-   confirms the index doc there. Write Purpose and data from what you have seen of the source, in a few paragraphs:
+3. Ask the user, and wait for the answer before drafting: what is the index for, what system or team produces its
+   data, and who searches it and why? The survey shows what the index holds, not why it exists; do not infer its
+   purpose when the user can say it.{' (They have said: ' + purpose + '; ask only what that leaves open.)' if purpose else ''}
+4. Draft the documentation in a build (start_build), with write_documentation index_uuid=the index doc: the user
+   confirms the index doc there. Write Purpose and data from the user's answer and what you have seen of the source,
+   in a few paragraphs:
    what the source system is and what its data records (the feeds the survey's profile names, their descriptions,
    and the feeding and events pipelines: describe_document, and their own Documentation docs where they have one);
    what kinds of events or records the index holds (from the sample values, e.g. the event codes and actions);
    who and what it serves, and how it is searched (dashboards on the index doc: find_documents types=['Dashboard']
-   with the index's name){', and: ' + purpose if purpose else ''}. Say what you do not know rather than guess, and ask
-   the user what they know of its purpose. The tool adds a "Data surveyed" summary under it (documents, time span,
+   with the index's name). Lead with the purpose as the user gave it; say what you do not know rather than guess.
+   The tool adds a "Data surveyed" summary under it (documents, time span,
    source feeds and pipelines) and generates Field mapping: each field with a description, type, source path when a
    plan records it, how often it is populated and sample values.
-4. Give the user the doc's link (the reply's link) and the field table in the chat. Ask where it should live:
+5. Give the user the doc's link (the reply's link) and the field table in the chat. Ask where it should live:
    beside the index doc (the default) or a folder they choose.
-5. Once the user agrees, promote_build: the doc goes beside the index doc, or with destinations=
+6. Once the user agrees, promote_build: the doc goes beside the index doc, or with destinations=
    {{'Documentation': '<their folder>'}}.
 
 {_RULES}"""

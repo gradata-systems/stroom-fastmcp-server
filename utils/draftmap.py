@@ -87,7 +87,7 @@ def _records(named: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]
 
 
 def draft_mapping(samples: Any, source_name: str = '', system_name: str | None = None,
-                  environment: str | None = None) -> dict[str, Any]:
+                  environment: str | None = None, source_notes: dict[str, Any] | None = None) -> dict[str, Any]:
     """{'mapping', 'splitter', 'notes', 'unmapped_fields', 'kinds'}: a valid mapping to edit, and what is left to decide."""
     named = as_named_samples(samples)
     info, records, spec = _records(named)
@@ -196,6 +196,19 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         notes.append("No field names the kind of event: every record is one 'other' event with Unknown/Data. Add rules "
                      "with conditions once you know how kinds are told apart.")
     mapping.update(common=common, events=rules)
-    return {'mapping': mapping, 'splitter': spec.model_dump(exclude_none=True, exclude_defaults=True) if spec else None,
+    applied = None
+    if source_notes and (source_notes.get('fields') or source_notes.get('events')):
+        # The user's documentation says where fields belong and what each event is: it wins over guesses from names.
+        from utils.sourcenotes import apply_to_draft
+        applied = apply_to_draft(mapping, names, values, source_notes)
+        if applied['events']:
+            notes[:] = [n for n in notes if not n.startswith(('One rule per value of', 'No field names the kind'))]
+        if applied['fields'] or applied['events']:
+            rest = [n for n in rest if not any(e.get('field') == n for e in mapping['common'])]
+            notes.insert(0, "Drafted from the source documentation: " + '; '.join(applied['fields'] + applied['events']) + '.')
+        if applied['not_in_catalogue']:
+            notes.append(f"The catalogue does not list {', '.join(applied['not_in_catalogue'])}: those records fall to the "
+                         f"rule for the rest; read the reference documents (find_documents content=the value) or ask the user.")
+    return {'mapping': mapping, 'source_notes': applied, 'splitter': spec.model_dump(exclude_none=True, exclude_defaults=True) if spec else None,
             'format': fmt, 'records': len(records), 'kinds': kinds, 'notes': notes,
             'unmapped_fields': rest, 'fields_seen': names}

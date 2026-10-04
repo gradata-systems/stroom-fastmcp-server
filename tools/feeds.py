@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from security.guard import guard_from
 from tools.streams import SampleStreams, read_sample_streams
@@ -125,18 +125,43 @@ async def upload_sample(
 
 
 class FieldNote(BaseModel):
-    field: str
+    field: str = Field(description="The field's name as the sample has it (a column, key or element).")
     meaning: str
     type: str = ''
     example: str = ''
-    event_logging_path: str = Field('', description="Suggested event-logging element, e.g. EventSource/User/Id.")
+    event_logging_path: str = Field('', description="The event-logging element it belongs in, e.g. EventSource/User/Id; "
+                                                    "the draft maps the field there.")
+    values: dict[str, str] = Field(default_factory=dict, description="The field's codes and what each means, from the "
+                                                                     "documentation, e.g. {'0x0': 'success'}.")
 
 
 class EventNote(BaseModel):
     event: str = Field(description="Source event id or action, e.g. '4624' or 'CODE_TO_TOKEN'.")
     description: str
-    event_detail: str = Field('', description="Suggested EventDetail action element, e.g. Authenticate.")
+    event_detail: str = Field('', description="The EventDetail action element, e.g. Authenticate.")
     type_id: str = ''
+    field: str = Field('', description="The field whose value shows this event in a record, e.g. 'evt'; with value, the "
+                                       "draft makes a rule for it and build_translation_xslt checks the mapping against it.")
+    value: str = Field('', description="That field's value for this event, e.g. '4625'.")
+    action: str = Field('', description="The action element's Action, when it has one, e.g. Logon or Logoff.")
+    success: bool | None = Field(None, description="The event's outcome, when the documentation says it, e.g. False for "
+                                                   "a failed logon.")
+
+
+class ReferenceDocument(BaseModel):
+    title: str = Field(description="The document's title, e.g. 'Acme door controller event reference v3'.")
+    text: str = Field('', description="Its text, verbatim, as Markdown or plain text, as the user gave it (attached in "
+                                      "their client). A document too long for one call goes in parts, one call each, "
+                                      "titled '<title> part 1', '<title> part 2' and so on.")
+    uuid: str = Field('', description="Instead of text: a Documentation doc already in Stroom holding it (one the user "
+                                      "made in the Stroom UI, say).")
+    source: str = Field('', description="Where it came from: a URL or file name.")
+
+    @model_validator(mode='after')
+    def text_or_uuid(self):
+        if bool(self.text.strip()) == bool(self.uuid):
+            raise ValueError("give the document's text, or the uuid of the Documentation doc holding it, not both")
+        return self
 
 
 async def record_source_notes(
@@ -147,12 +172,40 @@ async def record_source_notes(
         fields: Annotated[list[FieldNote] | str, ONE_OR_MORE, Field(description="Field dictionary condensed from the documentation.")] = [],
         events: Annotated[list[EventNote] | str, ONE_OR_MORE, Field(description="Event catalogue condensed from the documentation.")] = [],
         references: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Titles or links of the documents used.")] = [],
+        documents: Annotated[list[ReferenceDocument] | str, ONE_OR_MORE, Field(
+            description="The user's documents themselves, kept verbatim in Stroom as Documentation docs "
+                        "'<source> reference - <title>', to read and search later (find_documents content=an event "
+                        "id).")] = [],
 ) -> dict[str, Any]:
     """
-    Save the field dictionary and event catalogue condensed from user-supplied vendor documentation or
-    annotated samples, as a Documentation doc '<source> source notes' in the build. Drafting uses these for
-    field meanings and event types; later updates and evaluations can read them back with describe_document.
+    Keep the user's vendor or event reference documentation in Stroom, and the notes condensed from it, as
+    Documentation docs in the build: each document verbatim ('<source> reference - <title>'), and '<source> source
+    notes' with the field dictionary and event catalogue. The notes are read back by the tools: draft_translation_mapping
+    (build=) drafts from them (fields where the dictionary puts them, a rule per catalogued event that gives the field
+    and value showing it), build_translation_xslt (build=) checks a mapping against the catalogue, and
+    write_documentation lists the source fields with their meanings. Promotion puts them beside the feed.
     """
+    from utils.sourcenotes import REFERENCE_INFIX, block
+    fields = [FieldNote.model_validate(f) if isinstance(f, dict) else f for f in fields]
+    events = [EventNote.model_validate(e) if isinstance(e, dict) else e for e in events]
+    documents = [ReferenceDocument.model_validate(d) if isinstance(d, dict) else d for d in documents]
+    stroom = gateway_from(ctx)
+    guard = guard_from(ctx)
+    kept_docs = []
+    for d in [d for d in documents if d.uuid]:
+        # Already in Stroom (uploaded by the user): kept where it is, and named in the notes.
+        existing = await stroom.get_doc('Documentation', d.uuid)
+        kept_docs.append({'uuid': d.uuid, 'name': existing.get('name'), 'already_in_stroom': True})
+    for d in [d for d in documents if not d.uuid]:
+        name = f"{source}{REFERENCE_INFIX}{d.title}"[:200]
+        text = f"# {d.title}\n\n" + (f"Source: {d.source}\n\n" if d.source else '') + d.text.strip() + '\n'
+
+        async def keep(ref: dict[str, Any], text: str = text) -> dict[str, Any]:
+            doc = await stroom.get_doc('Documentation', ref['uuid'])
+            set_body_text(doc, text)
+            return await stroom.put_doc(doc)
+        kept = await guard.create_filled('Documentation', name, build, keep)
+        kept_docs.append({'uuid': kept['uuid'], 'name': kept['name']})
     lines = [f'# {source} source notes', '', summary.strip(), '']
     if fields:
         lines += ['## Field dictionary', '', '| Field | Meaning | Type | Example | Event-logging path |',
@@ -163,19 +216,25 @@ async def record_source_notes(
         lines += ['## Event catalogue', '', '| Event | Description | EventDetail | TypeId |', '| --- | --- | --- | --- |']
         lines += [f'| {e.event} | {e.description} | {e.event_detail} | {e.type_id} |' for e in events]
         lines.append('')
-    if references:
-        lines += ['## Sources', ''] + [f'- {r}' for r in references]
-    stroom = gateway_from(ctx)
+    if references or kept_docs:
+        lines += ['## Sources', ''] + [f'- {r}' for r in references] + [f"- `{d['name']}` (kept in Stroom)" for d in kept_docs]
+    lines += ['', block({'source': source, 'fields': [f.model_dump(exclude_defaults=True) for f in fields],
+                         'events': [e.model_dump(exclude_defaults=True) for e in events],
+                         'documents': [d['name'] for d in kept_docs]})]
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
         set_body_text(doc, '\n'.join(lines) + '\n')
         return await stroom.put_doc(doc)
 
-    doc = await guard_from(ctx).create_filled('Documentation', f'{source} source notes', build, write)
+    doc = await guard.create_filled('Documentation', f'{source} source notes', build, write)
     from tools.plan import with_next
+    usable = [e.event for e in events if e.field and e.value]
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'fields': len(fields),
-            'events': len(events)})
+            'events': len(events), 'documents_kept': kept_docs,
+            'hint': ("draft_translation_mapping with build= drafts from these notes" + (
+                f"; events without a field and value ({len(events) - len(usable)}) cannot become rules: give them "
+                f"where the documentation says how a record shows the event" if len(usable) < len(events) else '') + ".")})
 
 
 ALL_TOOLS = [profile_sample, create_feed, upload_sample, record_source_notes]

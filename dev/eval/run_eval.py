@@ -83,7 +83,8 @@ def sample_text(case: dict[str, Any]) -> str:
 
 def request_text(case: dict[str, Any]) -> str:
     """What to ask an agent for this case."""
-    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{sample_text(case)}"
+    docs = f"\n\nThe vendor's documentation:\n\n{case['source_docs'].strip()}" if case.get('source_docs') else ''
+    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{sample_text(case)}{docs}"
 
 
 # --- scoring ---

@@ -163,3 +163,15 @@ async def test_promotion_looks_again_when_the_build_lists_empty_right_after_a_wr
             patch.object(builds, 'guard_from', lambda c: SimpleNamespace()):
         with pytest.raises(ToolError, match='has no documents'):
             await builds.promote_build(ctx, 'b', destinations={})
+
+
+async def test_a_pipelines_documentation_follows_the_pipeline_promoted_with_it():
+    from tools import builds
+    docs = [{'type': 'Pipeline', 'uuid': 'p', 'name': 'ACME-Events', 'path': 'x', 'working_copy_of': None},
+            {'type': 'Documentation', 'uuid': 'd', 'name': 'ACME-Events', 'path': 'x', 'working_copy_of': None}]
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}))
+    guard = SimpleNamespace(resolve_folder=AsyncMock(side_effect=RuntimeError('planned')))
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)), patch.object(builds, 'guard_from', lambda c: guard):
+        with pytest.raises(RuntimeError, match='planned'):      # every doc had a destination: on to the folders
+            await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                       destinations={'Pipeline': 'System/Feeds/Acme'})
