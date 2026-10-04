@@ -168,7 +168,12 @@ async def main():
         es_template = next(c for c in candidates if c['name'] == FIXTURE_TEMPLATE)
         e2e.check(es_template['backend'] == 'elasticsearch', 'fixture template reads as an Elasticsearch template')
         index = f'e2e-acme-{stamp}-v1'
-        draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, 'ecs', events)
+        offered = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, 'ecs', events)
+        e2e.check(offered.get('drafted') is False and offered['options'][0]['option'].startswith('example index template'),
+                  'a convention alone is not drafted: the user is offered their example first')
+        # This user has no example: they say so in the confirmation.
+        draft = await e2e.agreed(indexing.draft_index_mapping, ctx=ctx, backend='elasticsearch', index_name=index,
+                                 convention='ecs', events_stream_ids=events, without_example=True)
         plan = FieldPlan.model_validate(draft['plan'])
         # As the agent does: the indexing XSLT saved from its plan, which is kept with it for the documentation.
         xslt = await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=plan)

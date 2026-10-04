@@ -186,6 +186,10 @@ async def draft_index_mapping(
             description="A discovery index instead: raw data (JSON, delimited text or XML) indexed as it is into "
                         "Elasticsearch, with no convention and no Events. Give what the user confirmed: the input, the "
                         "timestamp field (and XML's record element), any stream meta to add, fields to drop.")] = None,
+        without_example: Annotated[bool, Field(
+            description="Elasticsearch: only when the user has no example index template and no existing index to "
+                        "follow; they confirm it in a form, and the convention alone names the fields.")] = False,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
@@ -199,6 +203,24 @@ async def draft_index_mapping(
     """
     if discovery:
         return _draft_discovery(backend, index_name, discovery)
+    if backend == 'elasticsearch' and not (example_template or like_index):
+        # Names, types and structure come from what the environment already indexes: the agent asks the user,
+        # and indexing from a convention alone is the user's call, made in a form, not the agent's.
+        if not without_example:
+            options = await get_field_conventions(ctx, backend='elasticsearch')
+            return {**options, 'drafted': False,
+                    'hint': "Not drafted: ask the user for their example first, offering these options. Then "
+                            "draft_index_mapping with example_template=... (pasted) or like_index=<uuid>; only if they "
+                            "have neither, with convention=... and without_example=true, which they confirm."}
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', 'draft_index_mapping',
+            f"Index '{index_name}' into Elasticsearch without an example index template",
+            {'field names and types from': f"the '{convention}' convention" if convention else 'no convention given',
+             'index template': "built from Elasticsearch defaults, not from an index you already have",
+             'instead': "paste an example index template, or name an existing index in Stroom to follow"},
+            confirmation_id)
+        if gate:
+            return gate
     if not events_stream_ids:
         raise ToolError("Give events_stream_ids: the Events streams the index will hold, to see which paths they populate")
     profiles = _conventions(ctx)

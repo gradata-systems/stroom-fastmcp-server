@@ -262,8 +262,9 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     use = next(u for u in described['shared_xslt'] if u.get('template') == 'stroomFields')
     e2e.check(use['at'] == ['stroom'] and use['paths'] == ['stroom/feed'], f"the sibling's call: {use}")
     index = f'e2e-shared-{stamp}-v1'
-    draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, 'ecs', events_ids, shared=[
-        SharedTemplate(href=use['href'], template='stroomFields', at='stroom')])
+    draft = await e2e.agreed(indexing.draft_index_mapping, ctx=ctx, backend='elasticsearch', index_name=index,
+                             convention='ecs', events_stream_ids=events_ids, without_example=True,
+                             shared=[SharedTemplate(href=use['href'], template='stroomFields', at='stroom')])
     plan = FieldPlan.model_validate(draft['plan'])
     e2e.check(any(f.name == 'stroom.feed' and f.type == 'keyword' for f in plan.fields) and plan.required() == [],
              "stroom.feed planned from the shared XSLT's own text")

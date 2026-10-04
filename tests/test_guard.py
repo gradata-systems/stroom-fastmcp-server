@@ -121,3 +121,23 @@ async def test_a_folder_the_search_still_lists_after_deletion_is_not_found():
         post=AsyncMock(return_value=None))           # getFromDocRef: gone
     guard = WriteGuard(stroom, 'MCP Workspace')
     assert await guard.find_child_folder({'_path': 'System/MCP Workspace'}, 'b1') is None
+
+
+async def test_a_doc_the_explorer_tree_leaves_out_is_still_in_the_build():
+    from security.guard import WriteGuard
+    guard = WriteGuard(SimpleNamespace(), 'MCP Workspace')
+    folder = {'_path': 'System/MCP Workspace/b1'}
+    tree = {'children': [{'type': 'XSLT', 'uuid': 'x', 'name': 'X', 'tags': ['mcp-build-b1']}]}
+
+    async def post(path, body):
+        if path == '/explorer/v2/find':
+            assert body['filter']['tags'] == ['mcp-build-b1']
+            return {'values': [{'docRef': {'type': 'Folder', 'uuid': 'f', 'name': 'b1'}, 'path': 'System / MCP Workspace'},
+                               {'docRef': {'type': 'XSLT', 'uuid': 'x', 'name': 'X'}, 'path': 'System / MCP Workspace / b1'},
+                               {'docRef': {'type': 'Pipeline', 'uuid': 'p', 'name': 'P'}, 'path': 'System / MCP Workspace / b1'},
+                               {'docRef': {'type': 'Pipeline', 'uuid': 'q', 'name': 'Q'}, 'path': 'System / Elsewhere'}]}
+        return {'tags': ['mcp-build-b1', 'mcp-managed']}       # getFromDocRef
+    guard._stroom = SimpleNamespace(post=post)
+    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, tree))):
+        docs = await guard.folder_contents('b1')
+    assert sorted(d['uuid'] for d in docs) == ['p', 'x'] and next(d for d in docs if d['uuid'] == 'p')['tags'][1] == 'mcp-managed'

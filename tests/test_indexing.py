@@ -173,7 +173,22 @@ async def test_a_discovery_draft_reads_nothing_and_is_elasticsearch_only():
     with pytest.raises(ToolError, match='A discovery index is Elasticsearch'):
         await indexing.draft_index_mapping(ctx, 'lucene', 'x', discovery=Discovery(timestamp_field='ts'))
     with pytest.raises(ToolError, match='Give events_stream_ids'):
-        await indexing.draft_index_mapping(ctx, 'elasticsearch', 'x', convention='ecs')
+        await indexing.draft_index_mapping(ctx, 'lucene', 'x', convention='ecs')
+
+
+async def test_an_elasticsearch_index_is_drafted_from_the_users_example_or_their_confirmed_choice():
+    from utils.consent import ConsentStore
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(default_convention=None))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(use_elicitation=False)})
+    with patch.object(indexing, '_conventions', lambda c: {'ecs': {}, 'stroom-flat': {}}):
+        # A convention alone: not drafted; the user is to be offered their example first.
+        asked = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'x', convention='stroom-flat', events_stream_ids=[1])
+        assert asked['drafted'] is False and asked['options'][0]['option'].startswith('example index template')
+        # Without an example only when the user confirms it.
+        gate = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'x', convention='stroom-flat',
+                                                  events_stream_ids=[1], without_example=True)
+        assert gate['status'] == 'needs_confirmation' and 'without an example index template' in gate['summary']
 
 
 def test_a_discovery_template_takes_the_examples_settings_but_not_its_fields_or_rules():

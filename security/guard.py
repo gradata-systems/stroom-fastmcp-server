@@ -12,7 +12,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 
 from security.audit import audit
-from utils.stroom import StroomGateway
+from utils.stroom import StroomGateway, explorer_filter
 
 # The agent may change these; the tag comes off when a build is promoted.
 MANAGED = 'mcp-managed'
@@ -96,8 +96,23 @@ class WriteGuard:
         folder, node = await self._build_node(build)
         if folder is None:
             return []
-        return [{'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
-                 'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder']
+        docs = {c['uuid']: {'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
+                            'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder'}
+        # The tree can briefly leave out a doc whose node was just updated (a tag added, say), and a promotion that
+        # missed it would leave it behind: the docs tagged with the build, from the search index, are added too.
+        tagged = explorer_filter(None, '*')
+        tagged['tags'] = [build_tag(build)]
+        found = await self._stroom.post('/explorer/v2/find', {'filter': tagged, 'pageRequest': {'offset': 0, 'length': 1000}})
+        for value in found.get('values') or []:
+            ref = value.get('docRef') or {}
+            if ref.get('type') == 'Folder' or ref.get('uuid') in docs \
+                    or (value.get('path') or '').replace(' / ', '/') != folder['_path']:
+                continue
+            node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
+            if node:
+                docs[ref['uuid']] = {'type': ref['type'], 'uuid': ref['uuid'], 'name': ref.get('name'),
+                                     'tags': node.get('tags') or [], 'path': folder['_path']}
+        return list(docs.values())
 
     async def remove_build_folder_if_empty(self, build: str) -> bool:
         """Delete a build's folder once nothing at all is left in it, subfolders included. Stroom deletes a
@@ -105,6 +120,8 @@ class WriteGuard:
         folder, node = await self._build_node(build)
         if folder is None or not node or node.get('children') or 'L' not in (node.get('nodeFlags') or []):
             return False
+        if await self.folder_contents(build):
+            return False    # the tree is behind: a doc it left out is still there, and would go with the folder
         await self._stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [_ref(folder)]})
         return True
 

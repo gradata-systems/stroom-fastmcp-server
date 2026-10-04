@@ -180,7 +180,9 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
    (GET _index_template/<name>, or an index's GET <index>/_mapping; only if it lists any in composed_of, those
    component templates too, GET _component_template/<name>: many have none); (b) an existing index in Stroom to
    follow (its existing_indexes; draft_index_mapping like_index=); (c) a convention profile, only when they have no
-   example. With (a) or (b) there is no convention question: the example names the fields. Lucene:
+   example (draft_index_mapping convention=... without_example=true, which the user confirms; without either an
+   example or that, draft_index_mapping drafts nothing and returns these options). With (a) or (b) there is no
+   convention question: the example names the fields. Lucene:
    get_field_conventions, and ask the user which convention to follow.
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
    name (following the environment's versioned naming); create_index_doc once confirmed.
