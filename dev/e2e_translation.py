@@ -187,12 +187,14 @@ async def documented_to_the_field(stroom, written: dict, fields: list[str], valu
     bare = [f for f, cells in rows.items() if not cells or not cells[-1]]
     check(not bare and 'Sample values' in section,
           f"every row ({len(rows)}) says what the sample gave: values, or that it had none" + (f": not {bare}" if bare else ''))
-    # The Description column, after the field's name: what it is, then what the sample shows.
-    undescribed = [f for f, cells in rows.items() if not cells or not any(
-        k in cells[0] for k in ('sample', 'sampled', 'document', 'not stored', 'Not read', 'Not surveyed'))]
-    check('| Description |' in section and not undescribed,
-          f"each field described, with what the sample shows, e.g. {fields[-1]}: {(rows.get(fields[-1]) or [''])[0]!r}"
-          + (f": not {undescribed}" if undescribed else ''))
+    # The Description column, after the field's name: what the field is. How often and which values are the In
+    # sample and Sample values columns' to say, so the description does not repeat them.
+    undescribed = [f for f, cells in rows.items() if not cells or not cells[0].strip()]
+    repeating = [f for f, cells in rows.items() if cells and any(
+        k in cells[0] for k in ('sampled document', 'in the sample', 'distinct value', 'document that has it'))]
+    check('| Description |' in section and not undescribed and not repeating,
+          f"each field described, without repeating the sample, e.g. {fields[-1]}: {(rows.get(fields[-1]) or [''])[0]!r}"
+          + (f": not {undescribed}" if undescribed else '') + (f": repeats the sample {repeating}" if repeating else ''))
     wrong = {f: (rows.get(f) or ['?'])[-1] for f, v in values.items() if f'`{v}' not in (rows.get(f) or [''])[-1]}
     check(not wrong, "with the sample's values in their field's row, e.g. "
                      + ', '.join(f"{f} = {v}" for f, v in list(values.items())[:4]) + (f": not {wrong}" if wrong else ''))

@@ -101,6 +101,15 @@ async def draft(ctx, build: str, doc: dict, purpose: str) -> dict:
     return written
 
 
+def summarised(written: dict, documents: int, feed: str, stream_type: str, produced_by: str | None = None) -> None:
+    """The Data surveyed summary under the agent's Purpose and data: what the whole index holds and where from."""
+    summary = written.get('data_surveyed') or ''
+    made = f", produced by pipeline `{produced_by}`" if produced_by else ''
+    e2e.check(f"holds {documents} documents" in summary and f"From feed `{feed}` ({stream_type} streams{made})" in summary,
+              f"Purpose and data says what the index holds and where from: "
+              f"{[l for l in summary.splitlines() if l.startswith('- ')][:2]}")
+
+
 async def promoted_to(ctx, stroom, build: str, written: dict, folder: str, destinations: dict | None = None) -> None:
     result = await e2e.agreed(builds.promote_build, ctx=ctx, build=build, destinations=destinations or {})
     print(f"    {result.get('promoted')}")
@@ -137,6 +146,10 @@ async def nothing_feeds(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     e2e.check(not found.get('fed_by'), 'no pipeline in Stroom feeds it')
     build = f'e2e-docindex-{stamp}'
     written = await draft(ctx, build, doc, 'Web access logs, loaded into Elasticsearch by another system.')
+    summarised(written, 4, f'E2E-LEGACY-WEB-{stamp}', 'Raw Events')
+    text = (await stroom.get_doc('Documentation', written['uuid'])).get('data') or ''
+    e2e.check(text.index('loaded into Elasticsearch by another system') < text.index('### Data surveyed')
+              < text.index('## Field mapping'), "the summary sits under the agent's own words, before the field table")
     await e2e.documented_to_the_field(stroom, written, ['@timestamp', 'user.name', 'source.ip', 'http.status', 'message'],
                                       {'user.name': 'alice', 'source.ip': '10.3.0.1', 'http.status': '200'},
                                       'the existing index')
@@ -176,7 +189,8 @@ async def nothing_feeds(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     written = await draft(ctx, build, doc, 'Web access logs, loaded by another system without StreamId.')
     section = written.get('field_mapping') or ''
     rows = e2e.field_rows(section)
-    e2e.check('a stream in this Stroom' in section and all(r[-2:] == ['not read', '-'] for r in rows.values())
+    e2e.check('a stream in this Stroom' in (written.get('data_surveyed') or ''), 'the summary says why nothing was read')
+    e2e.check('no field below was read' in section and all(r[-2:] == ['not read', '-'] for r in rows.values())
               and {'user.name', 'source.ip', 'http.status', 'message'} <= set(rows),
               'documented from the mapping: every field listed, marked not read, and why')
     await promoted_to(ctx, stroom, build, written, folder)
@@ -208,6 +222,7 @@ async def wide(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
               f"all {len(found['surveyed_fields'])} fields surveyed, the last as fully as the first")
     build = f'e2e-docindex-wide-{stamp}'
     written = await draft(ctx, build, doc, 'Wide records from another system.')
+    summarised(written, 3, feed, 'Raw Events')
     rows = e2e.field_rows(written.get('field_mapping') or '')
     thin = [n for n in names if (rows.get(n) or ['', '', '', '?'])[3] != '100% of documents']
     e2e.check(len(rows) == 183 and not thin and f'`attr179-1`' in rows['attr179'][-1],
@@ -225,10 +240,13 @@ async def fed_by_a_plan(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
               f"fed by {[p['name'] for p in fed]}, whose XSLT keeps its index plan")
     build = f'e2e-docindex-v1-{stamp}'
     written = await draft(ctx, build, doc, 'CSV logons, indexed.')
+    summarised(written, 3, prod['csv']['feed'], 'Events', prod['csv']['pipeline']['name'])
+    e2e.check(f"Indexed by pipeline `{prod['v1']['name']}`, from the index plan" in written['data_surveyed'],
+              'and the pipeline that indexes it')
     rows = e2e.field_rows(written.get('field_mapping') or '')
     await e2e.documented_to_the_field(stroom, written, ['@timestamp', 'user.name'], {'user.name': 'alice'},
                                       'the index a plan feeds')
-    e2e.check(rows['user.name'][2] == '`EventSource/User/Id`' and len(rows['user.name'][0]) > 40,
+    e2e.check(rows['user.name'][2] == '`EventSource/User/Id`' and rows['user.name'][0] == 'An identifier for the user.',
               f"where each field comes from in the events, described from the schema: {rows['user.name'][0]!r}")
     chosen = f'System/E2E Docs/indexes-{stamp}'
     await promoted_to(ctx, stroom, build, written, chosen, {'Documentation': chosen})
@@ -254,6 +272,7 @@ async def lucene(ctx, stroom, stamp: str) -> None:
               'fed by the Lucene indexing pipeline, whose XSLT keeps no plan')
     build = f'e2e-docindex-lucene-{stamp}'
     written = await draft(ctx, build, doc, 'CSV logons, indexed in Lucene.')
+    summarised(written, 3, csv['feed'], 'Events', csv['pipeline']['name'])
     await e2e.documented_to_the_field(stroom, written, ['UserId'], {'UserId': 'alice'}, 'the Lucene index')
     rows = e2e.field_rows(written.get('field_mapping') or '')
     e2e.check(rows['HostName'][-2:] == ['not stored', '-'] and 'not stored' in rows['HostName'][0],

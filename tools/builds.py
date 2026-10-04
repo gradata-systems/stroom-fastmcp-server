@@ -1,4 +1,5 @@
 """Tools for builds: the workspace folder, Documentation docs, and promotion out of the workspace."""
+import asyncio
 import json
 import time
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ class AcceptedError(BaseModel):
 
 Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
+_LISTING_RETRIES, _LISTING_WAIT = 5, 1.0     # a build listed empty right after a write
 
 
 async def start_build(
@@ -390,7 +392,7 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     """The documentation of an existing index, its Field mapping section generated from a survey through Stroom. A doc
     already beside the index doc is changed through a working copy, written back (after a backup) on promotion."""
     from tools.indexing import _path_of, survey_index
-    from utils.fielddoc import existing_index_markdown
+    from utils.fielddoc import existing_index_markdown, existing_index_summary
     stroom = gateway_from(ctx)
     doc_type, index = None, None
     for candidate in ('ElasticIndex', 'Index'):
@@ -435,7 +437,8 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
     section = existing_index_markdown(survey, planned, schema)
-    text = replace_section(body, 'Field mapping', section)
+    summary = existing_index_summary(survey)
+    text = _below_section(replace_section(body, 'Field mapping', section), 'Purpose and data', summary)
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     async def write(target: dict[str, Any]) -> dict[str, Any]:
@@ -462,9 +465,19 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
                         f"(destinations={{'Documentation': '<folder>'}})")
     return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
             'link': doc_link(stroom.settings, 'Documentation', doc['uuid']), 'index': survey['index'],
-            'field_mapping': section,
+            'field_mapping': section, 'data_surveyed': summary,
             'next': f"Give the user the link to review the draft. Once they agree, promote_build build='{build}': the "
                     f"doc is {destination}."}
+
+
+def _below_section(markdown: str, heading: str, text: str) -> str:
+    """markdown with text added at the end of the `## heading` section (the agent's own words stay first), or the
+    section added at the top with just the text."""
+    import re
+    found = re.search(rf'^## {re.escape(heading)}[^\n]*\n(.*?)(?=^## |\Z)', markdown, re.M | re.S)
+    if not found:
+        return f"## {heading}\n\n{text.strip()}\n\n{markdown.lstrip()}"
+    return markdown[:found.end(1)].rstrip() + f"\n\n{text.strip()}\n\n" + markdown[found.end(1):].lstrip()
 
 
 async def _documentation_beside(stroom, pipeline: dict[str, Any]) -> dict[str, Any] | None:
@@ -546,6 +559,12 @@ async def promote_build(
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
     docs = await _build_docs(ctx, build)
+    for _ in range(_LISTING_RETRIES):
+        if docs:
+            break
+        # Stroom's explorer can lag a doc written moments ago (on a busy instance): look again before saying so.
+        await asyncio.sleep(_LISTING_WAIT)
+        docs = await _build_docs(ctx, build)
     if not docs:
         raise ToolError(f"Build '{build}' has no documents")
     plan = []

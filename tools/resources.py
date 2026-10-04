@@ -347,10 +347,15 @@ every field, what it holds and the values it has. Change nothing except the docu
    where each field comes from in the events). describe_document a feeding pipeline for its source feeds and what
    it does. A field with no values in the survey: say so, rather than guessing what it holds.
 3. Draft the documentation in a build (start_build), with write_documentation index_uuid=the index doc: the user
-   confirms the index doc there. Write Purpose and data (what the index is for, its source and feeding pipelines,
-   the time range surveyed{', and: ' + purpose if purpose else ''}), and leave Field mapping to the tool: it is
-   generated from the survey, each field with a description, type, source path when a plan records it, how often
-   it is populated and sample values.
+   confirms the index doc there. Write Purpose and data from what you have seen of the source, in a few paragraphs:
+   what the source system is and what its data records (the feeds the survey's profile names, their descriptions,
+   and the feeding and events pipelines: describe_document, and their own Documentation docs where they have one);
+   what kinds of events or records the index holds (from the sample values, e.g. the event codes and actions);
+   who and what it serves, and how it is searched (dashboards on the index doc: find_documents types=['Dashboard']
+   with the index's name){', and: ' + purpose if purpose else ''}. Say what you do not know rather than guess, and ask
+   the user what they know of its purpose. The tool adds a "Data surveyed" summary under it (documents, time span,
+   source feeds and pipelines) and generates Field mapping: each field with a description, type, source path when a
+   plan records it, how often it is populated and sample values.
 4. Give the user the doc's link (the reply's link) and the field table in the chat. Ask where it should live:
    beside the index doc (the default) or a folder they choose.
 5. Once the user agrees, promote_build: the doc goes beside the index doc, or with destinations=

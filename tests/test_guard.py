@@ -1,4 +1,5 @@
 """The write guard's refusals are audited."""
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -111,3 +112,12 @@ async def test_managed_docs_pass_without_an_audit_event():
         await guard.check_managed(XSLT)
         await guard.check_built(XSLT)
     audit.assert_not_called()
+
+
+async def test_a_folder_the_search_still_lists_after_deletion_is_not_found():
+    stroom = SimpleNamespace(
+        find_documents=AsyncMock(return_value={'values': [{'docRef': {'type': 'Folder', 'name': 'b1', 'uuid': 'f'},
+                                                           'path': 'System / MCP Workspace'}]}),
+        post=AsyncMock(return_value=None))           # getFromDocRef: gone
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    assert await guard.find_child_folder({'_path': 'System/MCP Workspace'}, 'b1') is None

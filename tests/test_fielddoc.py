@@ -87,16 +87,19 @@ def test_each_index_field_is_described_from_the_schema_and_the_sample():
     text = index_field_mapping_markdown(plan, None, documents, schema)
     described = {line.split(' | ')[0].strip('| `'): line.split(' | ')[1] for line in text.splitlines()
                  if line.startswith('| `')}
-    assert described['StreamId'] == ('The id of the Events stream the event came from. Numbers, the same in every sampled '
-            'document (`7`).')
-    assert described['host.ip'].endswith('IP addresses, different in each sampled document.')
-    assert described['user.email'].endswith('Email addresses, different in each sampled document.')
-    assert described['product'].endswith('The same in every sampled document (`E2E`).')
-    assert described['agent'].startswith('The `agent` value recorded in a Data element')
-    assert described['agent'].endswith('One value in the sample (`curl`), in 1 of 2 documents.')
-    assert described['outcome'] == 'Whether the logon succeeded. Different in each sampled document.'   # the plan's own
+    # What each is; how often and which values are the In sample and Sample values columns' to say.
+    assert described['StreamId'] == 'The id of the Events stream the event came from.'
+    assert described['host.ip'] == 'The network IP address of the device, e.g. 192.168.0.3.'
+    assert described['user.email'] == 'The email address of the user.'
+    assert described['product'] == 'The name of the system.'
+    assert described['agent'].startswith('The `agent` value recorded in a Data element') and 'sample' not in described['agent']
+    assert described['outcome'] == 'Whether the logon succeeded.'   # the plan's own
     # The schema's words for the user's id (its base type's 'the object' named for the user), then the sample.
-    assert described['user.id'] == 'An identifier for the user. Different in each sampled document.'
+    assert described['user.id'] == 'An identifier for the user.'
+    # The schema's opening ('This element contains information about the ...') goes.
+    from utils.fielddoc import schema_description
+    assert schema_description(schema, 'EventTime/TimeCreated') == 'Time the event was created.'
+    assert schema_description(schema, 'EventSource').startswith('Where the event came from')
 
 
 async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_section_otherwise():
@@ -152,9 +155,9 @@ def test_the_index_section_shows_what_each_index_field_got_from_the_sample():
     assert index_documents([lucene]) == [{'UserId': ['bob', 'carol']}]
     section = index_field_mapping_markdown(plan, {'EventSource/User/Id': 100.0}, documents)
     assert 'Sample values are what the 1 documents written from the sample got.' in section
-    assert ('| `user.name` | From the one sampled document. | keyword | `EventSource/User/Id` | 100% of events | '
+    assert ('| `user.name` | Not described: no plan or schema covers it. | keyword | `EventSource/User/Id` | 100% of events | '
             '`alice` |') in section
-    assert ('| `source.ip` | Not in the sample. | ip | `EventSource/Client/IPAddress` | not in the sample | '
+    assert ('| `source.ip` | Not described: no plan or schema covers it. | ip | `EventSource/Client/IPAddress` | not in the sample | '
             '(none in the sample) |') in section
 
 
@@ -193,11 +196,12 @@ def test_an_existing_index_is_documented_from_its_survey():
     text = existing_index_markdown(_survey(), {}, None)
     rows = {line.split(' | ')[0].strip('| `'): line.split(' | ')[1:] for line in text.splitlines() if line.startswith('| `')}
     assert list(rows) == ['@timestamp', 'message', 'user.name', 'http.status', 'source.ip']    # time first, then as Stroom lists
-    assert 'No pipeline was found that writes to it' in text and 'come from elsewhere' not in text
-    assert 'the 2 newest documents (2026-09-20T08:00:00.000Z to' in text
-    assert rows['http.status'] == ['Numbers, one value in the sample (`200`), in 1 of 2 documents.', 'long', '(not recorded)',
+    # The overall facts are the summary's; the field table says only what explains its columns.
+    assert 'No pipeline was found' not in text and 'newest documents' not in text and 'come from elsewhere' not in text
+    assert 'Where each field comes from is not recorded: no pipeline that writes to it keeps an index plan.' in text
+    assert rows['http.status'] == ['Numbers.', 'long', '(not recorded)',
                                    '50% of documents', '`200` |']
-    assert rows['source.ip'][0] == 'IP addresses, different in each sampled document.'
+    assert rows['source.ip'][0] == 'IP addresses.'
     unstored = existing_index_markdown(_survey(stored=False), {}, None)
     assert '| `http.status` | Indexed but not stored: searchable, its values cannot be shown. | long | (not recorded) | not stored | - |' in unstored
 
@@ -209,8 +213,8 @@ def test_an_existing_index_fed_by_a_plan_says_where_each_field_comes_from():
     planned = {'user.name': PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')}
     text = existing_index_markdown(_survey([{'name': 'Web - Indexing', 'uuid': 'p', 'plan': {'fields': []}}]), planned, schema)
     row = next(line for line in text.splitlines() if line.startswith('| `user.name`'))
-    assert '| `user.name` | An identifier for the user. Different in each sampled document. | keyword | `EventSource/User/Id` |' in row
-    assert 'Fed by `Web - Indexing`.' in text and 'not recorded here' not in text
+    assert '| `user.name` | An identifier for the user. | keyword | `EventSource/User/Id` |' in row
+    assert 'Fed by' not in text and 'not recorded' not in text.split('|')[0]
 
 
 def test_an_index_stroom_reads_no_documents_from_is_documented_from_its_mapping_saying_so():
@@ -218,7 +222,7 @@ def test_an_index_stroom_reads_no_documents_from_is_documented_from_its_mapping_
     survey = {**_survey(), 'documents': [], 'earliest': None, 'latest': None,
               'note': "No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in this Stroom"}
     text = existing_index_markdown(survey, {}, None)
-    assert 'only when its StreamId is a stream in this Stroom' in text and 'Surveyed through Stroom' not in text
+    assert 'No documents came back through Stroom, so no field below was read (see Data surveyed).' in text
     assert '| `user.name` | Not read: no documents came back through Stroom. | keyword | (not recorded) | not read | - |' in text
 
 
@@ -228,7 +232,7 @@ def test_fields_past_what_the_survey_reads_are_listed_as_not_surveyed():
     text = existing_index_markdown(survey, {}, None)
     assert 'The survey read 3 of the 5 fields; the other 2 are listed as not surveyed.' in text
     assert '| `source.ip` | Not surveyed: past the fields the survey reads. | ip | (not recorded) | not surveyed | - |' in text
-    assert '| `user.name` | Different in each sampled document. |' in text
+    assert '| `user.name` | Not described: no plan or schema covers it. |' in text
 
 
 async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids():
@@ -251,7 +255,8 @@ async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids()
                              post=post, find_documents=AsyncMock(return_value={'values': []}),
                              settings=SimpleNamespace(stroom_ui_url=None, stroom_url='http://s'))
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
-    with patch.object(indexing, '_search', search):
+    with patch.object(indexing, '_search', search), \
+            patch.object(indexing, 'index_profile', AsyncMock(return_value={'documents': 2})):
         survey = await indexing.survey_index(ctx, 'ElasticIndex', 'i')
     assert len(searched) == 3 and all(len(c) <= 100 and c[:3] == ['StreamId', 'EventId', '@timestamp'] for c in searched)
     assert len(survey['surveyed_fields']) == 253 and survey['populated']['f249'] == 100.0
@@ -285,3 +290,46 @@ async def test_documenting_an_index_needs_a_change_line_and_takes_no_pipeline_ar
     with pytest.raises(ToolError, match='Leave them out with index_uuid'):
         await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n',
                                          change='Created', stream_ids=[1])
+
+
+def test_an_existing_index_describes_its_ids_and_time_field_without_repeating_the_sample():
+    from utils.fielddoc import existing_index_markdown, field_description
+    survey = _survey()
+    survey['fields'] = [{'name': 'StreamId', 'type': 'long'}, {'name': 'EventId', 'type': 'long'}] + survey['fields']
+    for n, d in enumerate(survey['documents']):
+        d.update({'StreamId': ['7'], 'EventId': [str(n + 1)]})
+    text = existing_index_markdown(survey, {}, None)
+    described = {line.split(' | ')[0].strip('| `'): line.split(' | ')[1] for line in text.splitlines() if line.startswith('| `')}
+    assert described['StreamId'].startswith('The id of the stream the document came from.') and 'Events' not in described['StreamId']
+    assert described['EventId'].startswith("The record's number in that stream")
+    assert described['@timestamp'].startswith("The index's time field: searches and dashboards filter on it.")
+    # Only what the other columns do not show: several values in one document; the kind, when nothing else says.
+    assert field_description('The user.', [['a'], ['b', 'c']]) == 'The user. Several values per document.'
+    assert field_description('', [['200'], [], ['404']]) == 'Numbers.'
+    assert field_description('', [['x'], ['y']]) == 'Not described: no plan or schema covers it.'
+    assert field_description('', None) == ''
+
+
+def test_the_data_surveyed_summary_says_what_the_index_holds_and_where_it_comes_from():
+    from utils.fielddoc import existing_index_summary
+    survey = {**_survey([{'name': 'Web - Indexing', 'uuid': 'p', 'plan': {'fields': []}}]), 'documents_sampled': 2,
+              'profile': {'documents': 1200, 'earliest': '2026-01-01T00:00:00.000Z', 'latest': '2026-09-23T11:45:00.000Z',
+                          'streams': 40, 'streams_examined': 20,
+                          'sources': [{'feed': 'WEB-ACCESS', 'type': 'Events', 'produced_by': 'WEB-ACCESS-Events',
+                                       'streams': 20, 'documents': 900, 'description': 'Proxy access logs.'}]}}
+    text = existing_index_summary(survey)
+    assert text.startswith('### Data surveyed')
+    assert '`legacy-web` holds 1200 documents, from 2026-01-01T00:00:00.000Z to 2026-09-23T11:45:00.000Z, in 40 streams.' in text
+    assert ("From feed `WEB-ACCESS` (Events streams, produced by pipeline `WEB-ACCESS-Events`): 20 streams, 900 documents. "
+            "The feed's description: Proxy access logs.") in text
+    assert '(Sources from the 20 streams with the most documents.)' in text
+    assert 'Indexed by pipeline `Web - Indexing`, from the index plan kept with its XSLT.' in text
+    assert 'The field table is drawn from the 2 newest documents' in text and 'In sample and Sample values' in text
+
+
+def test_the_summary_goes_under_the_agents_own_purpose():
+    from tools.builds import _below_section
+    text = _below_section('## Purpose and data\n\nProxy logs.\n\n## Field mapping\n\nT\n', 'Purpose and data',
+                          '### Data surveyed\n\n- x\n')
+    assert text.index('Proxy logs.') < text.index('### Data surveyed') < text.index('## Field mapping')
+    assert _below_section('## Field mapping\n\nT\n', 'Purpose and data', '### S\n').startswith('## Purpose and data\n\n### S')

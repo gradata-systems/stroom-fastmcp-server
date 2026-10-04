@@ -577,6 +577,74 @@ async def feeding_pipelines(ctx: Context, doc_type: str, uuid: str, index: dict[
     return fed
 
 
+async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | None, names: list[str],
+                        streams: int = 20) -> dict[str, Any]:
+    """The whole index at a glance, through grouped dashboard searches: how many documents, the time they span and
+    how many streams they came from; and, for the streams with the most documents, the feed and stream type each
+    belongs to and the pipeline that produced it (from the stream's meta)."""
+    from tools.streams import _meta
+    stroom = gateway_from(ctx)
+
+    def column(name: str, expression: str, **extra: Any) -> dict[str, Any]:
+        return {'id': str(uuidlib.uuid4()), 'name': name, 'expression': expression, 'visible': True,
+                'format': {'type': 'GENERAL'}, **extra}
+
+    def probe(columns: list[dict[str, Any]], rows: int) -> dict[str, Any]:
+        return {'uuid': str(uuidlib.uuid4()), 'name': f"{ref['name']} profile", 'dashboardConfig': {'components': [
+            {'type': 'query', 'id': 'query-PROFILE', 'name': 'Query', 'settings': {
+                'type': 'query', 'dataSource': ref, 'expression': {'type': 'operator', 'op': 'AND', 'children': []}}},
+            {'type': 'table', 'id': 'table-PROFILE', 'name': 'Table', 'settings': {
+                'type': 'table', 'queryId': 'query-PROFILE', 'fields': columns, 'extractValues': False,
+                'maxResults': [rows], 'pageSize': rows}}]}}
+
+    everything = {'type': 'operator', 'op': 'AND', 'children': []}
+    totals = [column('all', "'all'", group=0), column('documents', 'count()')]
+    if time_field in names:
+        totals += [column('earliest', f'min(${{{time_field}}})'),
+                   column('latest', f'max(${{{time_field}}})')]
+    if 'StreamId' in names:
+        totals.append(column('streams', 'countUnique(${StreamId})'))
+    found = await _search(ctx, probe(totals, 1), everything, length=1)
+    if not found['rows']:
+        return {}
+    row = found['rows'][0]
+    profile: dict[str, Any] = {'documents': int(row.get('documents') or 0), 'earliest': row.get('earliest'),
+                               'latest': row.get('latest'), 'streams': int(row['streams']) if row.get('streams') else None}
+    if 'StreamId' not in names:
+        return profile
+    by_stream = await _search(ctx, probe([column('StreamId', '${StreamId}', group=0),
+                                          column('documents', 'count()', sort={'order': 0, 'direction': 'DESCENDING'})],
+                                         streams), everything, length=streams)
+    sources: dict[tuple, dict[str, Any]] = {}
+    pipelines: dict[str, str | None] = {}
+    for r in by_stream['rows'][:streams]:
+        try:
+            meta = await _meta(stroom, int(r['StreamId']))
+        except (ToolError, ValueError, TypeError):
+            continue
+        made_by = meta.get('pipelineUuid')
+        if made_by and made_by not in pipelines:
+            try:
+                pipelines[made_by] = (await stroom.get_doc('Pipeline', made_by)).get('name')
+            except ToolError:
+                pipelines[made_by] = None
+        key = (meta.get('feedName'), meta.get('typeName'), pipelines.get(made_by))
+        entry = sources.setdefault(key, {'feed': key[0], 'type': key[1], 'produced_by': key[2], 'streams': 0, 'documents': 0})
+        entry['streams'] += 1
+        entry['documents'] += int(r.get('documents') or 0)
+    for entry in sources.values():
+        feed = next((v['docRef'] for v in (await stroom.find_documents(entry['feed'] or '', ['Feed'], 5)).get('values') or []
+                     if v['docRef'].get('name') == entry['feed']), None)
+        if feed:
+            try:
+                entry['description'] = ((await stroom.get_doc('Feed', feed['uuid'])).get('description') or '').strip()
+            except ToolError:
+                pass
+    profile['sources'] = sorted(sources.values(), key=lambda e: -e['documents'])
+    profile['streams_examined'] = len(by_stream['rows'][:streams])
+    return profile
+
+
 async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: int = 100) -> dict[str, Any]:
     """What an existing index holds, surveyed through Stroom: the fields Stroom has for the index doc, the newest
     documents read through dashboard searches that are never saved (each field: how often the sample held it, its
@@ -628,6 +696,12 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
     documents = [{n: [str(r[n])] if r.get(n) not in (None, '') else [] for n in surveyed} for r in rows]
     times = sorted(d[time_field][0] for d in documents if time_field and d.get(time_field))
     total = len(documents)
+    profile: dict[str, Any] = {}
+    if total:
+        try:
+            profile = await index_profile(ctx, ref, time_field, names)
+        except ToolError as e:
+            profile = {'error': str(e)}
     note = None
     if not total:
         note = ("No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in "
@@ -639,7 +713,7 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
             **({'note': note} if note else {}),
             'backend': 'lucene' if doc_type == 'Index' else 'elasticsearch',
             'index_name': index.get('indexName'), 'time_field': time_field, 'fields': fields,
-            'surveyed_fields': surveyed, 'documents_sampled': total,
+            'surveyed_fields': surveyed, 'documents_sampled': total, 'profile': profile,
             'earliest': times[0] if times else None, 'latest': times[-1] if times else None,
             'populated': {n: round(100 * sum(1 for d in documents if d.get(n)) / total, 1) for n in surveyed} if total else {},
             'values': {n: list(dict.fromkeys(v for d in documents for v in d.get(n, [])))[:3] for n in surveyed},

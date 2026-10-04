@@ -145,3 +145,21 @@ async def test_paging_stops_when_stroom_returns_the_same_page_again():
     gateway.find_documents = find
     found = await StroomGateway.find_all_documents(gateway, 'type:Pipeline', ['Pipeline'], page=3)
     assert [v['docRef']['uuid'] for v in found] == ['0', '1', '2'] and calls == [0, 3]
+
+
+
+async def test_promotion_looks_again_when_the_build_lists_empty_right_after_a_write():
+    from tools import builds
+    listings = [[], [], [{'type': 'Documentation', 'uuid': 'd', 'name': 'D', 'path': 'x', 'working_copy_of': None}]]
+    lister = AsyncMock(side_effect=lambda ctx, build: listings.pop(0) if listings else [])
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with patch.object(builds, '_build_docs', lister), patch.object(builds, '_LISTING_WAIT', 0), \
+            patch.object(builds, 'guard_from', lambda c: SimpleNamespace()):
+        with pytest.raises(ToolError, match='No destination'):     # found the doc, then wants its destination
+            await builds.promote_build(ctx, 'b', destinations={})
+    assert lister.await_count == 3
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=[])), patch.object(builds, '_LISTING_WAIT', 0), \
+            patch.object(builds, 'guard_from', lambda c: SimpleNamespace()):
+        with pytest.raises(ToolError, match='has no documents'):
+            await builds.promote_build(ctx, 'b', destinations={})

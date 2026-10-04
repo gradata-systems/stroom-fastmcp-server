@@ -43,6 +43,8 @@ class WriteGuard:
                 parent_path = (value.get('path') or '').replace(' / ', '/')
                 if parent_path == parent.get('_path'):
                     node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
+                    if not node:
+                        continue    # just deleted: Stroom's explorer search can still list it for a moment
                     return {**node, '_path': f"{parent_path}/{name}"}
         return None
 

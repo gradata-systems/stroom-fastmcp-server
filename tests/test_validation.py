@@ -128,7 +128,7 @@ def test_an_indexing_xslt_without_a_plan_is_documented_from_the_documents_it_wri
     from utils.fielddoc import written_fields_markdown
     section = written_fields_markdown([{'UserId': ['alice'], 'Host': ['ws01'], 'Empty': ['']},
                                        {'UserId': ['bob'], 'Host': ['']}])
-    assert '| `UserId` | Different in each sampled document. | 100% of documents | `alice`, `bob` |' in section
-    assert ('| `Host` | One value in the sample (`ws01`), in 1 of 2 documents. | 50% of documents | `ws01` |' in section
+    assert '| `UserId` | Not described: no plan or schema covers it. | 100% of documents | `alice`, `bob` |' in section
+    assert ('| `Host` | Not described: no plan or schema covers it. | 50% of documents | `ws01` |' in section
             and '`Empty`' not in section)
     assert 'keeps no index plan' in section
