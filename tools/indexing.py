@@ -83,7 +83,11 @@ def _draft_discovery(backend: str, index_name: str, discovery: Discovery) -> dic
     if backend != 'elasticsearch':
         raise ToolError("A discovery index is Elasticsearch: its fields are mapped dynamically as documents arrive")
     plan = FieldPlan.for_discovery(index_name, discovery)
-    return {'plan': plan.model_dump(exclude_none=True), 'xslt': plan.xslt(),
+    try:
+        xslt = plan.xslt()
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    return {'plan': plan.model_dump(exclude_none=True), 'xslt': xslt,
             'rendered': plan.elastic_template(index_name),
             'hint': "Save the XSLT with save_xslt index_plan=plan and no code, create_indexing_pipeline from the "
                     "discovery template, step_sample on the raw streams (the documents show the source's fields), then "
@@ -113,9 +117,9 @@ async def draft_index_mapping(
             description="Named templates from shared XSLTs that sibling indexing XSLTs call (describe_template's "
                         "shared_xslt): each writes a field (at, e.g. 'guid'), which the XSLT then does not write.")] = [],
         discovery: Annotated[Discovery | None, Field(
-            description="A discovery index instead: raw JSON indexed as it is into Elasticsearch, with no convention "
-                        "and no Events. Give what the user confirmed: the timestamp field, any stream meta to add, "
-                        "fields to drop.")] = None,
+            description="A discovery index instead: raw data (JSON, delimited text or XML) indexed as it is into "
+                        "Elasticsearch, with no convention and no Events. Give what the user confirmed: the input, the "
+                        "timestamp field (and XML's record element), any stream meta to add, fields to drop.")] = None,
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
@@ -383,7 +387,11 @@ async def create_indexing_pipeline(
     shape = await _shape(stroom, template_uuid)
     if shape['stage'] not in ('indexing', 'discovery'):
         raise ToolError(f"That template is a {shape['stage']} template, not an indexing one")
-    if shape['stage'] == 'indexing':
+    # An XML discovery pipeline has an indexing template's shape (XMLParser, XSLT, indexing filter): the plan kept
+    # with its XSLT says it reads raw data, not Events.
+    kept = read_mapping((await stroom.get_doc('XSLT', xslt_uuid)).get('description'))
+    discovery = bool(kept and kept[0] == 'index' and (kept[1] or {}).get('discovery'))
+    if shape['stage'] == 'indexing' and not discovery:
         await _events_available(ctx, build, events_stream_ids)
     xslt_element = next((s['element'] for s in shape['child_must_supply'] if s['type'] == 'XSLTFilter'), 'xsltFilter')
     props = [PropertyValue(element=xslt_element, name='xslt', doc_uuid=xslt_uuid, doc_type='XSLT')]
@@ -432,33 +440,75 @@ def _column(name: str) -> dict[str, Any]:
             'width': 150, 'format': {'type': 'GENERAL'}}
 
 
+_IDS = ('StreamId', 'EventId')
+
+
+def dashboard_config(source: dict[str, Any], fields: list[str], time_field: str | None,
+                     window_start: str | None) -> dict[str, Any]:
+    """A verification dashboard: a query on the index doc (the time field, from window_start through the end of
+    today, run on open); a table of the user's fields, newest first, with StreamId and EventId as hidden columns; and
+    a text pane on the selected row's record, with stepping, and no extraction pipeline."""
+    query_id, table_id, text_id = 'query-VERIFY', 'table-VERIFY', 'text-VERIFY'
+    shown = [f for f in dict.fromkeys(fields) if f not in _IDS]
+    columns = [{**_column(f), **({'sort': {'order': 0, 'direction': 'DESCENDING'}} if f == time_field else {})}
+               for f in shown]
+    if time_field and time_field not in shown:     # sorted on, though not shown
+        columns.append({**_column(time_field), 'visible': False, 'sort': {'order': 0, 'direction': 'DESCENDING'}})
+    ids = {name: {**_column(name), 'visible': False} for name in _IDS}
+    columns += list(ids.values())
+    expression = {'type': 'operator', 'op': 'AND', 'children': [
+        {'type': 'term', 'field': time_field, 'condition': 'BETWEEN', 'value': f'{window_start},day()+1d'}]
+        if time_field and window_start else []}
+    table = {'type': 'table', 'queryId': query_id, 'fields': columns, 'extractValues': False,
+             'maxResults': [1000], 'pageSize': 100}
+    text = {'type': 'text', 'tableId': table_id, 'showAsHtml': False, 'showStepping': True,
+            'streamIdField': {'id': ids['StreamId']['id'], 'name': 'StreamId'},
+            'recordNoField': {'id': ids['EventId']['id'], 'name': 'EventId'}}
+    return {'components': [
+        {'type': 'query', 'id': query_id, 'name': 'Query', 'settings': {
+            'type': 'query', 'dataSource': source, 'expression': expression,
+            'automate': {'open': bool(expression['children']), 'refresh': False}}},
+        {'type': 'table', 'id': table_id, 'name': 'Table', 'settings': table},
+        {'type': 'text', 'id': text_id, 'name': 'Text', 'settings': text}],
+        'layout': {'type': 'splitLayout', 'dimension': 1, 'children': [
+            {'type': 'tabLayout', 'tabs': [{'id': query_id, 'visible': True}], 'selected': 0},
+            {'type': 'tabLayout', 'tabs': [{'id': table_id, 'visible': True}], 'selected': 0},
+            {'type': 'tabLayout', 'tabs': [{'id': text_id, 'visible': True}], 'selected': 0}]}}
+
+
+def window_start(times: list[str]) -> str | None:
+    """The earliest time, rounded back to a 30-day boundary (days since the epoch), as the dashboard's start."""
+    from datetime import datetime, timezone
+    parsed = []
+    for t in times:
+        try:
+            parsed.append(datetime.fromisoformat(str(t).replace('Z', '+00:00')))
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    days = int(min(parsed).timestamp() // 86400)
+    start = datetime.fromtimestamp((days - days % 30) * 86400, tz=timezone.utc)
+    return start.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+
 async def create_verification_dashboard(
         ctx: Context,
         build: Build,
         name: Annotated[str, Field(description="Dashboard name, e.g. the index name with a -VERIFY suffix.")],
         index_uuid: Annotated[str, Field(description="The index doc to query.")],
         backend: Backend,
-        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Minimal field set: StreamId, EventId, the time field and a "
-                                                       "few key fields.")],
+        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(description="The table's columns.")],
+        time_field: str | None = None,
+        window: str | None = None,
 ) -> dict[str, Any]:
-    """A workspace dashboard with a query on the index doc and a table of the given fields, for verify_index."""
+    """A workspace dashboard on the index doc, as dashboard_config lays it out, for verify_index."""
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
     source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
-    query_id, table_id = 'query-VERIFY', 'table-VERIFY'
-    table = {'type': 'table', 'queryId': query_id, 'fields': [_column(f) for f in fields], 'extractValues': False,
-             'maxResults': [1000], 'pageSize': 100}
-    config = {'components': [
-        {'type': 'query', 'id': query_id, 'name': 'Query', 'settings': {
-            'type': 'query', 'dataSource': source, 'expression': {'type': 'operator', 'op': 'AND', 'children': []},
-            'automate': {'open': False, 'refresh': False}}},
-        {'type': 'table', 'id': table_id, 'name': 'Table', 'settings': table}],
-        'layout': {'type': 'splitLayout', 'dimension': 1, 'children': [
-            {'type': 'tabLayout', 'tabs': [{'id': query_id, 'visible': True}], 'selected': 0},
-            {'type': 'tabLayout', 'tabs': [{'id': table_id, 'visible': True}], 'selected': 0}]}}
     ref = await guard_from(ctx).create('Dashboard', name, build)
     doc = await stroom.get_doc('Dashboard', ref['uuid'])
-    doc['dashboardConfig'] = config
+    doc['dashboardConfig'] = dashboard_config(source, list(fields), time_field, window)
     doc = await stroom.put_doc(doc)
     return {'type': 'Dashboard', 'uuid': doc['uuid'], 'name': doc['name'], 'data_source': source, 'fields': fields}
 
@@ -547,6 +597,7 @@ async def run_test_searches(
         retries: Annotated[int, Field(ge=0, le=20, description="Retries while the index catches up.")] = 6,
         searches: list[SearchCheck] | None = None,
         pipeline_uuid: str | None = None,
+        dashboard_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Run test searches through the verification dashboard, the way people will search: all documents for the
@@ -555,7 +606,7 @@ async def run_test_searches(
     rows it returned. With the indexing pipeline, each check's first hit is traced back to its record. A
     failure points at the mapping or the indexing XSLT.
     """
-    dashboard = await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
+    dashboard = dashboard_doc or await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
     term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
     by_stream = {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in stream_ids]}
     for attempt in range(retries + 1):
@@ -819,8 +870,10 @@ async def verify_index(
         backend: Backend,
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams that were indexed.")],
         expected_documents: Annotated[int, Field(description="Events records in those streams.")],
-        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Minimal field set for the dashboard: StreamId, EventId, "
-                                                       "the time field and a few key fields.")],
+        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="The dashboard table's columns, which the user chose: suggest the time field and the plan's key "
+                        "fields (user, host, address, event type, outcome) and confirm them with the user. StreamId and "
+                        "EventId are kept as hidden columns, for the text pane and tracing hits.")],
         exact: Annotated[list[dict[str, str]] | str, ONE_OR_MORE, Field(
             description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
                         "each must return at least one row.")] = [],
@@ -835,23 +888,65 @@ async def verify_index(
         pipeline_uuid: Annotated[str | None, Field(
             description="The indexing pipeline: each check's first hit is traced back to its record by stepping it "
                         "at the hit's StreamId and EventId.")] = None,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc
-    (created once per build, with a table of the given fields), then the test searches: the sample stream
-    ids, an exact match on each key field, a time range and any further searches; with the indexing pipeline,
-    each hit traced back to the record it came from. Passes when every check returns what it should.
+    Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc,
+    then the test searches: the sample stream ids, an exact match on each key field, a time range and any further
+    searches; with the indexing pipeline, each hit traced back to the record it came from. Passes when every check
+    returns what it should. The dashboard (created once per build, for an index the build made, after the user
+    confirms its columns) has a query on the time field from the sample's earliest event (rounded back to a 30-day
+    boundary) through the end of today, a table of the user's fields newest first, and a text pane on the selected row's record
+    with stepping. An index from elsewhere is searched without saving a dashboard.
     """
     searches = [SearchCheck.model_validate(s) if isinstance(s, dict) else s for s in searches]
     _searchable(backend, searches)
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
     name = dashboard_name or f"{index.get('name')}-VERIFY"
-    existing = next((d for d in await guard_from(ctx).folder_contents(build) if d['type'] == 'Dashboard' and d['name'] == name), None)
-    dashboard = existing or await create_verification_dashboard(ctx, build, name, index_uuid, backend, fields)
+    fields = [f for f in fields if f not in _IDS]
+    time_field = index.get('timeField') or index.get('timeFieldName')
+    source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
+    contents = await guard_from(ctx).folder_contents(build)
+    ours = any(d['uuid'] == index_uuid for d in contents)
+    existing = next((d for d in contents if d['type'] == 'Dashboard' and d['name'] == name), None)
+    # The window starts at the sample's earliest event: found by searching its streams first, saving nothing.
+    probe = {'uuid': str(uuidlib.uuid4()), 'name': name, 'dashboardConfig': dashboard_config(source, fields, time_field, None)}
+    sample = await _search(ctx, probe, {'type': 'operator', 'op': 'OR', 'children': [
+        {'type': 'term', 'field': 'StreamId', 'condition': 'EQUALS', 'value': str(i)} for i in stream_ids]})
+    window = window_start([r.get(time_field) for r in sample['rows']]) if time_field else None
+    design = {'columns (newest first)': fields, 'hidden': list(_IDS) + ([time_field] if time_field and time_field not in fields else []),
+              'initial query': f"{time_field} from {window} through today" if window else 'none',
+              'text pane': "the selected row's record, with stepping; no extraction pipeline"}
+    dashboard: dict[str, Any] | None = None
+    if not ours:
+        # Another build's (or production's) index: searched through an unsaved dashboard, so nothing lands here.
+        dashboard = {'uuid': probe['uuid'], 'name': name, 'saved': False}
+        doc = {**probe, 'dashboardConfig': dashboard_config(source, fields, time_field, window)}
+    elif existing:
+        doc = await stroom.get_doc('Dashboard', existing['uuid'])
+        table = next(c for c in doc['dashboardConfig']['components'] if c['type'] == 'table')
+        shown = [c['name'] for c in table['settings']['fields'] if c.get('visible', True)]
+        if shown != fields:
+            gate = await consent_from(ctx).require(ctx, 'confirmation', 'verify_index',
+                                                   f"Change the columns of dashboard '{name}'", design, confirmation_id)
+            if gate:
+                return gate
+            doc['dashboardConfig'] = dashboard_config(source, fields, time_field, window)
+            doc = await stroom.put_doc(doc)
+        dashboard = {'uuid': doc['uuid'], 'name': name, 'saved': True}
+    else:
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', 'verify_index', f"Create the verification dashboard '{name}' on index "
+            f"'{index.get('name')}'", design, confirmation_id)
+        if gate:
+            return gate
+        made = await create_verification_dashboard(ctx, build, name, index_uuid, backend, fields, time_field, window)
+        doc = await stroom.get_doc('Dashboard', made['uuid'])
+        dashboard = {'uuid': made['uuid'], 'name': name, 'saved': True}
     searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
-                                       searches=list(searches), pipeline_uuid=pipeline_uuid)
-    return {'dashboard': {'uuid': dashboard['uuid'], 'name': name}, **searched}
+                                       searches=list(searches), pipeline_uuid=pipeline_uuid, dashboard_doc=doc)
+    return {'dashboard': {**dashboard, **design}, **searched}
 
 
 ALL_TOOLS = [get_field_conventions, draft_index_mapping, propose_index_template, check_index_template,

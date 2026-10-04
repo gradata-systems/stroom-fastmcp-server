@@ -3,5 +3,5 @@
 .venv/
 __pycache__/
 .pytest_cache/
-/spike/out/
+/dev/api_checks/out/
 /dev/eval/results/

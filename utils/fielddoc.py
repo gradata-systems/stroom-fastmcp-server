@@ -336,22 +336,132 @@ def index_documents(outputs: list[str]) -> list[dict[str, list[str]]]:
     return documents
 
 
+_IP = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-fA-F:]+:[0-9a-fA-F:]*$')
+_EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+_TIME = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}')
+_NUMBER = re.compile(r'^-?\d+(\.\d+)?$')
+_DATA = re.compile(r"Data\[@Name='([^']+)'\]/@Value$")
+_IDS = {'@StreamId': 'The id of the Events stream the event came from.',
+        '@EventId': "The event's number in its stream; with StreamId, it identifies the event."}
+
+
+def schema_description(schema: EventSchema | None, source: str) -> str:
+    """What the event-logging schema says the source path holds: the first sentence of its documentation."""
+    if source in _IDS:
+        return _IDS[source]
+    data = _DATA.search(source)
+    path = re.sub(r'\[[^\]]*\]', '', source.split('/Data[')[0] if data else source)
+    attribute = None
+    if '/@' in path:
+        path, attribute = path.rsplit('/@', 1)
+    said = ''
+    if schema is not None:
+        try:
+            said = schema.describe(schema.resolve(path))
+        except (ValueError, IndexError, AttributeError):
+            said = ''
+    if data:
+        return f"The `{data.group(1)}` value recorded in a Data element" + (f" of {path.split('/')[-1]}: {said}" if said else '.')
+    if attribute:
+        return f"The `{attribute}` attribute of {path.split('/')[-1]}" + (f": {said}" if said else '.')
+    return said
+
+
+def sample_description(per_document: list[list[str]]) -> str:
+    """What the sample shows of a field: what kind of values, and how they vary between documents."""
+    holding = [[v for v in vs if v != ''] for vs in per_document]
+    holding = [vs for vs in holding if vs]
+    values = [v for vs in holding for v in vs]
+    if not values:
+        return 'Not in the sample.'
+    distinct = list(dict.fromkeys(values))
+    kind = next((name for name, pattern in (('IP addresses', _IP), ('Email addresses', _EMAIL),
+                                            ('Timestamps', _TIME), ('Numbers', _NUMBER))
+                 if all(pattern.match(v) for v in distinct)), '')
+    if len(per_document) == 1:
+        spread = 'from the one sampled document'
+    elif len(distinct) == 1:
+        spread = (f"the same in every sampled document (`{distinct[0][:40]}`)" if len(holding) == len(per_document)
+                  else f"one value in the sample (`{distinct[0][:40]}`), in {len(holding)} of {len(per_document)} documents")
+    elif len(distinct) == len(values):
+        spread = 'different in each sampled document'
+    else:
+        spread = f"{len(distinct)} distinct value{'s' if len(distinct) != 1 else ''} in the sample"
+    if any(len(vs) > 1 for vs in holding):
+        spread += ', several per document'
+    text = f"{kind}, {spread}" if kind else spread
+    return text[0].upper() + text[1:] + '.'
+
+
+def field_description(what: str, per_document: list[list[str]] | None) -> str:
+    """A field's description: what it is (the plan's description, the schema's, or its source), then what the
+    sample shows."""
+    parts = [what.strip()] if what and what.strip() else []
+    if per_document is not None:
+        parts.append(sample_description(per_document))
+    return ' '.join(p if p.endswith('.') else p + '.' for p in parts)
+
+
+def written_fields_markdown(documents: list[dict[str, list[str]]]) -> str:
+    """The Field mapping section of an indexing pipeline whose XSLT keeps no plan (written by hand): the fields the
+    documents it wrote from the sample hold, how often, and their values. No source paths: only a plan records those."""
+    seen: dict[str, int] = {}
+    for doc in documents:
+        for key, values in doc.items():
+            if any(v != '' for v in values):
+                seen[key] = seen.get(key, 0) + 1
+    lines = [f'The fields in the {len(documents)} documents the pipeline wrote from the sample. Its XSLT keeps no '
+             f'index plan, so where each comes from is not recorded here (save the XSLT with its plan to add it).', '',
+             '| Index field | Description | In sample | Sample values |', '| --- | --- | --- | --- |']
+    for key in sorted(seen)[:120]:
+        what = _IDS.get('@' + key, '') if key in ('StreamId', 'EventId') else ''
+        lines.append(_row(f'`{key}`', field_description(what, [doc.get(key, []) for doc in documents]),
+                          f'{100 * seen[key] / len(documents):.0f}% of documents',
+                          _values([v for doc in documents for v in doc.get(key, [])])))
+    return '\n'.join(lines) + '\n'
+
+
+def shown_type(plan: Any, kind: str) -> str:
+    """A field's type as its backend has it: Elasticsearch maps ids as long; Lucene keeps Stroom's own types."""
+    if getattr(plan, 'backend', None) == 'elasticsearch':
+        from utils.fieldplan import ELASTIC
+        return ELASTIC.get(kind, kind)
+    return kind
+
+
+def grouped_fields(plan: Any) -> list[Any]:
+    """The plan's fields for the table: the document's ids and time field first, then grouped by their top-level
+    object (host.*, user.*), each group where its first field comes in the plan."""
+    head = ('StreamId', 'EventId', plan.time_field, '@timestamp')
+    first = [f for f in plan.fields if f.name in head]
+    groups: dict[str, list[Any]] = {}
+    for f in plan.fields:
+        if f.name not in head:
+            groups.setdefault(f.name.split('.')[0], []).append(f)
+    return first + [f for members in groups.values() for f in members]
+
+
 def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None = None,
-                                 documents: list[dict[str, list[str]]] | None = None) -> str:
-    """The Field mapping section of an indexing pipeline's documentation: index field, type, the event-logging
-    path it comes from, and from the sample: how often that path is populated in the Events, and the values the
-    index documents the pipeline wrote got for the field."""
+                                 documents: list[dict[str, list[str]]] | None = None,
+                                 schema: EventSchema | None = None) -> str:
+    """The Field mapping section of an indexing pipeline's documentation: index field, a description (the plan's,
+    else the event-logging schema's for its source, then what the sample shows), type, the event-logging path it
+    comes from, and from the sample: how often that path is populated in the Events, and the values the index
+    documents the pipeline wrote got for the field."""
     lines = [f'Documents for `{plan.index_name}` ({plan.backend}); the time field is `{plan.time_field}`.', '']
     if plan.drop_when:
         lines += ['Events left out of the index:', ''] + [f'- `{t}`' for t in plan.drop_when] + ['']
     sampled = population is not None
     if documents is not None:
         lines += [f'Sample values are what the {len(documents)} documents written from the sample got.', '']
-    head = ['Index field', 'Type', 'From (event-logging path)'] + (['In sample'] if sampled else [])         + (['Sample values'] if documents is not None else [])
+    head = ['Index field', 'Description', 'Type', 'From (event-logging path)'] + (['In sample'] if sampled else [])         + (['Sample values'] if documents is not None else [])
     lines += [_row(*head), _row(*['---'] * len(head))]
-    for f in plan.fields:
+    for f in grouped_fields(plan):
         shared = plan.written_by(f.name) if hasattr(plan, 'written_by') else None
-        cells = [f'`{f.name}`', f.type, f"shared template `{shared.template}` of `{shared.href}`" if shared else f'`{f.source}`']
+        what = f.description or (f"Written by the shared template `{shared.template}`." if shared
+                                 else schema_description(schema, f.source))
+        per_document = [d.get(f.name, []) for d in documents] if documents is not None else None
+        cells = [f'`{f.name}`', field_description(what, per_document), shown_type(plan, f.type), f"shared template `{shared.template}` of `{shared.href}`" if shared else f'`{f.source}`']
         if sampled:
             pct = population.get(f.source)
             cells.append('always' if f.source.startswith('@') or shared else f'{pct:g}% of events' if pct is not None
@@ -413,11 +523,17 @@ def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | 
     explicit = {'StreamId': 'the stream id', 'EventId': 'the record number in the stream',
                 '@timestamp': f"`{d.timestamp_field}`" + (f' (format `{d.timestamp_format}`)' if d.timestamp_format else '')}
     explicit.update({name: f'stream meta `{attr}`' for name, attr in d.meta.items()})
-    lines += ['| Index field | Mapping | From |' + (' Sample values |' if documents is not None else ''),
-              '| --- | --- | --- |' + (' --- |' if documents is not None else '')]
+    lines += ['| Index field | Description | Mapping | From |' + (' Sample values |' if documents is not None else ''),
+              '| --- | --- | --- | --- |' + (' --- |' if documents is not None else '')]
     types = {f.name: f.type for f in plan.fields}
+    meaning = {'StreamId': 'The id of the raw stream the record came from.',
+               'EventId': "The record's number in its stream; with StreamId, it identifies the record.",
+               '@timestamp': f"The record's time, from its `{d.timestamp_field}` field."}
     for name, source in explicit.items():
-        cells = [f'`{name}`', {'id': 'long', 'date': 'date'}.get(types.get(name), 'dynamic'), source]
+        what = meaning.get(name) or f"The stream's `{d.meta.get(name)}` meta attribute."
+        per_document = [doc.get(name, []) for doc in documents] if documents is not None else None
+        cells = [f'`{name}`', field_description(what, per_document),
+                 {'id': 'long', 'date': 'date'}.get(types.get(name), 'dynamic'), source]
         if documents is not None:
             cells.append(_values([v for doc in documents for v in doc.get(name, [])]))
         lines.append(_row(*cells))
@@ -428,9 +544,13 @@ def discovery_field_markdown(plan: Any, documents: list[dict[str, list[str]]] | 
                 if key not in explicit and any(v != '' for v in values):
                     seen[key] = seen.get(key, 0) + 1
         lines += ['', f'Fields in the {len(documents)} documents written from the sample, mapped dynamically:', '',
-                  '| Field | In sample | Sample values |', '| --- | --- | --- |']
+                  '| Field | Description | In sample | Sample values |', '| --- | --- | --- | --- |']
         for key in sorted(seen)[:80]:
-            lines.append(_row(f'`{key}`', f'{100 * seen[key] / len(documents):.0f}% of documents',
+            top = key.split('.')[0]
+            what = (f"Parsed from the JSON held in the source's `{top[:-5]}` field." if top.endswith('_json') and d.unpack_json
+                    else f"The source's `{key}` field.")
+            lines.append(_row(f'`{key}`', field_description(what, [doc.get(key, []) for doc in documents]),
+                              f'{100 * seen[key] / len(documents):.0f}% of documents',
                               _values([v for doc in documents for v in doc.get(key, [])])))
         if len(seen) > 80:
             lines.append(f'\n(+{len(seen) - 80} more fields)')

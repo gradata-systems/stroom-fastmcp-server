@@ -16,7 +16,7 @@ LAYERS = [
                              {'id': 'schemaFilter', 'type': 'SchemaFilter'}]},
         'links': {'add': [{'from': 'dsParser', 'to': 'translationFilter'},
                           {'from': 'translationFilter', 'to': 'schemaFilter'}]}}},
-    {'sourcePipeline': {'name': 'SPIKE'}, 'pipelineData': {
+    {'sourcePipeline': {'name': 'ACME'}, 'pipelineData': {
         'properties': {'add': [{'element': 'translationFilter', 'name': 'xslt', 'value': {'entity': {'uuid': 'x'}}}]}}},
 ]
 
@@ -38,7 +38,7 @@ async def ctx():
 
 
 def mock_pipeline():
-    respx.get(f'{API}/pipeline/v1/p-1').mock(return_value=httpx.Response(200, json={'name': 'SPIKE', 'uuid': 'p-1'}))
+    respx.get(f'{API}/pipeline/v1/p-1').mock(return_value=httpx.Response(200, json={'name': 'ACME', 'uuid': 'p-1'}))
     respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=LAYERS))
 
 

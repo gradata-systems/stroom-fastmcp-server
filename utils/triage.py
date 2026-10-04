@@ -93,7 +93,8 @@ def split_bulk(m: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def triage(markers: list[dict[str, Any]], rules: ErrorRules, own_elements: set[str],
-           record_count: int | None = None, examples: int = 3) -> dict[str, Any]:
+           record_count: int | None = None, examples: int = 3,
+           accepted: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Group markers by (severity, element, normalised message) and classify each group.
 
     A group that would be benign but occurs at least once per record is raised to review: a
@@ -117,9 +118,14 @@ def triage(markers: list[dict[str, Any]], rules: ErrorRules, own_elements: set[s
         affected = len(group['records']) or None
         if classification == 'benign' and record_count and (affected or group['count']) >= record_count:
             classification, reason = 'review', 'Occurs for every record; our output may be the cause'
+        from utils.accepted import match
+        known = match(accepted or [], element, group['examples'][0]['message'])
+        if known:
+            # The user said this kind of error is benign for this pipeline: reported, not raised again.
+            classification, reason = 'benign', f"Accepted as benign by the user ({known.get('accepted')}): {known.get('reason')}"
         result.append({'class': classification, 'reason': reason, 'severity': severity, 'element': element,
                        'own_element': group['own_element'], 'count': group['count'],
-                       'records_affected': affected, 'examples': group['examples']})
+                       'records_affected': affected, 'examples': group['examples'], **({'accepted': True} if known else {})})
     result.sort(key=lambda g: (_ORDER[g['class']], -g['count']))
     counts = Counter(g['class'] for g in result)
     return {'verdict': 'blocking' if counts['blocking'] else 'review' if counts['review'] else 'clean',

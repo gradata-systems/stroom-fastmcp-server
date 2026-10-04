@@ -6,23 +6,34 @@ from typing import Annotated, Any
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from
+from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from, copy_of_tag
 from tools.instructions import applicable_instructions
 from tools.processing_writes import create_promotion_filters, promotion_processing
 from tools.pipelines import translation_docs
 from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags
 from tools.streams import summarise_events
 from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents, object_arrays,
-                            index_field_mapping_markdown, sampled_events)
+                            index_field_mapping_markdown, sampled_events, written_fields_markdown)
 from utils.fieldplan import FieldPlan
 from utils.mappingstore import (DOC_MARK, digest, doc_digest, normalise_xslt, read_agreed_template, read_mapping,
                                 replace_section)
 from utils.xsltgen import TranslationMapping, generate
+from utils.accepted import entry as accepted_entry, merge as merge_accepted, read_accepted
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, gateway_from, set_body_text
+
+class AcceptedError(BaseModel):
+    """An error the user says is benign, as triage showed it."""
+    element: str | None = Field(None, description="The element it comes from, e.g. 'decorationFilter'.")
+    example: str = Field(description="An example message, as triage showed it.")
+    reason: str = Field(description="Why it is benign, in the user's words.")
+    matches: str | None = Field(None, description="The kind of message it covers, with * for the parts that vary, e.g. "
+                                                  "'No HR record for user svc-*'; defaults to the example (numbers and "
+                                                  "quoted values vary).")
+
 
 Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.3'.")]
 _COPY_OF = 'mcp-copy-of-'
@@ -66,6 +77,26 @@ async def kept_mapping(ctx: Context, pipeline_uuid: str) -> dict[str, Any] | Non
         if found:
             return {'kind': found[0], 'payload': found[1], 'element': entry['element'], 'xslt': xslt}
     return None
+
+
+async def _shape_stage(stroom, pipeline_uuid: str) -> str:
+    from tools.templates import _shape
+    return (await _shape(stroom, pipeline_uuid))['stage']
+
+
+async def written_fields_section(stroom, pipeline_uuid: str, stream_ids: list[int]) -> str:
+    """The Field mapping section of an indexing pipeline whose XSLT keeps no plan: from the documents its own XSLT
+    writes, stepped over the sample streams."""
+    element = next((e['element'] for e in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid))
+                    if not e['inherited_from_template'] and e['doc']['type'] == 'XSLT'), None)
+    if not element:
+        raise ToolError("The pipeline has no XSLT of its own to document: give it one, or document the template")
+    loaded = await _Pipeline.load(stroom, pipeline_uuid)
+    documents = index_documents(list((await _outputs(stroom, loaded, stream_ids, element, None, 200)).values()))
+    if not documents:
+        raise ToolError(f"Field mapping not written: stepping streams {stream_ids} gave no documents. An indexing "
+                        f"pipeline's stream_ids are the Events streams it indexes (or the raw streams, for discovery).")
+    return written_fields_markdown(documents)
 
 
 def mapping_digest(kept: dict[str, Any]) -> str:
@@ -165,7 +196,12 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             loaded = await _Pipeline.load(stroom, pipeline['uuid'])
             outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], None, 200)
             documents = index_documents(list(outputs.values()))
-        section = index_field_mapping_markdown(plan, population, documents) + _agreed_line(pipeline)
+        from tools.generation import event_schema
+        try:
+            schema = await event_schema(ctx, stroom.settings.event_logging_version)
+        except Exception:   # descriptions then come from the plan and the sample alone
+            schema = None
+        section = index_field_mapping_markdown(plan, population, documents, schema) + _agreed_line(pipeline)
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
 
 
@@ -234,13 +270,22 @@ async def write_documentation(
             description="The pipeline's sample streams (raw streams for an events pipeline, Events streams for an "
                         "indexing pipeline): the Field mapping section is generated from the mapping kept with the XSLT, "
                         "stepped over them. Required when the XSLT keeps a mapping.")] = [],
+        accept_errors: Annotated[list[AcceptedError] | str, ONE_OR_MORE, Field(
+            description="Errors the user says are benign and can be ignored, each with the error's element, an example "
+                        "message as triage showed it, and the user's reason in their words. Only those the agent could "
+                        "not resolve in its own content. Recorded after the user confirms; later reviews then report "
+                        "them as benign, not as problems.")] = [],
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
     Create or update the Documentation doc for a pipeline in the build (same name as the pipeline). The Field
     mapping section is not taken from the markdown: it is generated from the mapping (or index plan) kept with the
     pipeline's XSLT, stepped over stream_ids, and put in place of whatever the markdown has there, so it always
     agrees with the XSLT. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
-    section. An update replaces the body and keeps the change log, adding a line. Promoted with the pipeline.
+    section. The Errors section is generated too: every kind of error processing the streams produced (from their
+    Error streams), with counts and an example, and the errors the user accepted as benign, with their reasons; those
+    are kept with the doc, so triage does not raise them again. An update replaces the body and keeps the change log
+    and the accepted errors, adding a line. Promoted with the pipeline.
     """
     body = markdown.split('## Change log')[0].rstrip()
     if not body.strip():
@@ -250,10 +295,21 @@ async def write_documentation(
     kept = await kept_mapping(ctx, pipeline_uuid)
     generated_section = None
     if kept:
-        if kept['kind'] == 'translation' and not stream_ids:
-            raise ToolError("Give stream_ids (the pipeline's sample raw streams): the Field mapping section is generated "
-                            "from the mapping kept with the XSLT by stepping them")
+        if not stream_ids:
+            # Documentation goes down to the field, with the values the sample gave: it needs the sample.
+            what = ("sample raw streams" if kept['kind'] == 'translation' or (kept['payload'] or {}).get('discovery')
+                    else "Events streams it indexes")
+            raise ToolError(f"Give stream_ids (the pipeline's {what}): the Field mapping section is generated from the "
+                            f"{'mapping' if kept['kind'] == 'translation' else 'index plan'} kept with the XSLT by "
+                            f"stepping them, each field with the values the sample gave")
         generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids)
+        body = replace_section(body, 'Field mapping', generated_section)
+    elif (await _shape_stage(stroom, pipeline_uuid)) in ('indexing', 'discovery'):
+        # An indexing XSLT written by hand keeps no plan: the section comes from the documents it writes.
+        if not stream_ids:
+            raise ToolError("Give stream_ids (the Events streams the pipeline indexes): the Field mapping section is "
+                            "generated from the documents it writes from them, each field with the values the sample gave")
+        generated_section = await written_fields_section(stroom, pipeline_uuid, stream_ids)
         body = replace_section(body, 'Field mapping', generated_section)
     elif '## Field mapping' not in body:
         from tools.templates import _shape
@@ -263,23 +319,114 @@ async def write_documentation(
                             "describe_document and a stepped sample, or save the XSLT again from its mapping "
                             "(build_translation_xslt uuid=...) and the section is generated here")
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    accepting = [AcceptedError.model_validate(a) if isinstance(a, dict) else a for a in accept_errors]
+    if accepting:
+        # The user says these are benign: confirmed by them, as the agent cannot decide it for them.
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', 'write_documentation',
+            f"Record {len(accepting)} kind(s) of error as benign for pipeline '{pipeline['name']}', so they are not "
+            f"raised again", {'errors': [f"{a.element or 'any element'}: {a.matches or a.example[:200]} -- {a.reason}"
+                                         for a in accepting]}, confirmation_id)
+        if gate:
+            return gate
+    new_entries = [accepted_entry(a.element, a.example, a.reason, stamp, a.matches) for a in accepting]
+    errors_markdown = await _errors_markdown(ctx, pipeline_uuid, stream_ids)
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
         old = body_text(doc)
         log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
-        set_body_text(doc, f"{body}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
+        accepted = merge_accepted(read_accepted(old), new_entries)
+        # Only the generated section: the agent's own sections on errors (an evaluation's analysis) stay as written.
+        text = replace_section(body, 'Errors', _errors_section(errors_markdown, accepted), exact=True)
+        set_body_text(doc, f"{text}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
         return await stroom.put_doc(doc)
 
+    name, beside = pipeline['name'], None
+    guard = guard_from(ctx)
+    copy_of = next((t[len(_COPY_OF):] for t in await guard.tags({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
+                    if t.startswith(_COPY_OF)), None)
+    if copy_of:
+        # An in-place change (a working copy): the documentation is the production pipeline's, under its name, and
+        # its existing doc beside it is changed through a working copy that promotion writes back after a backup.
+        original = await stroom.get_doc('Pipeline', copy_of)
+        name = original['name']
+        beside = await _documentation_beside(stroom, original)
     existing = next((d for d in await _build_docs(ctx, build)
-                     if d['type'] == 'Documentation' and d['name'] == pipeline['name']), None)
+                     if d['type'] == 'Documentation' and d['name'] == name), None)
     if existing:
         doc = await write(existing)
+    elif beside:
+        ref = await guard.create('Documentation', name, build, [copy_of_tag(beside['uuid'])])
+        copy, current = await stroom.get_doc('Documentation', ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
+        copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
+        await stroom.put_doc(copy)
+        doc = await write(ref)
     else:
-        doc = await guard_from(ctx).create_filled('Documentation', pipeline['name'], build, write)
+        doc = await guard.create_filled('Documentation', name, build, write)
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
                                         **({'field_mapping': generated_section} if generated_section else {})})
+
+
+async def _documentation_beside(stroom, pipeline: dict[str, Any]) -> dict[str, Any] | None:
+    """The Documentation doc named after a pipeline, in the pipeline's own folder."""
+    folder = await _folder_of(stroom, pipeline)
+    found = (await stroom.find_documents(pipeline['name'], ['Documentation'], 20)).get('values') or []
+    return next((v['docRef'] for v in found if v['docRef'].get('name') == pipeline['name']
+                 and _path(v.get('path')) == folder), None)
+
+
+def _path(path: Any) -> str:
+    """An explorer path ('System / A / B', or a list of parts) as 'System/A/B'."""
+    parts = path if isinstance(path, list) else str(path or '').split('/')
+    return '/'.join(str(p.get('name', p) if isinstance(p, dict) else p).strip() for p in parts if str(p).strip())
+
+
+async def _folder_of(stroom, ref: dict[str, Any]) -> str | None:
+    found = (await stroom.find_documents(ref['name'], [ref.get('type', 'Pipeline')], 20)).get('values') or []
+    return next((_path(v.get('path')) for v in found if v['docRef'].get('uuid') == ref['uuid']), None)
+
+
+async def _errors_markdown(ctx: Context, pipeline_uuid: str, stream_ids: list[int]) -> list[dict[str, Any]] | None:
+    """The error groups processing the streams gave, from the Error streams this pipeline wrote for them; None when no
+    streams were given."""
+    if not stream_ids:
+        return None
+    from tools.streams import summarise_errors
+    stroom = gateway_from(ctx)
+    groups: list[dict[str, Any]] = []
+    for stream_id in stream_ids:
+        children = (await stroom.find_meta([{'type': 'term', 'field': 'Parent Id', 'condition': 'EQUALS', 'value': str(stream_id)},
+                                            {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Error'}],
+                                           20)).get('values') or []
+        for child in children:
+            if (child['meta'].get('pipelineUuid') or pipeline_uuid) == pipeline_uuid:
+                groups += (await summarise_errors(ctx, child['meta']['id'])).get('groups') or []
+    return groups
+
+
+def _errors_section(groups: list[dict[str, Any]] | None, accepted: list[dict[str, Any]]) -> str:
+    """The Errors section: what processing the sample gave, and the errors the user accepted as benign."""
+    from utils.accepted import block
+    lines = []
+    if groups is None:
+        lines.append('Not measured: no processed streams were given.')
+    elif not groups:
+        lines.append('Processing the sample streams produced no errors.')
+    else:
+        lines += ['Errors processing the sample streams produced, by kind:', '',
+                  '| Class | Element | Severity | Count | Example | Note |', '| --- | --- | --- | --- | --- | --- |']
+        for g in groups:
+            example = ((g.get('examples') or [{}])[0].get('message') or '')[:160].replace('|', '\\|').replace('\n', ' ')
+            lines.append(f"| {g['class']} | `{g.get('element')}` | {g.get('severity')} | {g.get('count')} | {example} | "
+                         f"{g.get('reason', '') if g.get('accepted') else ''} |")
+    if accepted:
+        lines += ['', 'Accepted as benign by the user, so not raised again:', '']
+        lines += [f"- `{e.get('element') or 'any element'}`: {e.get('example', '')[:160]} ({e.get('accepted')}): "
+                  f"{e.get('reason')}" for e in accepted]
+        lines += ['', block(accepted)]
+    return '\n'.join(lines) + '\n'
 
 
 async def promote_build(
@@ -312,6 +459,12 @@ async def promote_build(
             plan.append({'doc': doc, 'action': 'write back', 'target': doc['working_copy_of']})
         else:
             target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
+            if not target and doc['type'] == 'Documentation':
+                # The documentation of a production pipeline (an in-place change's): beside that pipeline.
+                found = (await stroom.find_documents(doc['name'], ['Pipeline'], 20)).get('values') or []
+                outside = [v['docRef'] for v in found if v['docRef'].get('name') == doc['name']
+                           and not any(d['uuid'] == v['docRef'].get('uuid') for d in docs)]
+                target = await _folder_of(stroom, {**outside[0], 'type': 'Pipeline'}) if len(outside) == 1 else None
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
             plan.append({'doc': doc, 'action': 'move', 'target': '/'.join(folder_parts(target))})
@@ -349,6 +502,11 @@ async def promote_build(
         # Production folders, so not managed: only generated, to show the server made them.
         folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
         done.append(f"created folder {path}")
+    from tools.processing_writes import development_batch
+    for step in plan:
+        if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(
+                ctx, step['doc']['uuid'], False):
+            done.append(f"restored the default batch size on '{step['doc']['name']}'")
     order = {'write back': 0, 'move': 1, 'discard': 2}
     for step in sorted(plan, key=lambda p: order[p['action']]):
         doc = step['doc']

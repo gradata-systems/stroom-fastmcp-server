@@ -18,6 +18,8 @@ rules:
      reason: "The index has reached its total-fields limit, so documents adding fields are rejected: raise index.mapping.total_fields.limit in the index template, or drop the source fields that multiply (keys holding ids or dates)"}
   - {message: 'Elasticsearch rejected', class: blocking,
      reason: "Elasticsearch rejected these documents, so their records are not indexed (the rest of the batch was)"}
+  - {message: 'Bulk indexing request failed', class: blocking,
+     reason: "Elasticsearch rejected documents in a bulk request, and its response could not be read in full (a large batch is cut short in the Error stream). Process again with a small batch: create_processor_filter and reprocess_streams set batch size 10 on a workspace pipeline"}
   - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
   - {message: 'Attempt to index unknown field', class: blocking,
      reason: "The index has no such field, so the value is dropped: save the indexing XSLT from its plan (save_xslt index_plan=...), and create_indexing_pipeline adds the plan's fields to the index"}

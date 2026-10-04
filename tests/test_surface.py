@@ -64,11 +64,55 @@ async def test_save_tools_create_or_update_by_uuid():
         assert result['set'] == ['a.b'] and result['reference_data'] == ['F via L']
 
 
-async def test_verify_index_reuses_the_builds_dashboard():
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'IDX'}))})
-    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[{'type': 'Dashboard', 'uuid': 'd1', 'name': 'IDX-VERIFY'}]))
-    with patch.object(indexing, 'guard_from', lambda c: guard), \
-            patch.object(indexing, 'create_verification_dashboard', AsyncMock()) as create, \
-            patch.object(indexing, 'run_test_searches', AsyncMock(return_value={'passed': True, 'checks': []})):
-        result = await indexing.verify_index(ctx, 'b', 'i', 'lucene', [1], 3, ['StreamId'])
-    assert result['dashboard'] == {'uuid': 'd1', 'name': 'IDX-VERIFY'} and result['passed'] and create.await_count == 0
+def test_the_verification_dashboard_shows_the_users_fields_newest_first_and_a_stepping_text_pane():
+    config = indexing.dashboard_config({'type': 'ElasticIndex', 'uuid': 'i', 'name': 'IDX'},
+                                       ['@timestamp', 'user.name', 'StreamId'], '@timestamp', '2026-08-23T00:00:00.000Z')
+    query, table, text = (c['settings'] for c in config['components'])
+    columns = {c['name']: c for c in table['fields']}
+    assert [c['name'] for c in table['fields'] if c.get('visible', True)] == ['@timestamp', 'user.name']
+    assert columns['StreamId']['visible'] is False and columns['EventId']['visible'] is False
+    assert columns['@timestamp']['sort'] == {'order': 0, 'direction': 'DESCENDING'}
+    assert query['expression']['children'] == [{'type': 'term', 'field': '@timestamp', 'condition': 'BETWEEN',
+                                                'value': '2026-08-23T00:00:00.000Z,day()+1d'}]
+    assert query['automate']['open'] is True and table['extractValues'] is False
+    assert text['showStepping'] is True and 'pipeline' not in text and text['tableId'] == 'table-VERIFY'
+    assert text['streamIdField'] == {'id': columns['StreamId']['id'], 'name': 'StreamId'}
+    assert text['recordNoField'] == {'id': columns['EventId']['id'], 'name': 'EventId'}
+    assert len(config['layout']['children']) == 3
+
+
+def test_the_dashboard_window_starts_at_a_30_day_boundary_before_the_earliest_event():
+    # 2026-10-01 is day 20727 since the epoch; the boundary before it is day 20700, 2026-09-04.
+    assert indexing.window_start(['2026-10-02T08:00:00.000Z', '2026-10-01T09:00:00Z', 'not a time']) == '2026-09-04T00:00:00.000Z'
+    assert indexing.window_start([]) is None
+
+
+async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothing_for_another_builds_index():
+    from utils.consent import ConsentStore
+    index = {'name': 'IDX', 'timeField': '@timestamp'}
+    rows = {'rows': [{'@timestamp': '2026-10-01T09:00:00.000Z', 'StreamId': '1', 'EventId': '1'}], 'errors': []}
+
+    async def run(contents, dashboard=None):
+        docs = {'i': index, 'd1': dashboard or {}}
+        stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[u]), put_doc=AsyncMock())
+        ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False)})
+        guard = SimpleNamespace(folder_contents=AsyncMock(return_value=contents))
+        with patch.object(indexing, 'guard_from', lambda c: guard), \
+                patch.object(indexing, '_search', AsyncMock(return_value=rows)), \
+                patch.object(indexing, 'create_verification_dashboard', AsyncMock(return_value={'uuid': 'new'})) as create, \
+                patch.object(indexing, 'run_test_searches', AsyncMock(return_value={'passed': True, 'checks': []})) as searched:
+            docs['new'] = {'dashboardConfig': {}}
+            result = await indexing.verify_index(ctx, 'b', 'i', 'elasticsearch', [1], 1, ['@timestamp', 'user.name'])
+        return result, create, searched
+    asked, create, _ = await run([{'type': 'ElasticIndex', 'uuid': 'i', 'name': 'IDX'}])
+    assert asked['status'] == 'needs_confirmation' and create.await_count == 0
+    assert asked['details']['columns (newest first)'] == ['@timestamp', 'user.name']
+    assert asked['details']['initial query'] == '@timestamp from 2026-09-04T00:00:00.000Z through today'
+    mine = {'dashboardConfig': indexing.dashboard_config({'type': 'ElasticIndex', 'uuid': 'i'}, ['@timestamp', 'user.name'],
+                                                         '@timestamp', None), 'uuid': 'd1'}
+    reused, create, _ = await run([{'type': 'ElasticIndex', 'uuid': 'i', 'name': 'IDX'},
+                                   {'type': 'Dashboard', 'uuid': 'd1', 'name': 'IDX-VERIFY'}], mine)
+    assert reused['passed'] and reused['dashboard']['uuid'] == 'd1' and create.await_count == 0
+    elsewhere, create, searched = await run([])
+    assert elsewhere['dashboard']['saved'] is False and create.await_count == 0
+    assert searched.await_args.kwargs['dashboard_doc']['dashboardConfig']['components'][0]['settings']['dataSource']['uuid'] == 'i'

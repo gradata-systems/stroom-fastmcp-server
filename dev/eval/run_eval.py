@@ -174,16 +174,16 @@ async def check_output(call: Call, score: Score, case: dict[str, Any], events_st
 def local_ctx() -> SimpleNamespace:
     """A tool context on the local stack (dev/stroom), calling the tools directly as the admin key; close
     ctx.lifespan_context['stroom'] when done."""
-    import e2e_phase2 as p2
+    import e2e_translation as e2e
     from config import Settings
     from security.policy import AccessPolicy
     from utils.consent import ConsentStore
     from utils.stroom import StroomGateway
     from utils.triage import ErrorRules
 
-    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
+    local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=e2e.VERSION)
     return SimpleNamespace(lifespan_context={
         'stroom': StroomGateway(settings), 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
@@ -191,7 +191,7 @@ def local_ctx() -> SimpleNamespace:
 
 # --- reference mode: the case's own solution through the tools, no model ---
 async def run_reference(case: dict[str, Any], stamp: str) -> Score:
-    import e2e_phase2 as p2
+    import e2e_translation as e2e
     from tools import (feeds, generation, indexing, pipeline_writes, processing_writes, stepping, templates,
                        translation, validation, streams)
     from tools.pipeline_writes import PipelineReference, PropertyValue
@@ -215,10 +215,10 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         splitter = SplitterSpec.model_validate(reference['splitter']) if reference.get('splitter') else None
         # As an agent should: the samples' text is sent once, to upload_sample; the mapping is then checked against
         # every sample stream, read by the server, and the XSLT saved with it in the build, so its code never comes back.
-        await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
         raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
         raw = raws[0]
-        generated = await p2.agreed(generation.build_translation_xslt, ctx=ctx,
+        generated = await e2e.agreed(generation.build_translation_xslt, ctx=ctx,
                                     mapping=TranslationMapping.model_validate(reference['mapping']),
                                     stream_ids=raws, splitter=splitter, build=build, name=f'{feed}-Events')
         if not generated['ok']:
@@ -232,7 +232,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         if ref_data:
             # The user directory: a Raw Reference feed, a Reference Data pipeline, processed to Reference streams.
             ref_feed = f'{feed}-USERS'
-            await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=ref_feed, stream_type='Raw Reference')
+            await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=ref_feed, stream_type='Raw Reference')
             # Reference data applies from its effective time: before the events' streams, or lookups find nothing.
             ref_raw = (await feeds.upload_sample(ctx, ref_feed, ref_data['sample'], stream_type='Raw Reference',
                                                  effective_time='2000-01-01T00:00:00.000Z'))['stream_id']
@@ -242,18 +242,18 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             ref_template = next(c for c in (await templates.find_pipeline_templates(ctx, 'reference'))['candidates']
                                 if c['name'] == 'Reference Data')
             rprops = []
-            rcode = p2.CSV_SPLITTER if ref_data.get('converter') == 'csv_header' else ref_data.get('converter')
+            rcode = e2e.CSV_SPLITTER if ref_data.get('converter') == 'csv_header' else ref_data.get('converter')
             if rcode:
                 rtc = await translation.create_text_converter(ctx, build, ref_feed, 'DATA_SPLITTER', rcode)
                 rprops.append(PropertyValue(element='combinedParser', name='textConverter', doc_uuid=rtc['uuid'], doc_type='TextConverter'))
             rx = await translation.create_xslt(ctx, build, f'{ref_feed}-Reference', ref_xslt['xslt'])
             rprops.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=rx['uuid'], doc_type='XSLT'))
-            rpipe = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
+            rpipe = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
                                     template_uuid=ref_template['uuid'], set_properties=rprops)
             rstep = await stepping.step_sample(ctx, rpipe['uuid'], [ref_raw])
             if rstep['verdict'] != 'clean':
                 score.problems.append(f"reference pipeline stepping: {rstep['verdict']}")
-            await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=rpipe['uuid'], stream_ids=[ref_raw])
+            await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=rpipe['uuid'], stream_ids=[ref_raw])
             rgate = await processing_writes.wait_for_processing(ctx, rpipe['uuid'], [ref_raw], output_type='Reference')
             if rgate['gate'] != 'pass':
                 score.problems.append(f"reference data: {rgate['problems']}")
@@ -261,7 +261,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         props = []
         converter, replace_parser = reference.get('converter'), reference.get('replace_parser')
         if converter:
-            code = p2.CSV_SPLITTER if converter == 'csv_header' else converter
+            code = e2e.CSV_SPLITTER if converter == 'csv_header' else converter
             tc = await translation.create_text_converter(ctx, build, feed, reference.get('converter_type', 'DATA_SPLITTER'), code)
             parser = pipeline_writes.element_id(replace_parser) if replace_parser else 'dsParser'
             props.append(PropertyValue(element=parser, name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))
@@ -271,13 +271,13 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             # JSON lines need the parser's root map round the top-level objects; an array reads better without it.
             lines = reference['mapping'].get('json_layout') == 'lines'
             props.append(PropertyValue(element='jsonParser', name='addRootObject', value=lines))
-        pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
+        pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
                                    template_uuid=template['uuid'], set_properties=props, replace_parser=replace_parser,
                                    references=references)
         sample = await stepping.step_sample(ctx, pipeline['uuid'], raws)
         if sample['verdict'] == 'blocking':
             score.problems.append(f"stepping blocking: {[(g['element'], g.get('examples')) for g in sample['groups']][:3]}")
-        await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=raws)
+        await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=raws)
         gate = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], raws)
         events = [e for s in gate['streams'] for e in s['events']]
         await check_output(call, score, case, events)
@@ -294,18 +294,18 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
 
         draft = await indexing.draft_index_mapping(ctx, 'lucene', f'{feed}-INDEX', 'stroom-flat', events)
         plan = FieldPlan.model_validate(draft['plan'])
-        index = await p2.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='lucene', name=f'{feed}-INDEX',
+        index = await e2e.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='lucene', name=f'{feed}-INDEX',
                                 time_field=plan.time_field)
         await indexing.set_index_fields(ctx, index['uuid'], plan)
         ixslt = await translation.save_xslt(ctx, build, f'{feed}-INDEX-XSLT', index_plan=plan)   # generated from the plan
         lucene = next(c for c in (await templates.find_pipeline_templates(ctx, 'indexing'))['candidates']
                       if c['backend'] == 'lucene')
-        ipipe = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',
+        ipipe = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',
                                 template_uuid=lucene['uuid'], xslt_uuid=ixslt['uuid'], index_uuid=index['uuid'])
         istep = await stepping.step_sample(ctx, ipipe['uuid'], events)
         if istep['verdict'] != 'clean':
             score.problems.append(f"indexing pipeline stepping: {istep['verdict']}")
-        await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=ipipe['uuid'], stream_ids=events,
+        await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=ipipe['uuid'], stream_ids=events,
                         source_pipeline_uuid=pipeline['uuid'])
         igate = await processing_writes.wait_for_processing(ctx, ipipe['uuid'], events, expect_events=False)
         dash = await indexing.create_verification_dashboard(ctx, build, f'{feed}-VERIFY', index['uuid'], 'lucene',

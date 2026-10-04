@@ -135,7 +135,7 @@ server's use:
   `outcome: granted`; `details` lists what changed.
 - What users declined: filter on `outcome: declined`.
 - Attempts to change production content directly: filter on `reason: not_managed`.
-- Sign-in problems: filter on `reason: invalid_token` and rank `check`. A spike in `audience`, `issuer` or
+- Sign-in problems: filter on `reason: invalid_token` and rank `check`. A rise in `audience`, `issuer` or
   `signing_key` usually means a configuration change at the identity provider; `signature` means altered tokens.
 - Slow or failing tools: filter on `event: tool_call` and sort by `duration_ms`, or filter on
   `outcome: error`.

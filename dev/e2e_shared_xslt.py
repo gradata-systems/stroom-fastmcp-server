@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'dev'))
 
-import e2e_phase2 as p2  # noqa: E402
+import e2e_translation as e2e  # noqa: E402
 from e2e_generator import MAPPINGS  # noqa: E402
 from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
@@ -152,9 +152,9 @@ async def fixture_template(stroom: StroomGateway, name: str, source: str, elasti
 
 
 async def main():
-    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
+    local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=p2.VERSION)
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=e2e.VERSION)
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
@@ -175,15 +175,15 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     es_template = await fixture_template(stroom, ES_TEMPLATE, 'Indexing', elastic=True)
     src = f'e2e-shared-src-{stamp}'
     sibling = await translation.create_xslt(ctx, src, f'E2E-OTHER-{stamp}-Events', SIBLING_EVENT)
-    sibling_tc = await translation.create_text_converter(ctx, src, f'E2E-OTHER-{stamp}', *p2.CASES['csv']['converter'])
-    await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=src, name=f'E2E-OTHER-{stamp}-Events',
+    sibling_tc = await translation.create_text_converter(ctx, src, f'E2E-OTHER-{stamp}', *e2e.CASES['csv']['converter'])
+    await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=src, name=f'E2E-OTHER-{stamp}-Events',
                     template_uuid=text_template['uuid'],
                     set_properties=[PropertyValue(element='dsParser', name='textConverter', doc_uuid=sibling_tc['uuid'],
                                                   doc_type='TextConverter'),
                                     PropertyValue(element='translationFilter', name='xslt', doc_uuid=sibling['uuid'],
                                                   doc_type='XSLT')])
     sibling_index = await translation.create_xslt(ctx, src, f'e2e-other-{stamp}-v1-XSLT', SIBLING_ELASTIC)
-    await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=src, name=f'e2e-other-{stamp}-v1 - Indexing',
+    await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=src, name=f'e2e-other-{stamp}-v1 - Indexing',
                     template_uuid=es_template['uuid'],
                     set_properties=[PropertyValue(element='xsltFilter', name='xslt', doc_uuid=sibling_index['uuid'],
                                                   doc_type='XSLT'),
@@ -193,12 +193,12 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     described = await templates.describe_template(ctx, text_template['uuid'])
     shared = {u['template']: u for u in described.get('shared_xslt') or [] if u.get('template')}
     device, meta = shared.get('eventSourceDevice') or {}, shared.get('eventMeta') or {}
-    p2.check(device.get('at') == ['EventSource/Device'] and meta.get('at') == ['Meta']
+    e2e.check(device.get('at') == ['EventSource/Device'] and meta.get('at') == ['Meta']
              and device.get('href') == COMMON_EVENT, f"the calls and where: {json.dumps(described.get('shared_xslt'))[:600]}")
-    p2.check(device.get('paths') == ['Device/HostName', 'Device/IPAddress'] and device.get('reads_meta') == ['MyHostName']
+    e2e.check(device.get('paths') == ['Device/HostName', 'Device/IPAddress'] and device.get('reads_meta') == ['MyHostName']
              and device.get('with_params') == {'ip': "data[@name='src']/@value"} and meta.get('reads_meta') == ['GUID'],
              'what each writes and reads, and the parameter the sibling passes')
-    p2.check(any(u.get('document_contents', {}).get('name') == COMMON_EVENT for u in described['shared_xslt']),
+    e2e.check(any(u.get('document_contents', {}).get('name') == COMMON_EVENT for u in described['shared_xslt']),
              'the shared document itself, by name and uuid, for describe_document')
 
     print('\n### 2. the translation: the shared templates called, Device not written twice')
@@ -207,72 +207,72 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
              'with_params': {'ip': "data[@name='ip']/@value"}}]
     both = TranslationMapping.model_validate({**MAPPINGS['csv'], 'shared': uses})
     refused = await generation.build_translation_xslt(ctx, both)
-    p2.check(not refused['ok'] and any('EventSource/Device is written by the shared template eventSourceDevice' in p
+    e2e.check(not refused['ok'] and any('EventSource/Device is written by the shared template eventSourceDevice' in p
                                        for p in refused['problems']),
              f"mapping Device as well is refused: {[p[:120] for p in refused['problems']]}")
     mapping = TranslationMapping.model_validate({
         **MAPPINGS['csv'], 'shared': uses,
         'common': [f for f in MAPPINGS['csv']['common'] if not f['path'].startswith('EventSource/Device')]})
     build, feed = f'e2e-shared-{stamp}', f'E2E-SHARED-{stamp}'
-    await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
-    raw = (await feeds.upload_sample(ctx, feed, p2.CASES['csv']['sample'],
+    await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+    raw = (await feeds.upload_sample(ctx, feed, e2e.CASES['csv']['sample'],
                                      headers={'MyHostName': 'collector-01', 'GUID': f'guid-{stamp}'}))['stream_id']
     saved = await generation.build_translation_xslt(ctx, mapping, build=build, name=f'{feed}-Events', include_xslt=True)
-    p2.check(saved['ok'] and saved.get('saved'), f"saved: {saved.get('problems')}")
+    e2e.check(saved['ok'] and saved.get('saved'), f"saved: {saved.get('problems')}")
     sheet = etree.fromstring(saved['xslt'].encode())
     ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
-    p2.check(etree.QName(sheet[0]).localname == 'import' and sheet[0].get('href') == COMMON_EVENT
+    e2e.check(etree.QName(sheet[0]).localname == 'import' and sheet[0].get('href') == COMMON_EVENT
              and sheet.find('.//e:Device', ns) is None and sheet.find('.//e:Meta', ns) is None,
              'the XSLT imports the shared one and writes neither Device nor Meta itself')
-    tc = await translation.create_text_converter(ctx, build, feed, *p2.CASES['csv']['converter'])
-    pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
+    tc = await translation.create_text_converter(ctx, build, feed, *e2e.CASES['csv']['converter'])
+    pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
                                template_uuid=text_template['uuid'], set_properties=[
                                    PropertyValue(element='dsParser', name='textConverter', doc_uuid=tc['uuid'],
                                                  doc_type='TextConverter'),
                                    PropertyValue(element='translationFilter', name='xslt',
                                                  doc_uuid=saved['saved']['uuid'], doc_type='XSLT')])
     sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
-    p2.check(sample['verdict'] == 'clean', f"stepped {sample['records_stepped']} records clean: "
+    e2e.check(sample['verdict'] == 'clean', f"stepped {sample['records_stepped']} records clean: "
                                            f"{[(g['class'], g.get('message')) for g in sample['groups']]}")
     output = (await stepping.step_pipeline(ctx, pipeline['uuid'], raw, 0))['elements']['translationFilter']['output']
     events = etree.fromstring(output.encode())
     event = events.find('e:Event', ns)
     valid = await validation.validate_events(ctx, output)
-    p2.check(valid['valid'], f"valid against {valid['schema']}: {valid.get('errors')}")
-    p2.check(len(event.findall('e:EventSource/e:Device', ns)) == 1
+    e2e.check(valid['valid'], f"valid against {valid['schema']}: {valid.get('errors')}")
+    e2e.check(len(event.findall('e:EventSource/e:Device', ns)) == 1
              and event.findtext('e:EventSource/e:Device/e:HostName', namespaces=ns) == 'collector-01'
              and event.findtext('e:EventSource/e:Device/e:IPAddress', namespaces=ns) == '10.0.0.1',
              "one Device, from the shared template: the header's host name and the record's IP")
-    p2.check(event.findtext('e:Meta', namespaces=ns) == f'guid-{stamp}' and len(event.findall('e:Meta', ns)) == 1,
+    e2e.check(event.findtext('e:Meta', namespaces=ns) == f'guid-{stamp}' and len(event.findall('e:Meta', ns)) == 1,
              "one Meta, holding the stream's GUID")
 
     print('\n### 3. the index: the shared indexing template called, its fields planned from it')
-    await p2.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=[raw])
+    await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=[raw])
     done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw])
-    p2.check(done['gate'] == 'pass', f"one Events stream: {done['streams']}")
+    e2e.check(done['gate'] == 'pass', f"one Events stream: {done['streams']}")
     events_ids = done['streams'][0]['events']
     described = await templates.describe_template(ctx, es_template['uuid'])
     use = next(u for u in described['shared_xslt'] if u.get('template') == 'stroomFields')
-    p2.check(use['at'] == ['stroom'] and use['paths'] == ['stroom/feed'], f"the sibling's call: {use}")
+    e2e.check(use['at'] == ['stroom'] and use['paths'] == ['stroom/feed'], f"the sibling's call: {use}")
     index = f'e2e-shared-{stamp}-v1'
     draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, 'ecs', events_ids, shared=[
         SharedTemplate(href=use['href'], template='stroomFields', at='stroom')])
     plan = FieldPlan.model_validate(draft['plan'])
-    p2.check(any(f.name == 'stroom.feed' and f.type == 'keyword' for f in plan.fields) and plan.required() == [],
+    e2e.check(any(f.name == 'stroom.feed' and f.type == 'keyword' for f in plan.fields) and plan.required() == [],
              "stroom.feed planned from the shared XSLT's own text")
-    p2.check('<xsl:call-template name="stroomFields" />' in draft['xslt'] and 'key="stroom"' not in draft['xslt'],
+    e2e.check('<xsl:call-template name="stroomFields" />' in draft['xslt'] and 'key="stroom"' not in draft['xslt'],
              'the indexing XSLT calls it instead of writing the field')
     xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
-    indexer = await p2.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Indexing',
+    indexer = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Indexing',
                               template_uuid=es_template['uuid'], xslt_uuid=xslt['uuid'], index_name=index,
                               cluster_uuid=(await _named(stroom, 'E2E_LOCAL_ES', 'ElasticCluster'))['uuid'])
     stepped = await stepping.step_sample(ctx, indexer['uuid'], events_ids)
-    p2.check(stepped['verdict'] == 'clean', f"the indexing pipeline steps clean: {stepped['verdict']}")
+    e2e.check(stepped['verdict'] == 'clean', f"the indexing pipeline steps clean: {stepped['verdict']}")
     documents = await indexing._documents(ctx, indexer['uuid'], events_ids, 5)
-    p2.check(all(d.get('stroom') == {'feed': ('string', feed)} for d in documents) and documents,
+    e2e.check(all(d.get('stroom') == {'feed': ('string', feed)} for d in documents) and documents,
              f"each document gets one stroom object from the shared template: {json.dumps(documents[:1], default=str)[:300]}")
     template = plan.elastic_template(index)['body']['template']['mappings']['properties']
-    p2.check(template['stroom']['properties']['feed'] == {'type': 'keyword'}, 'and the index template maps it')
+    e2e.check(template['stroom']['properties']['feed'] == {'type': 'keyword'}, 'and the index template maps it')
 
 
 if __name__ == '__main__':

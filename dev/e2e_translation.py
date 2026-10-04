@@ -1,7 +1,7 @@
-"""Phase 2 exit test against the local Docker stack, driving the real tools.
+"""Onboarding translations end to end against the local Docker stack, driving the real tools.
 
-    uv run python dev/e2e_phase2.py
-    E2E_TARGET=live E2E_STAMP=... uv run python dev/e2e_phase2.py   # the read/write instance in .ai/secrets
+    uv run python dev/e2e_translation.py
+    E2E_TARGET=live E2E_STAMP=... uv run python dev/e2e_translation.py   # the read/write instance in .ai/secrets
 
 Against live, everything is named with the run stamp and promoted into a workspace folder, so
 dev/e2e_cleanup.py can remove the run afterwards.
@@ -79,7 +79,7 @@ def xslt(default_ns: str, root_match: str, record_match: str, time_expr: str, ho
       <EventTime><TimeCreated><xsl:value-of select="{time_expr}" /></TimeCreated></EventTime>
       <EventSource>
         <System><Name>E2E</Name><Environment>Dev</Environment></System>
-        <Generator>e2e-phase2</Generator>
+        <Generator>e2e-translation</Generator>
         <Device><HostName><xsl:value-of select="{host}" /></HostName><IPAddress><xsl:value-of select="{ip}" /></IPAddress></Device>
         <User><Id><xsl:value-of select="{user}" /></Id></User>
       </EventSource>{EVENT_TAIL.format(type_id=type_id, description=description,
@@ -163,6 +163,53 @@ def check(condition: bool, message: str):
         raise SystemExit(1)
 
 
+def field_rows(section: str) -> dict[str, list[str]]:
+    """The Field mapping tables' rows, by field: the cells after the field's name."""
+    rows = {}
+    for line in section.splitlines():
+        if line.startswith('| `'):
+            cells = [c.strip() for c in line.strip().strip('|').split(' | ')]
+            rows.setdefault(cells[0].strip('`'), cells[1:])
+    return rows
+
+
+async def documented_to_the_field(stroom, written: dict, fields: list[str], values: dict[str, str],
+                                  what: str = 'the indexing pipeline') -> None:
+    """The documentation as Stroom keeps it goes down to the field: every field in its own row, each row with what
+    the sample gave (values, or that it had none), and the values expected found in their field's row."""
+    text = (await stroom.get_doc('Documentation', written['uuid'])).get('data') or ''
+    section = text.split('## Field mapping')[1].split('\n## ')[0] if '## Field mapping' in text else ''
+    rows = field_rows(section)
+    missing = [f for f in fields if f not in rows]
+    check(bool(section) and not missing,
+          f"{what}'s documentation, as Stroom keeps it, has a row for each of its {len(fields)} fields"
+          + (f": missing {missing}" if missing else ''))
+    bare = [f for f, cells in rows.items() if not cells or not cells[-1]]
+    check(not bare and 'Sample values' in section,
+          f"every row ({len(rows)}) says what the sample gave: values, or that it had none" + (f": not {bare}" if bare else ''))
+    # The Description column, after the field's name: what it is, then what the sample shows.
+    undescribed = [f for f, cells in rows.items() if not cells or not any(
+        k in cells[0] for k in ('sample', 'sampled', 'document'))]
+    check('| Description |' in section and not undescribed,
+          f"each field described, with what the sample shows, e.g. {fields[-1]}: {(rows.get(fields[-1]) or [''])[0]!r}"
+          + (f": not {undescribed}" if undescribed else ''))
+    wrong = {f: (rows.get(f) or ['?'])[-1] for f, v in values.items() if f'`{v}' not in (rows.get(f) or [''])[-1]}
+    check(not wrong, "with the sample's values in their field's row, e.g. "
+                     + ', '.join(f"{f} = {v}" for f, v in list(values.items())[:4]) + (f": not {wrong}" if wrong else ''))
+    if 'In sample' in section:
+        # Rows of the tables with an In sample column (a discovery doc's explicit fields have none).
+        unsaid, counted, header = [], 0, ''
+        for line in section.splitlines():
+            if line.startswith('| ') and not line.startswith('| `') and '---' not in line:
+                header = line
+            elif line.startswith('| `') and 'In sample' in header:
+                counted += 1
+                if not any(k in line for k in ('always', '% of', 'not in the sample')):
+                    unsaid.append(line.split(' | ')[0].strip('| `'))
+        check(counted and not unsaid, f"and how often each of the {counted} was populated in the sample"
+                                      + (f": not {unsaid}" if unsaid else ''))
+
+
 async def agreed(call, **kwargs):
     """Call a gated tool, then call again with the id it returned, as a user agreeing would."""
     ids = {}
@@ -211,7 +258,7 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     quality = await validation.check_event_quality(ctx, record)
     check(quality['ok'], 'event quality checks pass')
     doc = await builds.write_documentation(ctx, build, pipeline['uuid'],
-                                           f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the Phase 2 test.\n\n"
+                                           f"# {pipeline['name']}\n\n## Purpose and data\n\n{fmt} sample for the translation e2e test.\n\n"
                                            # Written by hand (no mapping kept with the XSLT), so the section is too.
                                            f"## Field mapping\n\n| XPath | From |\n| --- | --- |\n"
                                            f"| `EventSource/User/Id` | the user field |\n",
@@ -219,7 +266,7 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     stored = await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])
     text = stored.get('data') or ''
     # The body (data) is what the Stroom UI shows; documentation is the Documentation tab.
-    check('Phase 2 test' in text and '## Change log' in text and not stored.get('documentation'),
+    check('translation e2e test' in text and '## Change log' in text and not stored.get('documentation'),
           f"documentation written to the doc's body: {len(text)} chars")
     return {'build': build, 'feed': feed_name, 'raw': raw, 'pipeline': pipeline, 'xslt': x, 'doc': doc}
 
@@ -279,7 +326,7 @@ async def promotion(ctx, csv: dict, stamp: str):
                                          f'created folder System/E2E Promoted {stamp}/Events'],
               f"missing destination folders created first: {result['promoted'][:2]}")
     text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('data') or ''
-    check('Phase 2 test' in text, f"promoted documentation keeps its text: {len(text)} chars")
+    check('translation e2e test' in text, f"promoted documentation keeps its text: {len(text)} chars")
     check("removed the build's workspace folder, now empty" in result['promoted']
           and await guard_from(ctx).build_folder(csv['build'], create=False) is None, 'the emptied build folder is removed')
     made = result.get('processing_filters') or []

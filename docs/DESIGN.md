@@ -1,6 +1,6 @@
 # Stroom FastMCP Server — Design
 
-As of 2026-09-29. Kept in step with the shared design doc
+As of 2026-10-04. Kept in step with the shared design doc
 (https://claude.ai/code/artifact/d0f92563-de5d-4c87-9d9b-8ba1c06f8c9a); diagrams are redrawn here in Mermaid.
 
 ## Overview
@@ -23,51 +23,145 @@ The Stroom MCP server lets an agent, whatever runs it, take a sample of raw data
 
 **Target platform**: Stroom v7.13 REST API (`/api/...`), the event-logging schema version the environment uses (v3.5.2 in the reference environment; configurable), Elasticsearch 8/9.
 
+## Workflows
+
+Each workflow is a prompt (`stroom://` prompts; a client may offer them as slash commands). They share their building
+blocks: the translation stage, the indexing stage, the index template hand-over, verification, documentation and
+promotion. Everything is built in a workspace build and promoted only on the user's approval.
+
+```mermaid
+flowchart LR
+    U{"What the user has,<br/>and wants"}
+    U -- "a sample of a new source" --> ON["onboard_data_source"]
+    U -- "a feed already holding data" --> EF["onboard_existing_feed"]
+    U -- "Events already, to index" --> IX["index_event_data"]
+    U -- "raw data to explore (JSON,<br/>CSV, XML), no translation" --> DI["create_discovery_index"]
+    U -- "new samples or a field fix" --> UE["update_events_pipeline"]
+    U -- "index fields to add or change" --> UI["update_indexing_pipeline"]
+    U -- "an event that came out wrong" --> FX["fix_pipeline_issue"]
+    U -- "what does this pipeline do?" --> EV["evaluate_events_pipeline"]
+    ON --> S1["Stage 1: translation<br/>mapping, XSLT, step, process"]
+    EF --> SV["Survey the feed,<br/>step in place"] --> S1
+    S1 --> S2["Stage 2: indexing<br/>field plan, indexing XSLT, step"]
+    IX --> S2
+    UI --> V2["v2 indexing pipeline<br/>beside v1"]
+    DI --> DP["Discovery pipeline<br/>raw records as they are"]
+    S2 -- "Elasticsearch" --> HT["Elasticsearch: index template<br/>from the user's example,<br/>agreed, then committed"]
+    V2 & DP --> HT
+    S2 -- "Lucene" --> VR
+    HT --> VR["Index, triage,<br/>verify through Stroom"]
+    UE --> CO["Draft code compared with<br/>the current, record by record"]
+    FX --> LF["Locate the event, prove a fix"] --> CO
+    EV --> RP["Report and<br/>Documentation doc"]
+    VR & CO & S1 --> PR["Document, promote<br/>on approval"]
+```
+
+| Prompt | Starts from | Described in |
+| --- | --- | --- |
+| `onboard_data_source` | Sample files of a new source | End-to-end workflow |
+| `onboard_existing_feed` | A Raw Events feed that already holds data | Build a pipeline for a feed that already holds data |
+| `index_event_data` | An Events feed | End-to-end workflow, stage 2 |
+| `create_discovery_index` | Raw JSON, a sample or an existing feed | Create a discovery index |
+| `update_events_pipeline` | An events pipeline, new samples or a field fix | Update an events pipeline |
+| `update_indexing_pipeline` | An indexing pipeline, field changes | Update an indexing pipeline |
+| `fix_pipeline_issue` | A Stream ID, optionally an Event ID | Fix a reported pipeline issue |
+| `evaluate_events_pipeline` | An events pipeline | Evaluate and document an events pipeline |
+
 ## End-to-end workflow
 
 In stage 1, stepping every sample record to completion is the correctness check: once every record steps clean, processing the sample only produces the Events stream stage 2 needs. The agent confirms every raw sample stream produced exactly one Events stream, since the indexing pipeline has nothing to step without one, but does not iterate on the stage 1 Error streams. From stage 2 on, pipelines act on cooked Events and write to Elasticsearch, so their Error streams are triaged and can send the agent back to fix and reprocess.
 
 ```mermaid
 flowchart TD
-    subgraph S1[Stage 1: translation to event-logging XML]
-        A[1. Profile sample<br/>+ user's source docs] --> B[2. Create feed, upload<br/>Raw Events stream]
-        B --> C[3. Pick template, draft<br/>child: converter + XSLT]
-        C --> D[4. Step every record<br/>to completion, draft code]
-        D -- blocking --> C
-        D -- all clean --> E[5. Save, process sample<br/>gate: one Events per raw stream]
+    subgraph S1["Stage 1: translation to event-logging XML"]
+        A["1. Profile the sample files<br/>+ the user's source docs"] --> B["2. Create the feed, upload<br/>each file as a Raw Events stream"]
+        B --> C["3. Pipeline template: how its children use it,<br/>and the shared XSLTs they import"]
+        C --> C2["Draft the mapping; build_translation_xslt<br/>generates the XSLT, calling shared<br/>templates where siblings do"]
+        C2 --> D["4. Step every record<br/>to completion"]
+        D -- "blocking" --> C2
+        D -- "all clean" --> E["5. Process the sample<br/>gate: one Events stream per raw stream"]
+        E --> E2["Check the Events,<br/>document the pipeline"]
     end
-    subgraph S2[Stage 2: Elasticsearch indexing, on cooked Events]
-        F[6. Draft index template<br/>per selected convention] --> G[7. Pick template, build<br/>indexing child pipeline]
-        G --> H[8. Step Events<br/>check docs vs template]
-        H -- mismatch --> G
-        H -- matches --> I[9. User writes template, confirms it<br/>enable indexing filter]
-        I --> J[10. Triage outputs<br/>Error streams, ES rejects]
-        J -- blocking: fix, reprocess --> G
-        J -- clean --> K[11. Verify in Stroom<br/>dashboard test searches]
-        K -- passes --> L[12. Document<br/>Documentation docs]
-        L --> M[13. Promote on approval<br/>workspace to source folders]
-        K -- failed search --> G
+    subgraph S2["Stage 2: indexing, on cooked Events"]
+        F["6. Backend, cluster, convention, index name;<br/>Elasticsearch: the user's example index template<br/>(and any component templates)"] --> G["7. Field plan, named as the example names fields;<br/>indexing XSLT from the plan (nested objects,<br/>shared templates), indexing pipeline"]
+        G --> H["8. Step the Events:<br/>the documents against the plan"]
+        H -- "mismatch" --> G
+        H -- "Elasticsearch" --> T["9. Index template built from the example:<br/>the user confirms or corrects it,<br/>the cluster admin commits it"]
+        H -- "Lucene" --> P
+        T --> P["Start indexing (the approval<br/>confirms the template is committed)"]
+        P --> J["10. Triage the outputs: Error streams,<br/>documents Elasticsearch rejected"]
+        J -- "blocking: fix, reprocess" --> G
+        J -- "clean" --> K["11. Verify through Stroom: test searches,<br/>each hit traced back to its event"]
+        K -- "failed search" --> G
+        K -- "passes" --> L["12. Document"]
+        L --> M["13. Promote on approval"]
     end
-    E -- Events for every sample --> F
+    E2 -- "Events for every sample" --> F
 ```
 
 1. **Profile the sample.** Detect format (XML, JSON, CSV with or without header, RFC 3164/5424 Syslog), encoding, record delimiter and timestamp format. If the user supplies vendor documentation or annotated samples, the agent records them as a field dictionary and event catalogue (`record_source_notes`; see Source documentation) to guide steps 3 and 4.
 2. **Create the feed and upload.** Create a `Feed` doc (stream type `Raw Events`, encoding) once the user confirms the proposed feed name and encoding, then POST the sample to `/stroom/datafeed` with a `Feed` header. The new stream's meta id is found with `/api/meta/v1/find`.
-3. **Choose a template, draft the translation pipeline.** The XSLT is generated from a field mapping (`build_translation_xslt`) rather than written by hand, wherever a mapping can express it. Search for translation-stage template pipelines (`find_pipeline_templates`), see how existing children specialise them, and learn what shared elements such as user decoration expect. Create a child of the chosen template, supplying only the source-specific `TextConverter` (Data Splitter or XML Fragment) and `XSLT`. Stroom's standard Event Data (Text) or Event Data (XML) pipelines are the fallback. The user confirms the chosen template before the child is created. Field mappings and event types follow the field dictionary and event catalogue when there are source notes.
-4. **Step every sample record to completion.** `/api/stepping/v1/step` accepts a `code` map that overrides element code for the session, so the agent tries XSLT revisions without saving them. It steps every record of the sample, not a subset; each step returns per-element input, output and error indicators, and any blocking error sends it back to step 3. Stepping errors are triaged with the same rules as Error streams, so benign decoration warnings do not hold it up.
+3. **Choose a template, draft the translation pipeline.** The XSLT is generated from a field mapping (`build_translation_xslt`) rather than written by hand, wherever a mapping can express it. Search for translation-stage template pipelines (`find_pipeline_templates`), see how existing children specialise them, and learn what shared elements such as user decoration expect. Environments often keep common steps in shared XSLTs that their translations import by name (`xsl:import href="Common-Event-V1"`), e.g. a named template writing `EventSource/Device` from `stroom:meta('MyHostName')`, or `Event/Meta` with the stream's GUID. `describe_template` reads the children's XSLTs, looks each imported document up by name as Stroom resolves it, and reports every named template they call: where (the element it writes), what it writes and reads, and the parameters passed. The mapping's `shared` entries make the generated XSLT import the same document and call the template in that element's place; mapping anything below an element a shared template writes is refused, as it would be written twice and fail schema validation. Create a child of the chosen template, supplying only the source-specific `TextConverter` (Data Splitter or XML Fragment) and `XSLT`. Stroom's standard Event Data (Text) or Event Data (XML) pipelines are the fallback. The user confirms the chosen template before the child is created. Field mappings and event types follow the field dictionary and event catalogue when there are source notes.
+4. **Step every sample record to completion.** `/api/stepping/v1/step` accepts a `code` map that overrides element code for the session, so the agent tries XSLT revisions without saving them. It steps every record of the sample, not a subset; each step returns per-element input, output and error indicators, and any blocking error sends it back to step 3. Stepping errors are triaged with the same rules as Error streams, so benign decoration warnings do not hold it up. The agent resolves the errors its own content causes (mapping, XSLT, text converter) itself, stepping again until they are gone, before involving the user; only errors it cannot resolve (an inherited element, reference data, the source data) go to the user, who may accept them as benign (step 12). Errors already accepted for the pipeline are reported as benign, with the user's reason.
 5. **Save and process the sample.** When every record steps clean, save the docs and create a processor filter on the sample stream ids. This run only produces the `Events` stream that stage 2 needs; before stage 2 the agent checks that every raw sample stream has exactly one child Events stream, with records, and that the counts match the stepped records. More than one means the raw stream was processed twice (overlapping filters or a stray reprocess), which would give the indexing stage duplicate events, so the agent reports it and asks which to keep. A raw stream with no Events means processing failed despite clean stepping (a failed task, a fatal error, a filter that missed the stream), so the agent reads that stream's task status and Error stream, fixes the cause and reprocesses it (`reprocess_streams`), or asks the user. Beyond this gate, stage 1 Error streams are not iterated on.
-6. **Draft the index template.** Apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference index docs (their fields read through Stroom), and draft a new template.
+6. **Draft the field plan.** Apply the field convention the user or configuration selected (never an assumed one), check names and types against that convention's reference index docs (their fields read through Stroom). For Elasticsearch, the user's example index template comes first: each field takes the example's name for the same data (its `User.Id` for the user, `TypeId` for the event type), matched by the event-logging path's own element names, then by known convention names; fields the example lacks are named in its style (PascalCase, camelCase or ECS-style, dotted or run together), and sample paths it maps are added. The indexing XSLT writes dotted names as nested objects (`"user": {"id", "name", "emailAddress"}`), calling any shared indexing templates in place of the fields they write.
 7. **Choose a template, build the indexing pipeline.** Search for indexing-stage templates the same way; a local one may already set the Elastic cluster, batch size and shared enrichment. Inherit from it (fallback: Indexing (Elasticsearch)). The indexing filter's `cluster` property must point at an existing Elastic Cluster doc: the agent takes the one that existing Elastic Index docs and indexing pipelines for similar data already use (`find_elastic_clusters`) and checks it with `elasticCluster/v1/testCluster`. It never creates a cluster doc, since that holds credentials; if none fits, it asks. The cluster, the indexing template, the field convention and the destination index or data stream name (with its version) are proposed together at the start of stage 2, and the user confirms or corrects them before anything is drafted or created. The child's XSLT emits the `xpath-functions` JSON-XML `array`/`map` form with `StreamId`, `EventId` and `@timestamp`.
 8. **Step Events through it.** Step the cooked Events and compare each stepped document's fields and value shapes with the draft template. Fix the XSLT or the template on a mismatch.
 9. **Agree the template, then hand over the filter.**
    - The agent suggests the index template once the indexing pipeline steps clean (`propose_index_template`). It is rendered from the field plan for the pipeline's own destination index, as a Kibana Dev Tools request, and already checked against the documents the pipeline writes.
    - If the user sends back a changed template, `check_index_template` steps the candidate indexing pipeline and checks every document field against it. It checks that `index_patterns` cover the pipeline's index and that values fit the mapped types, including date formats and IPs. It also checks the `dynamic` setting for unmapped fields, fields mapped as values that the pipeline writes as objects (or the reverse), `@timestamp` for data streams, and fields the template renamed or added.
    - When the template does not fit, the agent lists the pipeline changes it needs (e.g. rename `user.name` to `user.id` in the indexing XSLT) and asks whether to make them or change the template instead.
-   - The user commits the template; the server has no Elasticsearch access of its own. Events reach Elasticsearch only through the Stroom indexing pipeline.
+   - The server has no Elasticsearch access of its own: the cluster admin commits the template, and events reach Elasticsearch only through the Stroom indexing pipeline.
    - The agent asks the user for an example: the Elasticsearch index template a sibling source's index uses (or an existing index's mapping) and the component templates it is composed of. `propose_index_template` builds the index template for the new index from them, following their conventions: the new index's pattern; the example's settings and `composed_of`; fields the examples map left as they map them; new fields mapped in the examples' style for their type (`ignore_above`, `.keyword` sub-fields, date formats); field names unlike theirs reported, for the agent to rename in the field plan and build again. When it fits the documents the pipeline writes, the user confirms it as shown, or corrects it (`check_index_template` with their version, confirmed there when it fits). The agreed template is kept in the indexing pipeline's description, with the index, cluster and a digest of the indexing XSLT it was agreed for. The user then has the cluster admin commit it; `create_processor_filter` refuses an Elasticsearch pipeline without an agreed template for its current index and code, and its approval asks the user to confirm the agreed template is committed to the cluster, as documents arriving before it would create the index without it.
-10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
-11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace: a query on that index and a table with a minimal field set (`StreamId`, `EventId`, the time field and a few key fields from the template). Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; and a time-range search around the sample timestamps. Each must return the expected records, which checks the mapping and the way people will actually search it. A failed search sends the agent back to step 7.
-12. **Document.** Write Stroom Documentation docs for the events and indexing pipelines (`write_documentation`) from what stages 1 and 2 measured: the field mapping, event types from the processed sample, the index template and version, and the verification results. The same summary is returned in the chat.
+   ```mermaid
+   sequenceDiagram
+       actor User
+       participant Agent
+       participant Server as Stroom MCP server
+       participant Stroom
+       actor Admin as Cluster admin
+       participant ES as Elasticsearch
+       Agent->>User: An example index template (and any component templates)?
+       User-->>Agent: GET _index_template/... as Dev Tools shows it
+       Agent->>Server: draft_index_mapping with the example
+       Server-->>Agent: field plan, named as the example names fields
+       Agent->>Server: save_xslt, create_indexing_pipeline, step_sample
+       Server->>Stroom: create, step
+       Agent->>Server: propose_index_template (plan, example)
+       Server->>Stroom: step the pipeline: the documents it writes
+       Server-->>User: Use this index template, as shown?
+       opt the user corrects it
+           User-->>Agent: the changed template
+           Agent->>Server: check_index_template
+           Server-->>User: Use this one? (when it fits the documents)
+       end
+       Server->>Stroom: the agreed template, kept with the pipeline
+       Agent->>User: the Dev Tools request, for the cluster admin
+       User->>Admin: apply it
+       Admin->>ES: PUT _component_template, _index_template
+       User-->>Agent: it is committed
+       Agent->>Server: create_processor_filter
+       Server-->>User: Approve: the agreed template is committed, start indexing?
+       Server->>Stroom: processor filter, enabled
+       Stroom->>ES: documents, through the indexing filter
+   ```
+
+10. **Triage indexing outputs.** Stepping does not write to Elasticsearch, so mapping conflicts and bulk rejections only appear now. While the pipeline is in the workspace, `create_processor_filter` and `reprocess_streams` set its batch size to 10, so a rejected document comes back whole in the Error stream rather than cut short in a large bulk response; `wait_for_processing` removes the setting once indexing completes without errors (the template's default applies again), and promotion makes sure of it. Reprocessing a stream into Elasticsearch does not remove the documents it already put there (Stroom's purge on reprocess does not apply to a second filter, and the server has no Elasticsearch access), so the approval gives the cluster admin the `_delete_by_query` request to run first. Stroom reports a bulk request with failures as one message holding Elasticsearch's whole response; triage splits it into one entry per rejected document (which one in the batch, and why: a value where an object was mapped, a type it cannot parse, a field name Elasticsearch refuses, the field limit), each with what to do. The agent reads the indexing Error streams, classifies them as blocking, review or benign (see Error triage), fixes the XSLT or template and reprocesses on blocking errors, then runs Stroom's connection check (`elasticIndex/v1/testIndex`).
+11. **Verify the Stroom way.** Create an Elastic Index doc for the target index or data stream on the same Elastic Cluster doc the indexing filter writes through, copying settings such as the time field and search scroll size from existing Elastic Index docs on that cluster (its fields load from the mapping) and a verification dashboard in the workspace, laid out for the people who will search it. The agent suggests the table's columns (the time field and the plan's key fields: user, host, address, event type, outcome) and the user confirms them before the dashboard is made. The query has one term, the time field, from the sample's earliest event rounded back to a 30-day boundary through the end of today (`day()+1d`, so events stamped later today are included), and runs when the dashboard opens. The table shows the user's columns, newest first; `StreamId` and `EventId` are hidden columns, for the text pane and tracing hits. A text pane, linked to the table, shows the selected row's record, with stepping enabled and no extraction pipeline. The dashboard belongs to the build that made the index: verifying another build's or production's index searches through an unsaved dashboard. Then run test searches through Stroom's dashboard search API: all documents for the sample stream ids, whose count must match the Events records; an exact-match search on each key field using a value from a stepped document; a time-range search around the sample timestamps; and the searches people will make (a value in another case, which must find nothing on keyword fields, IN, wildcards, numeric and IP ranges, full text). Each must return the expected records, which checks the mapping and the way people will actually search it. Given the indexing pipeline, each check's first hit is traced back to its record: the pipeline is stepped at the hit's StreamId and EventId, and the document there must be the hit and hold the value searched for. A failed search sends the agent back to step 7. Some conditions answer wrongly on Elasticsearch through Stroom 7.13, without an error (STARTS_WITH and CONTAINS find nothing; IS_NULL and IS_NOT_NULL match everything; IN needs commas): `verify_index` refuses them and names what to use (EQUALS with `*` wildcards, EQUALS `*` for any value).
+
+    ```mermaid
+    flowchart LR
+        U["The user confirms the columns"] --> A["verify_index"]
+        A --> B["Dashboard on the index doc: opens on the time field<br/>from the sample through today; columns newest first;<br/>text pane with stepping"]
+        B --> C["All documents of the streams:<br/>the count must match"]
+        B --> D["Searches: exact, case, IN, wildcard,<br/>regex, ranges, IP/CIDR, full text"]
+        C & D --> T["Each check's first hit: step the indexing<br/>pipeline at its StreamId and EventId"]
+        T --> Q{"The same document,<br/>holding the value?"}
+        Q -- "yes" --> OK["pass"]
+        Q -- "no" --> NO["fail: which record, and why"]
+    ```
+
+12. **Document.** Write Stroom Documentation docs for the events and indexing pipelines (`write_documentation`) from what stages 1 and 2 measured: the field mapping, event types from the processed sample, the index template and version, and the verification results. The Errors section is generated: every kind of error processing the sample produced, with counts and examples. Errors the agent's own content causes are fixed before this point; an error it cannot resolve (an inherited element, reference data, the source data) that the user says is benign is recorded there with their reason (`accept_errors`, confirmed by the user, optionally covering a kind with `*`), and triage then reports it as benign for that pipeline, so later reviews do not raise it again. The same summary is returned in the chat.
 13. **Promote on approval.** Everything so far lives in the workspace. `build_status` shows what the build still lacks (a clean step of each pipeline's current code, documentation). `promote_build` proposes destination folders from where sibling sources live; the user confirms them and approves, with any of those warnings in view, and the docs are moved into place. Each promoted pipeline gets a processor filter for new data on its feed, created disabled, with a link to the pipeline for the user to review and enable it.
 
 ## Further use cases
@@ -78,15 +172,43 @@ Six further jobs. The evaluation is read-only. The two updates start from existi
 
 Triggered by new samples the current XSLT does not handle, or a reported issue such as a missed or wrongly translated field.
 
+```mermaid
+flowchart TD
+    A["Locate the pipeline,<br/>its XSLT and text converter"] --> B{"Trigger"}
+    B -- "new samples" --> C["Upload to a workspace<br/>test feed, FEED-MCP-TEST"]
+    B -- "a reported issue" --> D["Example records from production<br/>Raw Events, or ids the user gives"]
+    C & D --> E["Revise the mapping or XSLT,<br/>stepped as draft code"]
+    E --> F["compare_outputs: current and draft,<br/>record by record"]
+    F -- "other differences" --> E
+    F -- "only the intended fields" --> G{"The user: a new version,<br/>or in place? Names?"}
+    G -- "new version" --> H["copy_pipeline and the draft<br/>code, in the workspace"]
+    G -- "in place" --> I["A working copy<br/>of the XSLT"]
+    H & I --> J["Document, with a change log"]
+    J --> K["Promote on approval<br/>(in place: backup, then write)"]
+```
+
 1. **Locate the baseline.** Find the pipeline by name or feed (`find_documents`, `describe_document`) and read its XSLT and text converter.
 2. **Gather test records.** New samples go to a workspace test feed with the production feed's settings (`<FEED>-MCP-TEST`), never to the production feed, where live processor filters would pick them up. For a reported issue, the agent finds example records in the production feed's recent Raw Events (`find_streams`, `read_stream`), or uses stream and record ids the user gives.
 3. **Revise with draft code.** Stepping accepts draft XSLT through the `code` map, so the existing pipeline is stepped over the test records and a regression set of recent production records without saving anything.
 4. **Compare outputs.** `compare_outputs` steps the same records through the current and draft code and diffs each event. There must be no blocking errors, and differences must be limited to the fields the change targets; anything else goes to the user.
-5. **Confirm how to save, then save.** The agent asks whether to create a new version or change the current pipeline in place, and proposes names from the baseline's versioning convention, e.g. `Keycloak-V1.2-Events` becomes pipeline and XSLT `Keycloak-V1.3-Events`. The user confirms the choice and the pipeline and translation names, or edits them. A new version is made in the workspace with `copy_pipeline` (pipeline, XSLT and text converter) plus the draft code; an in-place change is saved to a working copy of the XSLT in the workspace. Nothing in production changes until the user approves promotion: a new version is then moved into place and gets its processor filter, with the current version left running until the user retires it; an in-place change is written into the production XSLT after a backup. Reprocessing historical data with the production pipeline is the user's to do (see Design decisions); the agent lists the streams the change would affect. Test records in the build are reprocessed as part of development. The Documentation doc is created for a new version, noting what changed, or updated with a change-log entry for an in-place change.
+5. **Confirm how to save, then save.** The agent asks whether to create a new version or change the current pipeline in place, and proposes names from the baseline's versioning convention, e.g. `Keycloak-V1.2-Events` becomes pipeline and XSLT `Keycloak-V1.3-Events`. The user confirms the choice and the pipeline and translation names, or edits them. A new version is made in the workspace with `copy_pipeline` (pipeline, XSLT and text converter) plus the draft code; an in-place change is saved to a working copy of the XSLT in the workspace, and its documentation is the production pipeline's: `write_documentation` on the working copy updates a working copy of the Documentation doc beside the production pipeline (or creates one under its name, promoted beside it), which promotion writes back after a backup. Nothing in production changes until the user approves promotion: a new version is then moved into place and gets its processor filter, with the current version left running until the user retires it; an in-place change is written into the production XSLT after a backup. Reprocessing historical data with the production pipeline is the user's to do (see Design decisions); the agent lists the streams the change would affect. Test records in the build are reprocessed as part of development. The Documentation doc is created for a new version, noting what changed, or updated with a change-log entry for an in-place change.
 
 **Update an indexing pipeline (as a new version)**
 
 Triggered by a request to index more fields or change how fields are mapped. In-use production indices stay untouched: the agent builds a new versioned pipeline beside the current one.
+
+```mermaid
+flowchart TD
+    A["Locate v1: pipeline, index doc,<br/>index or data stream, its template"] --> B["The next version's name,<br/>e.g. ...-v2, confirmed"]
+    B --> C["copy_pipeline as v2,<br/>indexName bumped; a v2 index doc"]
+    C --> D["Field changes in the plan;<br/>the template from v1's, bumped"]
+    D --> E["compare_outputs: v1 and v2 documents;<br/>only the changed fields differ"]
+    E -- "other differences" --> D
+    E --> F["v2 template agreed with the user,<br/>committed by the cluster admin"]
+    F --> G["v2 filter on new Events,<br/>from a create time"]
+    G --> H["Triage, verify, document"]
+    H --> I["Promote on approval; moving<br/>readers to v2 is the user's"]
+```
 
 1. **Locate the baseline.** Find the indexing pipeline, its Elastic Index doc, the index or data stream it writes to, and its index template.
 2. **Work out the next version.** With the convention `stroom-windows-events-v1`, the candidate is `stroom-windows-events-v2`. The pattern is configurable (`index_versioning.pattern: '{base}-v{n}'`); if the current name does not match it, the agent asks. The v2 name and the cluster are confirmed like any stage 2 destination.
@@ -94,26 +216,59 @@ Triggered by a request to index more fields or change how fields are mapped. In-
 4. **Revise the XSLT and template.** The template draft starts from the v1 template, renamed and with `index_patterns` bumped to v2, then applies the requested field changes under the selected field convention.
 5. **Step and compare.** `compare_outputs` steps the same Events records through v1 and v2 and diffs the documents. Only the added or changed fields may differ, and each must match the v2 template.
 6. **Hand over.** The agent proposes the v2 template (`propose_index_template`) and checks any changes the user sends back (`check_index_template`). Once the user has agreed it and the admin has committed it, the v2 indexing filter starts, on new Events from a create time, after the user's approval; backfilling older streams is the user's. Then triage its outputs and verify through a v2 Elastic Index doc and dashboard, as in steps 10 and 11. The v2 pipeline gets its own Documentation doc, noting what changed from v1. Moving readers from v1 to v2 and retiring v1 are the user's (see Design decisions).
+
 **Create a discovery index**
 
-A discovery index lets people explore raw structured data, such as JSON, before or instead of writing a translation. A simple indexing pipeline reads the Raw Events stream, parses it to JSON XML and indexes it as it is, with no event-logging step.
+A discovery index lets people explore raw data (JSON, delimited text such as CSV, or XML) before or instead of writing a translation. A simple indexing pipeline reads the Raw Events stream, parses it and indexes each record as it is, with no event-logging step.
+
+```mermaid
+flowchart TD
+    S{"Source"} -- "a sample" --> N["A new workspace feed,<br/>the sample uploaded"]
+    S -- "an existing raw feed" --> X["Its raw streams; one record read,<br/>only to confirm the time field"]
+    N & X --> Q["One message to the user: cluster, index name,<br/>pipeline template, time field, stream meta,<br/>fields to drop, an example index template"]
+    Q --> D["draft_index_mapping discovery=...: nothing surveyed;<br/>records copied as they are, JSON in strings unpacked,<br/>keys Elasticsearch or Stroom would lose renamed"]
+    D --> P["Discovery pipeline from the template,<br/>stepped over the sample or newest streams"]
+    P --> T["Permissive template: dynamic mapping, guardrails,<br/>the example's settings; agreed, committed"]
+    T --> F["Index the existing streams by id,<br/>new ones by a feed filter"]
+    F --> R{"Error streams?"}
+    R -- "rejected documents" --> E["Triage: which document and why;<br/>the user decides (drop the field, or accept)"]
+    E --> F
+    R -- "clean" --> V["Verify through Stroom, hits traced to records;<br/>document the fields the sample held"]
+    V --> M["Promote on approval"]
+```
 
 1. **Choose the source.** An existing Raw Events feed, or a sample uploaded to a new workspace feed as in steps 1 and 2.
 2. **Choose a template.** Look for a discovery-stage template pipeline as in step 7 (`pipeline_templates.discovery`); in the reference environment that is `Raw to Elasticsearch`; the fallback is a minimal chain: `JSONParser`, `XSLTFilter`, `ElasticIndexingFilter`.
-3. **Draft the XSLT, surveying nothing.** Elasticsearch maps the source's fields dynamically as documents arrive, so the raw data is not profiled or read through first: the user confirms the timestamp field (and its format if it is not ISO 8601 or epoch milliseconds), any stream meta to add and any fields to drop, and `draft_index_mapping` with `discovery` turns that into a discovery field plan. Its XSLT copies each `JSONParser` record from the `http://www.w3.org/2013/XSL/json` namespace into the `xpath-functions` one the indexing filter reads, with the source's own field names, adding `StreamId` (`stroom:stream-id()`), `EventId` (`stroom:record-no()`: the template splits one record at a time, so it finds exactly that record again) and `@timestamp`, and the stream meta (`stroom:meta()`). A string holding a JSON object, such as a `message`, is also parsed with `json-to-xml()` into a sibling `<field>_json` object; the string is kept, so a field that is only sometimes JSON keeps one type, and text that is not valid JSON is left as it is. Keys that would be lost are kept under another name: Elasticsearch refuses its metadata fields (`_id`) and Stroom's indexing filter silently drops any key starting with `_`, so those become `<key>_original` without the `_`, as do top-level keys repeating `StreamId`, `EventId` or `@timestamp`; empty keys and keys with an empty dotted part are repaired. A record Elasticsearch still rejects (a field that is an object in one record and a value in another) is reported in an Error stream, which triage splits out of Elasticsearch's bulk response: which document, why, and what to do. XML or CSV sources need a small mapping XSLT instead. Anything beyond this, such as a full event-logging translation, belongs in `onboard_data_source`. The XSLT is saved from the plan and stepped over the raw streams: the documents show what the source holds.
+3. **Draft the XSLT, surveying nothing.** Elasticsearch maps the source's fields dynamically as documents arrive, so the raw data is not profiled or read through first: the user confirms the timestamp field (and its format if it is not ISO 8601 or epoch milliseconds), any stream meta to add and any fields to drop, and `draft_index_mapping` with `discovery` turns that into a discovery field plan. Its XSLT copies each `JSONParser` record from the `http://www.w3.org/2013/XSL/json` namespace into the `xpath-functions` one the indexing filter reads, with the source's own field names, adding `StreamId` (`stroom:stream-id()`), `EventId` (`stroom:record-no()`: the template splits one record at a time, so it finds exactly that record again) and `@timestamp`, and the stream meta (`stroom:meta()`). A string holding a JSON object, such as a `message`, is also parsed with `json-to-xml()` into a sibling `<field>_json` object; the string is kept, so a field that is only sometimes JSON keeps one type, and text that is not valid JSON is left as it is. Keys that would be lost are kept under another name: Elasticsearch refuses its metadata fields (`_id`) and Stroom's indexing filter silently drops any key starting with `_`, so those become `<key>_original` without the `_`, as do top-level keys repeating `StreamId`, `EventId` or `@timestamp`; empty keys and keys with an empty dotted part are repaired. A record Elasticsearch still rejects (a field that is an object in one record and a value in another) is reported in an Error stream, which triage splits out of Elasticsearch's bulk response: which document, why, and what to do. Delimited text and XML are indexed the same way (`discovery.input`): a Data Splitter's record gives one field per column, named by the header; an XML record element (`discovery.record`, matched by name whatever its namespace) becomes nested objects, with repeated elements as arrays and attributes as fields. All their values are text, so the template turns on Elasticsearch's numeric detection (`"200"` becomes a number; an odd value is ignored as malformed). An XML discovery pipeline has the shape of an indexing pipeline (XMLParser, XSLT, indexing filter), so `create_indexing_pipeline` tells them apart by the discovery plan kept with the XSLT. Anything beyond this, such as a full event-logging translation, belongs in `onboard_data_source`. The XSLT is saved from the plan and stepped over the raw streams: the documents show what the source holds.
 4. **Draft a permissive template.** Field names stay as in the source, so no field convention applies. The template uses dynamic mapping with guardrails from the plan: strings as `keyword` (with `ignore_above`, 1024 by default), no date guessing, a total-fields limit (2000), `ignore_malformed`, and explicit types only for `StreamId`, `EventId` and `@timestamp`. As for any index, the user is asked first for an example index template (a sibling discovery index's) and its component templates; the template takes the example's settings and component templates, not its fields or mapping rules, and is not offered to agree until the example is given.
 5. **Confirm, step and apply.** Cluster, destination name (e.g. `stroom-discovery-<source>-v1`), template pipeline, timestamp field and the meta and fields to drop are confirmed in one prompt. The agent steps every sample record and proposes the template; the user confirms it (or corrects it, `check_index_template`), and once they say the admin has committed it, the processor filter on the raw streams starts, after the user's approval.
 6. **Verify the Stroom way.** Triage and verify as in steps 10 and 11. The discovered field list, read through the Elastic Index doc, can seed the sample profile when the source is later onboarded with a full translation. The discovery pipeline is documented like any other.
+
 **Evaluate and document an events pipeline**
 
-A read-only review that explains an existing translation and measures its output against the event-logging schema. Nothing is changed; suggested fixes go to `update_events_pipeline` if the user wants them.
+A read-only health check: is anything wrong with the pipeline that is worth worrying about, schema compliance above
+all? It also explains what the translation does. Nothing is changed; when the user asks, suggested fixes are proven
+and applied as for a reported issue. (A user who already knows what is broken starts from `fix_pipeline_issue`.)
+
+```mermaid
+flowchart TD
+    A["Describe the pipeline:<br/>chain, template, XSLT, feeds"] --> B["Errors first: its Error streams' groups,<br/>stepping its raw records now"]
+    B --> C["Records against events: Stroom does not store<br/>an event that fails the schema"]
+    C --> V{"Errors worth<br/>worrying about?"}
+    V -- "blocking: schema failures,<br/>fatal errors, records lost" --> W["Each with the records and events it<br/>affects, an example, and a draft fix"]
+    V -- "review or benign" --> N["Counted, not alarmed about"]
+    W & N --> D["Map the translation: input fields read,<br/>raw fields never read"]
+    D --> E["Inventory the events:<br/>type, TypeId, Action, path population"]
+    E --> R["Report in the chat, and a<br/>Documentation doc on approval"]
+    W -- "the user asks for a fix" --> F["summarise_fix: only the expected fields change,<br/>no new errors; then applied as for a reported issue"]
+```
 
 1. **Describe the pipeline.** Element chain, inherited template, text converter, XSLT, reference data and decoration lookups, and the feeds its processor filters cover (`describe_document`, `processing_status`).
-2. **Sample the data.** Recent Raw Events and their Events streams from each feed, up to `max_sample_records` (`find_streams`, `read_stream`). Stepping a handful of records shows input and output side by side.
-3. **Map the translation.** `describe_document` reads the XSLT and lists which input fields feed which event-logging paths; comparing that with the sample profile shows input fields that are never used.
-4. **Inventory the events.** `summarise_streams (kind=events)` counts events by `EventDetail` type, `TypeId` and `Action`, with examples, and reports how often each path is populated.
-5. **Measure conformance.** Validate the sampled events against the schema version the pipeline targets and the latest version the instance holds (`check_events`, which also runs the quality rules), and triage recent Error streams (`summarise_streams (kind=errors)`). Results are rates, e.g. 97% valid, 12% missing `EventSource/Device/IPAddress`.
-6. **Suggest improvements.** Prioritised changes, each with the rule or field it fixes, the share of events affected and a draft XSLT change.
+2. **Errors and schema compliance, first.** The pipeline's Error streams for recent raw streams (`summarise_streams (kind=errors)`), triaged as blocking, review or benign; `check_events` on sampled Events records; and `step_sample` over up to `max_sample_records` raw records, which shows the errors the current code gives now. Records stepped are compared with events stored: Stroom does not store an event that fails the schema, so the stored events can all be valid while records are being lost.
+3. **Say whether anything is worth worrying about.** Blocking groups (schema failures, fatal errors, records not translated) each with the records and events affected and an example; review groups; benign ones only as a count. E.g. "6 records, 5 events: one record's event fails on `EventSource/Device/IPAddress` ('n/a') and is not stored".
+4. **Map the translation.** `describe_document` reads the XSLT and lists which input fields feed which event-logging paths; comparing that with the raw data shows input fields that are never used.
+5. **Inventory the events.** `summarise_streams (kind=events)` counts events by `EventDetail` type, `TypeId` and `Action`, with examples, and reports how often each path is populated.
+6. **Suggest fixes.** Prioritised, blocking errors first, each with what it fixes, the share of records or events affected and a draft change to the pipeline's own XSLT or text converter. When the user asks for one, `summarise_fix` proves it (only the expected fields change, and it adds no errors) and it is applied as in Fix a reported pipeline issue.
 
 The report is returned in the chat and saved as the pipeline's Documentation doc: written in the workspace and, on approval, moved beside the pipeline or written into its existing doc after a backup, with a change-log entry. It uses the shared documentation sections, with suggestions under Open items:
 
@@ -123,12 +278,28 @@ The report is returned in the chat and saved as the pipeline's Documentation doc
 | Processing | Element chain, inherited template, reference lookups and decoration |
 | Field mapping | Input field to event-logging path, unused input fields |
 | Event types | `EventDetail` types, `TypeId`s and `Action`s, with counts and examples |
-| Schema conformance | Validation and quality pass rates, schema version gap, recent error groups |
+| Errors and schema conformance | Whether anything is worth worrying about: blocking and review error groups with records affected, records against events stored, validation and quality pass rates, schema version gap |
 | Suggestions | Prioritised changes with rationale and draft XSLT |
 
 **Build a pipeline for a feed that already holds data**
 
 The user names an existing Raw Events feed instead of giving a sample. Not every kind of event shows up in every stream, so the agent samples stream after stream until more streams add nothing new. It only reads and steps: no feed is created, nothing is uploaded or processed, so there are no filters or streams to clean up.
+
+```mermaid
+flowchart TD
+    A["survey_feed: streams spread over the feed's life,<br/>the head of each only"] --> B["Kinds of event (shapes), with<br/>examples and where each one is"]
+    B --> C["A mapping rule per shape;<br/>step_records on the feed's own records"]
+    C -- "blocking" --> C
+    C --> D{"Covered?"}
+    D -- "not yet" --> E["Survey again,<br/>skipping the streams read"]
+    E --> B
+    D -- "yes" --> F["Broad check: step_sample over<br/>the head of three streams"]
+    F --> G{"Kinds not worth translating?"}
+    G -- "the user agrees" --> H["set_shape_handling: dropped by a rule,<br/>with the user's reason"]
+    G -- "none" --> I["Document, promote on approval"]
+    H --> I
+    I --> J["The user starts processing;<br/>index_event_data once Events exist"]
+```
 
 1. **Survey.** `survey_feed` picks streams spread over the feed's lifetime (by create time, read newest, oldest, then the middle, then the quarters, so any prefix spans the whole range) and reads only the head of each: up to 250,000 characters of up to 3 parts, and 1,000 records, so a multi-GB stream costs the same as a small one. A cut-off last record is dropped, and JSON arrays and XML are parsed incrementally, so only complete records count. It groups the records into shapes, one per kind of event. For JSON, XML and key=value records a shape is the set of fields plus the values of fields that usually name the event (`action`, `event`, `type` and similar). For delimited data it is the values of those naming columns, or of low-variety columns when none is named that way. For syslog and other text it is the message with numbers, addresses and quoted strings masked, merged with messages that differ only in a few words, such as user names. A message-like field (body, message...) is unwrapped: JSON inside it, after any text prefix or byte order mark, is signed by its fields and naming values (logger names count), and naming `key=value` pairs keep their values (`type="LOGIN"`), so a wrapper such as syslog shipped as JSON does not hide the kinds of event. The survey stops when a few streams in a row add no new shape, and returns each shape's count, share and examples, with where each example is (stream, part, record), and says plainly whether the feed is covered yet.
 2. **Translate every shape, stepping in place.** The mapping gets one rule per shape (`build_translation_xslt`), and `step_records` steps the translation on the survey's locations, the feed's own records, until clean. Records no rule matches are logged, not dropped, so a missed shape shows up. Kinds not worth translating (housekeeping, debug) are shown to the user with their share; only if the user agrees are they left untranslated: `set_shape_handling` records the choice and the user's reason in the survey doc (a confirmation), the mapping gets an explicit drop rule for them, and their locations are stepped expecting no Event.
@@ -142,10 +313,24 @@ The survey is kept in the build as a Documentation doc, `<FEED> - Survey`: the k
 
 A user reports that something came out wrong, often one event type that is not translated properly, and gives a Stream ID and optionally an Event ID (as a dashboard shows them). The agent finds where it came from, confirms the problem, proves a fix and offers it. Nothing changes unless the user asks for the fix to be applied.
 
+```mermaid
+flowchart TD
+    A["A Stream ID, and an Event ID,<br/>from the user"] --> B["locate_event: the raw part and record,<br/>the stored and current event, the code"]
+    B --> C["Plan: the output expected,<br/>the wrong paths, records to check"]
+    C --> D{"Does it reproduce<br/>when stepped?"}
+    D -- "no" --> Q["Say what was found,<br/>and ask the user"]
+    D -- "yes" --> E["Draft the fix in the<br/>pipeline's own XSLT"]
+    E --> F["summarise_fix: the reported and recent<br/>records, draft against saved"]
+    F -- "other paths change, or blocking" --> E
+    F -- "only the expected paths" --> G{"The user"}
+    G -- "apply" --> H["update_events_pipeline: new version<br/>or in place, compare, promote"]
+    G -- "manual" --> I["The steps and diff,<br/>to apply in Stroom"]
+```
+
 1. **Locate.** `locate_event` accepts an Events, Error or Raw Events stream id. An output stream leads to its parent raw stream and the pipeline that produced it; a raw stream leads to its Events child. With an Event ID, the agent steps the raw stream record by record, counting the events each record produces, until it reaches that event. It returns the raw part and record, the record's input, the stored event, the event stepping gives now, and the XSLTs and text converters the pipeline runs (marking any inherited from a template). This works on multi-part streams: Stroom numbers records within each raw part, while the Events stream's events run on across parts, and a record can produce no events or several.
 2. **Plan the validation.** In a few lines the agent says what output the record should give (from the user's words, the schema and any source notes), which field paths are wrong now, and which other records it will check: recent raw streams on the same feed and the same event type (`find_streams`, `summarise_streams (kind=events)`).
 3. **Confirm the issue.** `step_pipeline` on the located part and record, `check_events`. If the problem does not reproduce, the agent says what it found and asks the user rather than guessing a fix.
-4. **Draft and prove the fix.** The fix goes in the pipeline's own XSLT or text converter, tried with draft code. `summarise_fix` steps every record of the reported stream and a few recent ones with the draft, and diffs the output against the saved code. The fix is ready when it changes the reported output, only the expected field paths change, and stepping has no blocking errors. It also returns the code diff and manual steps, and warns when the code belongs to a template shared by other pipelines.
+4. **Draft and prove the fix.** The fix goes in the pipeline's own XSLT or text converter, tried with draft code. `summarise_fix` steps every record of the reported stream and a few recent ones with the draft and with the saved code, and diffs the output. The fix is ready when it changes the reported output, only the expected field paths change, and stepping with it brings no blocking error the saved code does not have. Errors the saved code has too are reported apart, as not the fix's doing (a pipeline can have more than one problem); errors the draft clears are reported as resolved. It also returns the code diff and manual steps, and warns when the code belongs to a template shared by other pipelines.
 5. **Offer it.** The agent shows the diff, the fields that change and on how many records, and asks whether to apply it. **Apply** follows `update_events_pipeline`: the user chooses a new version or an in-place change and confirms the names, then the agent copies, updates, compares against the original, documents and promotes on approval. **Manual** returns the steps to apply it in Stroom with the diff. In both cases reprocessing production data is the user's.
 
 ## Architecture
@@ -284,7 +469,7 @@ The drafting steps use both: which fields are users, devices or addresses, and w
 
 ## MCP tool catalogue
 
-58 tools in 14 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
+52 tools in 14 groups. Tools are task-shaped rather than one-per-endpoint: each hides DocRef plumbing, pipeline JSON, expression trees and paging, and returns only what the model needs next. Write tools are marked **W**; those needing user approval are marked **A**.
 
 **Explorer and reference content** (`tools/explorer.py`)
 
@@ -421,7 +606,7 @@ Stepping holds no session between calls: each step is a fresh request from the l
 | `create_index_doc` **W** | The build's index doc: an Elastic Index doc on an existing Elastic Cluster, or a Lucene Index doc in a volume group, with settings copied from sibling index docs | `explorer/v2/create`, `elasticIndex/v1` or `index/v2`, `dataSource/v1/findFields` |
 | `create_indexing_pipeline` **W** | Child of the chosen indexing template (e.g. `Events to Elasticsearch`, or `Indexing` for Lucene) with its XSLT and index property | as `create_pipeline` |
 | `create_index_doc` | Elasticsearch: Stroom's own connection and index test | `elasticIndex/v1/testIndex` |
-| `verify_index` **W** | Workspace dashboard with a query on the index doc and a table of a minimal field set (`StreamId`, `EventId`, time field, key fields); same on either backend | `explorer/v2/create`, `dashboard/v1/{uuid}` |
+| `verify_index` **W** | Workspace dashboard, after the user confirms its columns: a query on the index doc's time field from the sample's earliest event (rounded back to 30 days) through today, run on open; a table of the user's fields, newest first (`StreamId`, `EventId` hidden); a text pane on the selected record with stepping, no extraction pipeline; same on either backend | `explorer/v2/create`, `dashboard/v1/{uuid}` |
 | `verify_index` | Run test searches through the dashboard (stream id count, exact match per key field, time range, and any further searches: case, IN, wildcards, regex, numeric, date and IP/CIDR ranges, full text); with the indexing pipeline, each check's first hit traced back to its record by stepping it at the hit's StreamId and EventId. Searches Stroom answers wrongly on Elasticsearch (STARTS_WITH, CONTAINS, IS_NULL, IS_NOT_NULL) are refused with what to use instead and poll to completion; per search, pass or fail with expected and returned rows | `dashboard/v1/search` |
 
 Tools return compact JSON with a `hint` for the next step where one helps, and gates as a `status` (`needs_confirmation`, `needs_approval`, `needs_guidance`) when the client cannot answer forms. Stroom errors are mapped to short reasons (not found, permission, validation, version conflict). Output is cut to `max_response_chars`, as in the ES server.
@@ -553,7 +738,7 @@ The server includes no agent. The agent is whatever the user runs: a chat client
 | Prompts (optional) | The workflows, e.g. as slash commands | Eight prompts; a client without prompt support can send the same text |
 | Resources (optional) | Reference guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
 | Patience with long calls | Processing takes time | `wait_for_processing` returns at its timeout with a hint to call again |
-| Room for 58 tools | Some clients cap tools per request | Tool groups a client can switch off (e.g. Elasticsearch on a Lucene-only instance) |
+| Room for 52 tools | Some clients cap tools per request | Tool groups a client can switch off (e.g. Elasticsearch on a Lucene-only instance) |
 
 **For agent frameworks.** Replies are made to be routed on in code rather than by the model: gates come back as a `status` with an id, and verdicts are fields: stepping `verdict` (clean, review, blocking) and `shapes_not_clean`, the processing `gate` (pass or fail), survey `saturated` and `coverage`, and `before_promotion` from `build_status`. A framework can loop on those (e.g. draft, step, fix until clean) with the model only writing the mapping and explaining results, and keep its own state in the build: the survey doc and the build folder carry what a later session needs to carry on.
 
@@ -561,7 +746,7 @@ The server includes no agent. The agent is whatever the user runs: a chat client
 
 ## Open questions, risks and delivery
 
-The riskiest parts are driving stepping and pipeline JSON through REST APIs built for the Stroom UI, so a spike against a real 7.13 instance comes first.
+The riskiest parts are driving stepping and pipeline JSON through REST APIs built for the Stroom UI; they were proven first against a real 7.13 instance (`dev/api_checks`, findings in [FINDINGS.md](FINDINGS.md)).
 
 **Design decisions** (can be revisited)
 
@@ -603,21 +788,23 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 
 | Risk | Mitigation |
 | --- | --- |
-| Stepping API is session-based and UI-shaped; responses can be large | Wrap in `step_pipeline`, return only changed elements, trim output to budget, spike first |
-| `savePipelineJson` format is undocumented | Round-trip existing pipelines in the spike; build JSON from a fetched template, never from scratch |
+| Stepping API is session-based and UI-shaped; responses can be large | Wrap in `step_pipeline`, return only changed elements, trim output to budget; proven first against a local 7.13 stack |
+| `savePipelineJson` format is undocumented | Round-trip existing pipelines (checked in `dev/api_checks`); build JSON from a fetched template, never from scratch |
 | Model writes plausible but wrong XSLT | Schema and quality validation on every step; attempt limits; few-shot examples from existing translations |
 | Feed-wide filters process far more than the sample | Sample-id filters by default; approval, task limits and time bounds for anything wider |
 | Template drift from the selected convention | `draft_index_mapping` conflict report, and `check_index_template` against the user's template |
 
-**Delivery phases**
+**Capabilities and how each is proven**
 
-| Phase | Scope | Exit criterion |
+| Capability | Covers | Proven by |
 | --- | --- | --- |
-| 0. Spike | Auth path, datafeed upload, pipeline JSON round-trip, one stepping call, against a local Stroom 7.13 Docker stack | Script takes one CSV sample to a valid Events stream |
-| 1. Read and validate | Explorer, template discovery, streams, errors, stepping (read-only), pipeline evaluation, validation tools, resources | Agent can explain errors in an existing broken pipeline and produce an evaluation report for a working one |
-| 2. Stage 1 writes | Feeds, translation, pipelines, processing, write guard and approvals, translation updates with backups and output diffs, pipeline documentation, workspace promotion | CSV, JSON, XML and Syslog samples each reach valid Events; a reported field fix lands with a diff limited to that field |
-| 3. Stage 2 | Indexing on both backends (Lucene locally, Elasticsearch live), ES template tools, convention profiles, indexing pipeline, stepping checks, versioned indexing copies, discovery indices | Sample events indexed and found by the verification searches, mapping matches the selected convention; a v2 copy indexes an added field beside v1 |
-| 4. Clients | Sign-in as the user, forms for confirmations and approvals, VS Code setup, the evaluation set of 19 samples (`dev/eval`), with headless Claude Code as the agent (`run_agent.py`) | Sign-in as VS Code does it works end to end; every case's reference solution passes on the local stack. An agent on the default model passes every case with no hints, each case in most of its runs (`--repeat`); lighter models are measured against the same bar |
-| 5. Deployment | Container image, Helm chart, TLS, CI; the e2e suites against a live instance | Released as 0.1.0; the Phase 2, existing-feed and generator suites pass on the live instance and are cleaned up afterwards |
+| Stroom API access | Sign-in for scripts, datafeed upload, pipeline JSON round trip, stepping, against a local Stroom 7.13 stack | `dev/api_checks`: one CSV sample to a valid Events stream; what was found is in [FINDINGS.md](FINDINGS.md) |
+| Reading and validating | Explorer, template discovery (with the shared XSLTs pipelines import), streams, errors, stepping, pipeline evaluation, validation, resources | Errors in a broken pipeline explained and an evaluation report for a working one; read-only tools run against the live instance (`dev/live_readonly.py`) |
+| Translation | Feeds, translation from a mapping (shared templates called in place), pipelines, processing, the write guard, confirmations and approvals, updates with backups and output diffs, documentation, promotion | `dev/e2e_translation.py`: CSV, JSON, XML and syslog samples each reach valid Events, and a field fix lands with a diff limited to that field; `dev/e2e_generator.py`, `dev/e2e_existing_feed.py`, `dev/e2e_shared_xslt.py` |
+| Errors and invalid data | The agent's own errors fixed first; errors the user accepts as benign, documented and not raised again; Elasticsearch rejections reported per document; data that is not well-formed caught | `dev/e2e_errors.py` |
+| Evaluating and fixing existing pipelines | A health check of a production pipeline (errors and schema compliance first, then its mapping and events), suggested fixes proven, a reported issue located, reproduced, proven and applied in place | `dev/e2e_evaluate_and_fix.py`: on a pipeline the server did not build, a schema failure found (one record lost), a proven fix for it, and a reported issue fixed in place with a backup |
+| Indexing | Lucene and Elasticsearch; field plans from conventions or the user's example index template; templates agreed, then committed; discovery indices; versioned copies; verification | `dev/e2e_lucene_indexing.py` (a v2 copy indexes an added field beside v1); `dev/e2e_index_versions.py` (a v2 of a production Elasticsearch indexing pipeline: only the added field differs, its template from v1's, new Events only, v1 still running); `dev/e2e_elastic_handover.py --live` and `dev/e2e_discovery.py` against Elasticsearch 9: events indexed, every search found through Stroom and directly, each hit traced to its record |
+| Clients | Sign-in as the user, forms for confirmations and approvals, VS Code setup, the evaluation set of 19 samples (`dev/eval`), with headless Claude Code as the agent (`run_agent.py`) | Sign-in as VS Code does it works end to end (`dev/e2e_oauth.py`); every case's reference solution passes on the local stack. An agent on the default model passes every case with no hints, each case in most of its runs (`--repeat`); lighter models are measured against the same bar |
+| Deployment | Container image, Helm chart, TLS, CI; the e2e suites against a live instance | Released as a container image and Helm chart; the translation, existing-feed and generator suites pass on the live instance and are cleaned up afterwards |
 
 Sources: [Stroom 7.13 OpenAPI spec](https://gchq.github.io/stroom/v7.13/stroom.json), [Stroom API docs](https://gchq.github.io/stroom-docs/docs/user-guide/api/), [Elasticsearch indexing in Stroom](https://gchq.github.io/stroom-docs/docs/user-guide/indexing/elasticsearch/indexing/), [event-logging-schema](https://github.com/gchq/event-logging-schema).

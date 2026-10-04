@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'dev'))
 
-import e2e_phase2 as p2  # noqa: E402
+import e2e_translation as e2e  # noqa: E402
 from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from security.guard import guard_from as ctx_guard  # noqa: E402
@@ -79,7 +79,7 @@ V3 = [r for r in V2 if r['name'] != 'file read'] + [
 async def xslt_for(ctx, rules: list[dict]) -> str:
     result = await generation.build_translation_xslt(ctx, TranslationMapping.model_validate(
         {'input': 'json', 'common': COMMON, 'events': rules}))
-    p2.check(result['ok'], f"mapping generates: {result['problems']}")
+    e2e.check(result['ok'], f"mapping generates: {result['problems']}")
     return result['xslt']
 
 
@@ -90,7 +90,7 @@ async def text_locations(ctx, stamp: str) -> None:
         print(f'\n### locations in a {case_file[3:]} feed')
         case = yaml.safe_load((ROOT / 'dev' / 'eval' / 'cases' / f'{case_file}.yaml').read_text(encoding='utf-8'))
         build, feed = f'loc-{case_file[:2]}-{stamp}', f'LOC-{case_file[:2]}-{stamp}'
-        await p2.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
         await feeds.upload_sample(ctx, feed, case['sample'])
         await asyncio.sleep(1)
         survey = await sampling.survey_feed(ctx, feed, examples_per_shape=5)
@@ -98,11 +98,11 @@ async def text_locations(ctx, stamp: str) -> None:
         xslt_text = (await generation.build_translation_xslt(ctx, mapping))['xslt']
         converter = case['reference']['converter']
         tc = await translation.create_text_converter(ctx, build, feed, 'DATA_SPLITTER',
-                                                     p2.CSV_SPLITTER if converter == 'csv_header' else converter)
+                                                     e2e.CSV_SPLITTER if converter == 'csv_header' else converter)
         x = await translation.create_xslt(ctx, build, f'{feed}-Events', xslt_text)
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == 'Event Data (Text)')
-        pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
+        pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
                                    template_uuid=template['uuid'], set_properties=[
                                        PropertyValue(element='dsParser', name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'),
                                        PropertyValue(element='translationFilter', name='xslt', doc_uuid=x['uuid'], doc_type='XSLT')])
@@ -115,111 +115,111 @@ async def text_locations(ctx, stamp: str) -> None:
                 output = one['elements']['translationFilter']['output']
                 user = output.split('<User><Id>')[1].split('<')[0] if '<User><Id>' in output else None
                 line = case['sample'].strip().splitlines()[location['record'] + (1 if converter == 'csv_header' else 0)]
-                p2.check(user is not None and user in line,
+                e2e.check(user is not None and user in line,
                          f"location {location['record']} steps the line it names (user {user})")
                 checked += 1
-        p2.check(checked == 3 and bool(examples), f'all {checked} records located')
+        e2e.check(checked == 3 and bool(examples), f'all {checked} records located')
 
 
 async def main():
-    settings = p2.target_settings()
+    settings = e2e.target_settings()
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = p2.STAMP
+    stamp = e2e.STAMP
     try:
         print('### a source feed that already holds data')
         source = f'SRC-APP-{stamp}'
-        await p2.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=source)
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=source)
         for text in STREAMS:
             await feeds.upload_sample(ctx, source, text)
         await asyncio.sleep(2)
 
-        ids = sorted(m['meta']['id'] for m in (await stroom.find_meta([p2.processing_writes._term('Feed', source)], 10))['values'])
+        ids = sorted(m['meta']['id'] for m in (await stroom.find_meta([e2e.processing_writes._term('Feed', source)], 10))['values'])
 
         build = f'existing-{stamp}'
         print('\n### 1. survey two streams, spread over the feed, recorded in the build')
         first = await sampling.survey_feed(ctx, source, max_streams=2, build=build)
-        p2.check(first['survey_doc']['name'] == f'{source} - Survey', f"survey kept in {first['survey_doc']['name']}")
+        e2e.check(first['survey_doc']['name'] == f'{source} - Survey', f"survey kept in {first['survey_doc']['name']}")
         signatures = [s['signature'] for s in first['shapes']]
         kinds = sorted(s['signature'].split('action=')[-1] for s in first['shapes'])
         print(f"    read {first['streams_read']} of {ids}; kinds: {kinds}")
-        p2.check(first['streams_read'] == [ids[-1], ids[0]], 'the newest and the oldest stream are read first')
-        p2.check(kinds == ['file_read', 'login', 'logout'] and not first['saturated'], 'three kinds so far, keep looking')
+        e2e.check(first['streams_read'] == [ids[-1], ids[0]], 'the newest and the oldest stream are read first')
+        e2e.check(kinds == ['file_read', 'login', 'logout'] and not first['saturated'], 'three kinds so far, keep looking')
 
         print('\n### 2. pipeline for those shapes, stepped on the feed\'s own records')
         template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
                         if c['name'] == 'Event Data (JSON)')
         xslt = await translation.create_xslt(ctx, build, f'{source}-Events', await xslt_for(ctx, V1))
-        pipeline = await p2.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{source}-Events',
+        pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{source}-Events',
                                    template_uuid=template['uuid'], set_properties=[
                                        PropertyValue(element='translationFilter', name='xslt', doc_uuid=xslt['uuid'], doc_type='XSLT'),
                                        PropertyValue(element='jsonParser', name='addRootObject', value=False)])
         stepped = await stepping.step_records(ctx, pipeline['uuid'], first['locations'])
-        p2.check(stepped['verdict'] == 'clean' and stepped['records_stepped'] == len(first['locations']),
+        e2e.check(stepped['verdict'] == 'clean' and stepped['records_stepped'] == len(first['locations']),
                  f"those records step clean in place ({stepped['records_stepped']} records)")
         for location in first['locations']:
             one = await stepping.step_pipeline(ctx, pipeline['uuid'], location['stream'], location['record'], part=location['part'])
             action = location['shape'].split('action=')[-1]
-            p2.check(f'<TypeId>{action}</TypeId>' in one['elements']['translationFilter']['output'],
+            e2e.check(f'<TypeId>{action}</TypeId>' in one['elements']['translationFilter']['output'],
                      f"location {location['stream']}:{location['record']} is a {action} record")
 
         print('\n### 3. survey the streams not read yet')
         second = await sampling.survey_feed(ctx, source, build=build)  # carries on from the survey doc
         new = [s['signature'].split('action=')[-1] for s in second['shapes'] if s['new']]
         print(f"    read {second['streams_read']}; new kinds: {new}")
-        p2.check(sorted(second['streams_read']) == ids[1:3] and new == ['passwd_change'],
+        e2e.check(sorted(second['streams_read']) == ids[1:3] and new == ['passwd_change'],
                  'the other two streams add the password change')
         gaps = await stepping.step_records(ctx, pipeline['uuid'], second['locations'])
         unmatched = [g for g in gaps['groups'] if 'No event mapping matched' in str(g)]
-        p2.check(unmatched and unmatched[0]['count'] == 1 and len(gaps['shapes_not_clean']) == 1,
+        e2e.check(unmatched and unmatched[0]['count'] == 1 and len(gaps['shapes_not_clean']) == 1,
                  f"the current translation flags it: {[(g['class'], g['count']) for g in gaps['groups']]}")
 
         print('\n### 4. extend the mapping and step every location')
         await translation.update_xslt(ctx, xslt['uuid'], await xslt_for(ctx, V2))
         every = first['locations'] + second['locations']
         both = await stepping.step_records(ctx, pipeline['uuid'], every)
-        p2.check(both['verdict'] == 'clean' and not both['shapes_not_clean'] and both['records_stepped'] == len(every),
+        e2e.check(both['verdict'] == 'clean' and not both['shapes_not_clean'] and both['records_stepped'] == len(every),
                  f"every kind of event steps clean ({both['records_stepped']} records)")
 
         print('\n### 5. survey again: every stream read')
         third = await sampling.survey_feed(ctx, source, build=build)
-        p2.check(third['saturated'] and third['new_shapes'] == 0 and not third['streams_read'],
+        e2e.check(third['saturated'] and third['new_shapes'] == 0 and not third['streams_read'],
                  f"the feed is covered: {third['hint']}")
         record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['data']
         state = sampling.read_state(record)
-        p2.check(sorted(state['streams_read']) == ids and len(state['shapes']) == 4 and state['saturated'],
+        e2e.check(sorted(state['streams_read']) == ids and len(state['shapes']) == 4 and state['saturated'],
                  f"the survey doc records all {len(ids)} streams and 4 kinds of event")
-        p2.check('## Kinds of event' in record and '"action": "passwd_change"' in record and 'Stream ' in record,
+        e2e.check('## Kinds of event' in record and '"action": "passwd_change"' in record and 'Stream ' in record,
                  'the doc shows the kinds of event with example records and where they are')
 
         print('\n### 6. broad check: the head of each stream')
         broad = await stepping.step_sample(ctx, pipeline['uuid'], ids, records_per_stream=2)
-        p2.check(broad['verdict'] == 'clean' and broad['records_stepped'] == 2 * len(ids),
+        e2e.check(broad['verdict'] == 'clean' and broad['records_stepped'] == 2 * len(ids),
                  f"{broad['records_stepped']} records, 2 from each stream, step clean")
 
         print('\n### 6b. the user leaves one kind of event untranslated')
-        marked = await p2.agreed(sampling.set_shape_handling, ctx=ctx, build=build, feed=source, shapes=['action=file_read'],
+        marked = await e2e.agreed(sampling.set_shape_handling, ctx=ctx, build=build, feed=source, shapes=['action=file_read'],
                                  handling='drop', reason='file reads are audited elsewhere')
         drop_locs = marked['locations']
-        p2.check(len(marked['shapes']) == 1 and drop_locs and all(l['expect'] == 'none' for l in drop_locs),
+        e2e.check(len(marked['shapes']) == 1 and drop_locs and all(l['expect'] == 'none' for l in drop_locs),
                  f"recorded, with {len(drop_locs)} example location(s) to step expecting no Event")
         still = await stepping.step_records(ctx, pipeline['uuid'], drop_locs)
-        p2.check(still['shapes_not_clean'] == marked['shapes'] and 'left untranslated' in str(still['groups']),
+        e2e.check(still['shapes_not_clean'] == marked['shapes'] and 'left untranslated' in str(still['groups']),
                  'the current translation still writes Events for them, and is flagged')
         await translation.update_xslt(ctx, xslt['uuid'], await xslt_for(ctx, V3))
         rest = [l for l in every if l['shape'] not in marked['shapes']]
         after = await stepping.step_records(ctx, pipeline['uuid'], rest + drop_locs)
-        p2.check(after['verdict'] == 'clean' and not after['shapes_not_clean']
+        e2e.check(after['verdict'] == 'clean' and not after['shapes_not_clean']
                  and after['left_untranslated_as_intended'] == len(drop_locs),
                  f"with a drop rule every location steps clean, {after['left_untranslated_as_intended']} left untranslated")
         record = (await stroom.get_doc('Documentation', third['survey_doc']['uuid']))['data']
-        p2.check('left untranslated: file reads are audited elsewhere' in record, 'the survey doc shows the choice and why')
+        e2e.check('left untranslated: file reads are audited elsewhere' in record, 'the survey doc shows the choice and why')
 
         print('\n### 7. a big single-line stream is read from its head only')
         big_feed = f'SRC-BIG-{stamp}'
-        await p2.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=big_feed)
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=big_feed)
         rows = [{'ts': '2026-09-28T10:00:00Z', 'host': 'app02', 'user': f'user{i}',
                  'action': 'logout' if i % 50 == 7 else 'login'} for i in range(30000)]
         big = json.dumps(rows)
@@ -228,22 +228,22 @@ async def main():
         head = await sampling.survey_feed(ctx, big_feed, max_chars_per_stream=100_000)
         stream = head['per_stream'][0]
         print(f"    {len(big)} chars; read {head['records_read']} records; per stream {stream}")
-        p2.check(stream['head_only'] and 0 < head['records_read'] < 2000, 'only the head was read')
-        p2.check(sorted(s['signature'].split('action=')[-1] for s in head['shapes']) == ['login', 'logout'],
+        e2e.check(stream['head_only'] and 0 < head['records_read'] < 2000, 'only the head was read')
+        e2e.check(sorted(s['signature'].split('action=')[-1] for s in head['shapes']) == ['login', 'logout'],
                  'both kinds found in the head')
         located = await stepping.step_records(ctx, pipeline['uuid'], head['locations'])
-        p2.check(located['verdict'] == 'clean' and located['records_stepped'] == len(head['locations']),
+        e2e.check(located['verdict'] == 'clean' and located['records_stepped'] == len(head['locations']),
                  f"its locations step clean ({located['records_stepped']} records)")
 
         print('\n### nothing copied or processed; generated docs are tagged')
-        created = [m['meta'] for m in (await stroom.find_meta([p2.processing_writes._term('Feed', source)], 50))['values']]
-        p2.check(len(created) == len(STREAMS) and all(m['typeName'] == 'Raw Events' for m in created),
+        created = [m['meta'] for m in (await stroom.find_meta([e2e.processing_writes._term('Feed', source)], 50))['values']]
+        e2e.check(len(created) == len(STREAMS) and all(m['typeName'] == 'Raw Events' for m in created),
                  f"the source feed still holds only its {len(STREAMS)} raw streams")
         filters = [r for r in (await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})).get('values') or []
                    if (r.get('processorFilter') or {}).get('pipelineUuid') == pipeline['uuid']]
-        p2.check(not filters, 'no processor filter was created')
+        e2e.check(not filters, 'no processor filter was created')
         tags = await ctx_guard(ctx).tags({'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']})
-        p2.check('mcp-generated' in tags and 'mcp-managed' in tags, f"the pipeline is tagged {tags}")
+        e2e.check('mcp-generated' in tags and 'mcp-managed' in tags, f"the pipeline is tagged {tags}")
         await text_locations(ctx, stamp)
         print('\nALL PASSED')
     finally:

@@ -34,7 +34,7 @@ def test_messages_that_differ_only_in_values_group_together():
     assert normalise('Failed to parse date: "abc" at index 0') == normalise('Failed to parse date: "xyz" at index 3')
 
 
-def test_cascade_from_the_live_spike_is_blocking_with_the_cause_under_review():
+def test_cascade_seen_on_a_live_instance_is_blocking_with_the_cause_under_review():
     # A bad date: the pipeline's own XSLT warns, then schema validation fails twice.
     markers = [
         m('WARNING', 'translationFilter', 'FormatDate - Failed to parse date: "not-a-date"', 'r1'),
@@ -91,3 +91,28 @@ def test_an_elasticsearch_bulk_failure_is_split_into_the_documents_it_rejected()
     assert group['examples'][0]['message'].startswith(
         'Elasticsearch rejected document 2 of 3 in a bulk request (document_parsing_exception): ')
     assert group['reason'].startswith('A field is an object in some records and a plain value in others')
+
+
+def test_an_error_the_user_accepted_is_benign_with_their_reason_and_matches_its_kind():
+    from pathlib import Path
+    from utils.accepted import block, entry, merge, read_accepted
+    from utils.triage import ErrorRules, marker, triage
+    rules = ErrorRules.load(Path(__file__).parents[1] / 'error_rules.yaml')
+    accepted = [entry('decorationFilter', 'No HR record for user svc-backup', 'Service accounts have no HR record',
+                      '2026-10-04', matches='No HR record for user svc-*')]
+    markers = [marker('ERROR', 'decorationFilter', 'Log - No HR record for user svc-deploy'),  # same kind, another value
+               marker('ERROR', 'decorationFilter', 'Lookup failed: no map named HR')]       # another kind
+    groups = {g['examples'][0]['message']: g for g in triage(markers, rules, set(), accepted=accepted)['groups']}
+    known = groups['Log - No HR record for user svc-deploy']
+    assert known['class'] == 'benign' and known.get('accepted') and 'Service accounts have no HR record' in known['reason']
+    assert groups['Lookup failed: no map named HR']['class'] == 'review' and not groups['Lookup failed: no map named HR'].get('accepted')
+    # Kept in the doc's text, and read back; a newer entry for the same kind replaces the older.
+    text = f"## Errors\n\n{block(accepted)}\n"
+    assert read_accepted(text) == accepted
+    newer = entry('decorationFilter', 'No HR record for user svc-x', 'newer', '2026-10-05', matches='No HR record for user svc-*')
+    assert [e['reason'] for e in merge(accepted, [newer])] == ['newer']
+
+    # Without matches, the example is the kind: another user name is another error.
+    exact = [entry('decorationFilter', 'No HR record for user svc-backup', 'x', '2026-10-04')]
+    other = triage([marker('ERROR', 'decorationFilter', 'No HR record for user svc-deploy')], rules, set(), accepted=exact)
+    assert other['groups'][0]['class'] == 'review'

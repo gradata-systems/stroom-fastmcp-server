@@ -53,10 +53,11 @@ def doc_digest(markdown: str) -> str | None:
     return match.group(1) if match else None
 
 
-def replace_section(markdown: str, heading: str, body: str) -> str:
+def replace_section(markdown: str, heading: str, body: str, exact: bool = False) -> str:
     """markdown with the `## heading` section's body replaced (or the section added before Output, else at the
-    end, before any change log)."""
-    pattern = re.compile(rf'(^## {re.escape(heading)}[^\n]*\n)(.*?)(?=^## |\Z)', re.M | re.S)
+    end, before any change log). exact: only a heading that is exactly this, not one starting with it."""
+    rest = r'[ \t]*' if exact else r'[^\n]*'
+    pattern = re.compile(rf'(^## {re.escape(heading)}{rest}\n)(.*?)(?=^## |\Z)', re.M | re.S)
     section = f'## {heading}\n\n{body.strip()}\n\n'
     if pattern.search(markdown):
         return pattern.sub(lambda m: section, markdown, count=1)

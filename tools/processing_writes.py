@@ -7,6 +7,7 @@ that pipeline's earlier outputs for the stream deleted (superseded); wait_for_pr
 outputs of a given filter while that happens.
 """
 import asyncio
+import json
 import time
 from datetime import datetime
 from urllib.parse import quote
@@ -16,7 +17,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from security.guard import guard_from
+from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers
 from tools.processing import processing_status
 from tools.stepping import stepped_clean
@@ -235,6 +236,41 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]], fro
     return made
 
 
+# While a pipeline is developed in the workspace, Elasticsearch indexing runs in small batches: a rejected document
+# is then reported with Elasticsearch's own reason, whole, rather than cut short in one large bulk response.
+DEV_BATCH_SIZE = 10
+_BATCH_NOTE = (f"batch size {DEV_BATCH_SIZE} while developing, so each document Elasticsearch rejects is reported with "
+               f"its reason; the template's default comes back once indexing completes without errors")
+
+
+async def development_batch(ctx: Context, pipeline_uuid: str, small: bool) -> bool:
+    """Set the workspace Elasticsearch indexing pipeline's own batchSize to DEV_BATCH_SIZE (small), or remove it so
+    the template's (or Stroom's) default applies again. Production pipelines are left alone. True if it changed."""
+    stroom = gateway_from(ctx)
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    element = next((e['id'] for e in merged['elements'] if e['type'] == 'ElasticIndexingFilter'), None)
+    if not element:
+        return False
+    doc = await stroom.get_doc('Pipeline', pipeline_uuid)
+    if MANAGED not in await guard_from(ctx).tags({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')}):
+        return False
+    data = doc.get('pipelineData') or {}
+    properties = data.get('properties') or {}
+    added = properties.get('add') or []
+    own = [p for p in added if p.get('element') == element and p.get('name') == 'batchSize']
+    if small and own and (own[0].get('value') or {}).get('integer') == DEV_BATCH_SIZE:
+        return False
+    if not small and not own:
+        return False
+    rest = [p for p in added if p not in own]
+    properties['add'] = rest + ([{'element': element, 'name': 'batchSize', 'value': {'integer': DEV_BATCH_SIZE}}]
+                                if small else [])
+    data['properties'] = properties
+    doc['pipelineData'] = data
+    await stroom.put_doc(doc)
+    return True
+
+
 async def indexing_xslt_digest(stroom: StroomGateway, pipeline_uuid: str) -> str:
     """The XSLT code the pipeline runs, digested: an index template is agreed for the documents this code writes."""
     from tools.pipelines import translation_docs
@@ -332,11 +368,13 @@ async def create_processor_filter(
     gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter', summary, details, approval_id)
     if gate:
         return gate
+    small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
     consent_from(ctx).discard(source_confirmation_id)
     from tools.plan import build_of, with_next
     result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
-              **({'events_from_pipeline': source['name']} if source else {})}
+              **({'events_from_pipeline': source['name']} if source else {}),
+              **({'batch_size': _BATCH_NOTE} if small else {})}
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
 
 
@@ -407,14 +445,23 @@ async def reprocess_streams(
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
         details['index template'] = await _committed(stroom, pipeline, destination)
-        details['already indexed'] = 'documents from these streams may be indexed again'
+        # Stroom's purgeOnReprocess does not apply to a second filter on the same streams, and this server has no
+        # Elasticsearch access: the earlier documents stay unless the cluster admin deletes them first (after
+        # reprocessing, the same request would delete the new ones too).
+        delete = json.dumps({'query': {'terms': {'StreamId': [int(i) for i in stream_ids]}}})
+        details['already indexed'] = (f"Stroom does not remove the documents these streams already put in "
+                                      f"'{destination['index name']}': have the cluster admin delete them first, or "
+                                      f"they are indexed twice: POST {destination['index name']}/_delete_by_query "
+                                      f"{delete}")
     gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
                                            f"Reprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'",
                                            details, approval_id)
     if gate:
         return gate
+    small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
     created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None)
     return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
+            **({'batch_size': _BATCH_NOTE} if small else {}),
             'hint': f"wait_for_processing with filter_id={created['id']} so only this run's outputs count."}
 
 
@@ -465,6 +512,13 @@ async def wait_for_processing(
     result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
               'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
               'hint': None if finished else "Tasks were still running at the timeout; call again."}
+    try:
+        restored = result['gate'] == 'pass' and await development_batch(ctx, pipeline_uuid, False)
+    except Exception:       # housekeeping: never a reason for the wait to fail
+        restored = False
+    if restored:
+        # Indexing completed without errors: the small development batch was only to see Elasticsearch's responses.
+        result['batch_size'] = "restored to the template's default, now that indexing completed without errors"
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), result)
 
 

@@ -12,7 +12,7 @@ EVENT = """<?xml version="1.1" encoding="UTF-8"?><Events xmlns="event-logging:3"
  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
  xsi:schemaLocation="event-logging:3 file://event-logging-v9.9.9.xsd" Version="9.9.9"><Event>
 <EventTime><TimeCreated>2026-09-28T10:00:00.000Z</TimeCreated></EventTime>
-<EventSource><System><Name>SPIKE</Name><Environment>Dev</Environment></System><Generator>g</Generator>
+<EventSource><System><Name>ACME</Name><Environment>Dev</Environment></System><Generator>g</Generator>
 <Device><HostName>ws01</HostName></Device></EventSource>
 <EventDetail><TypeId>Logon</TypeId><Authenticate><Action>Logon</Action></Authenticate></EventDetail>
 </Event></Events>"""
@@ -35,7 +35,7 @@ XSLT = """<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns
   <xsl:template match="record">
     <Event>
       <EventTime><TimeCreated><xsl:value-of select="stroom:format-date(data[@name='time']/@value)"/></TimeCreated></EventTime>
-      <EventSource><System><Name>SPIKE</Name></System>
+      <EventSource><System><Name>ACME</Name></System>
         <User><Id><xsl:value-of select="data[@name='user']/@value"/></Id></User></EventSource>
       <Data Name="host" Value="{data[@name='host']/@value}"/>
       <xsl:variable name="m" select="stroom:lookup('USER_MAP', data[@name='user']/@value)"/>
@@ -111,6 +111,24 @@ async def test_describe_translation_maps_outputs_to_inputs(ctx):
     mapped = {m['output']: m['source'] for m in result['mappings']}
     assert mapped['[record] Event/EventSource/User/Id'] == "data[@name='user']/@value"
     assert mapped['[record] Event/Data/@Value'] == "{data[@name='host']/@value}"
-    assert mapped['[record] Event/EventSource/System/Name'] == 'SPIKE'
+    assert mapped['[record] Event/EventSource/System/Name'] == 'ACME'
     assert result['input_fields'] == ['host', 'time', 'user']
     assert (result['imports'], result['lookups']) == (['IP Lookup'], ['USER_MAP'])
+
+
+def test_the_generated_errors_section_leaves_the_agents_own_error_sections_alone():
+    from utils.mappingstore import replace_section
+    report = '# P\n\n## Errors and schema conformance\n\nOne event fails the schema.\n\n## Suggestions\n\n1. Fix it.\n'
+    text = replace_section(report, 'Errors', 'Generated.', exact=True)
+    assert 'One event fails the schema.' in text and '## Errors\n\nGenerated.' in text
+    assert replace_section(text, 'Errors', 'Again.', exact=True).count('## Errors\n') == 1
+
+
+def test_an_indexing_xslt_without_a_plan_is_documented_from_the_documents_it_writes():
+    from utils.fielddoc import written_fields_markdown
+    section = written_fields_markdown([{'UserId': ['alice'], 'Host': ['ws01'], 'Empty': ['']},
+                                       {'UserId': ['bob'], 'Host': ['']}])
+    assert '| `UserId` | Different in each sampled document. | 100% of documents | `alice`, `bob` |' in section
+    assert ('| `Host` | One value in the sample (`ws01`), in 1 of 2 documents. | 50% of documents | `ws01` |' in section
+            and '`Empty`' not in section)
+    assert 'keeps no index plan' in section

@@ -1,7 +1,7 @@
-"""Phase 0 spike: prove the risky Stroom APIs against the local Docker stack.
+"""Checks of the Stroom APIs the server relies on, built for the Stroom UI, against the local Docker stack.
 
-    uv run python spike/phase0.py            # all steps, in order
-    uv run python spike/phase0.py step       # one step (names below); state is kept in spike/out/state.json
+    uv run python dev/api_checks/stroom_apis.py            # all steps, in order
+    uv run python dev/api_checks/stroom_apis.py step       # one step (names below); state is kept in dev/api_checks/out/state.json
 
 Every step prints what it learned. Nothing here talks to a shared Stroom.
 """
@@ -15,7 +15,7 @@ from stroom_client import Stroom, show
 OUT = Path(__file__).parent / 'out'
 STATE_FILE = OUT / 'state.json'
 
-FEED = 'SPIKE-AUTH-V1'  # default feed name rule: ^[A-Z0-9_-]{3,}$
+FEED = 'APICHECK-AUTH-V1'  # default feed name rule: ^[A-Z0-9_-]{3,}$
 SAMPLE = b"""time,user,host,result
 2026-09-28T10:00:00,alice,ws01,ok
 2026-09-28T10:05:00,bob,ws02,fail
@@ -56,8 +56,8 @@ XSLT = """<?xml version="1.1" encoding="UTF-8"?>
         <TimeCreated><xsl:value-of select="stroom:format-date(data[@name='time']/@value, 'yyyy-MM-dd''T''HH:mm:ss')" /></TimeCreated>
       </EventTime>
       <EventSource>
-        <System><Name>SPIKE</Name><Environment>Dev</Environment></System>
-        <Generator>phase0-spike</Generator>
+        <System><Name>APICHECK</Name><Environment>Dev</Environment></System>
+        <Generator>api-checks</Generator>
         <Device><HostName><xsl:value-of select="data[@name='host']/@value" /></HostName></Device>
         <User><Id><xsl:value-of select="data[@name='user']/@value" /></Id></User>
       </EventSource>
@@ -75,7 +75,7 @@ XSLT = """<?xml version="1.1" encoding="UTF-8"?>
 </xsl:stylesheet>
 """
 # Same XSLT with an element the schema does not allow, to prove draft-code overrides reach validation.
-BROKEN_XSLT = XSLT.replace('<Generator>phase0-spike</Generator>', '<NotAnElement>x</NotAnElement>')
+BROKEN_XSLT = XSLT.replace('<Generator>api-checks</Generator>', '<NotAnElement>x</NotAnElement>')
 
 s = Stroom()
 
@@ -100,7 +100,7 @@ def workspace(st):
     system = s.system_node()
     ws = next((d for d in s.find('MCP Workspace', ['Folder']) if d['name'] == 'MCP Workspace'), None)
     ws_node = s.post('/explorer/v2/getFromDocRef', ref(ws)) if ws else s.create('Folder', 'MCP Workspace', system)
-    build = s.create('Folder', f'spike-{int(time.time())}', ws_node)
+    build = s.create('Folder', f'api-checks-{int(time.time())}', ws_node)
     templates = {d['name']: ref(d) for d in s.find('*', ['Pipeline']) if 'Template Pipelines' in (d['path'] or '')}
     st.update(workspace=ws_node, build=build, template=templates['Event Data (Text)'])
     show('build folder node', {k: build.get(k) for k in ('type', 'uuid', 'name')})
@@ -110,7 +110,7 @@ def feed(st):
     """Create the feed in the build folder and set its stream type and encoding."""
     node = s.create('Feed', FEED, st['build'])
     doc = s.get(f"/feed/v1/{node['uuid']}")
-    doc.update(streamType='Raw Events', encoding='UTF-8', description='Phase 0 spike feed')
+    doc.update(streamType='Raw Events', encoding='UTF-8', description='Stroom API checks feed')
     doc = s.put(f"/feed/v1/{node['uuid']}", doc)
     st['feed'] = ref(doc)
     show('feed', {k: doc.get(k) for k in ('name', 'uuid', 'streamType', 'encoding')})
@@ -231,7 +231,7 @@ def documentation(st):
     node = s.create('Documentation', st['pipeline']['name'], st['build'])
     doc = s.get(f"/documentation/v1/{node['uuid']}")
     show('empty Documentation doc fields', list(doc.keys()))
-    text = '# SPIKE-AUTH-V1.0-Events\n\n## Purpose and data\n\nPhase 0 spike: CSV logons to event-logging.\n'
+    text = '# APICHECK-AUTH-V1.0-Events\n\n## Purpose and data\n\nStroom API checks: CSV logons to event-logging.\n'
     doc['documentation'] = text
     saved = s.put(f"/documentation/v1/{node['uuid']}", doc)
     back = s.get(f"/documentation/v1/{node['uuid']}")

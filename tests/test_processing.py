@@ -190,7 +190,8 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_appr
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-build-b']))):
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
     assert [g['status'] for g in gates] == ['needs_approval']
-    assert "index 'ecs-acme-v2'" in gates[0]['details']['index template'] and 'indexed again' in gates[0]['details']['already indexed']
+    assert "index 'ecs-acme-v2'" in gates[0]['details']['index template']
+    assert 'POST ecs-acme-v2/_delete_by_query' in gates[0]['details']['already indexed'] and 'StreamId' in gates[0]['details']['already indexed']
     assert json.loads(create.calls.last.request.content)['enabled'] is True and result['filter_id'] == 9
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM

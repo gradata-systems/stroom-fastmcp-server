@@ -81,7 +81,8 @@ def test_an_indexing_xslt_calls_shared_templates_for_their_fields_and_writes_eac
     # The index still maps the field; the documentation says where it comes from.
     assert 'guid' in plan.elastic_template('x')['body']['template']['mappings']['properties']
     section = index_field_mapping_markdown(plan, {'EventSource/User/Id': 100.0})
-    assert '| `guid` | keyword | shared template `guid` of `Common-Elastic-V1` | always |' in section
+    assert ('| `guid` | Written by the shared template `guid`. | keyword | shared template `guid` of '
+            '`Common-Elastic-V1` | always |') in section
 
 
 def test_a_shared_object_in_an_indexing_xslt_and_a_lucene_one():

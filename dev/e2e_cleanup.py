@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'dev'))
 
-import e2e_phase2 as p2  # noqa: E402
+import e2e_translation as e2e  # noqa: E402
 from security.guard import GENERATED, guard_from  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 
@@ -26,10 +26,10 @@ from utils.stroom import StroomGateway  # noqa: E402
 async def main(stamp: str, apply: bool):
     if len(stamp) < 6:
         raise SystemExit('Give the full run stamp (RUN STAMP ... in the e2e output)')
-    stroom = StroomGateway(p2.target_settings())
+    stroom = StroomGateway(e2e.target_settings())
     try:
         print(f"{'Removing' if apply else 'Would remove'} run {stamp} on "
-              f"{stroom.settings.stroom_url if p2.LIVE else 'the local stack'}")
+              f"{stroom.settings.stroom_url if e2e.LIVE else 'the local stack'}")
         found = (await stroom.find_documents(f'*{stamp}*', None, 1000)).get('values') or []
         ours, others = [], []
         for value in found:

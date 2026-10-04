@@ -70,7 +70,7 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
              'child_must_supply': [{'element': 'xsltFilter', 'type': 'XSLTFilter', 'property': 'xslt'},
                                    {'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'indexName'},
                                    {'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'cluster'}]}
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace()})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(return_value={}))})
     with patch('tools.indexing._shape', AsyncMock(return_value=shape)), \
             patch('tools.indexing._events_available', AsyncMock()), \
             patch('tools.indexing.create_pipeline', AsyncMock(return_value={'uuid': 'p'})) as create:
@@ -282,3 +282,57 @@ async def test_a_hit_is_traced_to_its_record_and_a_mismatch_fails():
     assert stepped.await_args_list[0].args[1:] == ('ix', 9, 1)       # EventId 2 is the second record, index 1
     assert not wrong_value['traced'] and "user.name = ['bob'], not alice" in wrong_value['why']
     assert not wrong_record['traced'] and 'no document with EventId 5' in wrong_record['why']
+
+
+def test_a_delimited_discovery_plan_indexes_each_column_by_its_header():
+    from utils.fieldplan import Discovery
+    plan = FieldPlan.for_discovery('d', Discovery(input='delimited', timestamp_field='time', drop=['secret']))
+    assert plan.elastic_template('d')['body']['template']['mappings']['numeric_detection'] is True
+    raw = ('<records xmlns="records:2"><record><data name="time" value="2026-10-01T09:00:00Z"/>'
+           '<data name="user" value="alice"/><data name="secret" value="x"/><data name="_id" value="s1"/>'
+           '<data name="msg" value="{&quot;a&quot;: 1}"/></record></records>')
+    xslt = plan.xslt().replace('stroom:stream-id()', '7').replace('stroom:record-no()', '1')
+    with PySaxonProcessor(license=False) as proc:
+        out = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt).transform_to_string(
+            xdm_node=proc.parse_xml(xml_text=raw))
+    for part in ('<string key="@timestamp">2026-10-01T09:00:00Z</string>', '<string key="user">alice</string>',
+                 '<string key="id_original">s1</string>', '<map key="msg_json"><number key="a">1</number></map>'):
+        assert part in out, part
+    assert 'secret' not in out
+
+
+def test_an_xml_discovery_plan_keeps_the_structure_and_needs_its_record_element():
+    from utils.fieldplan import Discovery
+    plan = FieldPlan.for_discovery('d', Discovery(input='xml', record='logon', timestamp_field='@at'))
+    raw = ('<logons xmlns="urn:x"><logon id="7" at="2026-10-01T09:00:00Z"><who>alice</who>'
+           '<roles><role>admin</role><role>ops</role></roles><client ip="10.1.1.1">laptop</client></logon></logons>')
+    xslt = plan.xslt().replace('stroom:stream-id()', '7').replace('stroom:record-no()', '1')
+    with PySaxonProcessor(license=False) as proc:
+        out = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt).transform_to_string(
+            xdm_node=proc.parse_xml(xml_text=raw))
+    for part in ('<string key="@timestamp">2026-10-01T09:00:00Z</string>', '<string key="id">7</string>',
+                 '<string key="who">alice</string>', '<map key="roles"><array key="role"><string>admin</string><string>ops</string></array></map>',
+                 '<map key="client"><string key="ip">10.1.1.1</string><string key="value">laptop</string></map>'):
+        assert part in out, part
+    with pytest.raises(ValueError, match="needs the record element's name"):
+        FieldPlan.for_discovery('d', Discovery(input='xml', timestamp_field='when')).xslt()
+
+
+async def test_an_xml_discovery_pipeline_needs_no_events_though_its_template_looks_like_indexing():
+    # XMLParser, XSLT, indexing filter: the same shape as indexing Events. The plan kept with the XSLT tells them apart.
+    from utils.fieldplan import Discovery
+    from utils.mappingstore import with_mapping
+    shape = {'stage': 'indexing', 'backend': 'elasticsearch',
+             'child_must_supply': [{'element': 'xsltFilter', 'type': 'XSLTFilter', 'property': 'xslt'},
+                                   {'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'indexName'}]}
+    plan = FieldPlan.for_discovery('d', Discovery(input='xml', record='logon', timestamp_field='when'))
+    discovery_xslt = {'description': with_mapping('', 'index', plan.model_dump())}
+    events_xslt = {'description': with_mapping('', 'index', FieldPlan(
+        backend='elasticsearch', index_name='x', time_field='@timestamp', fields=FIELDS).model_dump())}
+    for xslt, checked in ((discovery_xslt, False), (events_xslt, True)):
+        ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(return_value=xslt))})
+        with patch('tools.indexing._shape', AsyncMock(return_value=shape)), \
+                patch('tools.indexing._events_available', AsyncMock()) as events, \
+                patch('tools.indexing.create_pipeline', AsyncMock(return_value={'uuid': 'p'})):
+            await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_name='d')
+        assert events.called is checked

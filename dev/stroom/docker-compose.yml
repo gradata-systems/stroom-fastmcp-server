@@ -1,4 +1,4 @@
-# Local Stroom for development and the Phase 0 spike. Destructive tests run here, never
+# Local Stroom for development, the Stroom API checks and the e2e suites. Destructive tests run here, never
 # against a shared instance. Everything binds to 127.0.0.1.
 #
 #   cd dev/stroom && ./init-env.sh && docker compose up -d

@@ -12,6 +12,7 @@ from pydantic import Field
 from tools.pipelines import own_elements
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
+from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
 StreamId = Annotated[int, Field(description="Stream (meta) id, e.g. from find_streams.")]
@@ -231,13 +232,14 @@ async def summarise_errors(
     if not error_streams:
         return {'stream_id': stream_id, 'error_streams': [], **triage([], ctx.lifespan_context['rules'], set())}
 
-    markers, own = [], set()
+    markers, own, accepted = [], set(), []
     for error_stream in error_streams:
         body = await stroom.fetch_data(error_stream['id'], 0, 1000, 'MARKER')
         markers += [from_stored_error(m) for m in body.get('markers') or [] if m.get('type') == 'storedError']
         if error_stream.get('pipelineUuid'):
             own |= own_elements(await stroom.pipeline_layers(error_stream['pipelineUuid']))
-    result = triage(markers, ctx.lifespan_context['rules'], own)
+            accepted += await accepted_for(stroom, error_stream['pipelineUuid'])
+    result = triage(markers, ctx.lifespan_context['rules'], own, accepted=accepted)
     return {'stream_id': stream_id, 'error_streams': [e['id'] for e in error_streams], **result}
 
 

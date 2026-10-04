@@ -14,6 +14,7 @@ from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
+from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,8 @@ async def step_pipeline(
             'part': location.get('partIndex'), 'record': location.get('recordIndex'), 'draft_code_used': sorted(draft_code or {}),
             'elements': outputs, **triage(_markers(result, location.get('recordIndex'))
                                           + _empty_output(result, pipeline.default_outputs()[-1], location.get('recordIndex')),
-                                          ctx.lifespan_context['rules'], pipeline.own)}
+                                          ctx.lifespan_context['rules'], pipeline.own,
+                                          accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))}
 
 
 async def step_sample(
@@ -263,7 +265,8 @@ async def step_sample(
                                 for e in pipeline.default_outputs()}
             result = await _step(stroom, pipeline, stream_id, 'FORWARD', location, draft_code)
 
-    summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records))
+    summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
+                     accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))
     for group in summary['groups']:
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
@@ -340,7 +343,8 @@ async def step_records(
         records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found),
                         **({'expect': 'none'} if loc.expect == 'none' else {})})
 
-    summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records))
+    summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
+                     accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))
     for group in summary['groups']:
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]

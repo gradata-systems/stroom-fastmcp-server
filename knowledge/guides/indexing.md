@@ -20,9 +20,11 @@ object-level `dynamic`) and its settings. The example's own fields this source d
 The user confirms the template, or corrects it (`check_index_template`); once they say the cluster admin has
 committed it, `create_processor_filter` starts indexing.
 
-A discovery index is different: raw JSON indexed as it is into Elasticsearch, for exploration, with no
-translation. Don't survey the data first; Elasticsearch maps its fields dynamically. Give `draft_index_mapping`
-`discovery` with what the user confirmed (the timestamp field, any stream meta, fields to drop): only `StreamId`,
+A discovery index is different: raw data (JSON, delimited text, XML) indexed as it is into Elasticsearch, for
+exploration, with no translation. Don't survey the data first; Elasticsearch maps its fields dynamically. Give
+`draft_index_mapping` `discovery` with what the user confirmed (the input: `json`, `delimited`, which needs a Data
+Splitter naming the columns, or `xml` with its `record` element; the timestamp field; any stream meta; fields to
+drop): only `StreamId`,
 `EventId` and `@timestamp` are mapped explicitly, a JSON object held in a string is also indexed parsed as
 `<field>_json`, and the template is permissive (strings as keywords, a field limit, malformed values ignored).
 
@@ -64,10 +66,23 @@ Arrays: `<array key="tags"><string>a</string></array>`. `indexName` may interpol
 document, e.g. `ecs-windows{_suffix}v1` with a `_suffix` string key; keys starting with `_` are not
 indexed. Field names and types follow the environment's field convention.
 
+Some problems only appear when documents reach Elasticsearch (a value of the wrong type for the mapping, a field
+name it refuses, the field limit). In the workspace, `create_processor_filter` and `reprocess_streams` start
+indexing with a batch size of 10, so each rejected document comes back whole in the Error stream; triage splits the
+bulk response into one entry per document. `wait_for_processing` restores the template's default once indexing
+completes without errors. Reprocessing does not remove the documents a stream already indexed: the approval gives the
+`_delete_by_query` request for the cluster admin to run first, or the documents are indexed twice.
+
 ## Verifying
 
 Verify through Stroom, not by querying the backend: `verify_index` makes the dashboard once and runs the test
 searches: the sample stream ids, an exact match on each key field, and a time range.
+
+The dashboard is for the people who will search the index. Suggest its columns (the time field and the key fields:
+user, host, address, event type, outcome) and confirm them with the user; `verify_index` asks before making it.
+StreamId and EventId are never shown: they are hidden columns, for the text pane and tracing hits. The query is the
+time field from the sample's earliest event (rounded back to a 30-day boundary) through today, run on open; the table
+is newest first; a text pane shows the selected row's record, with stepping and no extraction pipeline.
 Shard or document counts are not a reliable signal until the index is flushed.
 
 ## Searching an Elasticsearch index through Stroom

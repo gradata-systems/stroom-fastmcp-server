@@ -18,6 +18,7 @@ from tools.stepping import _field_values, _markers, _Pipeline, _step, compare_ou
 from tools.streams import _meta, _term
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
+from utils.triage import normalise
 
 _EVENT = re.compile(r'<(?:[\w.-]+:)?Event[\s>/]')
 
@@ -143,6 +144,12 @@ async def locate_event(
                     f"({seen} events produced); the pipeline may have changed since it was processed")
 
 
+def _brief(group: dict[str, Any]) -> dict[str, Any]:
+    """An error group, short: where, how often, and one example."""
+    return {'element': group.get('element'), 'severity': group.get('severity'), 'count': group.get('count'),
+            'reason': group.get('reason'), 'example': ((group.get('examples') or [{}])[0].get('message') or '')[:300]}
+
+
 def _changed_outside(paths: list[str], expected: list[str]) -> list[str]:
     return [p for p in paths if not any(p == e or p.startswith(e.rstrip('/') + '/') for e in expected)]
 
@@ -179,6 +186,19 @@ async def summarise_fix(
     comparison = await compare_outputs(ctx, pipeline_uuid, stream_ids, draft_code=code, element=element
                                        if target['doc']['type'] == 'XSLT' else None)
     stepped = await step_sample(ctx, pipeline_uuid, stream_ids, draft_code=code)
+    # The saved code stepped too: blocking errors it already has are not the fix's doing, and must not stop a fix
+    # for something else (a pipeline can have more than one problem); errors only the draft has are.
+    before = await step_sample(ctx, pipeline_uuid, stream_ids)
+
+    def key(group: dict[str, Any]) -> tuple:
+        example = (group.get('examples') or [{}])[0].get('message') or group.get('reason') or ''
+        return group.get('element'), group.get('severity'), normalise(example)
+    blocking_before = [g for g in before['groups'] if g['class'] == 'blocking']
+    blocking_now = [g for g in stepped['groups'] if g['class'] == 'blocking']
+    was, now = {key(g) for g in blocking_before}, {key(g) for g in blocking_now}
+    introduced = [g for g in blocking_now if key(g) not in was]
+    pre_existing = [g for g in blocking_now if key(g) in was]
+    resolved = [g for g in blocking_before if key(g) not in now]
     changed = [f['path'] for f in comparison['fields_changed']]
     unexpected = _changed_outside(changed, expected_paths)
     problems = []
@@ -186,8 +206,9 @@ async def summarise_fix(
         problems.append("The draft changes no output on these records: it does not reach the reported case")
     if unexpected:
         problems.append(f"Fields outside expected_paths change too: {unexpected}")
-    if stepped['verdict'] == 'blocking':
-        problems.append("Stepping with the draft has blocking errors")
+    if introduced:
+        problems.append(f"Stepping with the draft has blocking errors the saved code does not: "
+                        f"{[(g.get('element'), (g.get('examples') or [{}])[0].get('message', '')[:150]) for g in introduced]}")
     name = (await stroom.get(f'/pipeline/v1/{pipeline_uuid}')).get('name')
     kind = 'XSLT' if target['doc']['type'] == 'XSLT' else 'Text Converter'
     manual = [
@@ -208,6 +229,11 @@ async def summarise_fix(
         'records_compared': comparison['records_compared'], 'records_changed': comparison['records_changed'],
         'fields_changed': comparison['fields_changed'][:20], 'step_verdict': stepped['verdict'],
         'step_groups': [g for g in stepped['groups'] if g['class'] != 'benign'][:10],
+        **({'errors_resolved': [_brief(g) for g in resolved]} if resolved else {}),
+        **({'errors_before_too': [_brief(g) for g in pre_existing],
+            'errors_before_too_note': "The saved code has these as well: not caused by this fix, and not in its way. "
+                                      "Tell the user; they are a separate issue (evaluate_events_pipeline lists "
+                                      "them)."} if pre_existing else {}),
         'diff': diff[:stroom.settings.max_stream_chars], 'draft': draft, 'manual_steps': manual,
         'hint': ("Show the user the diff and the fields changed, then ask whether to apply the fix to the "
                  "pipeline or give them the manual steps." if not problems else

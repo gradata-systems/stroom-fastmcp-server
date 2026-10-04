@@ -1,4 +1,4 @@
-"""Minimal synchronous Stroom client for the Phase 0 spike (local Docker stack only)."""
+"""Minimal synchronous Stroom client for the Stroom API checks (local Docker stack only)."""
 import json
 import os
 import time
@@ -8,14 +8,14 @@ from typing import Any
 import httpx
 
 ENV_FILE = Path(__file__).resolve().parents[1] / 'dev' / 'stroom' / '.env'
-BASE = os.environ.get('SPIKE_STROOM_URL', 'http://127.0.0.1:18080')
+BASE = os.environ.get('API_CHECKS_STROOM_URL', 'http://127.0.0.1:18080')
 
 
 def _credential() -> str:
     """The admin API key if one has been created, else the insecure test credential.
 
-    Explorer endpoints reject the test credential's processing identity, so the spike creates an
-    admin API key with it once (see phase0.py) and uses that from then on.
+    Explorer endpoints reject the test credential's processing identity, so the checks create an
+    admin API key with it once (see stroom_apis.py) and uses that from then on.
     """
     env = dict(line.split('=', 1) for line in ENV_FILE.read_text().splitlines() if '=' in line)
     key = env.get('STROOM_ADMIN_API_KEY') or env.get('STROOM_TEST_CREDENTIAL')
@@ -26,7 +26,7 @@ def _credential() -> str:
 
 class Stroom:
     def __init__(self):
-        assert '127.0.0.1' in BASE or 'localhost' in BASE, 'the spike only runs against the local stack'
+        assert '127.0.0.1' in BASE or 'localhost' in BASE, 'the API checks only run against the local stack'
         self.http = httpx.Client(base_url=BASE, timeout=120,
                                  headers={'Authorization': f'Bearer {_credential()}', 'Accept': 'application/json'})
 

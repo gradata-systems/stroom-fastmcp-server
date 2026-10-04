@@ -18,9 +18,14 @@ _RULES = """Rules for every run:
   needs_approval: show the summary, and only pass the id back once the user has agreed.
 - Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
   from, and let the user confirm or correct it.
-- Step every sample record (step_sample) before processing; fix blocking groups and treat review groups as
-  questions to resolve. A generated XSLT is saved by build_translation_xslt (build, name) and stepped as saved;
-  code written by hand is tried with draft_code before it is saved.
+- Step every sample record (step_sample) before processing. Errors, when stepping or processing: first resolve
+  those your own content causes (the XSLT, text converter, mapping or field plan), stepping again after each fix.
+  Only what you cannot resolve there (an inherited template element, reference data, the source data itself) goes
+  to the user, with what you tried and an example. If the user says one is benign and can be ignored, record it:
+  write_documentation accept_errors=[{element, example, reason in their words, matches: the kind it covers with * for
+  what varies, e.g. 'No HR record for user svc-*'}] (they confirm); it is then reported
+  as benign, with their reason, and not raised again. A generated XSLT is saved by build_translation_xslt (build,
+  name) and stepped as saved; code written by hand is tried with draft_code before it is saved.
 - Document what you build (write_documentation) and use the user's source notes for field meanings.
 - While developing a pipeline in the build, reprocess sample streams after a fix with reprocess_streams (at most
   10 per call, one task at a time) and wait_for_processing with its filter_id. Reprocessing production data, and
@@ -28,6 +33,9 @@ _RULES = """Rules for every run:
 - A translation pipeline only processes the build's own feeds: step production records in place (step_records) or
   copy them into a test feed. Promotion pre-creates each pipeline's filter for new data, disabled: give the user
   the pipeline link to review and enable it.
+- Elasticsearch indexing in the workspace runs in batches of 10 (create_processor_filter and reprocess_streams set
+  it), so a document Elasticsearch rejects is reported whole, with its reason; wait_for_processing restores the
+  template's batch size once indexing completes without errors.
 - Elasticsearch indexing runs only through the Stroom indexing pipeline, with an index template the user agreed
   (built by propose_index_template from their example, or their correction), and only once they confirm the cluster
   admin has committed it to the cluster: the approval to start it asks them."""
@@ -183,7 +191,9 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
     without it. Then create_processor_filter on the Events stream ids with source_pipeline_uuid = the events
     pipeline from stage 1 (the filter then only selects Events from that pipeline): its approval asks the user to
     confirm the agreed template is committed, and processing starts. Lucene: create_processor_filter likewise.
-    Then wait_for_processing expect_events=false, and verify_index with pipeline_uuid = the indexing pipeline (each
+    Then suggest the dashboard's columns (the time field and key fields: user, host, address, event type, outcome;
+    never StreamId or EventId) and confirm them with the user. Then wait_for_processing expect_events=false, and
+    verify_index with those fields and pipeline_uuid = the indexing pipeline (each
     hit traced back to its event) and searches as people will make them, from stepped values: an exact match, a
     value in another case (keywords on Elasticsearch: expected 0), IN, a wildcard, a numeric or IP range. Then
     write_documentation for the indexing
@@ -220,15 +230,23 @@ Samples:
     def update_indexing_pipeline(indexing_pipeline: str, changes: str) -> str:
         return f"""Create the next version of the indexing pipeline "{indexing_pipeline}" with these changes: {changes}
 
-1. describe_document to find its XSLT, index doc and index name; work out the next version from the naming
-   convention (e.g. -v1 to -v2) and confirm it and the cluster or volume group with the user.
-2. draft_index_mapping with the requested fields as extra_fields; create_index_doc for v2 (plan=... adds the Lucene fields), or
-   propose_index_template for v2 (check the user's changes with check_index_template); save_xslt with the new
-   indexing XSLT.
-3. copy_pipeline with set_properties for the new XSLT and index; compare_outputs against v1 on recent Events
-   streams: only the requested fields may differ.
-4. Process sample Events, wait_for_processing expect_events=false, verification dashboard and verify_index.
-5. write_documentation, promote_build. v1 stays running; switching readers to v2, and retiring v1, is the user's.
+1. describe_document to find its XSLT, index doc and index name (and, for Elasticsearch, the index template agreed
+   for it, kept in the pipeline's description); work out the next version from the naming convention (e.g. -v1 to
+   -v2) and confirm it and the cluster or volume group with the user.
+2. copy_pipeline as a new version (not a working copy), with rename (e.g. {{'-v1': '-v2'}}) and set_properties for the
+   v2 index (indexName, or the Lucene index doc). draft_index_mapping with the requested fields as extra_fields
+   (Elasticsearch: with v1's agreed template as example_template, so v2 follows it); save_xslt index_plan=plan with
+   uuid = the copied XSLT. Lucene: create_index_doc for v2 (plan=... adds the fields).
+3. step_sample v2 on recent Events streams; compare_outputs v1 against v2 (other_pipeline_uuid): only the requested
+   fields may differ.
+4. Elasticsearch: propose_index_template for v2 with v1's agreed template as the example (v2's pattern, the added
+   fields, everything else as v1's); the user confirms it (or corrects it, check_index_template), and once they say
+   it is committed, create_processor_filter on the Events feed from a create time (created_after), so v2 indexes new
+   Events: its approval asks them to confirm the template is committed. Backfilling older streams is the user's.
+   Lucene: process sample Events. Then wait_for_processing expect_events=false; create_index_doc (Elasticsearch);
+   verify_index with pipeline_uuid = v2 and searches on the new fields.
+5. write_documentation for v2, saying what changed from v1; promote_build. v1 stays running; switching readers to v2,
+   and retiring v1, is the user's.
 
 {_RULES}"""
 
@@ -243,23 +261,29 @@ stepping, processing, verification searches, documentation, promotion.
 
     @mcp.prompt(description="Index raw structured data directly into a discovery index.")
     def create_discovery_index(feed: str = '', sample: str = '', timestamp_field: str = '') -> str:
-        return f"""Create a discovery index for {'feed ' + feed if feed else 'the sample below'}: raw structured data (JSON)
-indexed as it is into Elasticsearch, for exploration, without an event-logging translation.
+        return f"""Create a discovery index for {'feed ' + feed if feed else 'the sample below'}: raw data (JSON, delimited
+text such as CSV, or XML) indexed as it is into Elasticsearch, for exploration, without an event-logging translation.
 
 Elasticsearch maps the source's fields dynamically as documents arrive, so do not survey the data first: no
 profile_sample, no reading through the streams. Only StreamId, EventId and @timestamp are mapped explicitly.
 
 1. The source: the feed's Raw Events streams, or the sample uploaded to a new workspace feed (create_feed,
-   upload_sample). find_pipeline_templates stage=discovery for the Stroom pipeline template; find_elastic_clusters.
+   upload_sample); what it is (JSON, delimited text, XML) from a glance at one record. find_pipeline_templates
+   stage=discovery for the Stroom pipeline template whose parser fits it (JSONParser, DSParser, XMLParser or
+   XMLFragmentParser; for XML, an XMLParser template listed under stage=indexing serves too, as the two look alike);
+   find_elastic_clusters. Delimited text needs a Data Splitter in the build first (build_data_splitter with the
+   streams, which infers the header; save_text_converter): it names each column.
 2. Ask the user, in one message: the cluster, the index name (e.g. stroom-discovery-<source>-v1), the Stroom
    pipeline template, the field holding the event time{f' ({timestamp_field})' if timestamp_field else ''} (and its
    format, if it is not ISO 8601 or epoch milliseconds), any stream meta to add (describe_stream lists a stream's
    attributes), any fields to leave out (secrets, tokens), and an example Elasticsearch index template from a
    sibling index, for its settings (and component templates, if it has any). If they don't know the time field, read one record
    (read_stream), no more.
-3. draft_index_mapping backend=elasticsearch discovery={{timestamp_field, timestamp_format?, meta?, drop?}}: its XSLT
-   copies every record as it is, adding StreamId, EventId (the record number) and @timestamp, and parses a string
-   holding a JSON object into a sibling <field>_json. save_xslt index_plan=plan with no code;
+3. draft_index_mapping backend=elasticsearch discovery={{input (json, delimited, xml), timestamp_field, record (xml: the
+   record element), timestamp_format?, meta?, drop?}}: its XSLT copies every record as it is (a JSON object; each
+   column, named by the header; an XML element as nested objects, repeated elements as arrays, attributes as
+   fields), adding StreamId, EventId (the record number) and @timestamp, and parses a value holding a JSON object
+   into a sibling <field>_json. save_xslt index_plan=plan with no code;
    create_indexing_pipeline from the discovery template; step_sample on the raw streams: the documents show what
    the source holds.
 4. propose_index_template with the plan, the raw streams and the user's example index template, and its component
@@ -279,24 +303,35 @@ Sample:
 
     @mcp.prompt(description="Evaluate and document an existing events pipeline.")
     def evaluate_events_pipeline(pipeline: str, sample_size: int = 50, source_docs: str = '') -> str:
-        return f"""Evaluate the Stroom events pipeline "{pipeline}" and write a report. Change nothing except the report.
+        return f"""Evaluate the Stroom events pipeline "{pipeline}": a health check. The question to answer first is whether
+anything is wrong with it that is worth worrying about, schema compliance above all. Change nothing except the
+report. (When the user already knows what is broken, that is fix_pipeline_issue.)
 
 1. Describe the pipeline: find it (find_documents), then describe_document for its template chain,
    elements, what it overrides or removes, and its reference data. describe_document its XSLT and text converter.
    processing_status shows which feeds its processor filters cover.
-2. Sample the data: find_streams for recent Raw Events on each of those feeds, and the Events and Error
-   streams the pipeline produced from them (describe_stream). Step up to {sample_size} raw records
-   with step_sample, and look at one or two records in detail with step_pipeline.
-3. Map the translation: describe_document on its XSLT. Compare input_fields with the fields in the
-   raw data (read_stream, profile_sample) to find inputs that are never used.
-4. Inventory the events: summarise_streams (kind=events) on its Events streams.
-5. Measure conformance: check_events on sample Events records;
-   summarise_streams (kind=errors) on recent raw streams it processed. Give rates, e.g. "97% valid".
-6. Suggest improvements, prioritised, each with the rule or field it fixes, the share of events affected,
-   and a draft XSLT change.
+2. Errors and schema compliance, first: find_streams for recent Raw Events on each of those feeds, and the Events
+   and Error streams the pipeline produced from them (describe_stream). summarise_streams (kind=errors) on those raw
+   streams: its error groups, triaged as blocking, review or benign. check_events on sample Events records (read_stream):
+   the share that are valid against the schema and pass the quality rules. step_sample over up to {sample_size} raw
+   records shows the same errors the current code gives now, and step_pipeline one record in detail.
+3. Say plainly whether there are errors worth worrying about: blocking ones (schema failures, fatal errors,
+   records not translated) with how many records and events each affects and an example; review ones; benign ones
+   only as a count. Compare records stepped with events stored: Stroom does not store an event that fails the
+   schema, so the stored events can all be valid while records are lost, e.g. "6 records, 5 events: one record's
+   event fails on EventSource/Device/IPAddress ('n/a') and is not stored".
+4. Map the translation: describe_document on its XSLT. Compare input_fields with the fields in the raw data
+   (read_stream, profile_sample) to find inputs that are never used.
+5. Inventory the events: summarise_streams (kind=events) on its Events streams: types, TypeIds, actions, and how often
+   each path is populated.
+6. Suggest fixes, prioritised (blocking errors first), each with what it fixes, the share of records or events
+   affected, and a draft change to the pipeline's own XSLT or text converter. When the user asks for one, prove it
+   with summarise_fix (expected_paths = the fields it should change): ready means it changes only those fields
+   and adds no errors (errors the saved code has too are reported apart, as not the fix's doing). Applying it
+   follows fix_pipeline_issue's step 5.
 
-Report sections: Purpose and data; Processing; Field mapping; Event types; Schema conformance; Suggestions.
-Return it in the chat and save it with write_documentation in a build, then promote_build beside the
+Report sections: Purpose and data; Processing; Errors and schema conformance; Field mapping; Event types;
+Suggestions. Return it in the chat and save it with write_documentation in a build, then promote_build beside the
 pipeline once the user approves.{_docs(source_docs)}"""
 
     @mcp.prompt(description="Build an events pipeline for a feed that already holds data.")

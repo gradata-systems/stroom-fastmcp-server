@@ -1,4 +1,5 @@
 """The mapping kept with an XSLT, and the documentation generated from it."""
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -50,9 +51,53 @@ def test_index_field_mapping_table():
                              PlannedField(name='UserId', type='keyword', source='EventSource/User/Id')])
     text = index_field_mapping_markdown(plan, {'EventTime/TimeCreated': 100.0, 'EventSource/User/Id': 66.7})
     assert "- `EventDetail/TypeId = 'hb'`" in text
-    assert '| `StreamId` | id | `@StreamId` | always |' in text
-    assert '| `UserId` | keyword | `EventSource/User/Id` | 66.7% of events |' in text
+    assert '| `StreamId` | The id of the Events stream the event came from. | id | `@StreamId` | always |' in text
+    assert '| `UserId` |  | keyword | `EventSource/User/Id` | 66.7% of events |' in text   # no schema, no sample
     assert '| In sample |' not in index_field_mapping_markdown(plan)
+
+
+def test_elasticsearch_rows_show_long_ids_and_group_fields_by_object():
+    fields = [('StreamId', 'id', '@StreamId'), ('@timestamp', 'date', 'EventTime/TimeCreated'),
+              ('host.name', 'keyword', 'EventSource/Device/HostName'), ('user.id', 'keyword', 'EventSource/User/Id'),
+              ('message', 'text', 'EventDetail/Description'), ('host.ip', 'ip', 'EventSource/Device/IPAddress'),
+              ('user.name', 'keyword', 'EventSource/User/Name')]
+    plan = FieldPlan(backend='elasticsearch', index_name='people-v1', time_field='@timestamp',
+                     fields=[PlannedField(name=n, type=t, source=s) for n, t, s in fields])
+    text = index_field_mapping_markdown(plan)
+    rows = [line.split(' | ')[0].strip('| `') for line in text.splitlines() if line.startswith('| `')]
+    assert rows == ['StreamId', '@timestamp', 'host.name', 'host.ip', 'user.id', 'user.name', 'message']
+    assert '| `StreamId` | The id of the Events stream the event came from. | long | `@StreamId` |' in text and '| `host.ip` |  | ip |' in text
+
+
+def test_each_index_field_is_described_from_the_schema_and_the_sample():
+    from utils.eventschema import EventSchema
+    schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
+    fields = [('StreamId', 'id', '@StreamId'), ('host.ip', 'ip', 'EventSource/Device/IPAddress'),
+              ('user.id', 'keyword', 'EventSource/User/Id'), ('user.email', 'keyword', 'EventSource/User/EmailAddress'),
+              ('product', 'keyword', 'EventSource/System/Name'),
+              ('agent', 'keyword', "EventDetail/Authenticate/Data[@Name='agent']/@Value"),
+              ('outcome', 'keyword', 'EventDetail/Authenticate/Outcome/Success')]
+    plan = FieldPlan(backend='elasticsearch', index_name='people-v1', time_field='@timestamp',
+                     fields=[PlannedField(name=n, type=t, source=s, description='Whether the logon succeeded.'
+                                          if n == 'outcome' else '') for n, t, s in fields])
+    documents = [{'StreamId': ['7'], 'host.ip': ['10.0.0.1'], 'user.id': ['alice'], 'user.email': ['a@x.org'],
+                  'product': ['E2E'], 'agent': ['curl'], 'outcome': ['true']},
+                 {'StreamId': ['7'], 'host.ip': ['10.0.0.2'], 'user.id': ['bob'], 'user.email': ['b@x.org'],
+                  'product': ['E2E'], 'outcome': ['false']}]
+    text = index_field_mapping_markdown(plan, None, documents, schema)
+    described = {line.split(' | ')[0].strip('| `'): line.split(' | ')[1] for line in text.splitlines()
+                 if line.startswith('| `')}
+    assert described['StreamId'] == ('The id of the Events stream the event came from. Numbers, the same in every sampled '
+            'document (`7`).')
+    assert described['host.ip'].endswith('IP addresses, different in each sampled document.')
+    assert described['user.email'].endswith('Email addresses, different in each sampled document.')
+    assert described['product'].endswith('The same in every sampled document (`E2E`).')
+    assert described['agent'].startswith('The `agent` value recorded in a Data element')
+    assert described['agent'].endswith('One value in the sample (`curl`), in 1 of 2 documents.')
+    assert described['outcome'] == 'Whether the logon succeeded. Different in each sampled document.'   # the plan's own
+    # The schema's words for the user's id, ahead of what the sample shows.
+    schema_words = schema.describe(schema.resolve('EventSource/User/Id'))
+    assert schema_words and described['user.id'] == f'{schema_words} Different in each sampled document.'
 
 
 async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_section_otherwise():
@@ -108,8 +153,10 @@ def test_the_index_section_shows_what_each_index_field_got_from_the_sample():
     assert index_documents([lucene]) == [{'UserId': ['bob', 'carol']}]
     section = index_field_mapping_markdown(plan, {'EventSource/User/Id': 100.0}, documents)
     assert 'Sample values are what the 1 documents written from the sample got.' in section
-    assert '| `user.name` | keyword | `EventSource/User/Id` | 100% of events | `alice` |' in section
-    assert '| `source.ip` | ip | `EventSource/Client/IPAddress` | not in the sample | (none in the sample) |' in section
+    assert ('| `user.name` | From the one sampled document. | keyword | `EventSource/User/Id` | 100% of events | '
+            '`alice` |') in section
+    assert ('| `source.ip` | Not in the sample. | ip | `EventSource/Client/IPAddress` | not in the sample | '
+            '(none in the sample) |') in section
 
 
 async def test_the_index_section_names_the_agreed_elasticsearch_template():

@@ -1,8 +1,8 @@
-"""Phase 3 exit test against the local Docker stack (Lucene backend), driving the real tools.
+"""Indexing on the Lucene backend end to end against the local Docker stack, driving the real tools.
 
-    uv run python dev/e2e_phase3.py
+    uv run python dev/e2e_lucene_indexing.py
 
-Stage 1 comes from the Phase 2 test (a CSV build). Then: convention guidance, field plan, Lucene index doc
+Stage 1 comes from the translation suite (a CSV build). Then: convention guidance, field plan, Lucene index doc
 and fields, indexing XSLT and pipeline from the Indexing template, stepping the Events, processing,
 verification dashboard and test searches, documentation; then a v2 copy adding one field, a diff limited
 to that field, and verification of v2 beside v1; then promotion.
@@ -15,19 +15,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import e2e_phase2 as p2  # noqa: E402
+import e2e_translation as e2e  # noqa: E402
 from tools import builds, indexing, pipeline_writes, processing_writes, stepping, templates, translation  # noqa: E402
 from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
 
-check, agreed = p2.check, p2.agreed
+check, agreed = e2e.check, e2e.agreed
 
 
 async def index_stage(ctx, csv: dict, stamp: str):
     print('\n### stage 2 on Lucene')
     stroom = ctx.lifespan_context['stroom']
-    events = (await p2.processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']]))['streams'][0]['events']
+    events = (await e2e.processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']]))['streams'][0]['events']
     guidance = await indexing.get_field_conventions(ctx)
     check(guidance['status'] == 'needs_guidance', 'no convention chosen: the tool asks instead of assuming one')
     conv = await indexing.get_field_conventions(ctx, 'stroom-flat')
@@ -72,8 +72,20 @@ async def index_stage(ctx, csv: dict, stamp: str):
         print(f"    {'ok ' if c['pass'] else 'BAD'} {c['check']}: {c['returned']}"
               + (f" (traced to record {trace['event']})" if trace and trace['traced'] else f" (trace: {trace})" if trace else ''))
     check(result['passed'], 'verification searches pass, each hit traced to its event')
-    await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
-                                     f"# {pipeline['name']}\n\n## Output\n\nLucene index {index_name}.\n", 'Created')
+    try:
+        await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
+                                         f"# {pipeline['name']}\n\n## Output\n\nLucene index {index_name}.\n", 'Created')
+        refused = ''
+    except Exception as e:
+        refused = str(e)
+    check('Give stream_ids' in refused and 'values the sample gave' in refused,
+          'documentation without the sample is refused: it goes down to the field, with sample values')
+    written = await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
+                                               f"# {pipeline['name']}\n\n## Output\n\nLucene index {index_name}.\n",
+                                               'Created', stream_ids=events)
+    user_field = next(f.name for f in plan.fields if f.source == 'EventSource/User/Id')
+    await e2e.documented_to_the_field(ctx.lifespan_context['stroom'], written, [f.name for f in plan.fields],
+                                      {user_field: 'alice'})
     return {'events': events, 'template': template, 'index': index, 'pipeline': pipeline, 'plan': plan}
 
 
@@ -114,17 +126,17 @@ async def version_two(ctx, csv: dict, v1: dict, stamp: str):
 
 
 async def main():
-    local = p2.env(ROOT / 'dev' / 'stroom' / '.env')
-    settings = p2.Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True, stroom_api_key=local['STROOM_ADMIN_API_KEY'],
+    local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
+    settings = e2e.Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True, stroom_api_key=local['STROOM_ADMIN_API_KEY'],
                            oidc_issuer_url='-', oidc_audience='-', public_base_url='-',
-                           event_logging_version=p2.VERSION, conventions_dir=ROOT / 'conventions')
-    stroom = p2.StroomGateway(settings)
-    ctx = p2.SimpleNamespace(lifespan_context={
-        'stroom': stroom, 'rules': p2.ErrorRules.load(ROOT / 'error_rules.yaml'),
-        'policy': p2.AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
+                           event_logging_version=e2e.VERSION, conventions_dir=ROOT / 'conventions')
+    stroom = e2e.StroomGateway(settings)
+    ctx = e2e.SimpleNamespace(lifespan_context={
+        'stroom': stroom, 'rules': e2e.ErrorRules.load(ROOT / 'error_rules.yaml'),
+        'policy': e2e.AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     stamp = time.strftime('%H%M%S')
     try:
-        csv = await p2.onboard(ctx, 'csv', p2.CASES['csv'], stamp)
+        csv = await e2e.onboard(ctx, 'csv', e2e.CASES['csv'], stamp)
         v1 = await index_stage(ctx, csv, stamp)
         await version_two(ctx, csv, v1, stamp)
         print('\n### promotion')

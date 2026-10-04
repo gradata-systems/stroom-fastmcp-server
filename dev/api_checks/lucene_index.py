@@ -1,9 +1,9 @@
-"""Phase 0 spike, indexing stage with Stroom's built-in Lucene index (local stack).
+"""Stroom API checks for indexing, with Stroom's built-in Lucene index (local stack).
 
-Runs after phase0.py has produced an Events stream:
+Runs after stroom_apis.py has produced an Events stream:
 
-    uv run python spike/lucene.py               # all steps
-    uv run python spike/lucene.py search        # one step; shares spike/out/state.json
+    uv run python dev/api_checks/lucene_index.py               # all steps
+    uv run python dev/api_checks/lucene_index.py search        # one step; shares dev/api_checks/out/state.json
 
 Proves the backend-neutral stage 2 flow on Lucene: index doc and fields, indexing pipeline from
 the Indexing template, stepping the cooked Events, processing, then a verification dashboard and
@@ -13,9 +13,9 @@ import sys
 import time
 import uuid
 
-from phase0 import _step_all, load, ref, s, save, show
+from stroom_apis import _step_all, load, ref, s, save, show
 
-INDEX = 'SPIKE-AUTH-V1-INDEX2'
+INDEX = 'APICHECK-AUTH-V1-INDEX2'
 FIELDS = [  # name, type; IDs and the time field are what every stage-2 build needs
     ('StreamId', 'ID'), ('EventId', 'ID'), ('EventTime', 'DATE'),
     ('UserId', 'KEYWORD'), ('HostName', 'KEYWORD'), ('Success', 'KEYWORD'), ('Description', 'TEXT'),

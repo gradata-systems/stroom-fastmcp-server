@@ -307,8 +307,10 @@ async def score_build(score: AgentScore, case: dict[str, Any], build: str, feed:
         # that finds the events counts, newest first.
         failed = []
         for index in reversed(indexes):
-            verified = await indexing.verify_index(ctx, build, index['uuid'], 'lucene', events, score.events,
-                                                   ['StreamId', 'EventId'], retries=4 if not failed else 1)
+            import e2e_translation as e2e  # noqa: E402 (dev/ is on the path, via run_eval)
+            verified = await e2e.agreed(indexing.verify_index, ctx=ctx, build=build, index_uuid=index['uuid'],
+                                        backend='lucene', stream_ids=events, expected_documents=score.events,
+                                        fields=['StreamId', 'EventId'], retries=4 if not failed else 1)
             if verified.get('passed'):
                 score.indexed = True
                 break
@@ -392,11 +394,11 @@ async def wait_healthy(url: str, seconds: float) -> None:
 
 async def start_server(port: int, log: Path) -> asyncio.subprocess.Process:
     """This checkout's server on localhost, without sign-in, against the local stack, as the admin key."""
-    import e2e_phase2 as p2
-    key = p2.env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
+    import e2e_translation as e2e
+    key = e2e.env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
     env = {**os.environ, 'STROOM_MCP_STROOM_URL': STROOM_URL, 'STROOM_MCP_STROOM_API_KEY': key,
            'STROOM_MCP_DEV_NO_AUTH': 'true', 'STROOM_MCP_HOST': '127.0.0.1', 'STROOM_MCP_PORT': str(port),
-           'STROOM_MCP_EVENT_LOGGING_VERSION': p2.VERSION, 'STROOM_MCP_DEFAULT_CONVENTION': 'stroom-flat',
+           'STROOM_MCP_EVENT_LOGGING_VERSION': e2e.VERSION, 'STROOM_MCP_DEFAULT_CONVENTION': 'stroom-flat',
            'STROOM_MCP_USE_ELICITATION': 'false'}
     handle = log.open('wb')
     proc = await asyncio.create_subprocess_exec(sys.executable, str(ROOT / 'main.py'), cwd=ROOT, env=env,
