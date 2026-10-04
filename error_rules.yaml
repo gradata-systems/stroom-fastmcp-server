@@ -20,6 +20,8 @@ rules:
      reason: "Elasticsearch rejected these documents, so their records are not indexed (the rest of the batch was)"}
   - {message: 'Bulk indexing request failed', class: blocking,
      reason: "Elasticsearch rejected documents in a bulk request, and its response could not be read in full (a large batch is cut short in the Error stream). Process again with a small batch: create_processor_filter and reprocess_streams set batch size 10 on a workspace pipeline"}
+  - {message: 'No schema locations specified', class: blocking,
+     reason: "The output does not say which schema it follows, and the schema filter's group holds several: the XSLT's root element must carry xsi:schemaLocation. For Elasticsearch, <array xsi:schemaLocation=\"http://www.w3.org/2005/xpath-functions file://xpath-functions.xsd\">: save the indexing XSLT again from its plan (save_xslt index_plan=..., uuid=...), which writes it. Do not change or remove the schema filter"}
   - {severity: [FATAL], class: blocking, reason: 'Fatal error stops processing'}
   - {message: 'Attempt to index unknown field', class: blocking,
      reason: "The index has no such field, so the value is dropped: save the indexing XSLT from its plan (save_xslt index_plan=...), and create_indexing_pipeline adds the plan's fields to the index"}

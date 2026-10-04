@@ -336,3 +336,52 @@ async def test_an_xml_discovery_pipeline_needs_no_events_though_its_template_loo
                 patch('tools.indexing.create_pipeline', AsyncMock(return_value={'uuid': 'p'})):
             await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_name='d')
         assert events.called is checked
+
+
+def test_elasticsearch_output_says_which_json_schema_it_follows():
+    # A template's schema filter with group JSON holds two schemas (json.xsd, xpath-functions.xsd): without
+    # xsi:schemaLocation every record fails with "No schema locations specified".
+    import re
+    from utils.fieldplan import Discovery
+    declared = ('xsi:schemaLocation="http://www.w3.org/2005/xpath-functions file://xpath-functions.xsd"')
+    indexed = run(FieldPlan(backend='elasticsearch', index_name='stroom-acme-v1', time_field='@timestamp',
+                            fields=FIELDS).xslt())
+    discovered = run_raw(FieldPlan.for_discovery('stroom-raw-v1', Discovery(timestamp_field='time')).xslt())
+    for output in (indexed, discovered):
+        root = re.search(r'<array\b[^>]*>', output).group(0)
+        assert declared in root and 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' in output
+
+
+async def test_elasticsearch_asks_for_the_users_example_first_offering_existing_indexes():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tools import indexing
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': [
+        {'docRef': {'type': 'ElasticIndex', 'uuid': 'k', 'name': 'Keycloak'}, 'path': 'System / Elastic Indices'}]}),
+        settings=SimpleNamespace(default_convention=None))
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {'description': 'ECS'}, 'stroom-flat': {}}):
+        asked = await indexing.get_field_conventions(SimpleNamespace(lifespan_context={'stroom': stroom}),
+                                                     backend='elasticsearch')
+    options = [o['option'] for o in asked['options']]
+    assert asked['status'] == 'needs_guidance' and options[0].startswith('example index template')
+    assert options[1] == 'follow an existing index in Stroom' and asked['options'][1]['existing_indexes'][0]['uuid'] == 'k'
+    assert options[2] == 'a convention profile' and 'ecs' in asked['options'][2]['profiles']
+
+
+async def test_an_existing_index_in_stroom_becomes_the_example_template():
+    import json as jsonlib
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from tools import indexing
+    stroom = SimpleNamespace(
+        get_doc=AsyncMock(return_value={'name': 'Keycloak', 'indexName': 'ecs-keycloak-v1'}),
+        post=AsyncMock(return_value={'values': [
+            {'fldName': 'user.name', 'fldType': 'KEYWORD'}, {'fldName': 'source.ip', 'fldType': 'IPV4_ADDRESS'},
+            {'fldName': '@timestamp', 'fldType': 'DATE'}, {'fldName': 'StreamId', 'fldType': 'LONG'}]}))
+    text, note = await indexing._example_from_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'k')
+    head, body = text.split('\n', 1)
+    template = jsonlib.loads(body)
+    assert head == 'PUT _index_template/ecs-keycloak-v1' and template['index_patterns'] == ['ecs-keycloak-v1*']
+    props = template['template']['mappings']['properties']
+    assert props['user']['properties']['name'] == {'type': 'keyword'} and props['source']['properties']['ip'] == {'type': 'ip'}
+    assert props['@timestamp'] == {'type': 'date'} and "Keycloak" in note and 'settings are not visible' in note

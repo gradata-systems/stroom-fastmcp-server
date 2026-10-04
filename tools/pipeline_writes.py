@@ -284,6 +284,7 @@ async def create_pipeline(
     unknown = sorted({p.element for p in set_properties} - elements)
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
+    _keep_validation({e['id']: e['type'] for e in merged['elements']}, set_properties)
     properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
     await _own_documents(ctx, build, properties, reuse_existing_docs)
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
@@ -402,6 +403,22 @@ async def copy_pipeline(
             'working_copy': working_copy, 'copied_documents': list(copies.values())}
 
 
+VALIDATION = {'SchemaFilter'}
+
+
+def _keep_validation(types: dict[str, str], props: list[Any]) -> None:
+    """Refuse a property on a schema filter: validation is the template's, there to catch output that is wrong.
+    When it fails, the output is what to fix (e.g. a root element that does not say which schema it follows)."""
+    touched = sorted({p.element for p in props if types.get(p.element) in VALIDATION})
+    if touched:
+        raise ToolError(f"{touched} validate the pipeline's output against its schema; their settings are not changed "
+                        f"here. Fix the output instead: an Elasticsearch indexing XSLT's root must say which JSON schema "
+                        f"it follows (<array xsi:schemaLocation=\"http://www.w3.org/2005/xpath-functions "
+                        f"file://xpath-functions.xsd\">), which save_xslt index_plan=... writes; an events XSLT must "
+                        f"produce valid event-logging. If the template's validation itself is wrong, that is for the "
+                        f"template's owner to change.")
+
+
 async def set_pipeline_property(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
@@ -411,9 +428,11 @@ async def set_pipeline_property(
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
     await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
-    elements = {e['id'] for e in merge_layers(await stroom.pipeline_layers(pipeline_uuid))['elements']}
+    types = {e['id']: e['type'] for e in merge_layers(await stroom.pipeline_layers(pipeline_uuid))['elements']}
+    elements = set(types)
     if prop.element not in elements:
         raise ToolError(f"No element '{prop.element}' in this pipeline; elements are {sorted(elements)}")
+    _keep_validation(types, [prop])
     data = doc.get('pipelineData') or {}
     _set_property(data, prop.element, prop.name, await _value(stroom, prop))
     doc['pipelineData'] = data

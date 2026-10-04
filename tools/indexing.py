@@ -45,9 +45,53 @@ def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
     return out
 
 
+_STROOM_TO_ES = {'keyword': 'keyword', 'text': 'text', 'long': 'long', 'integer': 'integer', 'id': 'long',
+                  'float': 'float', 'double': 'double', 'date': 'date', 'ipv4_address': 'ip', 'boolean': 'boolean'}
+
+
+async def _example_from_index(ctx: Context, index: str) -> tuple[str, str]:
+    """An existing Elastic Index doc's fields (names and types, read through Stroom) as an example index template,
+    and a note of what it cannot say (the template's settings)."""
+    stroom = gateway_from(ctx)
+    ref = None
+    try:
+        doc = await stroom.get_doc('ElasticIndex', index)
+        ref = {'type': 'ElasticIndex', 'uuid': index, 'name': doc.get('name')}
+    except ToolError:
+        found = [v['docRef'] for v in (await stroom.find_documents(index, ['ElasticIndex'], 20)).get('values') or []
+                 if v['docRef'].get('name') == index]
+        if len(found) != 1:
+            raise ToolError(f"No single Elastic Index doc named '{index}': give its uuid (get_field_conventions "
+                            f"backend=elasticsearch lists them)")
+        ref, doc = found[0], await stroom.get_doc('ElasticIndex', found[0]['uuid'])
+    fields = (await stroom.post('/dataSource/v1/findFields', {
+        'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})).get('values') or []
+    properties: dict[str, Any] = {}
+    for f in fields:
+        kind = _STROOM_TO_ES.get((f.get('fldType') or '').lower())
+        if not kind or not f.get('fldName'):
+            continue
+        node = properties
+        *parents, leaf = f['fldName'].split('.')
+        for part in parents:
+            node = node.setdefault(part, {'properties': {}}).setdefault('properties', {})
+        node[leaf] = {'type': kind}
+    if not properties:
+        raise ToolError(f"Stroom lists no fields for '{ref['name']}' (its cluster may be unreachable): ask the user for "
+                        f"its index template instead")
+    name = doc.get('indexName') or ref['name']
+    text = f"PUT _index_template/{name}\n" + json.dumps({'index_patterns': [f'{name}*'],
+                                                          'template': {'mappings': {'properties': properties}}})
+    return text, (f"followed the fields of Elastic Index doc '{ref['name']}' ({len(fields)} fields, read through "
+                  f"Stroom); its template's settings are not visible this way: ask the user for them, or keep the defaults")
+
+
 async def get_field_conventions(
         ctx: Context,
         name: Annotated[str | None, Field(description="Convention profile to use; omit to list them.")] = None,
+        backend: Annotated[Backend | None, Field(description="The index's backend: for Elasticsearch, the user's example "
+                                                             "comes first (an index template, or an existing index in "
+                                                             "Stroom), a convention profile only without one.")] = None,
 ) -> dict[str, Any]:
     """
     Field naming conventions for indexes. Without a name (and no configured default) this lists the profiles
@@ -57,6 +101,24 @@ async def get_field_conventions(
     through Stroom).
     """
     profiles = _conventions(ctx)
+    if not name and backend == 'elasticsearch':
+        # Field names, types and structure come from what the environment already indexes: the user's example.
+        found = await gateway_from(ctx).find_documents('*', ['ElasticIndex'], 60)
+        existing = [{'name': v['docRef'].get('name'), 'uuid': v['docRef'].get('uuid'), 'path': v.get('path')}
+                    for v in found.get('values') or [] if v['docRef'].get('type') == 'ElasticIndex']
+        return {'status': 'needs_guidance', 'options': [
+            {'option': 'example index template (recommended)',
+             'how': "The user pastes the Elasticsearch index template a similar source's index uses (Kibana Dev Tools: "
+                    "GET _index_template/<name>, or GET <index>/_mapping): draft_index_mapping example_template=..."},
+            {'option': 'follow an existing index in Stroom',
+             'how': "The user picks one of existing_indexes (a similar source's): draft_index_mapping like_index=<its "
+                    "uuid> takes its field names and types, read through Stroom. Its template's settings are not "
+                    "visible this way: ask the user for them, or keep the defaults.",
+             'existing_indexes': existing},
+            {'option': 'a convention profile',
+             'how': "Only when the user has no example: draft_index_mapping convention=<one of profiles>.",
+             'profiles': {n: p.get('description') for n, p in profiles.items()}}],
+            'hint': "Ask the user which, offering all three, the example first. Do not choose for them."}
     name = name or gateway_from(ctx).settings.default_convention
     if not name:
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
@@ -108,6 +170,9 @@ async def draft_index_mapping(
         drop_when: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
                         "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
+        like_index: Annotated[str | None, Field(
+            description="Elasticsearch: an existing Elastic Index doc (uuid or exact name) whose field names and types "
+                        "to follow, read through Stroom, when the user has no index template to paste.")] = None,
         example_template: Annotated[str | None, Field(
             description="Elasticsearch: the user's example index template or index mapping (as for "
                         "propose_index_template); field names then follow it.")] = None,
@@ -137,8 +202,15 @@ async def draft_index_mapping(
     if not events_stream_ids:
         raise ToolError("Give events_stream_ids: the Events streams the index will hold, to see which paths they populate")
     profiles = _conventions(ctx)
+    like_note = None
+    if like_index and not example_template:
+        example_template, like_note = await _example_from_index(ctx, like_index)
+    if not convention and example_template:
+        # The example names the fields; a profile only says which event paths are worth indexing.
+        convention = 'ecs' if 'ecs' in profiles else next(iter(profiles), None)
     if convention not in profiles:
-        raise ToolError(f"No convention profile '{convention}'; ask the user and use get_field_conventions")
+        raise ToolError(f"No convention profile '{convention}'; ask the user for an example index template (or an "
+                        f"existing index to follow), or a convention: get_field_conventions backend=elasticsearch")
     profile = profiles[convention]
     events = await summarise_events(ctx, events_stream_ids, 200)
     populated = events['path_population']
@@ -166,6 +238,8 @@ async def draft_index_mapping(
         named, example_notes = names_from_example(
             [f.model_dump() for f in fields], read_mapping_fields(composed), known, sorted(p for p in populated if populated[p]))
         fields = [PlannedField(**f) for f in named]
+        if like_note:
+            example_notes.insert(0, like_note)
         # Documents are written nested whatever the example; subobjects: false changes how the index maps them.
         if ((composed.get('template') or {}).get('mappings') or {}).get('subobjects') is False:
             subobjects = False

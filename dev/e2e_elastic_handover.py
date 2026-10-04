@@ -89,9 +89,30 @@ LIVE_COMPONENT = """PUT _component_template/e2e-stroom-base
                                           "@timestamp": {"type": "date"}}}}}"""
 
 
+async def with_json_schema_filter(stroom: StroomGateway, ref: dict) -> dict:
+    """An Elasticsearch fixture template validating its XSLT's output as the live one does: a schema filter of group
+    JSON between the XSLT and the indexing filter. The group holds two schemas (json.xsd, xpath-functions.xsd), so
+    output that does not say which it follows (xsi:schemaLocation) fails every record. Added once, kept after."""
+    doc = await stroom.get(f"/pipeline/v1/{ref['uuid']}")
+    data = doc.get('pipelineData') or {}
+    elements = (data.get('elements') or {}).setdefault('add', [])
+    if not elements or any(e['id'] == 'schemaFilter' for e in elements):
+        return ref
+    elements.append({'id': 'schemaFilter', 'type': 'SchemaFilter'})
+    data.setdefault('properties', {}).setdefault('add', []).append(
+        {'element': 'schemaFilter', 'name': 'schemaGroup', 'value': {'string': 'JSON'}})
+    links = data.setdefault('links', {}).setdefault('add', [])
+    for link in links:
+        if link['from'] == 'xsltFilter' and link['to'] == 'elasticIndexingFilter':
+            link['to'] = 'schemaFilter'
+    links.append({'from': 'schemaFilter', 'to': 'elasticIndexingFilter'})
+    await stroom.request('PUT', f"/pipeline/v1/{doc['uuid']}", doc)
+    return ref
+
+
 async def fixtures(stroom: StroomGateway) -> tuple[dict, dict]:
     """The fixture ES indexing template (beside 'Indexing') and a cluster doc, created once."""
-    found = (await stroom.find_documents('Indexing', ['Pipeline'], 500))['values']
+    found = await stroom.find_all_documents('Indexing', ['Pipeline'])
     lucene = next(v for v in found if v['docRef']['name'] == 'Indexing')
     existing = {v['docRef']['name']: v['docRef'] for v in
                 (await stroom.find_documents('E2E*', ['Pipeline', 'ElasticCluster'], 20))['values']}
@@ -115,7 +136,7 @@ async def fixtures(stroom: StroomGateway) -> tuple[dict, dict]:
                                                          'destinationFolder': destination, 'permissionInheritance': 'DESTINATION'})
         ref = node.get('docRef', node)
         existing[FIXTURE_CLUSTER] = {'type': 'ElasticCluster', 'uuid': ref['uuid'], 'name': FIXTURE_CLUSTER}
-    return existing[FIXTURE_TEMPLATE], existing[FIXTURE_CLUSTER]
+    return await with_json_schema_filter(stroom, existing[FIXTURE_TEMPLATE]), existing[FIXTURE_CLUSTER]
 
 
 def change_template(body: dict) -> dict:
@@ -157,6 +178,16 @@ async def main():
                                    cluster_uuid=cluster['uuid'])
         sample = await stepping.step_sample(ctx, pipeline['uuid'], events)
         print(f"    stepping: {sample['verdict']}; groups: {[(g['class'], g['element'], g['count']) for g in sample['groups']]}")
+        e2e.check(sample['verdict'] == 'clean', "stepped clean through the template's JSON schema filter (as live)")
+        # The live template's schema filter (group JSON) needs the output to say which schema it follows.
+        saved_xslt = (await stroom.get_doc('XSLT', xslt['uuid'])).get('data') or ''
+        undeclared = saved_xslt.replace(
+            ' xsi:schemaLocation="http://www.w3.org/2005/xpath-functions file://xpath-functions.xsd"', '')
+        bare = await stepping.step_sample(ctx, pipeline['uuid'], events, draft_code={'xsltFilter': undeclared})
+        reasons = ' '.join(g['reason'] for g in bare['groups'])
+        e2e.check(undeclared != saved_xslt and bare['verdict'] == 'blocking' and 'xsi:schemaLocation' in reasons
+                  and 'Do not change or remove the schema filter' in reasons,
+                  "without its schema declaration, every record fails as on live, and triage says how to fix the output")
 
         print('\n### index field documentation, with the values from the sample')
         doc = await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
@@ -497,6 +528,14 @@ async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: s
                          ('user.emailAddress', 'EQUALS', '*@email.com', 2, {'wildcard': {'user.emailAddress': '*@email.com'}}),
                          ('host.ip', 'EQUALS', '10.0.0.2', 1, {'term': {'host.ip': '10.0.0.2'}}),
                      ], pipeline_uuid=pipeline['uuid'])
+        print('\n### following an existing index in Stroom, when the user has no template to paste')
+        like = await indexing.draft_index_mapping(ctx, 'elasticsearch', f'people-{stamp}-v2', events_stream_ids=events,
+                                                  like_index=doc['uuid'])
+        names = {f['source']: f['name'] for f in like['plan']['fields']}
+        e2e.check(names.get('EventSource/User/Id') == 'user.id' and names.get('EventSource/User/Name') == 'user.name'
+                  and any(f"'{index}'" in n for n in like.get('from_example') or []),
+                  f"field names follow the existing index, read through Stroom: {sorted(names.values())}")
+
         print('\n### documented down to the nested fields, with the sample values')
         written = await builds.write_documentation(ctx, people['build'], pipeline['uuid'],
                                                    '## Purpose and data\n\nPeople logons indexed into Elasticsearch.\n',

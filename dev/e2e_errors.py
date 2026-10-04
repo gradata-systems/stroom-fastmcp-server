@@ -78,7 +78,7 @@ async def _folder(stroom: StroomGateway) -> dict:
 
 
 async def _named(stroom: StroomGateway, name: str, doc_type: str) -> dict | None:
-    return next((v['docRef'] for v in (await stroom.find_documents(name, [doc_type], 500)).get('values') or []
+    return next((v['docRef'] for v in await stroom.find_all_documents(name, [doc_type])
                  if v['docRef']['name'] == name), None)
 
 

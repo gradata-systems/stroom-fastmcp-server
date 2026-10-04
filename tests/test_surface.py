@@ -175,3 +175,20 @@ async def test_a_pipelines_documentation_follows_the_pipeline_promoted_with_it()
         with pytest.raises(RuntimeError, match='planned'):      # every doc had a destination: on to the folders
             await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
                                        destinations={'Pipeline': 'System/Feeds/Acme'})
+
+
+
+async def test_schema_validation_is_never_changed_only_the_output():
+    from tools import pipeline_writes
+    stroom = SimpleNamespace(
+        get_doc=AsyncMock(return_value={'uuid': 'p', 'name': 'ACME - Indexing', 'pipelineData': {}}),
+        pipeline_layers=AsyncMock(return_value=[{'pipelineData': {'elements': {'add': [
+            {'id': 'xsltFilter', 'type': 'XSLTFilter'}, {'id': 'schemaFilter', 'type': 'SchemaFilter'}]}}}]),
+        put_doc=AsyncMock())
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    guard = SimpleNamespace(check_managed=AsyncMock())
+    with patch.object(pipeline_writes, 'guard_from', lambda c: guard):
+        with pytest.raises(ToolError, match='Fix the output instead'):
+            await pipeline_writes.set_pipeline_property(ctx, 'p', pipeline_writes.PropertyValue(
+                element='schemaFilter', name='schemaValidation', value='false'))
+    assert stroom.put_doc.await_count == 0

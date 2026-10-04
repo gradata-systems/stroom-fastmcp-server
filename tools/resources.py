@@ -20,6 +20,8 @@ _RULES = """Rules for every run:
   from, and let the user confirm or correct it. For a name a tool confirms (create_feed, create_pipeline,
   create_index_doc), propose it by calling the tool, not by asking in the chat first: the user confirms or corrects
   it there (a form their client shows, the name editable in it; otherwise the needs_confirmation reply you relay).
+- Never weaken validation: do not change, remove or bypass a schema filter, or any check a template applies. When
+  validation fails, the output is what to fix.
 - Step every sample record (step_sample) before processing. Errors, when stepping or processing: first resolve
   those your own content causes (the XSLT, text converter, mapping or field plan), stepping again after each fix.
   Only what you cannot resolve there (an inherited template element, reference data, the source data itself) goes
@@ -173,18 +175,20 @@ from (find_pipeline_templates, describe_template); an Elasticsearch index templa
 mappings and settings on the cluster (propose_index_template, check_index_template).
 
 7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch) and the Stroom pipeline
-   template. get_field_conventions; ask the user which convention to follow. For Elasticsearch, find_elastic_clusters,
-   and ask the user for an example: the Elasticsearch index template a sibling source's index uses (GET
-   _index_template/<name>), or an existing index's mapping (GET <index>/_mapping), and, only if it lists any in
-   composed_of, those component templates (GET _component_template/<name>). Many templates have none. The new
-   index's template is built from them.
+   template. Elasticsearch: find_elastic_clusters, then get_field_conventions backend=elasticsearch and offer the user
+   its three options, the example first: (a) the Elasticsearch index template a similar source's index uses, pasted
+   (GET _index_template/<name>, or an index's GET <index>/_mapping; only if it lists any in composed_of, those
+   component templates too, GET _component_template/<name>: many have none); (b) an existing index in Stroom to
+   follow (its existing_indexes; draft_index_mapping like_index=); (c) a convention profile, only when they have no
+   example. With (a) or (b) there is no convention question: the example names the fields. Lucene:
+   get_field_conventions, and ask the user which convention to follow.
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
    name (following the environment's versioned naming); create_index_doc once confirmed.
 9. describe_template on the indexing template: if its shared_xslt shows sibling indexing XSLTs calling shared
    templates (a guid field, say), pass them to draft_index_mapping as shared; the XSLT calls them, not writing those
    fields itself.
-   draft_index_mapping (Elasticsearch: with the user's example and any component templates, so field names follow
-   theirs, e.g. User.Id for the user, TypeId for the event type; show its from_example notes); create_index_doc
+   draft_index_mapping (Elasticsearch: with the user's example_template and any component templates, or like_index,
+   so field names follow theirs, e.g. User.Id for the user, TypeId for the event type; show its from_example notes); create_index_doc
    (plan=...) (Lucene); save_xslt with index_plan=plan and no code (it is generated from the plan);
    create_indexing_pipeline; step_sample on the Events streams.
 10. Elasticsearch: propose_index_template with the user's example and any component templates builds the index

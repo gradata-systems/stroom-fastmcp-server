@@ -113,7 +113,7 @@ async def _folder(stroom: StroomGateway) -> dict:
 
 
 async def _named(stroom: StroomGateway, name: str, doc_type: str) -> dict | None:
-    return next((v['docRef'] for v in (await stroom.find_documents(name, [doc_type], 500)).get('values') or []
+    return next((v['docRef'] for v in await stroom.find_all_documents(name, [doc_type])
                  if v['docRef']['name'] == name), None)
 
 
@@ -141,14 +141,21 @@ async def fixture_template(stroom: StroomGateway, name: str, source: str, elasti
         ref = node.get('docRef', node)
     doc = await stroom.get(f"/pipeline/v1/{ref['uuid']}")
     if ((doc.get('pipelineData') or {}).get('elements') or {}).get('add'):
-        return {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name}     # filled by an earlier run
+        ref = {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name}     # filled by an earlier run
+        return await _validated(stroom, ref) if elastic else ref
     data = (await stroom.get(f"/pipeline/v1/{(await _named(stroom, source, 'Pipeline'))['uuid']}"))['pipelineData']
     if elastic:
         data = json.loads(json.dumps(data).replace('"indexingFilter"', '"elasticIndexingFilter"')
                           .replace('"IndexingFilter"', '"ElasticIndexingFilter"'))
     doc['pipelineData'], doc['description'] = data, 'Fixture for dev/e2e_shared_xslt.py'
     await stroom.request('PUT', f"/pipeline/v1/{ref['uuid']}", doc)
-    return {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name}
+    ref = {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name}
+    return await _validated(stroom, ref) if elastic else ref
+
+
+async def _validated(stroom: StroomGateway, ref: dict) -> dict:
+    from e2e_elastic_handover import with_json_schema_filter
+    return await with_json_schema_filter(stroom, ref)
 
 
 async def main():

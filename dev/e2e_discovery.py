@@ -97,8 +97,9 @@ async def fixture_template(stroom: StroomGateway, name: str = FIXTURE_TEMPLATE) 
     an XSLT and the Elasticsearch indexing filter."""
     found = {v['docRef']['name']: v['docRef'] for v in
              (await stroom.find_documents('E2E*', ['Pipeline'], 50)).get('values') or []}
+    from e2e_elastic_handover import with_json_schema_filter
     if name in found:
-        return found[name]
+        return await with_json_schema_filter(stroom, found[name])
     parent = await stroom.post('/explorer/v2/find', {
         'filter': {'includedTypes': ['Folder'], 'nameFilter': 'Template Pipelines', 'requiredPermissions': ['VIEW']},
         'pageRequest': {'offset': 0, 'length': 5}})
@@ -123,7 +124,7 @@ async def fixture_template(stroom: StroomGateway, name: str = FIXTURE_TEMPLATE) 
         'properties': {'add': properties}}
     doc['description'] = 'Fixture for dev/e2e_discovery.py'
     await stroom.request('PUT', f"/pipeline/v1/{ref['uuid']}", doc)
-    return {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name}
+    return await with_json_schema_filter(stroom, {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': name})
 
 
 CSV_SAMPLE = ('time,user,host,status,latency_ms,msg,secret\n'
