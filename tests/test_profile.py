@@ -47,3 +47,20 @@ def test_value_types():
     assert value_type('28/Sep/2026:10:00:00 +0000') == 'timestamp (dd/MMM/yyyy:HH:mm:ss Z)'
     assert value_type('{"a": 1}') == 'embedded json'
     assert value_type('') == 'empty'
+
+
+def test_a_json_array_read_only_in_part_is_still_a_json_array():
+    # Seen: a 755 KB one-line array read to 20,000 characters profiled as key=value (its records' body field), and
+    # create_pipeline refused the JSON parser the stream needed.
+    import json
+    from utils.profile import profile
+    records = [{'timestamp': f'2026-10-02T09:00:{i % 60:02d}Z', 'hostname': 'gs-fw01',
+                'body': f'eventtime={i} type="traffic" action="deny" srcip=10.0.0.{i % 250} dstport=443'}
+               for i in range(400)]
+    text = json.dumps(records)
+    cut = profile(text[:20_000])
+    assert cut['format'] == 'json array' and 0 < cut['records'] < 400 and 'cut short' in cut['note']
+    assert 'JSONParser' in cut['suggested_parser']
+    assert profile(text)['records'] == 400 and 'note' not in profile(text)
+    lines = '\n'.join(json.dumps(r) for r in records[:5])
+    assert profile(lines[:-10])['format'] == 'json lines'      # the last line cut short

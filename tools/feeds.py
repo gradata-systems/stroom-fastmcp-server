@@ -202,7 +202,15 @@ async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_
                      f"folder its path is relative to; they approve it. Pass the command to the terminal exactly as "
                      f"given, copied whole: don't retype or edit it. Each prints JSON with the stream_id. The ticket "
                      f"lasts {minutes} minute(s) (no longer than their sign-in): if it runs out, call upload_sample "
-                     f"with files= again. Then go on with stream_ids. Don't read or pass the files' text yourself.")}
+                     f"with files= again. If curl.exe reports CRYPT_E_NO_REVOCATION_CHECK (Windows can't reach the "
+                     f"certificate's revocation list), add --ssl-no-revoke; never --insecure, which drops the TLS "
+                     f"check altogether. Once every file has its stream_id: build_status build={await _build_name(ctx, match)} "
+                     f"gives the next step. Don't read or pass the files' text yourself.")}
+
+
+async def _build_name(ctx: Context, feed: dict[str, Any]) -> str:
+    from tools.plan import build_of
+    return await build_of(ctx, {k: feed.get(k) for k in ('type', 'uuid', 'name')}) or '<the build>'
 
 
 def _subject() -> str | None:

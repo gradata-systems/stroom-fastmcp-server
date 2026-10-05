@@ -151,3 +151,14 @@ def test_every_indexing_call_takes_its_arguments():
     for processing in (None, 'running', 'finished'):
         call, _ = plan.next_call('indexed', 'b', ['F'], [1], [2], 'p', 'q', processing, {'uuid': 'i', 'backend': 'lucene'})
         assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), processing
+
+
+async def test_next_says_what_to_do_when_its_tool_is_hidden(monkeypatch):
+    # Seen: create_pipeline hidden in a VS Code tool group; the agent wrote a handoff note and stopped.
+    from tools import plan
+    async def nxt(ctx, build, made=None):
+        return {'step': 'pipeline', 'call': {'tool': 'create_pipeline', 'arguments': {}}}
+    monkeypatch.setattr(plan, 'next_step', nxt)
+    monkeypatch.setattr(plan, 'remember_build', lambda ctx, build: None)
+    result = await plan.with_next(None, 'b', {'ok': True})
+    assert result['next']['if_missing'].startswith('create_pipeline not in your tool list? Call the activate_* tool')

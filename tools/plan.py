@@ -398,6 +398,11 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
             if all(isinstance(result.get(k), str) for k in ('type', 'uuid', 'name')) else None)
     nxt = await next_step(ctx, build, made)
     if nxt:
+        tool = (nxt.get('call') or {}).get('tool')
+        if tool:
+            # Seen: create_pipeline hidden in a VS Code tool group; the agent wrote a handoff note and stopped.
+            nxt = {**nxt, 'if_missing': f"{tool} not in your tool list? Call the activate_* tool whose description "
+                                        f"covers it, then {tool}. Never stop, or work around it, for want of it."}
         result['next'] = nxt
         if nxt['step'] != 'promoted':
             result['done'] = False

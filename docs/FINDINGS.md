@@ -206,6 +206,14 @@ A fifteenth session, on 0.16.20:
 | --- | --- | --- |
 | The command retyped | The agent typed the upload command itself rather than passing it on, and dropped the quote closing the ticket header: PowerShell waited for the rest of the command for four minutes until it was cancelled. The ticket was 2,554 characters (the user's token, sealed). Told the files weren't uploaded, the agent sent each file's first record or two as text instead. | The ticket is a 12-character code the server keeps (`UPLOAD_TICKETS=sealed` for several replicas), in the URL, so the command has one quoted argument besides it: `curl.exe -sS --fail-with-body --data-binary "@<path>" "<url>/upload/<code>"`. The reply says to pass each command on exactly as given. Once a feed has been given commands, `upload_sample` refuses text samples for it, pointing back to the commands. |
 
+A sixteenth session, on 0.16.21: the four files went up whole from the terminal (985 records each), then:
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| A hidden tool, a handoff note | VS Code held create_pipeline behind `activate_pipeline_creation_management`; the agent wrote a handoff document and stopped until the user said continue. The server's guidance on hidden tools was in its instructions and in start_onboarding's reply, long out of view. | Every `next` naming a tool carries `if_missing`: call the activate_* tool that covers it, never stop or work around it. After the uploads, the commands reply names build_status for the next step. |
+| A JSON array taken for key=value | The build's sample check read the newest stream's first 20,000 characters: a cut 755 KB one-line array isn't JSON, so it profiled as key=value (its records' body field), and create_pipeline refused the JSON parser the stream needed. | A JSON array read only in part profiles as a JSON array, from its complete first records, noted as cut short; JSON lines with a cut last line likewise. |
+| TLS checks dropped | Windows curl.exe couldn't check the certificate's revocation (`CRYPT_E_NO_REVOCATION_CHECK`), and the agent added `--insecure`. | The commands reply says to add `--ssl-no-revoke` for that error, never `--insecure`. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent

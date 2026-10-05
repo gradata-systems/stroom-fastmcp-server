@@ -203,6 +203,25 @@ def profile_many(samples: dict[str, str], max_records: int = 200) -> dict[str, A
                      if differences else "The files agree; upload each as its own stream and step them all.")}
 
 
+def _array_head(text: str, limit: int) -> list[Any] | None:
+    """The complete items at the start of a JSON array whose text was cut short (a stream read up to a limit), or
+    None when what comes before the cut isn't a JSON array. Seen: a 755 KB one-line array read to 20,000 characters
+    profiled as key=value (its records' body field), and create_pipeline refused the JSON parser it needed."""
+    decoder = json.JSONDecoder()
+    items, at = [], text.index('[') + 1
+    while len(items) < limit:
+        while at < len(text) and text[at] in ' \t\r\n,':
+            at += 1
+        if at >= len(text) or text[at] == ']':
+            break
+        try:
+            item, at = decoder.raw_decode(text, at)
+        except ValueError:
+            break       # the cut, or not JSON at all: what was read so far decides
+        items.append(item)
+    return items or None
+
+
 def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     text = sample.strip('﻿\r\n ')
     lines = [line for line in text.splitlines() if line.strip()]
@@ -237,7 +256,11 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             return {**result, 'format': 'json array', 'records': len(data), 'fields': _inventory(records),
                     'suggested_parser': 'JSONParser (Event Data (JSON) template)', **JSON_SETUP['array']}
         except ValueError:
-            pass
+            head = _array_head(text, max_records)
+            if head and all(isinstance(r, dict) for r in head):
+                return {**result, 'format': 'json array', 'records': len(head), 'fields': _inventory(
+                    [_flatten(r) for r in head]), 'note': 'the array is cut short here: these are its first records',
+                    'suggested_parser': 'JSONParser (Event Data (JSON) template)', **JSON_SETUP['array']}
     json_lines = []
     for line in lines[:max_records]:
         try:
@@ -246,7 +269,10 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                 json_lines.append(obj)
         except ValueError:
             break
-    if json_lines and len(json_lines) == min(len(lines), max_records):
+    # A last line cut short by a read limit doesn't make JSON lines something else.
+    whole = min(len(lines), max_records)
+    if json_lines and (len(json_lines) == whole or (len(json_lines) == whole - 1 and len(lines) <= max_records
+                                                    and len(json_lines) >= 2)):
         return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
                 'suggested_parser': 'JSONParser, one object per line (Event Data (JSON) template)', **JSON_SETUP['lines']}
 
