@@ -13,6 +13,7 @@ details and the caller, signed with the request-state keys and expiring, so it c
 something else and any replica sharing the keys can verify it.
 """
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -195,6 +196,16 @@ class ConsentStore:
                     raise ToolError(f"The user did not agree to: {summary}")
                 ctx_edits(ctx).update(edits)
                 ctx_changes(ctx).update({k: (editable[k][1], v) for k, v in changed.items()})
+                # The user's answer as an id, for the same call repeated with what they settled on: if their access
+                # token ran out while the form was open (VS Code holds the call until they answer), the call is made
+                # again with a fresh one, and they aren't asked twice.
+                settled = _with_edits(details, editable, changed)
+                agreed_id = self._seal(kind, self._binding(kind, action, _digest(action, settled), _user()),
+                                       int(time.time()) + TTL_SECONDS)
+                _AGREED.set({'kind': kind, 'action': action, 'id': agreed_id, 'changed': dict(changed)})
+                if _token_expired(margin=15):
+                    audit(kind, action=action, details=details, outcome='kept for retry', id=agreed_id[-16:])
+                    return retry_after_expiry(kind, action, summary)
                 return None
 
         pending_id = self._seal(kind, self._binding(kind, action, digest, _user()), int(time.time()) + TTL_SECONDS)
@@ -265,6 +276,56 @@ class ConsentStore:
             token = token.strip().lower()
             payload = self._unseal(token)
             self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
+
+
+# The answer a form gave in this call, kept as an id (see require); read when the access token runs out later on.
+_AGREED: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar('consent_agreed', default=None)
+
+
+def _token_expired(margin: int = 0) -> bool:
+    """Whether the caller's access token has run out (or will within margin seconds): None without one."""
+    try:
+        token = get_access_token()
+    except Exception:
+        return False
+    expires = getattr(token, 'expires_at', None) if token is not None else None
+    return bool(expires) and expires - margin <= time.time()
+
+
+def _with_edits(details: dict[str, Any], editable: dict[str, tuple[str, str]], changed: dict[str, str]) -> dict[str, Any]:
+    """The details as the call repeated with the user's values builds them: each proposed value they changed,
+    replaced by theirs."""
+    swaps = {editable[k][1]: v for k, v in changed.items() if k in editable}
+    if not swaps:
+        return details
+    def swap(value: Any) -> Any:
+        if isinstance(value, str):
+            return swaps.get(value, value)
+        if isinstance(value, dict):
+            return {k: swap(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [swap(v) for v in value]
+        return value
+    return swap(details)
+
+
+def retry_after_expiry(kind: str | None = None, action: str | None = None, summary: str | None = None) -> dict[str, Any]:
+    """What to tell the agent when the caller's access token ran out during a call: call again, which the client
+    makes with a fresh token; with the user's answer from this call kept, so they aren't asked again."""
+    agreed = _AGREED.get()
+    keep = ''
+    if agreed:
+        kind, action = agreed['kind'], agreed['action']
+        values = ', '.join(f"{k}='{v}'" for k, v in agreed['changed'].items())
+        keep = (f" plus {kind}_id='{agreed['id']}'" + (f", and {values} as the user changed it" if values else '')
+                + ": the user already agreed in the form, so they are not asked again")
+    return {'status': 'needs_retry', **({f'{kind}_id': agreed['id']} if agreed else {}),
+            **({'summary': summary} if summary else {}),
+            'hint': (f"The user's sign-in (access token) expired while this call was waiting"
+                     f"{' for their answer' if agreed else ''}: nothing was changed in Stroom after that. Call "
+                     f"{action or 'the same tool'} again now with the same arguments{keep}. Your client sends a "
+                     f"fresh token with every new call, so there is nothing for the user to do; only if that call "
+                     f"fails the same way, ask them to sign in again.")}
 
 
 def ctx_edits(ctx: Any) -> dict[str, str]:

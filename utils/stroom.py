@@ -113,7 +113,10 @@ class StroomGateway:
                             f"'{self.settings.stroom_audience}'. The identity provider must add it to tokens "
                             f"for the client you signed in with (in Keycloak, an audience mapper).")
         if token.expires_at and token.expires_at <= time.time():
-            raise ToolError("Your access token expired during this call; sign in again or refresh, then call again")
+            # Ran out during the call (a form left open, a long wait): calling again carries a fresh token, and an
+            # answer the user gave in this call is kept for it.
+            from utils.consent import retry_after_expiry
+            raise ToolError(retry_after_expiry()['hint'])
         return {'Authorization': f'Bearer {token.token}'}
 
     async def request(self, method: str, path: str, body: Any = None) -> Any:

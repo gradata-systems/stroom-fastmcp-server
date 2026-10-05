@@ -135,6 +135,12 @@ Following an existing index, from a sixth session:
 | The choices | Offered the naming options, an agent showed "follow an existing index", ECS and Stroom flat, and left out the index template the user had. | `get_field_conventions` returns one option per choice, each with its label, in order: From an index template, Follow an existing index in Stroom, then one per convention profile. The agent is told to offer exactly these. |
 | The verification dashboard | The data was indexed and verify_index passed: its searches run through the dashboard's components. But the dashboard showed empty in Stroom's UI, no query and no widgets. Its layout had no sizes, and the config had none of a UI-made dashboard's `preferredSize`, `layoutConstraints`, `designMode`, `timeRange` and `modelVersion` (compared read-only with live's Fortigate dashboard). | The dashboard is laid out as Stroom's UI lays one out: every layout node sized, the query above, the table and text pane side by side, and the config's own settings set. A dashboard made before is laid out again, its columns kept, the next time verify_index runs. Read back on the local stack, Stroom keeps all of it. |
 
+A seventh session:
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| A form outlasting the token | `create_feed` held its form open for 5 minutes 18 seconds (VS Code keeps the call open until the user answers). The access token expired meanwhile, so creating the feed after the user agreed failed with "sign in again or refresh, then call again", and the agent stopped and asked the user to sign in. The server can't refresh a token: it forwards the caller's own, and the client refreshes on its next call. | When the user agrees in a form and the token has run out, nothing more is done in Stroom. The tool returns `needs_retry`, with an id that carries the user's answer and any value they changed, and tells the agent to call again at once: the new call carries a fresh token, and the user isn't asked twice. A token that runs out later in a call gives the same instruction. Only if the call fails again is the user asked to sign in. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent

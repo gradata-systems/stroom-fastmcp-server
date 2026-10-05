@@ -214,3 +214,54 @@ async def test_the_result_tells_the_agent_the_user_changed_the_name():
 
 async def _accept(response_type):
     return SimpleNamespace(action='accept', data=response_type())
+
+
+async def test_an_answer_given_while_the_token_ran_out_is_kept_for_the_call_again():
+    # Seen in VS Code: create_feed held its form open for 5 minutes, the user's access token expired meanwhile, and
+    # creating the feed after they agreed failed; the agent told the user to sign in, and stopped.
+    import time
+    from unittest.mock import patch
+    from utils import consent
+    expired = SimpleNamespace(expires_at=time.time() - 5, claims={'preferred_username': 'pk'})
+    fresh = SimpleNamespace(expires_at=time.time() + 300, claims={'preferred_username': 'pk'})
+    store = ConsentStore()
+    asked = []
+
+    async def elicit(message, response_type):
+        asked.append(message)
+        return SimpleNamespace(action='accept', data=response_type(name='ACME-FW-V1.0'))   # the user renames it
+    details = lambda name: {'build': 'b', 'feed name': name}  # noqa: E731
+    with patch.object(consent, 'get_access_token', lambda: expired):
+        retry = await store.require(SimpleNamespace(elicit=elicit), 'confirmation', 'create_feed', 'Create feed',
+                                    details('FIREWALL-EDGE-V1.0'), None,
+                                    editable={'name': ('Feed name', 'FIREWALL-EDGE-V1.0')})
+    # Nothing done in Stroom: the agent is told to call again, with the user's answer and their name kept.
+    assert retry['status'] == 'needs_retry' and retry['confirmation_id'].startswith('conf-')
+    assert "create_feed again now with the same arguments plus confirmation_id='" in retry['hint']
+    assert "name='ACME-FW-V1.0' as the user changed it" in retry['hint'] and 'not asked again' in retry['hint']
+    assert 'nothing for the user to do' in retry['hint']
+    # Called again (a fresh token, the user's name), the answer stands: no second form.
+    with patch.object(consent, 'get_access_token', lambda: fresh):
+        assert await store.require(SimpleNamespace(elicit=elicit), 'confirmation', 'create_feed', 'Create feed',
+                                   details('ACME-FW-V1.0'), retry['confirmation_id'],
+                                   editable={'name': ('Feed name', 'ACME-FW-V1.0')}) is None
+    assert len(asked) == 1
+
+
+async def test_a_token_that_runs_out_later_in_the_call_says_to_call_again_not_to_sign_in():
+    import time
+    from unittest.mock import patch
+    from utils import consent
+    from utils.stroom import StroomGateway
+    from config import Settings
+    settings = Settings(_env_file=None, stroom_url='https://stroom.example', stroom_audience='stroom')
+    gateway = StroomGateway(settings)
+    expired = SimpleNamespace(expires_at=time.time() - 5, claims={'aud': ['stroom']}, token='t')
+    try:
+        with patch('utils.stroom.get_access_token', lambda: expired):
+            with pytest.raises(ToolError) as e:
+                gateway._authorization()
+    finally:
+        await gateway.close()
+    assert 'Call the same tool again now with the same arguments' in str(e.value)
+    assert 'sends a fresh token with every new call' in str(e.value) and 'sign in again' in str(e.value)
