@@ -212,6 +212,16 @@ def _writes_unknown(result: dict[str, Any], element: str) -> bool:
     return bool(_UNKNOWN.search(output))
 
 
+async def _stream_is_array(stroom: StroomGateway, stream_id: int) -> bool:
+    try:
+        from tools.sampling import read_head
+        from utils.profile import profile
+        text, _, _ = await read_head(stroom, stream_id, 0, 20_000)
+        return profile(text)['format'] == 'json array'
+    except Exception:
+        return False
+
+
 async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, element: str, unknown: list[str],
                             total: int, draft_code: dict[str, str] | None) -> dict[str, Any] | None:
     """A blocking group when a build's own pipeline writes EventDetail/Unknown from an XSLT saved without a mapping:
@@ -384,11 +394,23 @@ async def step_sample(
     elif records_per_stream and any(n >= records_per_stream for n in per_stream.values()):
         result['hint'] = (f"Stepped the first {records_per_stream} records of each stream: processing then reads every "
                           f"record, and wait_for_processing reports any that fail.")
-    if pipeline.json_root_map and records and all(n == 1 for n in per_stream.values()):
-        result['hint'] = ((result.get('hint') or '') + " Each stream stepped as one record: a JSON array read with the "
-                          "parser's root map (jsonParser.addRootObject true) is a single record, however many items it "
-                          "holds. Set it false (update_pipeline set_properties=[{element: <the JSON parser>, name: "
-                          "addRootObject, value: false}]) so each item is a record.").strip()
+    if pipeline.json_root_map and records and all(n == 1 for n in per_stream.values()) \
+            and await _stream_is_array(stroom, stream_ids[0]):
+        # JSON lines need the root map and step as one record too: only an array is told to change it.
+        summary['groups'].insert(0, {
+            'class': 'review', 'reason': 'Each JSON array stepped as one record', 'severity': 'WARNING',
+            'element': next(e for e, t in pipeline.types.items() if t == 'JSONParser'), 'own_element': True,
+            'count': len(per_stream), 'records_affected': len(per_stream), 'records': sorted(map(str, per_stream))[:20],
+            'examples': [{'message': "Each stream stepped as one record: a JSON array read with the parser's root map "
+                                     "(jsonParser.addRootObject true) is a single record, however many items it holds, "
+                                     "so a large one outlasts Stroom's stepping. Set it false (update_pipeline "
+                                     "set_properties=[{element: <the JSON parser>, name: addRootObject, value: false}]) "
+                                     "so each item is a record, change the XSLT to match /array/map, and step again.",
+                          'location': None}]})
+        summary['groups_by_class']['review'] = summary['groups_by_class'].get('review', 0) + 1
+        if summary['verdict'] == 'clean':
+            summary['verdict'] = 'review'
+        result.update(verdict=summary['verdict'], groups=summary['groups'], groups_by_class=summary['groups_by_class'])
     if not records:
         _nothing_stepped(result, markers, f"streams {stream_ids}")
     await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)

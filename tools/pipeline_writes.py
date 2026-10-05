@@ -1,5 +1,6 @@
 """Tools that create and change pipelines in a build."""
 import copy
+import logging
 import re
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -18,6 +19,8 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 # Document types a pipeline owns: copied with it, rather than shared with the original.
 OWNED_TYPES = {'XSLT', 'TextConverter'}
 PARSERS = {'XMLParser', 'XMLFragmentParser', 'JSONParser', 'DSParser', 'CombinedParser'}
+
+logger = logging.getLogger(__name__)
 
 
 def element_id(element_type: str) -> str:
@@ -93,14 +96,19 @@ class PropertyValue(BaseModel):
     value: str | int | bool | None = Field(None, description="For plain properties: the value.")
 
 
-async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any],
-                             properties: list[PropertyValue]) -> PropertyValue | None:
-    """jsonParser.addRootObject false when the translation XSLT's mapping reads a JSON array, unless set already: with
-    the parser's root map, the whole array is one record. Seen: four 755 KB arrays stepped as four records of 985
-    events each, every step outlasting Stroom's wait, until stepping failed altogether."""
+async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any], properties: list[PropertyValue],
+                             sample_is_array: bool = False) -> PropertyValue | None:
+    """jsonParser.addRootObject false when the build's sample is a JSON array, or the translation XSLT's mapping reads
+    one, unless set already: with the parser's root map, the whole array is one record. Seen: four 755 KB arrays
+    stepped as four records of 985 events each, every step outlasting Stroom's wait, until stepping failed; and
+    then, with no mapping (the XSLT written by hand), never set at all."""
     parser = next((e['id'] for e in merged['elements'] if e['type'] == 'JSONParser'), None)
+    if not parser or any(p.element == parser and p.name == 'addRootObject' for p in properties):
+        return None
+    if sample_is_array:
+        return PropertyValue(element=parser, name='addRootObject', value=False)
     xslt = next((p for p in properties if p.name == 'xslt' and p.doc_uuid), None)
-    if not parser or not xslt or any(p.element == parser and p.name == 'addRootObject' for p in properties):
+    if not xslt:
         return None
     try:
         from utils.mappingstore import read_mapping
@@ -111,6 +119,18 @@ async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any],
     if mapping and mapping.get('input') == 'json' and mapping.get('json_layout', 'array') == 'array':
         return PropertyValue(element=parser, name='addRootObject', value=False)
     return None
+
+
+async def _sample_is_array(ctx: Context, build: str | None) -> bool:
+    """Whether the build's sample stream is a JSON array (each item a record, read with addRootObject false)."""
+    if not build:
+        return False
+    try:
+        from tools.plan import sample_format
+        found = await sample_format(ctx, build)
+    except Exception:      # a convenience on top: never fail the write over it
+        return False
+    return bool(found) and found['format'] == 'json array'
 
 
 async def _value(stroom: StroomGateway, prop: PropertyValue) -> dict[str, Any]:
@@ -306,10 +326,10 @@ async def create_pipeline(
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
     _keep_validation({e['id']: e['type'] for e in merged['elements']}, set_properties)
     properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
-    array = await _json_array_parser(stroom, merged, properties)
+    array = await _json_array_parser(stroom, merged, properties, await _sample_is_array(ctx, build))
     if array:
         properties.append(array)
-        filled = list(filled or []) + [f"{array.element}.addRootObject = false (the mapping reads a JSON array: "
+        filled = list(filled or []) + [f"{array.element}.addRootObject = false (the sample is a JSON array: "
                                        f"each item is a record)"]
     await _own_documents(ctx, build, properties, reuse_existing_docs)
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
@@ -516,6 +536,23 @@ async def update_pipeline(
         outcome = await set_pipeline_references(ctx, pipeline_uuid, references)
         result['name'], result['type'] = outcome['name'], 'Pipeline'
         result['reference_data'] = outcome['reference_data']
+    # A pipeline made before its XSLT (or with one written by hand) never had the JSON parser set for an array.
+    try:
+        stroom = gateway_from(ctx)
+        from tools.plan import build_of
+        merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+        have = [PropertyValue(element=p['element'], name=p['name'], value=p.get('value'))
+                for p in merged.get('properties') or [] if p.get('name') == 'addRootObject']
+        build = await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': result.get('name')})
+        array = await _json_array_parser(stroom, merged, have + list(set_properties), await _sample_is_array(ctx, build))
+    except Exception as e:      # a convenience on top of what was asked: never fail the update over it
+        logger.warning("Couldn't check pipeline %s's JSON parser: %s", pipeline_uuid, e)
+        array = None
+    if array:
+        outcome = await set_pipeline_property(ctx, pipeline_uuid, array)
+        result['set'].append(outcome['set'])
+        result['note'] = (f"Also set {array.element}.addRootObject false: the build's sample is a JSON array, so each "
+                          f"item is a record (with the parser's root map, the whole array was one).")
     return result
 
 

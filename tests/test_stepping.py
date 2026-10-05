@@ -211,6 +211,10 @@ async def test_a_json_array_mapping_sets_the_parser_to_read_each_item_as_a_recor
     added = await _json_array_parser(stroom_with('array'), merged, xslt)
     assert (added.element, added.name, added.value) == ('jsonParser', 'addRootObject', False)
     assert await _json_array_parser(stroom_with('lines'), merged, xslt) is None     # JSON lines need the root map
+    # With no mapping (an XSLT written by hand, or none yet), the sample decides: seen, never set otherwise.
+    unmapped = SimpleNamespace(get_doc=AsyncMock(return_value={'description': ''}))
+    assert await _json_array_parser(unmapped, merged, [], sample_is_array=False) is None
+    assert (await _json_array_parser(unmapped, merged, [], sample_is_array=True)).value is False
     chosen = xslt + [PropertyValue(element='jsonParser', name='addRootObject', value=True)]
     assert await _json_array_parser(stroom_with('array'), merged, chosen) is None   # the agent's own choice stands
     # A pipeline stepping each array as one record says so.
