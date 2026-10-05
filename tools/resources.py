@@ -62,6 +62,11 @@ pipeline with no clean step recorded; create_pipeline refuses another source's X
 cannot read the sample. Templates are inherited (create_pipeline), never copied: copy_pipeline refuses one, and is for a
 new version or working copy of a source's own pipeline.
 
+Tools: a tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients
+hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the one whose
+description covers it, then the named tool. Never work around a hidden tool with others, and never stop because one
+seems to be missing.
+
 Samples: ask for every sample file the user has and give them all to profile_sample (samples by file name): it
 reports what differs between files. Upload each file as its own stream, step them all, and survey_feed with those
 stream_ids shows every kind of event the sample holds; map variants with any_of.

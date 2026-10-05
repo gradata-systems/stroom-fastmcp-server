@@ -279,6 +279,8 @@ async def step_sample(
     With records_per_stream, only the head of each stream is stepped (a broad check on existing streams).
     """
     await _check_drafts(ctx, draft_code)
+    from tools.streams import refuse_older_than_feed
+    await refuse_older_than_feed(ctx, stream_ids)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
@@ -352,6 +354,9 @@ async def step_records(
     or processing anything. A record that produces no event is flagged.
     """
     await _check_drafts(ctx, draft_code)
+    from tools.streams import refuse_older_than_feed
+    locations = [RecordLocation.model_validate(x) for x in locations]
+    await refuse_older_than_feed(ctx, sorted({loc.stream for loc in locations}))
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     output_element = pipeline.default_outputs()[-1]

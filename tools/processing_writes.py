@@ -20,6 +20,7 @@ from pydantic import Field
 from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers
 from tools.processing import processing_status
+from tools.streams import refuse_older_than_feed
 from tools.stepping import stepped_clean
 from utils.consent import consent_from
 from utils.mappingstore import digest, normalise_xslt, read_agreed_template
@@ -351,6 +352,8 @@ async def create_processor_filter(
                         f"(or step_records) over the sample streams until the verdict is clean, then process. A change "
                         f"to its XSLT or converter since the last clean step needs stepping again.")
     await _build_feeds_only(ctx, pipeline, stream_ids, feed)
+    if stream_ids:
+        await refuse_older_than_feed(ctx, stream_ids)
     source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, stream_type, source_confirmation_id)
     if source and 'status' in source:
         return source
@@ -446,6 +449,7 @@ async def reprocess_streams(
     if fresh:
         raise ToolError(f"Stream(s) {fresh} have not been processed by '{pipeline['name']}': use create_processor_filter")
     await _build_feeds_only(ctx, pipeline, stream_ids, None)
+    await refuse_older_than_feed(ctx, stream_ids)
     source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, 'Events', source_confirmation_id)
     if source and 'status' in source:
         return source

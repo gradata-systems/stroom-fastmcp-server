@@ -4,6 +4,7 @@ Creates land in `<workspace>/<build>/`; updates are allowed only on documents ta
 `mcp-managed`. Changing anything else (a production XSLT, say) goes through a working copy that
 `promote_build` writes back after approval and a backup.
 """
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -30,12 +31,62 @@ def copy_of_tag(uuid: str) -> str:
     return f'mcp-copy-of-{uuid}'
 
 
+def _node_in(nodes: list[dict[str, Any]], uuid: str) -> dict[str, Any] | None:
+    for node in nodes:
+        if node.get('uuid') == uuid:
+            return node
+        hit = _node_in(node.get('children') or [], uuid)
+        if hit:
+            return hit
+    return None
+
+
 class WriteGuard:
     def __init__(self, stroom: StroomGateway, workspace: str):
         self._stroom = stroom
         self.workspace = workspace
 
+    def _known_folders(self) -> dict[tuple[str, str], dict[str, Any]]:
+        # Folders this server process found or made, by (parent uuid, name), kept with its Stroom gateway. The search
+        # index lags a new folder: two docs created one after the other (copy_pipeline's pipeline and its XSLT)
+        # each looked for the build folder there, and the second made a twin of the same name.
+        known = getattr(self._stroom, '_known_folders', None)
+        if known is None:
+            known = {}
+            setattr(self._stroom, '_known_folders', known)
+        return known
+
+    async def _tree_child(self, parent: dict[str, Any], name: str) -> dict[str, Any] | None:
+        """The parent's child folder of that name as the explorer tree lists it (it shows a new folder before the
+        search index does), when the parent's path in the tree is known."""
+        if not parent.get('_open'):
+            return None
+        tree = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
+            'openItems': parent['_open'], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': None,
+            'showAlerts': False, 'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None,
+                                            'nodeFlags': None, 'requiredPermissions': ['VIEW'], 'nameFilter': None,
+                                            'nameFilterChange': False, 'recentItems': None}})
+        node = _node_in(tree.get('rootNodes') or [], parent['uuid'])
+        return next((c for c in (node or {}).get('children') or []
+                     if c.get('type') == 'Folder' and c.get('name') == name), None)
+
+    def _placed(self, parent: dict[str, Any], name: str, node: dict[str, Any]) -> dict[str, Any]:
+        node = {k: v for k, v in node.items() if not k.startswith('_')}
+        self._known_folders()[(parent.get('uuid'), name)] = node
+        placed = {**node, '_path': f"{parent.get('_path')}/{name}"}
+        if parent.get('_open') and node.get('uniqueKey'):
+            placed['_open'] = [*parent['_open'], node['uniqueKey']]
+        return placed
+
     async def find_child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any] | None:
+        known = self._known_folders().get((parent.get('uuid'), name))
+        if known:
+            if await self._stroom.post('/explorer/v2/getFromDocRef', _ref(known)):
+                return self._placed(parent, name, known)
+            self._known_folders().pop((parent.get('uuid'), name), None)    # deleted since
+        child = await self._tree_child(parent, name)
+        if child:
+            return self._placed(parent, name, child)
         found = await self._stroom.find_documents(name, ['Folder'], 200)
         for value in found.get('values') or []:
             ref = value['docRef']
@@ -45,7 +96,7 @@ class WriteGuard:
                     node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
                     if not node:
                         continue    # just deleted: Stroom's explorer search can still list it for a moment
-                    return {**node, '_path': f"{parent_path}/{name}"}
+                    return self._placed(parent, name, node)
         return None
 
     async def create_folder(self, parent: dict[str, Any], name: str, tags: list[str]) -> dict[str, Any]:
@@ -53,7 +104,7 @@ class WriteGuard:
             'docType': 'Folder', 'docName': name, 'destinationFolder': _strip(parent),
             'permissionInheritance': 'DESTINATION'})
         await self.tag([_ref(node)], tags)
-        return {**node, '_path': f"{parent.get('_path')}/{name}"}
+        return self._placed(parent, name, node)
 
     async def _child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any]:
         return await self.find_child_folder(parent, name) or await self.create_folder(parent, name, [MANAGED, GENERATED])
@@ -64,7 +115,8 @@ class WriteGuard:
             'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
                        'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
                        'recentItems': None}})
-        return {**next(r for r in roots['rootNodes'] if r['type'] == 'System'), '_path': 'System'}
+        system = next(r for r in roots['rootNodes'] if r['type'] == 'System')
+        return {**system, '_path': 'System', **({'_open': [system['uniqueKey']]} if system.get('uniqueKey') else {})}
 
     async def resolve_folder(self, path: str) -> tuple[dict[str, Any], list[str]]:
         """The deepest folder that exists along an explorer path such as 'System/Feeds/Events/Acme', and the
@@ -122,8 +174,18 @@ class WriteGuard:
             return False
         if await self.folder_contents(build):
             return False    # the tree is behind: a doc it left out is still there, and would go with the folder
-        await self._stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [_ref(folder)]})
-        return True
+        # Right after a doc in it is deleted (a working-copy pipeline), Stroom can answer the delete without the
+        # folder going, and right after the call it may not resolve yet still be there: it is removed only once it
+        # still doesn't resolve a moment later.
+        for attempt in range(5):
+            await self._stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [_ref(folder)]})
+            await asyncio.sleep(1 + attempt)
+            if not await self._stroom.post('/explorer/v2/getFromDocRef', _ref(folder)):
+                for key, node in list(self._known_folders().items()):
+                    if node.get('uuid') == folder['uuid']:
+                        del self._known_folders()[key]
+                return True
+        return False
 
     async def _build_node(self, build: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """The build's folder and its explorer node, opened so that its children are listed; (None, {}) when

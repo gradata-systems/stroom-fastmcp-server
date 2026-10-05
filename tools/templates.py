@@ -285,15 +285,29 @@ async def shared_xslt_usage(ctx: Context, pipelines: list[dict[str, Any]], limit
     stroom = gateway_from(ctx)
     texts: dict[str, str | None] = {}
     docs: dict[str, dict[str, Any]] = {}
+    missing: dict[str, str] = {}
+
+    async def readable(uuid: str) -> str | None:
+        # The explorer can still list a document that is gone (live: an XSLT node whose document was deleted),
+        # and a pipeline can name one: a description skips it and says so, rather than failing.
+        try:
+            return (await stroom.get_doc('XSLT', uuid)).get('data') or ''
+        except ToolError:
+            missing[uuid] = 'listed or referenced, but its document cannot be read (deleted, or no permission)'
+            return None
 
     async def shared(href: str) -> str | None:
         # Stroom resolves an import's href to the XSLT document of that name: read it the same way.
         if href not in texts:
             found = [v['docRef'] for v in (await stroom.find_documents(href, ['XSLT'], 20)).get('values') or []
                      if v['docRef'].get('name') == href]
-            texts[href] = (await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') if found else None
-            if found:
-                docs[href] = {'uuid': found[0]['uuid'], 'name': href, **describe(texts[href])}
+            texts[href] = None
+            for ref in found:
+                text = await readable(ref['uuid'])
+                if text is not None:
+                    texts[href] = text
+                    docs[href] = {'uuid': ref['uuid'], 'name': href, **describe(text)}
+                    break
         return texts[href]
     seen: dict[tuple, dict[str, Any]] = {}
     for pipeline in pipelines[:limit]:
@@ -304,8 +318,8 @@ async def shared_xslt_usage(ctx: Context, pipelines: list[dict[str, Any]], limit
         for entry in translation_docs(pipeline['uuid'], layers):
             if entry['inherited_from_template'] or entry['doc'].get('type') != 'XSLT':
                 continue
-            text = (await stroom.get_doc('XSLT', entry['doc']['uuid'])).get('data') or ''
-            hrefs = imports_of(text)
+            text = await readable(entry['doc']['uuid'])
+            hrefs = imports_of(text) if text else []
             if not hrefs:
                 continue
             for use in usage(text, {h: await shared(h) for h in hrefs}):
@@ -317,7 +331,7 @@ async def shared_xslt_usage(ctx: Context, pipelines: list[dict[str, Any]], limit
             row['document'] = {'uuid': docs[row['href']]['uuid'], 'name': row['href']}
     usages = sorted(seen.values(), key=lambda r: -len(r['used_by']))
     # Everything each shared document offers, called or not (describe_document reads its full text).
-    return usages + [{'href': href, 'document_contents': doc} for href, doc in docs.items()]
+    return usages + [{'href': href, 'document_contents': doc} for href, doc in docs.items()]         + [{'unreadable_xslt': uuid, 'note': note} for uuid, note in missing.items()]
 
 
 async def describe_template(
@@ -337,7 +351,10 @@ async def describe_template(
     contract = await describe_template_contract(ctx, template_uuid)
     result = {'template_uuid': template_uuid, 'children': children['children'],
               **{k: v for k, v in contract.items() if k != 'template_uuid'}}
-    shared = await shared_xslt_usage(ctx, [c for c in children['children'] if 'unreadable' not in c])
+    try:
+        shared = await shared_xslt_usage(ctx, [c for c in children['children'] if 'unreadable' not in c])
+    except ToolError as e:   # the shared XSLTs are an extra: the template's children and contract still stand
+        shared, result['shared_xslt_error'] = [], str(e)[:300]
     if shared:
         result['shared_xslt'] = shared
         result['shared_xslt_hint'] = (

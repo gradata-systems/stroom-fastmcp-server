@@ -76,9 +76,20 @@ async def create_feed(
     doc = await stroom.get_doc('Feed', ref['uuid'])
     doc.update(encoding=encoding, streamType=stream_type, description=description)
     doc = await stroom.put_doc(doc)
+    result = {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'], 'stream_type': doc.get('streamType'),
+              'encoding': doc.get('encoding')}
+    # A feed of this name made before and deleted leaves its streams under the name, out of sight in the UI.
+    rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': doc['name']}],
+                                   50)).get('values') or []
+    earlier = [r['meta']['id'] for r in rows if r['meta'].get('status') != 'DELETED'
+               and (r['meta'].get('createMs') or 0) < (doc.get('createTimeMs') or 0)]
+    if earlier:
+        result['note'] = (f"Stroom still holds {len(earlier)}{'+' if len(rows) == 50 else ''} stream(s) from an earlier feed "
+                          f"named {doc['name']}, since deleted (e.g. {earlier[:5]}); the UI doesn't show them. They are "
+                          f"not this build's samples: the plan and the stepping and processing tools use only the "
+                          f"streams uploaded to this feed from now on. Tell the user.")
     from tools.plan import with_next
-    return await with_next(ctx, build, {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'],
-                                        'stream_type': doc.get('streamType'), 'encoding': doc.get('encoding')})
+    return await with_next(ctx, build, result)
 
 
 async def upload_sample(

@@ -12,7 +12,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import MANAGED, build_tag, guard_from
-from tools.streams import SampleStreams, read_sample_streams
+from tools.streams import SampleStreams, own_streams, read_sample_streams
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples
@@ -98,17 +98,26 @@ async def build_of(ctx: Context, ref: dict[str, Any]) -> str | None:
     return next((t[len(marker):] for t in tags if t.startswith(marker)), None)
 
 
+async def _feed_created(stroom, feed: dict[str, Any]) -> int | None:
+    try:
+        return (await stroom.get_doc('Feed', feed['uuid'])).get('createTimeMs')
+    except ToolError:
+        return None
+
+
 async def sample_streams(ctx: Context, build: str, docs: list[dict[str, Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
     """Raw streams on the build's feeds, by feed: {'Raw Events': [...], 'Raw Reference': [...]} entries hold meta."""
     stroom = gateway_from(ctx)
     docs = docs if docs is not None else await guard_from(ctx).folder_contents(build)
     found: dict[str, list[dict[str, Any]]] = {}
     for feed in (d for d in docs if d['type'] == 'Feed'):
+        created = await _feed_created(stroom, feed)
         for stream_type in ('Raw Events', 'Raw Reference'):
             terms = [{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed['name']},
                      {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': stream_type}]
             rows = (await stroom.find_meta(terms, 20)).get('values') or []
-            metas = [r['meta'] for r in rows if r['meta'].get('status') != 'DELETED']
+            # Only the feed's own: an earlier, deleted feed of the same name left its streams under the name.
+            metas = own_streams([r['meta'] for r in rows if r['meta'].get('status') != 'DELETED'], created)
             if metas:
                 found.setdefault(stream_type, []).extend({**m, 'feed': feed['name']} for m in metas)
     return found
@@ -236,7 +245,8 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
     for feed in by_type.get('Feed', []):
         rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed['name']},
                                         {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Events'}], 50)).get('values') or []
-        events += [r['meta']['id'] for r in rows if r['meta'].get('status') != 'DELETED']
+        events += [m['id'] for m in own_streams([r['meta'] for r in rows if r['meta'].get('status') != 'DELETED'],
+                                                await _feed_created(stroom, feed))]
     # Elasticsearch: the index template agreed with the user for each indexing pipeline's current code.
     # Not needed for Lucene; to do for Elasticsearch until every such pipeline has one.
     problems = []
@@ -415,6 +425,10 @@ async def start_onboarding(
                  "build_translation_xslt with the streams and build and name (it saves the XSLT with the mapping), the "
                  "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
                  "build_status shows what remains at any point."),
+        'tools': ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients"
+                  " hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
+                  "one whose description covers it, then the named tool. Never work around a hidden tool with others, and "
+                  "never stop because one seems to be missing."),
     }
 
 

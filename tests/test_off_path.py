@@ -174,6 +174,7 @@ async def processing_filter(**kwargs):
     with patch.object(processing_writes, '_managed_pipeline', AsyncMock(return_value=PIPELINE)), \
             patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=o['stepped'])), \
             patch.object(processing_writes, '_build_feeds_only', AsyncMock()), \
+            patch.object(processing_writes, 'refuse_older_than_feed', AsyncMock()), \
             patch.object(processing_writes, '_events_source', AsyncMock(return_value=None)), \
             patch.object(processing_writes, '_already_processed', AsyncMock(return_value=o['processed'])), \
             patch.object(processing_writes, 'elastic_destination', AsyncMock(return_value=o['destination'])), \
@@ -229,6 +230,25 @@ async def misleading_search():
     return indexing._searchable('elasticsearch', [SearchCheck(field='User.Id', condition='CONTAINS', value='ali')])
 
 
+async def a_deleted_feeds_stream():
+    """Seen in VS Code: streams 15793567 and 15793566 belonged to a deleted feed of the same name."""
+    from tools import streams
+    metas = {7: {'id': 7, 'feedName': 'FW-V1', 'createMs': 1000, 'status': 'UNLOCKED'},
+             9: {'id': 9, 'feedName': 'FW-V1', 'createMs': 5000, 'status': 'UNLOCKED'}}
+
+    async def find_meta(terms, limit):
+        if terms[0]['field'] == 'Id':
+            return {'values': [{'meta': metas[int(terms[0]['value'])]}]}
+        return {'values': [{'meta': m} for m in metas.values()]}
+    ctx = context()
+    stroom = ctx.lifespan_context['stroom']
+    stroom.find_meta = AsyncMock(side_effect=find_meta)
+    stroom.get = AsyncMock(return_value={'uuid': 'feed-1'})
+    stroom.get_doc = AsyncMock(return_value={'uuid': 'feed-1', 'createTimeMs': 4000})
+    await streams.refuse_older_than_feed(ctx, [9])          # the feed's own: fine
+    return await streams.refuse_older_than_feed(ctx, [7, 9])
+
+
 # (what the agent did wrong, the call, what the reply must say to put it right)
 WRONG_MOVES = [
     ('process before a clean step', lambda: processing_filter(stream_ids=[5], given={'stepped': False}),
@@ -258,6 +278,9 @@ WRONG_MOVES = [
     ('document with no change line', lambda: documentation(stream_ids=[5]), ['Give change']),
     ('weaken validation to get past an error', weaken_validation, ['Fix the output instead']),
     ('a search Elasticsearch answers wrongly through Stroom', misleading_search, ['use EQUALS']),
+    ('build from a deleted feed\'s stream of the same name (VS Code)', a_deleted_feeds_stream,
+                    ['stream(s) [7] are older than feed FW-V1', 'earlier feed of that name, since deleted',
+                     "The feed's own raw streams: [9]"]),
 ]
 
 

@@ -40,6 +40,8 @@ async def ctx():
 def mock_pipeline():
     respx.get(f'{API}/pipeline/v1/p-1').mock(return_value=httpx.Response(200, json={'name': 'ACME', 'uuid': 'p-1'}))
     respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=LAYERS))
+    # The sample stream's feed: none here, so no stream is older than its feed.
+    respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
 
 
 @respx.mock

@@ -3,6 +3,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from fastmcp import Context
 from lxml import etree
@@ -146,10 +147,54 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
     return text, truncated
 
 
+async def feed_created_ms(stroom: StroomGateway, feed: str) -> int | None:
+    """When the feed doc of that name was created, or None when there is none (or it can't be read)."""
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+        return (await stroom.get_doc('Feed', ref['uuid'])).get('createTimeMs') if ref and ref.get('uuid') else None
+    except (ToolError, KeyError, TypeError):
+        return None
+
+
+def own_streams(metas: list[dict[str, Any]], created_ms: int | None) -> list[dict[str, Any]]:
+    """The feed's own streams: Stroom keeps a deleted feed's streams under its name (the UI no longer shows them), so a
+    feed made again with the same name finds them too. Its own are those created since it was."""
+    return [m for m in metas if created_ms is None or (m.get('createMs') or 0) >= created_ms]
+
+
+async def refuse_older_than_feed(ctx: Context, stream_ids: list[int]) -> None:
+    """Building and validating pipelines uses only a feed's own streams: refuse any older than its feed, which
+    belongs to an earlier, deleted feed of the same name."""
+    stroom = gateway_from(ctx)
+    older: dict[str, list[int]] = {}
+    created: dict[str, int | None] = {}
+    for stream_id in stream_ids:
+        try:
+            meta = await _meta(stroom, int(stream_id))
+        except (ToolError, ValueError):
+            continue        # the tool itself says it can't find it
+        feed = meta.get('feedName')
+        if feed and feed not in created:
+            created[feed] = await feed_created_ms(stroom, feed)
+        if feed and created[feed] and (meta.get('createMs') or 0) < created[feed]:
+            older.setdefault(feed, []).append(int(stream_id))
+    if older:
+        said = []
+        for feed, ids in older.items():
+            rows = (await stroom.find_meta([_term('Feed', feed), _term('Type', 'Raw Events')], 20)).get('values') or []
+            own = [m['id'] for m in own_streams([r['meta'] for r in rows if r['meta'].get('status') != 'DELETED'],
+                                                created[feed])]
+            said.append(f"stream(s) {ids} are older than feed {feed} itself: they belong to an earlier feed of that "
+                        f"name, since deleted (Stroom keeps its streams, though the UI doesn't show them). The feed's "
+                        f"own raw streams: {own or 'none yet (upload_sample)'}")
+        raise ToolError("Only a feed's own streams are used to build and validate pipelines: " + '; '.join(said))
+
+
 async def read_sample_streams(ctx: Context, stream_ids: list[int]) -> tuple[dict[str, str], list[str]]:
     """({name: text}, notes): sample streams' raw text, read by the server in place of text sent by the client,
     so a sample passes through the model once (upload_sample) however many tools then read it."""
     stroom = gateway_from(ctx)
+    await refuse_older_than_feed(ctx, stream_ids)
     texts, notes = {}, []
     for stream_id in stream_ids:
         text, truncated = await raw_text(stroom, stream_id, stroom.settings.max_sample_chars)

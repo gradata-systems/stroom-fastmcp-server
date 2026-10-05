@@ -33,6 +33,7 @@ from config import Settings  # noqa: E402
 from e2e_elastic_handover import ES, LIVE_COMPONENT, LIVE_EXAMPLE, _request, fixtures, live_cluster  # noqa: E402
 from e2e_generator import MAPPINGS  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
+from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
@@ -105,11 +106,16 @@ class Walk:
         self.index_name = f'walk-door-{stamp}-v1' if path == 'elasticsearch' else f'WALK-{stamp}-INDEX-V1'
         self.build = self.events = self.plan = self.index = self.cluster = None
         self.template_applied = False
+        self.old_stream = None      # a stream of an earlier, deleted feed with the walk's feed name
 
     # Stage 1 ----------------------------------------------------------------------------------------------
 
     async def feed_step(self, call):
-        return await run(self.ctx, 'create_feed', **fill(call, name=self.feed))
+        made = await run(self.ctx, 'create_feed', **fill(call, name=self.feed))
+        if self.old_stream:
+            check(str(self.old_stream) in made.get('note', '') and 'earlier feed' in made['note'],
+                  "the earlier feed's streams, still under the name, are pointed out and not taken as samples")
+        return made
 
     async def samples_step(self, call):
         return await run(self.ctx, 'upload_sample', **fill(call, sample=SAMPLE))
@@ -296,6 +302,12 @@ async def detours_before(walk: Walk, step: str, call: dict) -> None:
                                 stream_ids=call['arguments']['stream_ids'])
         check('no clean step' in message and 'step_sample' in message,
               'processing before a clean step is refused, naming step_sample')
+        check(walk.old_stream not in call['arguments']['stream_ids'], "the plan names only the feed's own streams")
+        if walk.old_stream:
+            message = await refused(ctx, 'step_sample', pipeline_uuid=call['arguments']['pipeline_uuid'],
+                                    stream_ids=[walk.old_stream])
+            check('older than feed' in message and str(call['arguments']['stream_ids'][0]) in message,
+                  "stepping the deleted feed's stream is refused, naming the feed's own")
         await at(ctx, build, 'stepped', 'step_sample')
     if step in ('index_template', 'indexed'):
         status = await build_status(ctx, build)
@@ -303,9 +315,37 @@ async def detours_before(walk: Walk, step: str, call: dict) -> None:
               f'not indexed yet: neither documentation nor promotion is next ({status["next"]["step"]})')
 
 
+async def deleted_feed_before(ctx, walk: Walk) -> None:
+    """Seen in VS Code: a feed of the same name made and deleted before, its streams still in Stroom under the name."""
+    stroom = ctx.lifespan_context['stroom']
+    folder = await guard_from(ctx).build_folder(f'walk-old-{walk.stamp}')
+    node = await stroom.post('/explorer/v2/create', {
+        'docType': 'Feed', 'docName': walk.feed, 'permissionInheritance': 'DESTINATION',
+        'destinationFolder': {k: v for k, v in folder.items() if not k.startswith('_')}})
+    ref = node.get('docRef', node)
+    response = await stroom.datafeed(walk.feed, json.dumps([{'old': True}]).encode(), {'Type': 'Raw Events'})
+    check(response.is_success, 'data sent to the earlier feed')
+    rows = []
+    for _ in range(20):
+        rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': walk.feed}],
+                                       5)).get('values') or []
+        if rows:
+            break
+        await asyncio.sleep(1)
+    check(bool(rows), 'the earlier feed has a stream')
+    walk.old_stream = rows[0]['meta']['id']
+    await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: ref[k] for k in ('type', 'uuid', 'name')}]})
+    await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [
+        {'type': 'Folder', 'uuid': folder['uuid'], 'name': folder['name']}]})
+    await asyncio.sleep(2)       # the new feed doc is made after the stream
+    print(f'    an earlier feed {walk.feed} made, sent stream {walk.old_stream}, and deleted')
+
+
 async def walk_path(ctx, path: str, stamp: str, es: httpx.AsyncClient | None) -> None:
     print(f'\n### {path}: start_onboarding, then what next says')
     walk = Walk(ctx, path, stamp, es)
+    if path == 'lucene':
+        await deleted_feed_before(ctx, walk)
     started = await run(ctx, 'start_onboarding', source_name=f'Walk {path} {stamp}', samples={'logons.csv': SAMPLE})
     walk.build = started['build']
     check(started['next']['step'] == 'feed' and started['next']['call']['tool'] == 'create_feed',

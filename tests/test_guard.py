@@ -25,6 +25,7 @@ class FakeExplorer:
     def __init__(self, *paths):
         self.folders = {'System': {'type': 'System', 'uuid': '0', 'name': 'System', 'uniqueKey': 'k-0'}}
         self.requests = []
+        self.deleted, self.ignored_deletes = set(), 0     # Stroom can answer a delete without deleting, at first
         for path in paths:
             self.add(path)
 
@@ -46,10 +47,17 @@ class FakeExplorer:
             parent = next(p for p, n in self.folders.items() if n['uuid'] == body['destinationFolder']['uuid'])
             return self.add(f"{parent}/{body['docName']}") if body['docType'] == 'Folder' else \
                 {'type': body['docType'], 'uuid': 'd-1', 'name': body['docName']}
+        if path == '/explorer/v2/getFromDocRef' and body.get('uuid') in self.deleted:
+            return None
         return {**body, 'tags': []}
 
     async def request(self, method, path, body=None):
         self.requests.append((method, path, body))
+        if method == 'DELETE' and path == '/explorer/v2/delete':
+            if self.ignored_deletes:
+                self.ignored_deletes -= 1
+            else:
+                self.deleted |= {r['uuid'] for r in body['docRefs']}
         return {}
 
 
@@ -141,3 +149,35 @@ async def test_a_doc_the_explorer_tree_leaves_out_is_still_in_the_build():
     with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, tree))):
         docs = await guard.folder_contents('b1')
     assert sorted(d['uuid'] for d in docs) == ['p', 'x'] and next(d for d in docs if d['uuid'] == 'p')['tags'][1] == 'mcp-managed'
+
+
+@pytest.mark.parametrize('ignored, removed, deletes', [(1, True, 2), (9, False, 5)])
+async def test_a_build_folder_is_removed_only_once_it_is_gone(ignored, removed, deletes):
+    # Seen in the translation suite: right after a working copy in it was deleted, Stroom answered the folder's
+    # delete without deleting it, and promotion said it was removed.
+    stroom = FakeExplorer('System/MCP Workspace', 'System/MCP Workspace/acme-v1')
+    stroom.ignored_deletes = ignored
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    folder = {**stroom.folders['System/MCP Workspace/acme-v1'], '_path': 'System/MCP Workspace/acme-v1'}
+    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, {'nodeFlags': ['L'], 'children': None}))),             patch('security.guard.asyncio.sleep', AsyncMock()):
+        assert await guard.remove_build_folder_if_empty('acme-v1') is removed
+    assert len([r for r in stroom.requests if r[0] == 'DELETE']) == deletes
+
+
+async def test_two_docs_made_one_after_the_other_share_one_build_folder():
+    # Seen in the translation suite: copy_pipeline made a pipeline and its XSLT in a new build; the search index
+    # didn't list the new build folder yet, so the second doc made a twin folder of the same name, and promotion
+    # removed one, leaving the other behind.
+    stroom = FakeExplorer('System/MCP Workspace')
+    indexed = dict(stroom.folders)
+
+    async def lagging_search(name, types, limit):    # only what was there before: new folders aren't indexed yet
+        return {'values': [{'docRef': n, 'path': p.rsplit('/', 1)[0].replace('/', ' / ')}
+                           for p, n in indexed.items() if n['name'] == name and n['type'] in types]}
+    stroom.find_documents = lagging_search
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    with patch.object(guard, 'tag', AsyncMock()):
+        await guard.create('Pipeline', 'ACME-Events-WORKING', 'acme-fix')
+        await guard.create('XSLT', 'ACME-Events-WORKING', 'acme-fix')
+    made = [r for r in stroom.requests if r[1] == '/explorer/v2/create' and r[2]['docType'] == 'Folder']
+    assert [r[2]['docName'] for r in made] == ['acme-fix']

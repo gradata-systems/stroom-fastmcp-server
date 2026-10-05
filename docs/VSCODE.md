@@ -108,8 +108,13 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
 - Confirmations and approvals appear as forms that you answer; the model never holds the answer.
 - Standing instructions from `AGENTS` docs in Stroom apply whoever connects; a workspace `AGENTS.md` can add
   your own on top.
-- 58 tools stay within VS Code's per-request limit, but with other servers enabled you may want to switch some
-  groups off in the tools picker.
+- The server has 52 tools. A chat request can carry at most 128, and with VS Code's own tools and other servers,
+  Copilot Chat groups many of them behind `activate_*` tools that the model has to call before it sees what is
+  inside (virtual tools, `github.copilot.chat.virtualTools.threshold`). The server tells the model to do that
+  when a tool it names is missing, but a small model can still stop instead (seen with Haiku 4.5: 18 of the 52
+  offered, the rest in 8 groups, and onboarding gave up at the text converter). To keep every Stroom tool in
+  view, switch off tools you don't need for this work in the tools picker (browser, notebook and terminal
+  tools, other servers), or raise the threshold.
 
 ## What was checked locally (`dev/e2e_oauth.py`)
 

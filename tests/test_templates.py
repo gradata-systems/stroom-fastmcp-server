@@ -48,3 +48,35 @@ async def test_one_child_stroom_cannot_load_does_not_hide_the_others():
         with patch.object(templates, '_shape', AsyncMock(side_effect=ToolError('Stroom rejected the request (500): x'))):
             with pytest.raises(ToolError, match='an administrator fixes the template in the Stroom UI'):
                 await templates.describe_template_contract(None, 't')
+
+
+async def test_a_dangling_xslt_is_skipped_and_named_not_a_failure():
+    # Seen on live in VS Code: the explorer listed an XSLT whose document was deleted, and describe_template failed
+    # with Stroom's 500, so the agent never saw the template's children and contract.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from fastmcp.exceptions import ToolError
+    from tools import templates
+    own = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="2.0">'
+           '<xsl:import href="shared-lib"/><xsl:template match="/"/></xsl:stylesheet>')
+    lib = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="2.0">'
+           '<xsl:template name="device"/></xsl:stylesheet>')
+    texts = {'own': own, 'live': lib}
+
+    async def get_doc(doc_type, uuid):
+        if uuid not in texts:
+            raise ToolError(f"Stroom rejected the request (500): Document not found: {uuid}")
+        return {'uuid': uuid, 'data': texts[uuid]}
+    stroom = SimpleNamespace(
+        get_doc=AsyncMock(side_effect=get_doc), pipeline_layers=AsyncMock(return_value=[]),
+        find_documents=AsyncMock(return_value={'values': [
+            {'docRef': {'type': 'XSLT', 'uuid': 'dead', 'name': 'shared-lib'}},
+            {'docRef': {'type': 'XSLT', 'uuid': 'live', 'name': 'shared-lib'}}]}))
+    docs = {'a': [{'doc': {'type': 'XSLT', 'uuid': 'gone'}, 'inherited_from_template': False}],
+            'b': [{'doc': {'type': 'XSLT', 'uuid': 'own'}, 'inherited_from_template': False}]}
+    with patch.object(templates, 'gateway_from', lambda c: stroom), \
+            patch('tools.pipelines.translation_docs', lambda uuid, layers: docs[uuid]):
+        shared = await templates.shared_xslt_usage(None, [{'uuid': 'a', 'name': 'A'}, {'uuid': 'b', 'name': 'B'}])
+    contents = [r for r in shared if 'document_contents' in r]
+    assert contents and contents[0]['document_contents']['uuid'] == 'live'
+    assert sorted(r['unreadable_xslt'] for r in shared if 'unreadable_xslt' in r) == ['dead', 'gone']
