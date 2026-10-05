@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # ticket lasts (never past the sign-in it carries), and the largest file taken.
     upload_ticket_minutes: int = 15
     max_upload_mb: int = 100
+    # 'short': a 12-character code this replica keeps (one replica, or routing that keeps a client on one). 'sealed':
+    # the ticket carries everything, sealed with the request-state keys, so any replica opens it (2,500 characters).
+    upload_tickets: str = 'short'
     # Development only: no authentication, and Stroom is called with stroom_api_key. Refused unless the
     # server listens on localhost.
     dev_no_auth: bool = False

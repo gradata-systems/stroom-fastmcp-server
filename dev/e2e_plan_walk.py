@@ -131,7 +131,7 @@ class Walk:
         command = given['commands'][0]
         check(command['powershell'].startswith('curl.exe ') and str(path) in command['bash'],
               "a command per file for the user's terminal, nothing sent through the agent")
-        ticket = re.search(rf'{HEADER}: (upl-[^"]+)', command['bash']).group(1)
+        ticket = re.search(r'/upload/([A-Za-z0-9_-]+)"', command['bash']).group(1)
 
         async def endpoint(request):
             return await handle_upload(request, self.ctx.lifespan_context['uploads'],
@@ -139,7 +139,7 @@ class Walk:
         app = Starlette(routes=[Route('/upload', endpoint, methods=['POST'])])
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://mcp') as client:
             response = await client.post('/upload', headers={HEADER: ticket, 'X-File-Name': path.name},
-                                         content=path.read_bytes())
+                                         content=path.read_bytes())     # the code, by header: the same route
         sent = response.json()
         check(response.status_code == 200 and sent.get('stream_id') and sent['bytes'] == len(SAMPLE.encode('utf-8')),
               f"the whole file reached Stroom from the terminal: {sent}")

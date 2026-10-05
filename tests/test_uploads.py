@@ -28,11 +28,25 @@ def test_a_ticket_opens_on_any_replica_sharing_the_keys_and_not_after_it_runs_ou
 
 
 def test_each_file_gets_a_command_for_bash_and_powershell():
-    [one] = commands('https://mcp.example/upload', 'upl-T', ['sample-data/fortios/001_1.json'])
-    assert one['bash'] == ('curl -sS --fail-with-body -X POST "https://mcp.example/upload" -H "X-Stroom-MCP-Ticket: '
-                           'upl-T" -H "X-File-Name: sample-data/fortios/001_1.json" --data-binary '
-                           '"@sample-data/fortios/001_1.json"')
+    # The ticket in the URL: one quoted argument besides it, nothing to escape. An agent retyping a header form
+    # dropped a quote, and PowerShell waited on the command for minutes.
+    [one] = commands('https://mcp.example/upload', 'Xk3f9QpL2mWa', ['sample-data/fortios/001_1.json'])
+    assert one['bash'] == ('curl -sS --fail-with-body --data-binary "@sample-data/fortios/001_1.json" '
+                           '"https://mcp.example/upload/Xk3f9QpL2mWa"')
     assert one['powershell'].startswith('curl.exe -sS')       # curl alone is Invoke-WebRequest in Windows PowerShell
+
+
+def test_a_short_code_is_kept_until_it_runs_out_and_a_sealed_ticket_still_opens():
+    tickets = UploadTickets(KEYS)
+    code = tickets.issue(payload())
+    assert len(code) == 12 and tickets.open(code)['feed'] == 'FORTIOS-EVENTS-V1.0'
+    assert UploadTickets(KEYS).open(code) is None                      # another replica never heard of it
+    stale = tickets.issue(payload(exp=int(time.time()) - 1))
+    assert tickets.open(stale) is None
+    tickets.issue(payload())                                           # issuing clears what has run out
+    assert stale not in tickets._codes
+    sealed = tickets.issue(payload(), 'sealed')
+    assert sealed.startswith('upl-') and UploadTickets(KEYS).open(sealed)['feed'] == 'FORTIOS-EVENTS-V1.0'
 
 
 class Gateway:
@@ -58,8 +72,11 @@ async def post(tickets, headers, body, max_mb=1):
 
     async def endpoint(request):
         return await handle_upload(request, tickets, settings, Gateway)
-    app = Starlette(routes=[Route('/upload', endpoint, methods=['POST'])])
+    app = Starlette(routes=[Route('/upload/{ticket}', endpoint, methods=['POST']),
+                            Route('/upload', endpoint, methods=['POST'])])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://t') as client:
+        if 'code' in headers:
+            return await client.post(f"/upload/{headers.pop('code')}", headers=headers, content=body)
         return await client.post('/upload', headers=headers, content=body)
 
 
@@ -81,3 +98,27 @@ async def test_no_ticket_too_large_or_empty_is_refused():
     assert (await post(tickets, {HEADER: tickets.seal(payload())}, b'x' * (1024 * 1024 + 1))).status_code == 413
     assert (await post(tickets, {HEADER: tickets.seal(payload())}, b'')).status_code == 400
     assert Gateway.sent == []
+
+
+async def test_the_code_in_the_url_is_the_credential():
+    tickets = UploadTickets(KEYS)
+    Gateway.sent = []
+    response = await post(tickets, {'code': tickets.issue(payload())}, b'[{"a": 1}]')
+    assert response.status_code == 200 and Gateway.sent[0][0] == 'FORTIOS-EVENTS-V1.0'
+    refused = await post(tickets, {'code': 'not-a-code12'}, b'x')
+    assert refused.status_code == 401 and 'not copied exactly' in refused.json()['error']
+
+
+async def test_once_a_feed_has_had_commands_text_samples_are_refused():
+    # Seen: the terminal command failed, and the agent uploaded two records of each file as text instead.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds
+    feed = {'type': 'Feed', 'uuid': 'f1', 'name': 'FORTIOS-FIREWALL-V1.0'}
+    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed', feeds.FILES_TAG]))
+    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)), \
+            patch.object(feeds, 'guard_from', lambda ctx: guard), patch.object(feeds, 'gateway_from', lambda ctx: None):
+        with pytest.raises(ToolError, match="samples are files on the user's disk .* exactly as given"):
+            await feeds.upload_sample(SimpleNamespace(lifespan_context={}), 'FORTIOS-FIREWALL-V1.0',
+                                      sample='[{"a": 1}]')

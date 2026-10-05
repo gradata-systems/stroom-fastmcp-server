@@ -136,11 +136,16 @@ async def upload_sample(
     if files and not sample:
         return await upload_ticket(ctx, feed, files, stream_type, headers)
     if not sample:
-        raise ToolError("Give sample (a file's whole text, as read) or files (for files too large to pass through you, "
-                        "or that your reader cuts short)")
+        raise ToolError("Give files (the sample files' paths on the user's disk) or sample (only text the user pasted "
+                        "into the chat)")
     check_sample(sample)
     stroom = gateway_from(ctx)
     match = await _build_feed(ctx, feed)
+    if FILES_TAG in await guard_from(ctx).tags(match):
+        # Seen: the terminal command failed, and the agent uploaded two records of each file as text instead.
+        raise ToolError(f"Feed {feed}'s samples are files on the user's disk (it was given commands for them): text "
+                        f"isn't taken for it. Call upload_sample with files=[their paths] for fresh commands, and run "
+                        f"each in the user's terminal exactly as given (copy it whole; don't retype or edit it).")
     receipt = {'Type': stream_type, **({'EffectiveTime': effective_time} if effective_time else {}), **(headers or {})}
     sent = await send_to_feed(stroom, feed, sample.encode('utf-8'), receipt, stream_type)
     if sent['stream_id'] is None:
@@ -159,6 +164,10 @@ async def _build_feed(ctx: Context, feed: str) -> dict[str, Any]:
         raise ToolError(f"No feed named '{feed}'")
     await guard_from(ctx).check_managed(match)
     return match
+
+
+# On a feed whose samples were given commands: its samples are files, never text (upload_sample refuses it).
+FILES_TAG = 'mcp-sample-files'
 
 
 async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_type: str,
@@ -181,18 +190,19 @@ async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_
         if token is not None and token.expires_at:
             expires = min(expires, token.expires_at)
     tickets = ctx.lifespan_context.setdefault('uploads', UploadTickets([]))
-    ticket = tickets.seal({'feed': feed, 'feed_uuid': match.get('uuid'), 'type': stream_type,
-                           'headers': headers or {}, 'auth': authorization, 'exp': int(expires),
-                           'sub': _subject()})
+    ticket = tickets.issue({'feed': feed, 'feed_uuid': match.get('uuid'), 'type': stream_type,
+                            'headers': headers or {}, 'auth': authorization, 'exp': int(expires),
+                            'sub': _subject()}, settings.upload_tickets)
+    await guard_from(ctx).tag([{k: match[k] for k in ('type', 'uuid', 'name')}], [FILES_TAG])
     base = (settings.public_base_url or f'http://127.0.0.1:{settings.port}').rstrip('/')
     minutes = max(1, int((expires - time.time()) // 60))
     return {'feed': feed, 'expires_in_minutes': minutes, 'max_mb': settings.max_upload_mb,
             'commands': commands(f'{base}/upload', ticket, files),
             'hint': (f"Run each file's command in the user's terminal (powershell on Windows, else bash), from the "
-                     f"folder its path is relative to; they approve it. Each prints JSON with the stream_id. The "
-                     f"ticket lasts {minutes} minute(s) (no longer than their sign-in): if it runs out, call "
-                     f"upload_sample with files= again. Then go on with stream_ids. Don't read or pass the files' "
-                     f"text yourself.")}
+                     f"folder its path is relative to; they approve it. Pass the command to the terminal exactly as "
+                     f"given, copied whole: don't retype or edit it. Each prints JSON with the stream_id. The ticket "
+                     f"lasts {minutes} minute(s) (no longer than their sign-in): if it runs out, call upload_sample "
+                     f"with files= again. Then go on with stream_ids. Don't read or pass the files' text yourself.")}
 
 
 def _subject() -> str | None:

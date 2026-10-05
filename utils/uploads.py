@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import time
 from typing import Any
 
@@ -34,6 +35,20 @@ class UploadTickets:
     def __init__(self, keys: list[str]):
         # Without shared keys (one replica), a per-process key: tickets don't outlive a restart.
         self._keys = [_key(k) for k in keys if k] or [AESGCM.generate_key(bit_length=256)]
+        self._codes: dict[str, dict[str, Any]] = {}
+
+    def issue(self, payload: dict[str, Any], mode: str = 'short') -> str:
+        """A ticket for the payload: a short code this replica keeps until it expires (the default), or the sealed
+        payload itself, which any replica sharing the keys opens. A sealed ticket carries the user's token, so it runs
+        to 2,500 characters: an agent retyping it dropped a quote, and PowerShell waited on the command for minutes."""
+        if mode == 'sealed':
+            return self.seal(payload)
+        now = time.time()
+        for code in [c for c, p in self._codes.items() if p.get('exp', 0) <= now]:
+            del self._codes[code]
+        code = secrets.token_urlsafe(9)        # 12 characters, nothing to quote
+        self._codes[code] = payload
+        return code
 
     def seal(self, payload: dict[str, Any]) -> str:
         nonce = os.urandom(12)
@@ -41,7 +56,11 @@ class UploadTickets:
         return PREFIX + base64.urlsafe_b64encode(nonce + sealed).decode().rstrip('=')
 
     def open(self, ticket: str) -> dict[str, Any] | None:
-        """The ticket's payload, or None when it isn't one of ours (any replica's) or has expired."""
+        """The ticket's payload, or None when it isn't one of ours (a code this replica issued, or a sealed ticket
+        any replica's keys open) or has expired."""
+        if ticket in self._codes:
+            payload = self._codes[ticket]
+            return payload if payload.get('exp', 0) > time.time() else None
         if not ticket or not ticket.startswith(PREFIX):
             return None
         try:
@@ -73,12 +92,12 @@ async def send_to_feed(stroom, feed: str, data: bytes, receipt: dict[str, str], 
 
 
 def commands(url: str, ticket: str, files: list[str]) -> list[dict[str, str]]:
-    """The curl command for each file, for a POSIX shell and for PowerShell (where curl alone is Invoke-WebRequest)."""
+    """The curl command for each file, for a POSIX shell and for PowerShell (where curl alone is Invoke-WebRequest):
+    the ticket in the URL, so there is one quoted argument besides it and nothing to escape."""
     out = []
     for name in files:
         quoted = name.replace('"', '\\"')
-        args = (f'-sS --fail-with-body -X POST "{url}" -H "{HEADER}: {ticket}" -H "X-File-Name: {quoted}" '
-                f'--data-binary "@{quoted}"')
+        args = f'-sS --fail-with-body --data-binary "@{quoted}" "{url}/{ticket}"'
         out.append({'file': name, 'bash': f'curl {args}', 'powershell': f'curl.exe {args}'})
     return out
 
@@ -91,12 +110,13 @@ async def handle_upload(request, tickets: UploadTickets, settings, gateway: Any 
     from security.audit import audit
     from utils.stroom import StroomGateway
     name = request.headers.get('X-File-Name', '')[:300]
-    payload = tickets.open(request.headers.get(HEADER, ''))
+    payload = tickets.open(request.path_params.get('ticket') or request.headers.get(HEADER, ''))
     if payload is None:
         audit('upload', outcome='refused', reason='no valid ticket', file=name)
-        return JSONResponse({'error': "No valid upload ticket: it has run out (a ticket lasts minutes, never past the "
-                                      "sign-in) or isn't this server's. Ask the agent for a new one (upload_sample "
-                                      "with files=)."},
+        return JSONResponse({'error': "No valid upload ticket: not copied exactly from the command the agent was "
+                                      "given, run out (a ticket lasts minutes, never past the sign-in), or forgotten "
+                                      "by a server restart. Ask the agent for fresh commands (upload_sample with "
+                                      "files=) and run them as given."},
                             status_code=401)
     limit = settings.max_upload_mb * 1024 * 1024
     data = bytearray()

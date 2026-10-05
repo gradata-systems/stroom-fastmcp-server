@@ -85,9 +85,11 @@ async def healthz(request: Request) -> Response:
     return PlainTextResponse(f'ok {SERVER_VERSION}')
 
 
+@mcp.custom_route('/upload/{ticket}', methods=['POST'], include_in_schema=False)
 @mcp.custom_route('/upload', methods=['POST'], include_in_schema=False)
 async def upload(request: Request) -> Response:
-    """A sample file sent from the user's machine with a ticket from upload_sample files= (utils/uploads.py)."""
+    """A sample file sent from the user's machine with a ticket from upload_sample files= (utils/uploads.py): the
+    ticket in the URL, or in the X-Stroom-MCP-Ticket header."""
     return await handle_upload(request, uploads, settings)
 
 

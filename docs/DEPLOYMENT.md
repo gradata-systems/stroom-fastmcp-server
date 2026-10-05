@@ -115,6 +115,7 @@ brackets.
 | `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata [`publicBaseUrl`] |
 | `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state and the confirmation and approval ids given to clients without forms, comma-separated; set them when running more than one replica [`requestState`] |
 | `UPLOAD_TICKET_MINUTES` | `15` | How long a sample-upload ticket lasts (never past the sign-in it carries): `upload_sample` with `files` gives the agent one, and a `curl` command per file that sends the file from the user's terminal to `/upload` [`extraEnv`] |
+| `UPLOAD_TICKETS` | `short` | `short`: an upload ticket is a 12-character code this replica keeps until it expires (one replica, or routing that keeps a client on one; a restart forgets pending codes). `sealed`: the ticket carries everything, sealed with `REQUEST_STATE_KEYS`, so any replica opens it, but it runs to 2,500 characters for the agent to copy [`extraEnv`] |
 | `MAX_UPLOAD_MB` | `100` | The largest sample file `/upload` takes. A proxy or ingress in front must let request bodies that large through to `/upload` (ingress-nginx refuses over 1 MB by default: `nginx.ingress.kubernetes.io/proxy-body-size: "100m"`) [`extraEnv`] |
 | `TLS_CERTFILE`, `TLS_KEYFILE` | | Server certificate and key [`tls`] |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Serve plain HTTP behind a TLS proxy [`tls.enabled: false`]. Without it or a certificate, the server only starts when listening on localhost |

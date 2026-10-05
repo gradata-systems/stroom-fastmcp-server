@@ -200,6 +200,12 @@ A fourteenth session, on 0.16.19: the four files went up whole through the termi
 | "No stepping session found" | Steps that large outlasted Stroom's 30 s wait and came back unfinished; the follow-up for the session reached the other Stroom node, and every step after the second failed with Stroom's 500. The server reached Stroom without the ingress's cookie affinity: its HTTP client kept cookies, but shared them across users. | Stroom works on a step for up to 55 s (`STROOM_STEPPING_WAIT_MS`), under the request timeout. A follow-up carries the cookies its own first response set; the shared client keeps none. When a follow-up still reaches the wrong node, the refusal says why and what keeps a client on one node. |
 | Every record, one request each | 3,940 records would have been 500 steps, one request each, against a remote Stroom. | `step_sample` steps the first 50 records of each stream by default; processing reads every record. |
 
+A fifteenth session, on 0.16.20:
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| The command retyped | The agent typed the upload command itself rather than passing it on, and dropped the quote closing the ticket header: PowerShell waited for the rest of the command for four minutes until it was cancelled. The ticket was 2,554 characters (the user's token, sealed). Told the files weren't uploaded, the agent sent each file's first record or two as text instead. | The ticket is a 12-character code the server keeps (`UPLOAD_TICKETS=sealed` for several replicas), in the URL, so the command has one quoted argument besides it: `curl.exe -sS --fail-with-body --data-binary "@<path>" "<url>/upload/<code>"`. The reply says to pass each command on exactly as given. Once a feed has been given commands, `upload_sample` refuses text samples for it, pointing back to the commands. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent
