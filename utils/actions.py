@@ -11,6 +11,8 @@ from typing import Any
 
 PERMIT = re.compile(r'^(allow(ed)?|accept(ed)?|permit(ted)?|pass(ed)?)$', re.I)
 DENY = re.compile(r'^(deny|denied|drop(ped)?|block(ed)?|reject(ed)?|refused?)$', re.I)
+CONNECT = re.compile(r'^(connect(ed|ion)?|establish(ed)?|open(ed)?)$', re.I)
+CLOSE = re.compile(r'^(close[d]?|disconnect(ed)?|teardown|terminated)$', re.I)
 AUTH = re.compile(r'(login|logon|signin|sign_in|authenticat|logoff|logout|signout|sign_out)', re.I)
 LOGOFF = re.compile(r'(logoff|logout|signout|sign_out)', re.I)
 FAILED = re.compile(r'(fail|denied|invalid|bad|reject|refused)', re.I)
@@ -18,9 +20,9 @@ SUCCEEDED = re.compile(r'(success|succeeded|ok\b|accepted|allowed)', re.I)
 CONFIG = re.compile(r'(config|setting|policy)', re.I)
 SPLITTER = re.compile(r'^(action|act|result|outcome|operation|op|activity|subtype|sub_?type|status|event_?action|verdict|disposition)$', re.I)
 FIELDS = {
-    'src_ip': r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|source_?address|clientip)$',
+    'src_ip': r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|source_?address|clientip)$',
     'src_port': r'^(src_?port|source_?port|client_?port|sport)$',
-    'dst_ip': r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|target_?ip|destination_?address)$',
+    'dst_ip': r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address)$',
     'dst_port': r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port)$',
     'protocol': r'^(proto|protocol|transport|ip_?proto|l4_?proto)$',
 }
@@ -57,21 +59,21 @@ def _splitter(records: list[dict[str, str]], names: list[str], skip: set[str]) -
         if name in skip or not SPLITTER.match(name.rsplit('.', 1)[-1]):
             continue
         values = _values(records, name)
-        if 1 <= len(values) <= MAX_VALUES and any(PERMIT.match(v) or DENY.match(v) or AUTH.search(v) or CONFIG.search(v)
-                                                   for v in values):
+        if 1 <= len(values) <= MAX_VALUES and any(PERMIT.match(v) or DENY.match(v) or CONNECT.match(v) or CLOSE.match(v)
+                                                   or AUTH.search(v) or CONFIG.search(v) for v in values):
             return name
     return None
 
 
 def action_rules(records: list[Any], names: list[str], base: list[dict[str, Any]], prefix: str,
                  user: str | None = None, description: str | None = None,
-                 skip: set[str] = frozenset()) -> tuple[list[dict[str, Any]], list[str], str | None]:
+                 skip: set[str] = frozenset(), split: str | None = None) -> tuple[list[dict[str, Any]], list[str], str | None]:
     """(rules, values left over, the field that splits them) for records of one kind: a rule per action the values
     show, each with conditions `base` plus the splitter's values. Records that aren't dicts (XML) give none."""
     records = [r for r in records if isinstance(r, dict)]
     if not records:
         return [], [], None
-    split = _splitter(records, names, set(skip))
+    split = split or _splitter(records, names, set(skip))     # given: the kind's own field names the action
     if not split:
         return [], [], None
     values = _values(records, split)
@@ -86,9 +88,15 @@ def action_rules(records: list[Any], names: list[str], base: list[dict[str, Any]
             used.update(chosen)
 
     if 'src_ip' in net and 'dst_ip' in net:
-        for side, pattern in (('Permit', PERMIT), ('Deny', DENY)):
-            chosen = [v for v in values if pattern.match(v)]
-            rule('permitted' if side == 'Permit' else 'denied', chosen, network_fields(side, net, records))
+        def addressed(value: str) -> bool:
+            # Only a value whose records carry both addresses: a firewall's SYSTEM START has none.
+            held = [r for r in records if r.get(split) == value]
+            return bool(held) and all((r.get(net['src_ip']) or '').strip() and (r.get(net['dst_ip']) or '').strip()
+                                      for r in held)
+        for side, name, pattern in (('Permit', 'permitted', PERMIT), ('Deny', 'denied', DENY),
+                                    ('Connect', 'connected', CONNECT), ('Close', 'closed', CLOSE)):
+            chosen = [v for v in values if pattern.match(v) and v not in used and addressed(v)]
+            rule(name, chosen, network_fields(side, net, records))     # the kind's protocols, seen in any of them
     logons = [v for v in values if AUTH.search(v) and not LOGOFF.search(v) and v not in used]
     outcome = {v: ('false' if FAILED.search(v) else 'true') for v in logons if FAILED.search(v) or SUCCEEDED.search(v)}
     rule('logon', logons, [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'},

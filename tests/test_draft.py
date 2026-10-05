@@ -78,8 +78,9 @@ def test_text_formats_come_with_their_splitter_and_naive_times_get_a_zone_note()
     assert by_path['EventTime/TimeCreated'] == {'path': 'EventTime/TimeCreated', 'timezone': 'UTC', 'time_format': 'yyyy-MM-dd HH:mm:ss',
                                                 'xpath': "concat(data[@name='date']/@value, ' ', data[@name='time']/@value)"}
     assert any("'date' and 'time' are joined" in n for n in draft['notes'])
-    assert only_placeholders(generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0'))
-    assert generate(TranslationMapping.model_validate(decided(draft['mapping'])), SCHEMA, '4.1.0')['ok']
+    # accept and deny between addresses are Network/Permit and Network/Deny, so nothing is left to decide.
+    assert [r['name'] for r in draft['mapping']['events']] == ['permitted', 'denied', 'other']
+    assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0')['ok']
 
 
 async def test_a_field_inventory_sent_as_the_mapping_gets_the_draft_back():
@@ -145,3 +146,26 @@ def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_ele
     offered = json.loads(problems[0][problems[0].index('[{'):])
     assert generate(TranslationMapping.model_validate({**draft['mapping'], 'events': offered}), SCHEMA_352, '3.5.2')['ok']
     assert [k['rule'] for k in kept] == ['system'] and 'Update for action CONFIG_SAVED' in kept[0]['suggested']
+
+
+def test_fields_with_no_element_are_drafted_as_data_on_the_side_they_name():
+    # Eval case 21: a connection broker's CONNECT and DISCONNECT records, with fields the schema has no element for.
+    import yaml
+    from pathlib import Path
+    case = yaml.safe_load((Path(__file__).parents[1] / 'dev' / 'eval' / 'cases' /
+                           '21_csv_connections_odd_fields.yaml').read_text(encoding='utf-8'))
+    draft = draft_mapping({'broker.csv': case['sample']}, 'Connection Broker', 'Broker', 'Eval')
+    rules = {r['name']: r for r in draft['mapping']['events']}
+    assert list(rules) == ['connected', 'closed', 'other']      # the kinds are themselves the actions
+    connect = {(f['path'], f.get('data_name')) for f in rules['connected']['fields']}
+    assert {('EventDetail/Network/Connect/Destination/Port', None),
+            ('EventDetail/Network/Connect/Destination/Device/IPAddress', None),
+            ('EventDetail/Network/Connect/Destination/Data', 'destination_key'),
+            ('EventDetail/Network/Connect/Destination/Data', 'destination_zone'),
+            ('EventDetail/Network/Connect/Source/Data', 'source_zone'),
+            ('EventDetail/Network/Connect/Data', 'tls_ja3')} <= connect
+    assert ('EventDetail/Network/Close/Destination/Data', 'destination_key') in \
+        {(f['path'], f.get('data_name')) for f in rules['closed']['fields']}
+    assert {'path': 'EventSource/Device/HostName', 'field': 'sensor'} in draft['mapping']['common']
+    # No kind is Unknown, and it generates as drafted.
+    assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0')['ok']

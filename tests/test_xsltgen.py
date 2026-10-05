@@ -496,3 +496,13 @@ def test_a_value_no_element_means_is_offered_as_data_of_the_action_element():
     rules[0]['fields'][-1] = {'path': 'EventDetail/Network/Permit/Data', 'data_name': 'result', 'field': 'result'}
     rules[1]['fields'][-1] = {'path': 'EventDetail/Alert/Data', 'data_name': 'result', 'field': 'result'}
     assert generate(mapping(events=rules), SCHEMA_352, '3.5.2')['ok']
+
+
+def test_an_invented_child_is_offered_as_data_of_the_nearest_element_that_takes_it():
+    # destination_key given a made-up Destination/Key: Data under Destination, not under the action element.
+    rules = [{'name': 'c', 'when': [{'field': 'action', 'equals': 'connect'}], 'fields': [
+        {'path': 'EventDetail/TypeId', 'value': 'Connect'},
+        {'path': 'EventDetail/Network/Connect/Source/Device/IPAddress', 'field': 'ip'},
+        {'path': 'EventDetail/Network/Connect/Destination/Key', 'field': 'result'}]}]
+    problem = next(p for p in generate(mapping(events=rules), SCHEMA_352, '3.5.2')['problems'] if 'Destination/Key' in p)
+    assert '{"path": "EventDetail/Network/Connect/Destination/Data", "data_name": "result", "field": "result"}' in problem

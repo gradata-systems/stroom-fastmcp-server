@@ -155,8 +155,33 @@ def score_events(score: Score, case: dict[str, Any], records: list[str], validit
     for path, values in missing_values.items():
         if values:
             score.problems.append(f"no event has {path} = {values}")
+    # Types no event may have: Unknown for a source whose every record has an action element.
+    forbidden = sorted(set(expected.get('forbidden_types') or []) & types)
+    if forbidden:
+        score.problems.append(f"events of type {forbidden}, which none should be")
+    # Fields with no element of their own, carried as Data where they belong (destination_key under Destination).
+    misplaced = [d for d in expected.get('data') or [] if not data_held(events, d)]
+    for d in misplaced:
+        score.problems.append(f"{'not every' if d.get('every', True) else 'no'} event has Data {d['name']!r}"
+                              f"{' = ' + repr(d['value']) if 'value' in d else ''} under {d['at']}")
     score.stage1 = (len(events) == expected['records'] and bool(validity) and all(validity)
-                    and not score.missing_types and not score.missing_paths and not any(missing_values.values()))
+                    and not score.missing_types and not score.missing_paths and not any(missing_values.values())
+                    and not forbidden and not misplaced)
+
+
+def data_held(events: list[etree._Element], spec: dict[str, Any]) -> bool:
+    """Whether every event (or, with every: false, some event) has a Data element of that Name, with a value (or that
+    value), directly under the element at (alternatives a|b, * for one element)."""
+    def held(event: etree._Element) -> bool:
+        for alt in spec['at'].split('|'):
+            for node in event.findall(_steps(alt)):
+                for data in node.findall(f'{{{EVT}}}Data'):
+                    value = data.get('Value') or ''
+                    if data.get('Name') == spec['name'] and (value == spec['value'] if 'value' in spec else value):
+                        return True
+        return False
+    found = [held(e) for e in events]
+    return bool(found) and (all(found) if spec.get('every', True) else any(found))
 
 
 Call = Callable[..., Awaitable[dict[str, Any]]]

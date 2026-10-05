@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 20 and len({c['id'] for c in cases}) == 20
+    assert len(cases) == 21 and len({c["id"] for c in cases}) == 21
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']
@@ -96,3 +96,34 @@ def test_expected_types_and_paths_may_name_alternatives():
     ev.score_events(score, {'expected': {'records': 1, 'event_types': ['Authenticate|Authorise'],
                                          'paths': [dept, 'EventDetail/Authenticate/Action|EventDetail/Authorise/Action']}}, [xml], [True])
     assert score.stage1 and not score.missing_types and not score.missing_paths
+
+
+def test_scoring_fails_unknown_events_and_data_away_from_where_it_belongs():
+    # Case 21: every record is a connection (no Unknown), and destination_key, a field with no element, is Data under
+    # Destination, not under the action element or left out.
+    events = ('<Events xmlns="event-logging:3"><Event><EventDetail><TypeId>CONNECT</TypeId><Network><Connect>'
+              '<Source><Device><IPAddress>198.51.100.23</IPAddress></Device><Data Name="source_zone" Value="internet"/>'
+              '</Source><Destination><Device><IPAddress>10.20.0.11</IPAddress></Device><Port>443</Port>'
+              '<Data Name="destination_key" Value="svc/payments-api"/></Destination></Connect></Network></EventDetail>'
+              '</Event></Events>')
+    wrong = events.replace('<Data Name="destination_key" Value="svc/payments-api"/></Destination></Connect>',
+                           '</Destination><Data Name="destination_key" Value="svc/payments-api"/></Connect>')
+    unknown = ('<Events xmlns="event-logging:3"><Event><EventDetail><TypeId>CONNECT</TypeId><Unknown>'
+               '<Data Name="destination_key" Value="svc/payments-api"/></Unknown></EventDetail></Event></Events>')
+    case = {'expected': {'records': 1, 'event_types': ['Network'], 'forbidden_types': ['Unknown'],
+                         'paths': ['EventDetail/Network/Connect/Destination/Port'],
+                         'data': [{'at': 'EventDetail/Network/*/Destination', 'name': 'destination_key'},
+                                  {'at': 'EventDetail/Network/Connect/Destination', 'name': 'destination_key',
+                                   'value': 'svc/payments-api', 'every': False},
+                                  {'at': 'EventDetail/Network/Connect/Source', 'name': 'source_zone'}]}}
+    good = ev.Score('21', 'reference')
+    ev.score_events(good, case, [events], [True])
+    assert good.stage1 and not good.problems
+    moved = ev.Score('21', 'reference')
+    ev.score_events(moved, case, [wrong], [True])
+    assert not moved.stage1 and moved.problems == [
+        "not every event has Data 'destination_key' under EventDetail/Network/*/Destination",
+        "no event has Data 'destination_key' = 'svc/payments-api' under EventDetail/Network/Connect/Destination"]
+    gave_up = ev.Score('21', 'reference')
+    ev.score_events(gave_up, case, [unknown], [True])
+    assert not gave_up.stage1 and "events of type ['Unknown'], which none should be" in gave_up.problems

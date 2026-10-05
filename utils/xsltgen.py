@@ -695,7 +695,10 @@ class _Generator:
         # The action the rule already maps below the element (Network/Permit), where its Data goes.
         mapped = [f.path.strip('/').split('/') for f in rule.fields]
         siblings = ['/'.join(m[:3] + ['Data']) for m in mapped if m[:2] == parts[:2] and len(m) > 3]
-        for candidate in (*siblings, '/'.join(parts[:3] + ['Data']), '/'.join(parts[:2] + ['Data'])):
+        # The nearest element above it that takes Data (a destination_key under Destination), then the action the
+        # rule maps, then the element itself.
+        nearest = ['/'.join(parts[:k] + ['Data']) for k in range(len(parts) - 1, 2, -1)]
+        for candidate in (*nearest, *siblings, '/'.join(parts[:2] + ['Data'])):
             try:
                 if self.schema.resolve(candidate)[-1].name == 'Data':
                     home = candidate

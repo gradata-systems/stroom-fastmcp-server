@@ -1,6 +1,6 @@
 # Evaluation set
 
-Twenty samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Twenty-one samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -29,11 +29,14 @@ case), not a margin to spend.
 | `18_json_event_string_freetext` | JSON array; the event is JSON in a string field: timestamp, username, event_type, an optional resource and a free-form message | Authenticate (logon, logoff, password change), View, Delete | `json-to-xml()` through `xpath` for every field, the event's own time (millisecond, offset) rather than the shipper's, free text kept whole as the Description (quotes, colons, text that looks like key=value), `values` checks |
 | `19_jsonl_message_layouts` | JSON lines; the message's layout depends on its first word, with quoted values, optional and extra keys, and free text | Authenticate, Alert, Unknown | Several `extract` regexes over one field, `any_of` for a quoted or bare value, rules per kind, a catch-all rule for unrecognised lines, `values` checks that quoted names are read whole |
 | `20_csv_coded_with_docs` | CSV with a header, the vendor's own codes (`A17`, `R7`) | Authenticate (logon, failed logon, logoff) | The vendor's documentation (`source_docs`): only it says A18 is a failed logon and A40 a logoff; `values` checks Action and Outcome/Success. `run_agent.py --without-source-docs 20` runs it without the documentation, to measure what the documentation is worth |
+| `21_csv_connections_odd_fields` | CSV with a header: connections made and ended, with the broker's own fields (zones, `destination_key`, a TLS fingerprint, policy, connection id) | Network (Connect, Close) | Fields with no element of their own carried as `Data` on the side they describe (`destination_key` under `Destination`, `source_zone` under `Source`) rather than invented or left Unknown: `forbidden_types: [Unknown]` and `data` checks |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have (`*` for one element any of several may fill, such as
 `Network/*/Source` for Open, Permit or Deny; `a|b` for alternatives, in types as in paths), and optionally `values` some event must hold exactly, such as a
-free-text message carried whole or a time read from the right field), an optional list of `hints`, and a reference solution (a Data
+free-text message carried whole or a time read from the right field), optionally `forbidden_types` no event may have
+(Unknown, for a source whose every record has an action element) and `data`: a Data element of a given Name (and
+value) that every event, or with `every: false` some event, must have directly under a given element. Also an optional list of `hints`, and a reference solution (a Data
 Splitter where the format needs one, and a `build_translation_xslt` mapping).
 
 ## Running

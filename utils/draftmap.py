@@ -18,10 +18,10 @@ from utils.samples import as_named_samples
 
 # Field-name patterns, tried in order; the first field matching a home takes it.
 HOMES = [
-    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node)$'),
-    ('EventSource/Client/IPAddress', r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?address|remote_?addr|remote_?ip|source_?address|ip_?address|ipaddress|clientip)$'),
+    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node|sensor|appliance|probe)$'),
+    ('EventSource/Client/IPAddress', r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|remote_?addr|remote_?ip|source_?address|ip_?address|ipaddress|clientip)$'),
     ('EventSource/Client/Port', r'^(src_?port|source_?port|client_?port|sport)$'),
-    ('EventSource/Server/IPAddress', r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|target_?ip|destination_?address)$'),
+    ('EventSource/Server/IPAddress', r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address)$'),
     ('EventSource/Server/Port', r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port)$'),
     ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name)$'),
     ('EventSource/Generator', r'^(generator|app|app_?name|application|program|process_?name|logger|service|source)$'),
@@ -85,6 +85,22 @@ def _records(named: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]
             if spec is not None:
                 records += dry_run(spec, text)['records']
     return info, records, spec
+
+
+SOURCE_SIDE = re.compile(r'^(src|source|client|orig|origin)(_|$)', re.I)
+DESTINATION_SIDE = re.compile(r'^(dst|dest|destination|server|target|resp|responder)(_|$)', re.I)
+
+
+def _data_home(element: str, field: str) -> str:
+    """Where a field with no element of its own goes as Data: on a network action, the side it names (a
+    destination_key under Destination, a source_zone under Source); otherwise the action element itself."""
+    if element.startswith('EventDetail/Network/'):
+        name = field.rsplit('.', 1)[-1]
+        if SOURCE_SIDE.match(name):
+            return f'{element}/Source'
+        if DESTINATION_SIDE.match(name):
+            return f'{element}/Destination'
+    return element
 
 
 def draft_mapping(samples: Any, source_name: str = '', system_name: str | None = None,
@@ -191,11 +207,15 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         of_kind = [r for r in records if isinstance(r, dict) and r.get(naming) == kind]
         found, left, split = action_rules(of_kind, names, [{'field': naming, 'equals': kind}], name, user, message,
                                           skip={naming})
+        if not found:
+            # The kind itself may be the action (CONNECT, DENY): split on the naming field.
+            found, left, split = action_rules(of_kind, names, [], '', user, message, split=naming)
         for found_rule in found:
             # The rest of the record is carried as the action element's Data, as the Unknown rule did.
             element = '/'.join(found_rule['fields'][0]['path'].split('/')[:3 if 'Network' in found_rule['fields'][0]['path'] else 2])
             mapped = {f.get('field') for f in found_rule['fields']} | {split}
-            found_rule['fields'] += [{'path': f'{element}/Data', 'data_name': n, 'field': n} for n in rest if n not in mapped]
+            found_rule['fields'] += [{'path': f'{_data_home(element, n)}/Data', 'data_name': n, 'field': n}
+                                     for n in rest if n not in mapped]
         rules += found
         if found:
             recognised.append(f"{kind}: {described(found)}")
