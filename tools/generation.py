@@ -1,4 +1,5 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
+import re
 import json
 from typing import Annotated, Any
 
@@ -33,6 +34,17 @@ async def event_schema(ctx: Context, version: str) -> EventSchema:
         cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx)))
         schemas[version] = EventSchema.parse(await cache.source(event_logging_system_id(version)))
     return schemas[version]
+
+
+_KIND = re.compile(r'(type|action|event|kind|category|operation|activity|status|result)', re.I)
+
+
+def _kinds(held: str) -> str:
+    """From what a rule's records hold ('device: FW; event_type: SYSTEM, ADMIN; action: START, ...'), the fields that
+    say what kind of record they are, for the confirmation's one line."""
+    parts = [p for p in held.split('; ') if not p.startswith('e.g. ')]
+    named = [p for p in parts if _KIND.search(p.split(':', 1)[0])]
+    return '; '.join(named or parts[:2])
 
 
 async def build_translation_xslt(
@@ -119,6 +131,14 @@ async def build_translation_xslt(
     elif sample is not None:
         for text in (sample if isinstance(sample, list) else [sample]):
             check_sample(text)
+    if sample and mapping.input == 'data_splitter' and splitter is None:
+        # Without the spec no record could be read, so nothing was checked: the rule for the rest went to the user
+        # as "no sample records checked", logoffs and all. The spec is inferred, as build_data_splitter does.
+        from utils.dsgen import infer_spec
+        splitter, _ = infer_spec(sample[0] if isinstance(sample, list) else sample)
+        if splitter is not None:
+            result['warnings'].append("sample: read with the Data Splitter spec inferred from it (as build_data_splitter "
+                                      "does); give splitter if the build's converter differs")
     if sample is not None:
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
@@ -169,15 +189,29 @@ async def build_translation_xslt(
         if kept:
             # Unknown says what happened is not known: the user agrees to that per rule, seeing what its records hold
             # (a form when the client has them, so the model cannot agree for them).
-            sampled = {k['rule']: k for k in (result.get('sample_check') or {}).get('kept_unknown') or []}
-            details = {'rules kept as EventDetail/Unknown': [
-                f"{r.name}: {r.allow_unknown}" + (f" (sample: {sampled[r.name]['records']} records; {sampled[r.name]['sample']})"
-                                                  if r.name in sampled else ' (no sample records checked)')
-                + (f"; their values suggest {sampled[r.name]['suggested']}"
-                   if sampled.get(r.name, {}).get('suggested') else '') for r in kept]}
+            check = result.get('sample_check') or {}
+            if not check.get('records'):
+                # The user is asked what they agree to: which records, with which values. Without the sample the form
+                # said "no sample records checked", and logoffs went to Unknown unseen.
+                raise ToolError("Keeping a rule as Unknown is put to the user with the sample records it catches: call "
+                                "again with stream_ids (the sample streams) or sample, so the check can show them"
+                                + (f" ({check['note']})" if check.get('note') else ''))
+            sampled = {k['rule']: k for k in check.get('kept_unknown') or []}
+            details = {}
+            for r in kept:
+                held = sampled.get(r.name)
+                details[f"rule '{r.name}'"] = {
+                    'reason given': r.allow_unknown,
+                    'sample records it keeps Unknown': (f"{held['records']} of {check['records']}" if held else
+                                                        f"none of the {check['records']}"),
+                    **({'what they hold': held['sample']} if held else {}),
+                    **({'their values suggest': held['suggested']} if held and held.get('suggested') else {})}
+            caught = '; '.join(f"{r.name}: {sampled[r.name]['records']} records ({_kinds(sampled[r.name]['sample'])})"
+                               for r in kept if r.name in sampled)
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
                                                    f"Keep {', '.join(r.name for r in kept)} as Unknown (what happened is "
-                                                   f"not known) in the saved XSLT", details, confirmation_id)
+                                                   f"not known) in the saved XSLT" + (f": {caught}" if caught else ''),
+                                                   details, confirmation_id)
             if gate:
                 return gate
         from tools.translation import create_xslt, update_xslt

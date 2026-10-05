@@ -143,19 +143,32 @@ async def test_stroom_s_placeholder_past_the_end_is_not_read_as_data():
 async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
     from tools import translation
     from utils.consent import ConsentStore
-    kept = mapping(events=[{'name': 'status', 'when': [{'field': 'action', 'equals': 'status'}],
+    kept = mapping(events=[mapping().events[0].model_dump(exclude_none=True),
+                           {'name': 'status', 'when': [{'field': 'action', 'equals': 'status'}],
                             'allow_unknown': 'status lines carry no activity',
                             'fields': [{'path': 'EventDetail/TypeId', 'value': 'status'},
                                        {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]},
                            mapping().events[-1].model_dump(exclude_none=True)])
     ctx, (schema, instructions) = ctx_and_patches()
     ctx.lifespan_context['consent'] = ConsentStore(use_elicitation=False)
+    # A CSV sample with no splitter: the spec is inferred, so the check sees the records.
+    sample = ('time,action,user,result,sid,host,port\n2026-09-28T10:00:00.000Z,login,alice,ok,s1,ws01,22\n'
+              '2026-09-28T10:01:00.000Z,status,,,,ws01,0\n2026-09-28T10:02:00.000Z,status,,,,ws02,0\n'
+              '2026-09-28T10:03:00.000Z,login,bob,fail,s2,ws03,22\n')
     with schema, instructions, patch.object(translation, 'create_xslt', AsyncMock(return_value={
             'type': 'XSLT', 'uuid': 'x-1', 'name': 'N', 'version': 'v'})) as create:
-        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N')
+        # Seen in VS Code: asked with "no sample records checked", the user couldn't see what went to Unknown.
+        with pytest.raises(ToolError, match='call again with stream_ids'):
+            await generation.build_translation_xslt(ctx, kept, build='b', name='N')
+        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample)
         assert asked['status'] == 'needs_confirmation' and not create.await_count
-        assert asked['details']['rules kept as EventDetail/Unknown'] == ['status: status lines carry no activity (no sample records checked)']
-        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', confirmation_id=asked['confirmation_id'])
+        assert asked['summary'].endswith('in the saved XSLT: status: 2 records (action: status)'), asked['summary']
+        assert asked['details']["rule 'status'"] == {
+            'reason given': 'status lines carry no activity', 'sample records it keeps Unknown': '2 of 4',
+            'what they hold': asked['details']["rule 'status'"]['what they hold']}
+        assert 'action: status' in asked['details']["rule 'status'"]['what they hold']
+        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample,
+                                                      confirmation_id=asked['confirmation_id'])
         assert done['saved']['uuid'] == 'x-1'
         # Checking without saving asks nothing.
         assert 'status' not in await generation.build_translation_xslt(ctx, kept)
