@@ -2,5 +2,5 @@ apiVersion: v2
 name: stroom-mcp
 description: MCP server for building, testing and promoting Stroom pipelines, acting as the signed-in user
 type: application
-version: 0.16.16
-appVersion: "0.16.16"
+version: 0.16.17
+appVersion: "0.16.17"
