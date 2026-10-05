@@ -141,7 +141,14 @@ fields, and anchor the pattern. A record the pattern does not match gets no valu
 left out; a rule can test that with `{"field": "ts", "present": false}` (and `drop` it, or map it to `Unknown`
 with `allow_unknown` set to the reason, in the user's words: a rule that writes `Unknown` for sample records is
 refused without it, as the kind it singles out nearly always has an action element, and the user confirms the
-reason when the XSLT is saved, seeing what those records hold).
+reason when the XSLT is saved, seeing what those records hold). `allow_unknown` is refused outright for records
+that are connections or logons, with the rules to use; a schema error in an action element is fixed, not avoided
+with `Unknown`.
+
+A field no element of the schema means (a rule id, a byte count, a vendor's key) is carried as `Data` (a path ending
+`/Data`, with `data_name`) on the element it describes: `destination_key` under
+`EventDetail/Network/Connect/Destination/Data`, a source zone under `.../Source/Data`, anything else under the action
+element itself. Never invent an element for it, and never leave the event `Unknown` because of it.
 
 ## Style
 

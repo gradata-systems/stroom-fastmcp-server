@@ -105,7 +105,12 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
 - Workflows are slash commands, e.g. `/mcp.stroom.onboard_data_source`, `/mcp.stroom.onboard_existing_feed`,
   `/mcp.stroom.fix_pipeline_issue`.
 - Guides (`stroom://guide/...`) can be attached as context.
-- Confirmations and approvals appear as forms that you answer; the model never holds the answer.
+- Confirmations and approvals appear as forms that you answer; the model never holds the answer. VS Code keeps
+  the call open until you answer, so a form left open past your access token's lifetime can't be acted on when
+  you do. The agent is then told to call again: VS Code sends a fresh token with the new call, and your answer is
+  kept, so you aren't asked twice.
+- Something too long for a form is shown in the chat first: an Elasticsearch index template appears there as a
+  Dev Tools request, and the form after it is a short summary to confirm.
 - Standing instructions from `AGENTS` docs in Stroom apply whoever connects; a workspace `AGENTS.md` can add
   your own on top.
 - The server has 52 tools. A chat request can carry at most 128, and with VS Code's own tools and other servers,

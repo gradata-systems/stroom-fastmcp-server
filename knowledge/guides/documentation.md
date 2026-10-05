@@ -2,7 +2,8 @@
 
 Every pipeline built, changed or evaluated gets a Documentation doc with the pipeline's name, written with
 `write_documentation` in Markdown. The same content is returned in the chat. On an update, revise the sections
-that changed; the tool keeps the change log and adds a line to it.
+that changed; the tool keeps the change log and adds a line to it (give `change`: what changed; a new doc's line is
+"Created").
 
 ## Sections
 

@@ -17,13 +17,19 @@ for the event type, not the convention profile's `user.name`), fields it has no 
 (PascalCase, camelCase or ECS-style, dotted or run together as it is), and sample paths it maps are added. The
 template then follows its field types (`ignore_above`, sub-fields, date formats), its objects (`"type": "object"`,
 object-level `dynamic`) and its settings. The example's own fields this source doesn't write are listed, not copied.
-The user confirms the template, or corrects it (`check_index_template`); once they say the cluster admin has
-committed it, `create_processor_filter` starts indexing.
+Before they confirm it, the user sees it whole: the template first comes back as `needs_review`, its Dev Tools
+request to show in the chat as a code block; called again with `reviewed=true`, the form is a short summary (name,
+pattern and priority, settings, fields and types). They confirm it, or correct it (`check_index_template`); once
+they say the cluster admin has committed it, `create_processor_filter` starts indexing. An alias in the example
+becomes a field when the pipeline writes that field (documents can't write to an alias), typed as its target.
 
-The choice of example is the user's: offer the options without recommending one. An example is pasted into the
-chat, as a choice form can't carry it, so ask for it there and wait for it before drafting. Following an existing
-index in Stroom (`like_index`) is confirmed by the user in a form, as is going without an example
-(`without_example`). Without an example, `propose_index_template` builds nothing for the cluster. A template put on
+The choice is the user's: `get_field_conventions backend=elasticsearch` gives the choices with their labels (From
+an index template, Follow an existing index in Stroom, then a convention per profile); offer exactly those, in
+order, recommending none. An example is pasted into the chat, as a choice form can't carry it, so ask for it there
+and wait for it before drafting. Following an existing index in Stroom (`like_index`) reads its field names and
+Elasticsearch types through Stroom, with nothing to paste, and the user confirms it in a form that says what was
+read; its template's settings and component templates aren't readable that way, so they paste the template for
+those. Going without an example (`without_example`) is confirmed in a form too. Without an example, `propose_index_template` builds nothing for the cluster. A template put on
 the cluster without being agreed through it doesn't count, so indexing stays refused. Stepping clean is not
 indexing: the build's `indexed` step is done only once `verify_index` passes.
 
