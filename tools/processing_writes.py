@@ -69,12 +69,9 @@ def _selected_ids(expression: dict[str, Any] | None) -> set[int]:
 
 async def _already_processed(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[int]:
     """Streams this pipeline has output for, or that one of its filters already selects."""
-    rows = await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})
     selected = set()
-    for row in rows.get('values') or []:
-        f = row.get('processorFilter') or {}
-        if f.get('pipelineUuid') == pipeline_uuid and not f.get('deleted'):
-            selected |= _selected_ids((f.get('queryData') or {}).get('expression'))
+    for f in await stroom.processor_filters(pipeline_uuid):
+        selected |= _selected_ids((f.get('queryData') or {}).get('expression'))
     return [i for i in stream_ids if i in selected or await _outputs(stroom, i, pipeline_uuid)]
 
 
@@ -199,12 +196,9 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]],
     surveyed feed's Raw Events. Test feeds (-MCP-TEST) are left out: they only held samples.
     """
     stroom = gateway_from(ctx)
-    rows = await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})
-    filters = [r['processorFilter'] for r in rows.get('values') or []
-               if r.get('processorFilter') and not r['processorFilter'].get('deleted')]
     plan = []
     for pipeline in pipelines:
-        own = [f for f in filters if f.get('pipelineUuid') == pipeline['uuid']]
+        own = await stroom.processor_filters(pipeline['uuid'])
         targets: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for f in own:
             expression = (f.get('queryData') or {}).get('expression')

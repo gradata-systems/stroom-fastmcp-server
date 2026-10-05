@@ -24,6 +24,23 @@ audit_logger = logging.getLogger('audit')
 
 # Correlates the tool_call or resource_read event with the stroom_request events it triggered.
 _call_id: ContextVar[str | None] = ContextVar('audit_call_id', default=None)
+# Where a call's time went, summed onto its tool_call event: Stroom's requests, and waiting on the user's forms.
+_spent: ContextVar[dict[str, Any] | None] = ContextVar('audit_spent', default=None)
+
+
+def spent_in_stroom(took_ms: int, method: str, path: str) -> None:
+    spent = _spent.get()
+    if spent is not None:
+        spent['stroom_requests'] += 1
+        spent['stroom_ms'] += took_ms
+        if took_ms > spent['slowest_ms']:
+            spent['slowest_ms'], spent['slowest'] = took_ms, f"{method} {path}"
+
+
+def spent_waiting_for_user(ms: int) -> None:
+    spent = _spent.get()
+    if spent is not None:
+        spent['user_ms'] += ms
 
 
 def configure_audit_log(path: Path | None) -> None:
@@ -85,15 +102,22 @@ async def _audited(context: MiddlewareContext[Any], call_next: CallNext[Any, Any
     """Run the request, then record `event` with `fields`, the outcome and the duration. Audit events for the
     requests it makes share its call_id."""
     reset = _call_id.set(uuid.uuid4().hex)
+    spent = {'stroom_requests': 0, 'stroom_ms': 0, 'slowest_ms': 0, 'slowest': None, 'user_ms': 0}
+    reset_spent = _spent.set(spent)
     started = time.perf_counter()
+
+    def timing() -> dict[str, Any]:
+        # The rest of duration_ms (less Stroom and the user) is this server's own work and the network to Stroom.
+        took = round((time.perf_counter() - started) * 1000)
+        return {'duration_ms': took, **{k: v for k, v in spent.items() if v}}
     try:
         result = await call_next(context)
     except Exception as e:
-        audit(event, **fields, outcome='error', error=str(e),
-              duration_ms=round((time.perf_counter() - started) * 1000))
+        audit(event, **fields, outcome='error', error=str(e), **timing())
         raise
     else:
-        audit(event, **fields, outcome='success', duration_ms=round((time.perf_counter() - started) * 1000))
+        audit(event, **fields, outcome='success', **timing())
         return result
     finally:
+        _spent.reset(reset_spent)
         _call_id.reset(reset)

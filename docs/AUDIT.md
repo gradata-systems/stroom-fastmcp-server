@@ -38,7 +38,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 
 | Event | When | Key fields |
 |---|---|---|
-| `tool_call` | every tool invocation, when it finishes | `tool`, `arguments`, `outcome` (`success` or `error`), `error`, `duration_ms` |
+| `tool_call` | every tool invocation, when it finishes | `tool`, `arguments`, `outcome` (`success` or `error`), `error`, `duration_ms`, and where that time went when any did: `stroom_requests` and `stroom_ms` (its Stroom requests and their total time), `slowest` and `slowest_ms` (the longest), `user_ms` (waiting on the user in a form). The rest is this server's own work and the network |
 | `resource_read` | every resource read, such as a guide or convention profile, when it finishes | `uri`, `outcome`, `error`, `duration_ms` |
 | `stroom_request` | every Stroom REST request, and every sample upload to the datafeed | `method`, `path`, `outcome` (`success` or `error`), `status`, `error`, `took_ms`; uploads add `feed` and `bytes` |
 | `confirmation` | a change the user confirms first, e.g. `create_feed`, `create_pipeline`, `copy_pipeline` | `action`, `details`, `outcome`, `via` or `id` |
@@ -138,4 +138,5 @@ server's use:
 - Sign-in problems: filter on `reason: invalid_token` and rank `check`. A rise in `audience`, `issuer` or
   `signing_key` usually means a configuration change at the identity provider; `signature` means altered tokens.
 - Slow or failing tools: filter on `event: tool_call` and sort by `duration_ms`, or filter on
-  `outcome: error`.
+  `outcome: error`. A slow call says where its time went: Stroom (`stroom_ms`, with the slowest request), the user
+  (`user_ms`), or neither, which leaves this server and the network.

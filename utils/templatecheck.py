@@ -267,6 +267,45 @@ def _derive(source: str, style: str, dotted: bool, taken: set[str]) -> str | Non
     return None
 
 
+# Path elements that only lead to the value, left out of a nested name: Update/After/Configuration/Type is
+# Update.Configuration.Type, Network/*/Source/Device/IPAddress is Source.IPAddress.
+_FILLER = {'After', 'Before', 'Device', '*'}
+
+
+def field_group(source: str) -> tuple[str, list[str]] | None:
+    """(group, the rest) of an event-detail path, the group being the element its fields belong together under:
+    the action element (Alert, Authenticate), or for a network event the side (Source, Destination)."""
+    parts = _segments(source)
+    if not parts or not source.strip('/').startswith('EventDetail/') or len(parts) < 2:
+        return None
+    if parts[0] == 'Network' and len(parts) >= 4:
+        group, rest = parts[2], parts[3:]
+    else:
+        group, rest = parts[0], parts[1:]
+    rest = [p for p in rest if p not in _FILLER]
+    return (group, rest) if rest else None
+
+
+def _together(source: str) -> str | None:
+    """Which fields count together when deciding to nest: a connection's two sides are one (Source.Port nests, so
+    Destination.IPAddress does), the rest by their group."""
+    grouped = field_group(source)
+    return None if not grouped else 'Network' if source.strip('/').startswith('EventDetail/Network/') else grouped[0]
+
+
+def nested_name(source: str, style: str) -> str | None:
+    """A nested name in the example's style for a path whose group has other fields: Alert.Type, Source.Port."""
+    grouped = field_group(source)
+    if not grouped or style not in STYLE_NAMES:
+        return None
+    group, rest = grouped
+    if style == 'pascal':
+        return '.'.join(p[:1].upper() + p[1:] for p in [group, *rest])
+    if style == 'camel':
+        return '.'.join(_camel(_words(p)) for p in [group, *rest])
+    return '.'.join('_'.join(w.lower() for w in _words(p)) for p in [group, *rest])
+
+
 def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str, Any]],
                        convention_names: dict[str, set[str]], populated: list[str]) -> tuple[list[dict[str, str]], list[str]]:
     """(fields, notes): the field plan's fields named as the user's example names them. A field takes the example's
@@ -275,6 +314,10 @@ def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str
     them. StreamId, EventId and @timestamp keep their names."""
     leaves = [f for f, spec in example.items() if 'properties' not in spec and spec.get('type') != 'object']
     style, dotted = example_naming(leaves), example_dotted(leaves)
+    # An example that nests any of its names (User.Id) nests fields that belong together: a user asked for Alert.Type
+    # and Alert.Severity, then the same wherever fields share an element.
+    nests = any('.' in f for f in leaves if naming_style(f) is not None)
+    groups = Counter(g for g in (_together(f['source']) for f in fields) if g)
 
     def fits(name: str) -> bool:
         # A dotted name in an example that runs its names together (userName) does not fit it either.
@@ -297,6 +340,10 @@ def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str
             hit = None
         if hit:
             new = hit
+        elif style and nests and _together(field['source']) and groups[_together(field['source'])] > 1 \
+                and nested_name(field['source'], style) not in taken | used:
+            new = nested_name(field['source'], style)
+            derived.append(f"{name} -> {new}")
         elif style and not fits(name):
             # A convention's name for the path in the example's style (host.ip), else one built from the path.
             conventional = sorted(n for n in convention_names.get(field['source'], set()) if fits(n)

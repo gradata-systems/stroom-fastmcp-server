@@ -164,8 +164,9 @@ def record_key(stream_id: int, location: dict[str, Any]) -> str:
 
 
 def _criteria(stream_id: int) -> dict[str, Any]:
+    # Stroom's booleans given, not left null: a null one is an ERROR in Stroom's log on every request.
     return {'expression': {'type': 'operator', 'op': 'AND', 'children': [
-        {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(stream_id)}]}}
+        {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(stream_id)}]}, 'fetchRelationships': False}
 
 
 async def _step(stroom: StroomGateway, pipeline: _Pipeline, stream_id: int, step_type: str,

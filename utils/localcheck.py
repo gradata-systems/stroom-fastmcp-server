@@ -213,8 +213,12 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
         # Connections allowed or denied, and logons, are never unknown; a configuration change is the user's call.
         plain = [r for r in shown if any(f['path'].startswith(('EventDetail/Network/', 'EventDetail/Authenticate/'))
                                          for f in r['fields'])]
-        if rule.allow_unknown and plain:
-            values = {v for r in plain for v in (r['when'][-1].get('one_of') or [r['when'][-1].get('equals')])}
+        # Every record it catches has a rule from its own values (an alert, a service starting, a configuration
+        # saved): seen, an agent folded the draft's rules into 'other' as Unknown and the user had to decline the form.
+        covered = bool(shown) and not left
+        if rule.allow_unknown and (plain or covered):
+            values = {v for r in (shown if covered else plain)
+                      for v in (r['when'][-1].get('one_of') or [r['when'][-1].get('equals')])}
             known = sum(1 for r in found if isinstance(r, dict) and r.get(split) in values)
             problems.append(f"[{name}] can't be kept as Unknown: {known} of its {len(found)} sample records are not "
                             f"unknown events.{use}")

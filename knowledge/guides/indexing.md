@@ -44,7 +44,11 @@ drop): only `StreamId`,
 A network event records its connection under its action (`Network/Permit`, `Network/Deny`, ...): index the
 address, port and protocol once whichever action it is, with `*` for the action in the source
 (`EventDetail/Network/*/Source/Device/IPAddress`), never a field per action (`SourceIp.Permit`). The plan does this,
-and lists the paths it leaves out the same way.
+and lists the paths it leaves out the same way. What happened (the action element's Type, Severity, Action,
+Outcome) is planned too; with an example that nests names, fields sharing an element nest (`Alert.Type`,
+`Source.Port`). The example the user pasted is kept in the build when the plan is drafted, so
+`propose_index_template` follows it even when the conversation has lost it: never write a template of your own as
+their example.
 
 Events the index must not hold (heartbeats, a monitoring account) are left out at this step: give
 `draft_index_mapping` `drop_when` XPath tests on an Event, e.g. `"EventDetail/TypeId = 'Heartbeat'"`; the drafted

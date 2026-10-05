@@ -1,6 +1,7 @@
 """Indexing tools for either backend: Stroom's Lucene index or Elasticsearch."""
 import asyncio
 import fnmatch
+import logging
 import re
 import json
 import time
@@ -27,7 +28,7 @@ from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_act
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
-from utils.stroom import doc_link, gateway_from
+from utils.stroom import doc_link, gateway_from, set_body_text
 from utils.sharedxslt import json_values
 from utils.templatecheck import (compare, compose, from_example, json_xml_documents, names_from_example,
                                  parse_component_templates, read_mapping_fields,
@@ -46,7 +47,71 @@ def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
     return out
 
 
+logger = logging.getLogger(__name__)
 _PROFILE_LABELS = {'ecs': 'ECS (Elastic Common Schema)', 'stroom-flat': 'Stroom flat'}
+EXAMPLE_SUFFIX = ' example index template'
+_EXAMPLE_BLOCK = re.compile(r'<!-- stroom-mcp example\n(.*?)\n-->', re.S)
+
+
+async def _build_of_stream(ctx: Context, stream_id: int) -> str | None:
+    """The build whose pipeline wrote an Events stream, if any."""
+    from tools.plan import build_of
+    try:
+        found = await gateway_from(ctx).find_meta(
+            [{'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(stream_id)}], 1)
+        row = (found.get('values') or [{}])[0]
+        uuid = (row.get('meta') or row).get('pipelineUuid')
+        return await build_of(ctx, {'type': 'Pipeline', 'uuid': uuid, 'name': None}) if uuid else None
+    except Exception:
+        return None
+
+
+async def _keep_example(ctx: Context, build: str, index_name: str, example: str, components: list[str]) -> None:
+    """Keep the example index template the user pasted (and its components) in the build, verbatim: a summarised
+    conversation lost it, and the agent proposed a template of its own as the user's example."""
+    stroom, guard = gateway_from(ctx), guard_from(ctx)
+    text = (f"# Example index template for {index_name}\n\nAs the user pasted it, kept so the index template follows "
+            f"it even if the conversation no longer holds it.\n\n```\n{example.strip()}\n```\n"
+            + ''.join(f"\n```\n{c.strip()}\n```\n" for c in components)
+            + f"\n<!-- stroom-mcp example\n{json.dumps({'example': example, 'components': components})}\n-->\n")
+    name = f"{index_name}{EXAMPLE_SUFFIX}"
+
+    async def write(ref: dict[str, Any]) -> dict[str, Any]:
+        doc = await stroom.get_doc('Documentation', ref['uuid'])
+        set_body_text(doc, text)
+        return await stroom.put_doc(doc)
+    there = next((d for d in await guard.folder_contents(build) if d['type'] == 'Documentation' and d['name'] == name), None)
+    if there:
+        await write(there)
+    else:
+        await guard.create_filled('Documentation', name, build, write)
+
+
+async def _kept_example(ctx: Context, pipeline_uuid: str, index_names: list[str]) -> tuple[str, list[str]] | None:
+    """The example kept in the indexing pipeline's build when the plan was drafted: (template, components)."""
+    from tools.plan import build_of
+    try:
+        build = await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': None})
+        if not build:
+            return None
+        names = {f"{n}{EXAMPLE_SUFFIX}" for n in index_names if n}
+        doc = next((d for d in await guard_from(ctx).folder_contents(build)
+                    if d['type'] == 'Documentation' and d['name'] in names), None)
+        if not doc:
+            return None
+        found = _EXAMPLE_BLOCK.search((await gateway_from(ctx).get_doc('Documentation', doc['uuid'])).get('data') or '')
+        kept = json.loads(found.group(1)) if found else None
+        return (kept['example'], list(kept.get('components') or [])) if kept else None
+    except Exception:
+        return None
+
+
+def _is_template(text: str) -> bool:
+    try:
+        parse_template(text)
+        return True
+    except ValueError:
+        return False
 _STROOM_TO_ES = {'keyword': 'keyword', 'text': 'text', 'long': 'long', 'integer': 'integer', 'id': 'long',
                   'float': 'float', 'double': 'double', 'date': 'date', 'ipv4_address': 'ip', 'boolean': 'boolean'}
 
@@ -276,6 +341,7 @@ async def draft_index_mapping(
     if not events_stream_ids:
         raise ToolError("Give events_stream_ids: the Events streams the index will hold, to see which paths they populate")
     profiles = _conventions(ctx)
+    pasted = example_template
     like_note = None
     if like_index and not example_template:
         # Following another source's index is the user's choice, as the example is: its fields are read through
@@ -312,6 +378,24 @@ async def draft_index_mapping(
             fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
         elif not population_of(path, populated):
             unused.append(path)
+    # What happened, from the event's action element (Alert's Type and Severity, Authenticate's Action and Outcome,
+    # Process, Update), planned by default: a user asked for these each time. Network's are the profile's.
+    from utils.templatecheck import _derive, field_group, nested_name
+    nested = profile.get('structure') == 'nested'
+    added = 0
+    for path in sorted(populated):
+        if (added >= 20 or not populated[path] or not path.startswith('EventDetail/') or 'Data' in path.split('/')
+                or path.startswith('EventDetail/Network/') or not field_group(path)
+                or any(source_matches(f.source, path) for f in fields)):
+            continue
+        taken = {f.name for f in fields}
+        name = nested_name(path, 'ecs') if nested else _derive(path, 'pascal', False, taken)
+        if not name or name in taken:
+            continue
+        fields.append(PlannedField(name=name, source=path,
+                                   type='boolean' if path.endswith('/Success') else 'long' if path.endswith('/Port')
+                                   else 'keyword'))
+        added += 1
     example_notes, subobjects = [], True
     if example_template:
         try:
@@ -357,6 +441,16 @@ async def draft_index_mapping(
                              + ('' if found else '; not found as an XSLT document, so typed as a keyword'))
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
                      subobjects=subobjects, shared=list(shared))
+    if pasted and backend == 'elasticsearch':
+        build = await _build_of_stream(ctx, events_stream_ids[0])
+        if build:
+            try:
+                await _keep_example(ctx, build, index_name, pasted, [component_templates] if isinstance(
+                    component_templates, str) else list(component_templates))
+                example_notes.append(f"the example is kept in build {build} ('{index_name}{EXAMPLE_SUFFIX}'): "
+                                     f"propose_index_template follows it even if it isn't given again")
+            except Exception as e:   # keeping it is a convenience; the plan stands without it
+                logger.warning("Couldn't keep the example index template in build %s: %s", build, e)
     rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
     # Network paths once, whichever action: one field for a source address, not one per Permit and Deny.
     unmapped = sorted(dict.fromkeys(any_action(p) for p in populated
@@ -474,7 +568,21 @@ async def create_index_doc(
         if not (index_name and cluster_uuid):
             raise ToolError("Elasticsearch needs index_name (or plan=, which names it) and cluster_uuid: the existing "
                             "Elastic Index docs use more than one cluster, or none (find_elastic_clusters lists them)")
-        cluster = await stroom.get_doc('ElasticCluster', cluster_uuid)
+        try:
+            cluster = await stroom.get_doc('ElasticCluster', cluster_uuid)
+        except ToolError as e:
+            # Seen: an Elastic Index doc's uuid (the index the user had been offered to follow) given as the cluster,
+            # and Stroom's 500 "Document not found" passed on as it was.
+            try:
+                index_doc = await stroom.get_doc('ElasticIndex', cluster_uuid)
+            except ToolError:
+                index_doc = None
+            if index_doc:
+                its = index_doc.get('clusterRef') or {}
+                raise ToolError(f"{cluster_uuid} is the Elastic Index doc '{index_doc.get('name')}', not an Elastic "
+                                f"Cluster: its cluster is '{its.get('name')}' (cluster_uuid={its.get('uuid')}). Give "
+                                f"that, or another from find_elastic_clusters.") from e
+            raise ToolError(f"No Elastic Cluster doc {cluster_uuid}: find_elastic_clusters lists them.") from e
         target = {'cluster': f"{cluster.get('name')}{why}", 'index name': index_name}
     else:
         target = {'volume group': volume_group}
@@ -1225,6 +1333,13 @@ async def propose_index_template(
     name = template_name or index
     body = plan.model_copy(update={'index_name': index}).elastic_template(name, priority)['body']
     notes, components = [], {}
+    kept_note = None
+    if not without_example and (not example_template or not _is_template(example_template)):
+        kept = await _kept_example(ctx, pipeline_uuid, [index, plan.index_name])
+        if kept:
+            kept_note = ("the example index template the user pasted, kept in the build when the plan was drafted"
+                         + ("; what was given as example_template is not an index template" if example_template else ""))
+            example_template, component_templates = kept
     if example_template:
         try:
             _, example = parse_template(example_template)
@@ -1233,6 +1348,8 @@ async def propose_index_template(
         except ValueError as e:
             raise ToolError(str(e)) from e
         body, notes = from_example(body, example, components, discovery=plan.discovery is not None)
+        if kept_note:
+            notes.insert(0, kept_note)
     stroom = gateway_from(ctx)
     if not example_template and not without_example:
         # No template to commit yet: one handed out now would be applied to the cluster without the user's

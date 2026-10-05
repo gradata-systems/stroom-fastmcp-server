@@ -26,7 +26,7 @@ import mcp_types
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 
-from security.audit import audit
+from security.audit import audit, spent_waiting_for_user
 
 logger = logging.getLogger(__name__)
 Kind = Literal['confirmation', 'approval']
@@ -180,7 +180,11 @@ class ConsentStore:
                 return outcome
         elif self.use_elicitation and hasattr(ctx, 'elicit'):
             try:
-                answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", _answer_type(kind, editable))
+                asked = time.perf_counter()
+                try:
+                    answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", _answer_type(kind, editable))
+                finally:
+                    spent_waiting_for_user(round((time.perf_counter() - asked) * 1000))
             except Exception as e:  # client without elicitation support
                 logger.info("Elicitation unavailable, falling back to %s id: %s", kind, e)
             else:

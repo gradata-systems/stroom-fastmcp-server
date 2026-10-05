@@ -131,7 +131,7 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
         page = await stroom.post('/data/v1/fetch', {
             'sourceLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': 0, 'childType': None,
                                'dataRange': {'charOffsetFrom': have, 'length': min(RAW_PAGE_CHARS, max_chars - have)}},
-            'displayMode': 'TEXT', 'recordCount': 1, 'expandedSeverities': []})
+            'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
         data = page.get('data') or ''
         if not data or data.strip() == NO_DATA:
             break       # past the end: Stroom answers a range beyond the data with its placeholder, not nothing

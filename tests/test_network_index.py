@@ -27,7 +27,7 @@ def test_a_wildcard_source_names_every_network_action():
     assert any_action('EventDetail/Authenticate/Action') == 'EventDetail/Authenticate/Action'
 
 
-def test_the_plan_takes_network_fields_once_named_in_the_examples_style():
+def test_the_plan_takes_network_fields_once_nested_as_the_example_nests():
     # Seen: the plan took IpAddress from the Deny destination only (the first path ending IPAddress), permitted
     # traffic's addresses went unindexed, and the agent added SourceIp.Permit, SourceIp.Deny and the like.
     profiles = {p.stem: yaml.safe_load(p.read_text(encoding='utf-8')) for p in CONVENTIONS.glob('*.yaml')}
@@ -41,9 +41,9 @@ def test_the_plan_takes_network_fields_once_named_in_the_examples_style():
             known.setdefault(path, set()).add(spec['name'])
     named, _ = names_from_example([f.model_dump() for f in fields], EXAMPLE, known, sorted(POPULATED))
     by_source = {f['source']: f['name'] for f in named}
-    assert by_source['EventDetail/Network/*/Source/Device/IPAddress'] == 'SourceIPAddress'
-    assert by_source['EventDetail/Network/*/Destination/Device/IPAddress'] == 'DestinationIPAddress'
-    assert by_source['EventDetail/Network/*/Source/Port'] == 'SourcePort'
+    assert by_source['EventDetail/Network/*/Source/Device/IPAddress'] == 'Source.IPAddress'
+    assert by_source['EventDetail/Network/*/Destination/Device/IPAddress'] == 'Destination.IPAddress'
+    assert by_source['EventDetail/Network/*/Source/Port'] == 'Source.Port'
     assert not any('/Permit/' in s or '/Deny/' in s for s in by_source)          # no field per action
     assert 'IpAddress' not in by_source.values()       # which address the example's name means can't be told
     xslt = FieldPlan(backend='elasticsearch', index_name='fw', time_field='@timestamp',

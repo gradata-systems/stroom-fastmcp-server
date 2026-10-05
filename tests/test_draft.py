@@ -136,20 +136,21 @@ def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_ele
     assert service['EventDetail/Process/Type']['value'] == 'Service'
     assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA_352, '3.5.2')['problems'] == []
 
-    # The agent's give-up: each kind Unknown with a reason. Traffic and admin are refused with the rules to use;
-    # system's records show no plain action, so it goes to the user, with the suggestion for CONFIG_SAVED.
+    # The agent's give-up: each kind Unknown with a reason. Traffic and admin are refused with the rules to use, and
+    # so is system now: every record it catches has a rule from its own values (a service starting, a configuration
+    # saved), so there is nothing to put to the user.
     gave_up = {**draft['mapping'], 'events': [
         {'name': kind, 'when': [{'field': 'event_type', 'equals': kind.upper()}], 'allow_unknown': 'the schema is complex',
          'fields': [{'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}
         for kind in ('traffic', 'admin', 'system')]}
     _, records, _ = _records({'fw.csv': FIREWALL_CSV})
     problems, kept = unknown_coverage(TranslationMapping.model_validate(gave_up), records)
-    assert [p.split(']')[0] for p in problems] == ['[traffic', '[admin']
+    assert sorted(p.split(']')[0] for p in problems) == ['[admin', '[system', '[traffic']
     assert "can't be kept as Unknown: 2 of its 2 sample records" in problems[0]
     offered = json.loads(problems[0][problems[0].index('[{'):])
     assert generate(TranslationMapping.model_validate({**draft['mapping'], 'events': offered}), SCHEMA_352, '3.5.2')['ok']
-    assert [k['rule'] for k in kept] == ['system'] and kept[0]['suggested'].startswith(
-        'Update for action CONFIG_SAVED; Process for action START')
+    system = next(p for p in problems if p.startswith('[system]'))
+    assert kept == [] and 'Update for action CONFIG_SAVED; Process for action START' in system
 
 
 def test_fields_with_no_element_are_drafted_as_data_on_the_side_they_name():

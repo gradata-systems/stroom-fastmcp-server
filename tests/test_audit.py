@@ -45,3 +45,28 @@ def test_audit_file_is_reopened_after_rotation(tmp_path):
         audit_module.audit_logger.handlers.clear()
     assert json.loads((tmp_path / 'audit.jsonl.1').read_text())['tool'] == 'before'
     assert json.loads(log.read_text())['tool'] == 'after'
+
+
+async def test_a_tool_call_says_where_its_time_went(caplog):
+    # Calls took a median of 26 s in a VS Code run; Stroom's own log couldn't say why. Each tool_call now says how
+    # much was Stroom (and its slowest request) and how much was the user filling a form.
+    mcp = FastMCP('t', middleware=[AuditMiddleware()])
+
+    @mcp.tool
+    def build_status() -> str:
+        audit_module.spent_in_stroom(120, 'POST', '/explorer/v2/find')
+        audit_module.spent_in_stroom(900, 'POST', '/processorFilter/v1/find')
+        audit_module.spent_waiting_for_user(5000)
+        return 'ok'
+
+    with patch('security.audit.get_access_token', return_value=None), caplog.at_level(logging.INFO, 'audit'):
+        propagate, audit_module.audit_logger.propagate = audit_module.audit_logger.propagate, True
+        try:
+            async with Client(mcp) as client:
+                await client.call_tool('build_status', {})
+        finally:
+            audit_module.audit_logger.propagate = propagate
+    call = next(json.loads(r.getMessage()) for r in caplog.records if r.name == 'audit')
+    assert (call['stroom_requests'], call['stroom_ms'], call['user_ms']) == (2, 1020, 5000)
+    assert call['slowest'] == 'POST /processorFilter/v1/find' and call['slowest_ms'] == 900
+    assert call['duration_ms'] >= 0 and call['outcome'] == 'success'

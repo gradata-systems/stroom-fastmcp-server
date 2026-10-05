@@ -219,7 +219,13 @@ class WriteGuard:
         return folder, find(tree['rootNodes']) or {}
 
     async def create(self, doc_type: str, name: str, build: str, extra_tags: list[str] | None = None) -> dict[str, Any]:
-        """Create an empty document in the build folder and tag it as the agent's."""
+        """Create an empty document in the build folder and tag it as the agent's. A name the build already has for
+        that type is refused, naming the one there: after a long conversation was summarised, an agent made the same
+        indexing pipeline twice, and the build held two."""
+        twin = next((d for d in await self.folder_contents(build) if d['type'] == doc_type and d['name'] == name), None)
+        if twin:
+            raise ToolError(f"A {doc_type} named '{name}' is already in build {build} (uuid {twin['uuid']}): carry on "
+                            f"with that one (build_status lists the build's documents), or give the new one another name.")
         folder = await self.build_folder(build)
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': doc_type, 'docName': name, 'destinationFolder': _strip(folder),

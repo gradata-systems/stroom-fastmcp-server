@@ -478,3 +478,23 @@ async def test_without_a_backend_the_only_indexing_backend_is_taken():
             patch.object(templates, 'find_pipeline_templates', AsyncMock(return_value=both)):
         asked = await indexing.get_field_conventions(ctx)
     assert 'profiles' in asked and asked['hint'].startswith('Which backend first')
+
+
+async def test_an_index_doc_given_as_the_cluster_is_named_with_its_cluster():
+    # Seen: the uuid of the FortiOS-V1 Elastic Index (offered as an index to follow) given as cluster_uuid, and
+    # Stroom's 500 "Document not found" passed on.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastmcp.exceptions import ToolError
+    from tools import indexing
+
+    async def get_doc(doc_type, uuid):
+        if doc_type == 'ElasticIndex':
+            return {'name': 'FortiOS-V1', 'clusterRef': {'name': 'ES_PROD', 'uuid': 'c1'}}
+        raise ToolError("Stroom rejected the request (500): Document not found")
+    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=get_doc), settings=SimpleNamespace())
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': None})
+    with pytest.raises(ToolError, match=r"is the Elastic Index doc 'FortiOS-V1', not an Elastic Cluster: its cluster is "
+                                        r"'ES_PROD' \(cluster_uuid=c1\)"):
+        await indexing.create_index_doc(ctx, build='b', backend='elasticsearch', name='fw', index_name='fw-v1',
+                                        cluster_uuid='a96e', time_field='@timestamp')

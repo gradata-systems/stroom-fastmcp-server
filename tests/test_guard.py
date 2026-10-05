@@ -202,3 +202,22 @@ async def test_an_emptied_build_folder_is_removed_once_the_tree_catches_up():
             patch('security.guard.asyncio.sleep', AsyncMock()) as slept:
         assert await guard.remove_build_folder_if_empty('acme-v1') is False
     assert not slept.called
+
+
+async def test_a_name_the_build_already_has_is_not_created_again():
+    # Seen: after Copilot summarised a long conversation, the agent created the same indexing pipeline twice.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from fastmcp.exceptions import ToolError
+    from security.guard import WriteGuard
+    stroom = SimpleNamespace(post=AsyncMock(return_value={'type': 'Pipeline', 'uuid': 'new', 'name': 'Other'}))
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    there = [{'type': 'Pipeline', 'uuid': 'p1', 'name': 'Firewall Indexing', 'tags': [], 'path': 'x'}]
+    with patch.object(WriteGuard, 'folder_contents', AsyncMock(return_value=there)), \
+            patch.object(WriteGuard, 'build_folder', AsyncMock(return_value={'uuid': 'f', '_path': 'x'})), \
+            patch.object(WriteGuard, 'tag', AsyncMock()):
+        with pytest.raises(ToolError, match=r"A Pipeline named 'Firewall Indexing' is already in build b \(uuid p1\)"):
+            await guard.create('Pipeline', 'Firewall Indexing', 'b')
+        assert stroom.post.await_count == 0
+        made = await guard.create('XSLT', 'Firewall Indexing', 'b')       # another type may share the name
+        assert made['uuid'] == 'new'

@@ -75,7 +75,7 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     body = await stroom.post('/data/v1/fetch', {
         'sourceLocation': {'metaId': stream_id, 'partIndex': part, 'recordIndex': 0,
                            'dataRange': {'charOffsetFrom': 0, 'length': chars}},
-        'displayMode': 'TEXT', 'recordCount': 1, 'expandedSeverities': []})
+        'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
     if body.get('errors'):
         raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
     text = body.get('data') or ''

@@ -27,10 +27,7 @@ async def processing_status(
     status and counts, and processor tasks by status. Use it to see whether processing has finished.
     """
     stroom = gateway_from(ctx)
-    rows = await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})
-    filters = [row['processorFilter'] for row in rows.get('values') or []
-               if row.get('processorFilter') and row['processorFilter'].get('pipelineUuid') == pipeline_uuid
-               and not row['processorFilter'].get('deleted')]
+    filters = await stroom.processor_filters(pipeline_uuid)
     by_filter: dict[int, Counter] = {}
     for f in filters:
         # Each filter's own tasks: on a busy instance a page of every task in the system may not include them.

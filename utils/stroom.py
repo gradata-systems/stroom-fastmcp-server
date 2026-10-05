@@ -9,7 +9,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 
 from config import Settings
-from security.audit import audit
+from security.audit import audit, spent_in_stroom
 from utils.tls import trust
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,7 @@ class StroomGateway:
             raise ToolError("Stroom is unavailable") from e
 
         took_ms = round((time.perf_counter() - started) * 1000)
+        spent_in_stroom(took_ms, method, path)
         if response.status_code in (401, 403):
             audit('access_denied', reason=f'stroom_{response.status_code}', status=response.status_code, **who)
             raise ToolError("Stroom denied access to this request")
@@ -220,15 +221,28 @@ class StroomGateway:
         return await self.post('/meta/v1/find', {
             'expression': {'type': 'operator', 'op': op, 'children': terms},
             'pageRequest': {'offset': 0, 'length': limit},
-            'sortList': [{'id': 'Id', 'desc': newest_first}],
+            'sortList': [{'id': 'Id', 'desc': newest_first, 'ignoreCase': False}],
+            # Stroom's booleans given, not left null: a null one is an ERROR in Stroom's log on every request.
+            'fetchRelationships': False,
         })
+
+    async def processor_filters(self, pipeline_uuid: str) -> list[dict[str, Any]]:
+        """The pipeline's processor filters (not deleted). Asked of Stroom by pipeline: every filter on an instance
+        (2,000 on the local stack) was fetched on each call, and Stroom logged a warning for each one whose pipeline is
+        gone."""
+        rows = await self.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': [
+            {'type': 'term', 'field': 'Processor Pipeline', 'condition': 'IS_DOC_REF',
+             'docRef': {'type': 'Pipeline', 'uuid': pipeline_uuid}}]}})
+        return [r['processorFilter'] for r in rows.get('values') or []
+                if r.get('processorFilter') and r['processorFilter'].get('pipelineUuid') == pipeline_uuid
+                and not r['processorFilter'].get('deleted')]
 
     async def fetch_data(self, meta_id: int, record_index: int, record_count: int, mode: str = 'TEXT',
                          child_type: str | None = None) -> dict[str, Any]:
         """Records from a stream (TEXT), or its error markers (MARKER)."""
         return await self.post('/data/v1/fetch', {
             'sourceLocation': {'metaId': meta_id, 'partIndex': 0, 'recordIndex': record_index, 'childType': child_type},
-            'displayMode': mode,
+            'displayMode': mode, 'showAsHtml': False,
             'recordCount': record_count,
             'expandedSeverities': ['INFO', 'WARN', 'ERROR', 'FATAL'],
         })
