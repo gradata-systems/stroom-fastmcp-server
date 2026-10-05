@@ -14,6 +14,7 @@ and these thresholds follow the mapping's style, which a style guide in the AGEN
 Mistakes the schema can catch (unknown paths, invalid constants, two alternatives of a choice) come back as
 problems per mapping entry instead of as XSLT for the model to debug.
 """
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -684,6 +685,31 @@ class _Generator:
         if entry.time_format and entry.map:
             self._note(self.problems, f"{where}: use time_format or map, not both")
 
+    def _as_data(self, path: str, data_name: str | None, entry: FieldMapping, rule: EventRule) -> str:
+        """For a value given an element the schema hasn't got (Network/Protocol, Alert/AlertSeverity): it can be
+        carried as a Data entry of the action element, Name and Value, rather than invented or left Unknown."""
+        parts = path.strip('/').split('/')
+        if data_name is not None or len(parts) < 3 or parts[0] != 'EventDetail' or parts[1] == 'Unknown':
+            return ''
+        home = None
+        # The action the rule already maps below the element (Network/Permit), where its Data goes.
+        mapped = [f.path.strip('/').split('/') for f in rule.fields]
+        siblings = ['/'.join(m[:3] + ['Data']) for m in mapped if m[:2] == parts[:2] and len(m) > 3]
+        for candidate in (*siblings, '/'.join(parts[:3] + ['Data']), '/'.join(parts[:2] + ['Data'])):
+            try:
+                if self.schema.resolve(candidate)[-1].name == 'Data':
+                    home = candidate
+                    break
+            except ValueError:
+                continue
+        name = entry.field or parts[-1]
+        suggested = {'path': home or f'EventDetail/{parts[1]}/<the action>/Data', 'data_name': name,
+                     **({'field': entry.field} if entry.field else {}), **({'xpath': entry.xpath} if entry.xpath else {}),
+                     **({'value': entry.value} if entry.value is not None else {})}
+        return (f" If no element means this value, carry it as Data of the action element instead: "
+                f"{json.dumps(suggested)} (Name and Value in the event, searchable as they are). A value with no element "
+                f"of its own is no reason to leave the event Unknown.")
+
     def tree(self, rule: EventRule) -> _Node:
         root = _Node(None, 'Event')
         by_key = {(e.path.strip('/'), e.data_name): e for e in self.m.common}
@@ -693,7 +719,7 @@ class _Generator:
             try:
                 chain = self.schema.resolve(path)
             except ValueError as e:
-                self._note(self.problems, f"[{rule.name}] {path}: {e}")
+                self._note(self.problems, f"[{rule.name}] {path}: {e}{self._as_data(path, data_name, entry, rule)}")
                 continue
             if not chain:
                 self._note(self.problems, f"{where}: map a path below Event")
@@ -777,8 +803,10 @@ class _Generator:
                                       f"configuration changes Update (After/Configuration/Type), alerts and health "
                                       f"messages Alert (Type, Severity), processes started or stopped Process; also "
                                       f"Create, Delete, View, Send, Receive. A schema problem in the action element is "
-                                      f"fixed from what it names, not avoided with Unknown. allow_unknown (the reason, "
-                                      f"which the user confirms) is only for records no action element describes.")
+                                      f"fixed from what it names, not avoided with Unknown, and a value no element "
+                                      f"means is carried as Data of the action element (EventDetail/<Action>/Data, "
+                                      f"data_name). allow_unknown (the reason, which the user confirms) is only for "
+                                      f"records no action element describes.")
         source = root.kids.get('EventSource')
         acted = [f"{name}/User" for name, node in (detail.kids.items() if detail is not None else []) if 'User' in node.kids]
         if acted and (source is None or 'User' not in source.kids):

@@ -474,3 +474,25 @@ def test_a_shared_template_at_event_level_and_generated_names_avoid_shared_ones(
     named = {t.get('name') for t in sheet.findall('xsl:template[@name]', ns)}
     # The generator's own EventSource template is not named event_source: that would override the shared one.
     assert 'event_source' not in named and len(sheet.findall(".//xsl:call-template[@name='event_source']", ns)) == 2
+
+
+def test_a_value_no_element_means_is_offered_as_data_of_the_action_element():
+    # Seen in VS Code: the agent invented elements (Network/Protocol, Alert/AlertSeverity) for fields the schema has
+    # none for, was refused, and in the end left the events Unknown.
+    rules = [{'name': 'traffic', 'when': [{'field': 'action', 'equals': 'connect'}],
+              'fields': [{'path': 'EventDetail/TypeId', 'value': 'Traffic'},
+                                             {'path': 'EventDetail/Network/Permit/Source/Device/IPAddress', 'field': 'ip'},
+                                             {'path': 'EventDetail/Network/Protocol', 'field': 'result'}]},
+             {'name': 'alert', 'fields': [{'path': 'EventDetail/TypeId', 'value': 'Alert'},
+                                          {'path': 'EventDetail/Alert/Type', 'value': 'Other'},
+                                          {'path': 'EventDetail/Alert/AlertSeverity', 'field': 'result'}]}]
+    problems = generate(mapping(events=rules), SCHEMA_352, '3.5.2')['problems']
+    network = next(p for p in problems if 'Network/Protocol' in p)
+    assert '{"path": "EventDetail/Network/Permit/Data", "data_name": "result", "field": "result"}' in network
+    alert = next(p for p in problems if 'AlertSeverity' in p)
+    assert "Did you mean ['Severity']" in alert and '"path": "EventDetail/Alert/Data"' in alert
+    assert 'no reason to leave the event Unknown' in alert
+    # Carried as Data, as offered, they generate.
+    rules[0]['fields'][-1] = {'path': 'EventDetail/Network/Permit/Data', 'data_name': 'result', 'field': 'result'}
+    rules[1]['fields'][-1] = {'path': 'EventDetail/Alert/Data', 'data_name': 'result', 'field': 'result'}
+    assert generate(mapping(events=rules), SCHEMA_352, '3.5.2')['ok']

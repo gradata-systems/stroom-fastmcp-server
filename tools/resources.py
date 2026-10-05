@@ -85,7 +85,10 @@ parsed body), which runs it on the sample and shows the records and field names;
 Translation: start from draft_translation_mapping (a valid mapping drafted from the sample: decide the action element
 per kind of event, the system name and environment), then build_translation_xslt with the edited mapping, the sample
 (and the splitter spec) so fields no record has and time formats the values do not fit are caught before stepping;
-never write XSLT by hand, and never send the field inventory as the mapping. Sources:
+never write XSLT by hand, and never send the field inventory as the mapping. A field that no element of the schema
+means (a rule id, a byte count, a vendor code) is carried as Data of the action element (path
+EventDetail/<Action>/Data with data_name): never invent an element for it, and never leave the event Unknown because
+of it. Sources:
 field, any_of (first of several names), value, xpath, lookup (reference data); modifiers: transform (lower, upper,
 trim, strip_domain, domain, digits), dictionary, map, default, time_format. Values the record does not carry come
 from reference data (find_reference_data; build_reference_xslt and a Reference Data pipeline for new tables; the
