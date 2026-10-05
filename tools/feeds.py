@@ -24,18 +24,18 @@ def sent_by_user(settings, feed: dict[str, Any]) -> str:
     """How the user sends a file the agent can't pass on whole: in the Stroom UI, or with curl, as a source would."""
     from utils.stroom import doc_link
     url = settings.stroom_url.rstrip('/') + settings.datafeed_path
-    return (f"A sample file you can't read whole (your reader cuts it, or it's too large to pass on) isn't passed "
-            f"through you: upload_sample feed={feed['name']} files=[...] gives a command per file to run in the "
-            f"user's terminal, sending it from their disk. Without a terminal, the user sends it: in Stroom, the "
-            f"feed ({doc_link(settings, 'Feed', feed['uuid'])}), its Data tab, Upload; or curl -X POST '{url}' -H "
+    return (f"Sample files on the user's disk aren't passed through you, whatever their size: upload_sample "
+            f"feed={feed['name']} files=[their paths] gives a command per file to run in the user's terminal, which "
+            f"sends each from their disk whole. Without a terminal, the user sends them: in Stroom, the feed "
+            f"({doc_link(settings, 'Feed', feed['uuid'])}), its Data tab, Upload; or curl -X POST '{url}' -H "
             f"'Feed: {feed['name']}' -H 'Authorization: Bearer <their token or API key>' --data-binary @<file>, and "
-            f"find_streams feed={feed['name']} gives its stream id. Either way, carry on with stream_ids.")
+            f"find_streams feed={feed['name']} gives each stream id. Either way, carry on with stream_ids.")
 
 
 async def profile_sample(
         ctx: Context,
         sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long: "
-                                                       "each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids.")] = None,
+                                                       "text to tell the format and fields from: the start of each file is enough (your reader may cut it: VS Code's read_file cuts a line at 2,000 characters). Never trimmed further, completed or repaired. The files themselves go to Stroom whole with upload_sample files=[their paths], never as this text.")] = None,
         samples: Annotated[SampleTexts | None, Field(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
@@ -110,13 +110,12 @@ async def create_feed(
 async def upload_sample(
         ctx: Context,
         feed: Annotated[str, Field(description="Feed name, e.g. one created with create_feed.")],
-        sample: Annotated[str | None, Field(description="The raw data to send, exactly as the source produces it: each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids.")] = None,
+        sample: Annotated[str | None, Field(description="The raw data to send, exactly as the source produces it. Only for text the user pasted into the chat, exactly as pasted. A sample file on the user's disk goes with files= instead, whatever its size: your reader may cut it (VS Code's read_file cuts a line at 2,000 characters), and an agent that passed files' text uploaded 2 of each file's 985 records.")] = None,
         files: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="Instead of sample, for files too large to pass through you or that your reader cuts short "
-                        "(VS Code's read_file cuts a line at 2,000 characters): their names or paths as the user's "
-                        "terminal sees them, e.g. 'sample-data/fortios/001_1.json'. Nothing is sent now: you get a "
-                        "short-lived ticket and a curl command per file to run in the user's terminal, which sends "
-                        "the file from their disk to Stroom whole, as them, and prints its stream id.")] = [],
+            description="The sample files on the user's disk, every one, whatever their size: their paths as the "
+                        "user's terminal sees them, e.g. 'sample-data/fortios/001_1.json'. Nothing is sent now: you "
+                        "get a short-lived ticket and a curl command per file to run in the user's terminal, which "
+                        "sends the file from their disk to Stroom whole, as them, and prints its stream id.")] = [],
         headers: Annotated[dict[str, str] | None, Field(
             description="Extra receipt headers, e.g. {'MyHost': 'ws01'}; readable in XSLT with stroom:meta().")] = None,
         stream_type: Annotated[str, Field(description="'Raw Events', or 'Raw Reference' for a reference feed.")] = 'Raw Events',
@@ -130,8 +129,9 @@ async def upload_sample(
     Send sample data to a feed through Stroom's datafeed receiver, as the real source would, and return
     the receipt id and the raw stream it created. Upload each sample file as its own call, so each becomes
     a stream and every file is stepped. Only upload to feeds in a build (test feeds for updates), never to a
-    production feed whose processor filters would pick the data up. A file you can't read whole goes with files=
-    instead: a command per file for the user's terminal sends it from their disk, not through you.
+    production feed whose processor filters would pick the data up. Sample files on the user's disk go with files=:
+    a command per file for the user's terminal sends each from their disk, whole, not through you. sample= is only
+    for text the user pasted into the chat.
     """
     if files and not sample:
         return await upload_ticket(ctx, feed, files, stream_type, headers)

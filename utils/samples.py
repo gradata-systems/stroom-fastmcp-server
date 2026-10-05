@@ -42,7 +42,7 @@ def why_not_data(sample: str, name: str = 'sample') -> str | None:
     if cut:
         return (f"{name} holds a file reader's cut ({cut.group(0)!r}): you didn't get the whole file, so what was passed "
                 f"isn't its data. Don't trim, complete or repair it (an agent completed a cut record with values it "
-                f"made up). Send the file with upload_sample files=[...] (a command per file for the user's terminal: it goes "
+                f"made up). Send the files with upload_sample files=[their paths] (a command per file for the user's terminal: it goes "
                 f"from their disk to Stroom whole, not through you); tools then take its stream_ids.")
     tokens = [t for t in re.split(r'[,\n;]+', text) if t.strip()]
     if tokens and len(tokens) <= 50 and all(path_like(t) for t in tokens):

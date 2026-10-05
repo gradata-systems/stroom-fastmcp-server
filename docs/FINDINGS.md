@@ -186,6 +186,12 @@ A twelfth session onboarded four FortiOS JSON files of about 755 KB (985 records
 | --- | --- | --- |
 | Samples cut, then made up | VS Code's `read_file` cuts a line at 2,000 characters (`[... truncated at 2000 characters]`). The agent closed each JSON array after three records and uploaded that: 2.2 to 2.4 KB of each file. The third record of each had been cut; the agent completed it with values it made up (`service="BROADCAST"`, `app="Unknown"`, `sentpkt=1`, other MAC addresses, the `msg` left out). | Every tool taking sample text says it is each file's whole text as read, never trimmed, completed or repaired; a sample holding a reader's cut is refused. `upload_sample` with `files` gives a short-lived ticket for the feed and a `curl` command per file, which the agent runs in the user's terminal: the file goes from their disk to the server's `/upload` and on to Stroom as them, whole, without passing through the model. Without a terminal, `create_feed`'s reply says how the user sends it (the Stroom UI, or `curl` to the datafeed). |
 
+A thirteenth session, on 0.16.18, with the same four files:
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| The terminal route not taken | The agent read each file (cut at 2,000 characters again), dropped the cut record and uploaded the first two whole records of each file as text, 1.5 to 1.6 KB: exact this time, with no cut marker left to refuse. The plan's `next` after `create_feed` named `upload_sample` with `sample: "<one file's text>"`, and `files=` was an exception for files "too large or cut short", a judgement the agent got wrong. | `files=` is the route for every sample file on the user's disk, whatever its size; `sample=` is only for text the user pasted into the chat. The plan's next call is `upload_sample` with `files`, and the tools that profile text say the start of each file is enough there, the files themselves going with `files=`. The plan walk takes that route, playing the terminal through the upload route. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent

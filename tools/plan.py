@@ -31,7 +31,7 @@ TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'u
 
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
-    ('samples', 'Upload every sample file as its own stream', 'upload_sample (sample= a file read whole; files= one too large or cut short)'),
+    ('samples', 'Upload every sample file as its own stream', 'upload_sample files=[their paths] (sample= only for text pasted into the chat)'),
     ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter stream_ids=<the sample streams>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
@@ -169,9 +169,11 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
     calls = {
         'feed': (('create_feed', {'build': build, 'name': '<the feed name the user confirmed>'}),
                  'then upload_sample once per sample file'),
-        'samples': (('upload_sample', {'feed': feeds[0] if feeds else '<the feed>', 'sample': "<one file's text>"}),
-                    'once per sample file read whole; one too large or cut short by your reader: upload_sample '
-                    'files=[...] and run its command in the user\'s terminal. From then on give tools stream_ids, not the text'),
+        'samples': (('upload_sample', {'feed': feeds[0] if feeds else '<the feed>',
+                                       'files': ["<each sample file's path, as the user's terminal sees it>"]}),
+                    'run each command it gives in the user\'s terminal (they approve it): each file goes from their '
+                    'disk to Stroom whole, and prints its stream id. sample= is only for text the user pasted into '
+                    'the chat. From then on give tools stream_ids, not the text'),
         'converter': (('build_data_splitter', {'stream_ids': raw, 'build': build, 'save_as': '<converter name>'}),
                       'it saves the converter once every line parses'),
         'translation': (('draft_translation_mapping', {'stream_ids': raw}),
@@ -406,7 +408,7 @@ async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller' (names the build).")],
         samples: Annotated[SampleTexts | None, Field(
-            description="The text of every sample file the user has, by file name or as a list: each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids. Not paths: "
+            description="The text of every sample file the user has, by file name or as a list: text to tell the format and fields from: the start of each file is enough (your reader may cut it: VS Code's read_file cuts a line at 2,000 characters). Never trimmed further, completed or repaired. The files themselves go to Stroom whole with upload_sample files=[their paths], never as this text. Not paths: "
                         "this server cannot read the client's files.")] = None,
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],

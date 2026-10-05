@@ -118,7 +118,32 @@ class Walk:
         return made
 
     async def samples_step(self, call):
-        return await run(self.ctx, 'upload_sample', **fill(call, sample=SAMPLE))
+        # As the plan now has it: the sample files' paths, and a command per file for the user's terminal. The
+        # terminal is played here: the file goes to the server's upload route in-process, with the ticket.
+        import re
+        import tempfile
+        from starlette.applications import Starlette
+        from starlette.routing import Route
+        from utils.uploads import HEADER, handle_upload
+        path = Path(tempfile.mkdtemp()) / 'walk-sample.csv'
+        path.write_bytes(SAMPLE.encode('utf-8'))
+        given = await run(self.ctx, 'upload_sample', **fill(call, files=[str(path)]))
+        command = given['commands'][0]
+        check(command['powershell'].startswith('curl.exe ') and str(path) in command['bash'],
+              "a command per file for the user's terminal, nothing sent through the agent")
+        ticket = re.search(rf'{HEADER}: (upl-[^"]+)', command['bash']).group(1)
+
+        async def endpoint(request):
+            return await handle_upload(request, self.ctx.lifespan_context['uploads'],
+                                       self.ctx.lifespan_context['stroom'].settings)
+        app = Starlette(routes=[Route('/upload', endpoint, methods=['POST'])])
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://mcp') as client:
+            response = await client.post('/upload', headers={HEADER: ticket, 'X-File-Name': path.name},
+                                         content=path.read_bytes())
+        sent = response.json()
+        check(response.status_code == 200 and sent.get('stream_id') and sent['bytes'] == len(SAMPLE.encode('utf-8')),
+              f"the whole file reached Stroom from the terminal: {sent}")
+        return sent
 
     async def converter_step(self, call):
         return await run(self.ctx, 'build_data_splitter', **fill(call, save_as=f'{self.feed}-CSV'))

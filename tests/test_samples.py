@@ -102,7 +102,7 @@ def test_a_file_a_reader_cut_short_is_not_sample_data():
     from utils.samples import why_not_data
     cut = '[{"a": "1"}, {"b": "2 x=1 [... truncated at 2000 characters]'
     assert "holds a file reader's cut ('[... truncated')" in why_not_data(cut)
-    assert 'upload_sample files=[...]' in why_not_data(cut, 'samples[0]')
+    assert 'upload_sample files=[their paths]' in why_not_data(cut, 'samples[0]')
     assert why_not_data('msg="see [...] below" n=3\n') is None       # data that happens to hold [...]
 
 
@@ -111,6 +111,6 @@ def test_the_feed_says_how_the_user_sends_a_file_themselves():
     from tools.feeds import sent_by_user
     settings = SimpleNamespace(stroom_url='https://stroom.example', stroom_ui_url=None, datafeed_path='/stroom/datafeed')
     said = sent_by_user(settings, {'uuid': 'f1', 'name': 'FORTIOS-EVENTS-V1.0'})
-    assert 'upload_sample feed=FORTIOS-EVENTS-V1.0 files=[...]' in said
+    assert 'upload_sample feed=FORTIOS-EVENTS-V1.0 files=[their paths]' in said
     assert "curl -X POST 'https://stroom.example/stroom/datafeed' -H 'Feed: FORTIOS-EVENTS-V1.0'" in said
     assert 'docType=Feed&docUuid=f1' in said and 'find_streams feed=FORTIOS-EVENTS-V1.0' in said
