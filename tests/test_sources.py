@@ -231,8 +231,10 @@ def test_the_records_rules_keep_as_unknown_are_named_by_what_they_hold():
     assert 'username: admin' in admin and 'e.g. message: "Administrator logged in via web console"' in admin
     other = next(p for p in problems if p.startswith('[other]'))
     assert 'the rule for records no other rule matches' in other and 'VPN_TUNNEL_DOWN' in other and 'allow_unknown' in other
-    # With a reason, the rule's records are reported for the user to confirm instead.
+    assert 'Authenticate for action LOGIN_SUCCESS; Authenticate for action LOGOUT' in admin     # and the rules to add
+    # A reason doesn't keep logons Unknown (seen in VS Code: the agent gave up on the schema and asked the user to
+    # agree): refused, with the rules that describe them.
     kept = check_mapping(firewall_mapping(allow_unknown='admin console activity has no action element'), records)
-    assert not any(p.startswith('[admin]') for p in kept['problems'])
-    assert kept['kept_unknown'] == [{'rule': 'admin', 'reason': 'admin console activity has no action element',
-                                     'records': 2, 'sample': kept['kept_unknown'][0]['sample']}]
+    refused = next(p for p in kept['problems'] if p.startswith('[admin]'))
+    assert "can't be kept as Unknown: 2 of its 2 sample records" in refused and '"admin_logon"' in refused
+    assert not kept.get('kept_unknown')

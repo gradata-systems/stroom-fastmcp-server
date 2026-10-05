@@ -85,7 +85,8 @@ class WriteGuard:
                 return self._placed(parent, name, known)
             self._known_folders().pop((parent.get('uuid'), name), None)    # deleted since
         child = await self._tree_child(parent, name)
-        if child:
+        # Just deleted, the tree still lists it for a moment: only one that still resolves counts.
+        if child and await self._stroom.post('/explorer/v2/getFromDocRef', _ref(child)):
             return self._placed(parent, name, child)
         found = await self._stroom.find_documents(name, ['Folder'], 200)
         for value in found.get('values') or []:
@@ -169,11 +170,19 @@ class WriteGuard:
     async def remove_build_folder_if_empty(self, build: str) -> bool:
         """Delete a build's folder once nothing at all is left in it, subfolders included. Stroom deletes a
         folder with everything in it, so it must both list no children and be flagged a leaf (L)."""
-        folder, node = await self._build_node(build)
-        if folder is None or not node or node.get('children') or 'L' not in (node.get('nodeFlags') or []):
+        for attempt in range(5):
+            folder, node = await self._build_node(build)
+            if folder is None:
+                return False
+            if await self.folder_contents(build):
+                return False    # docs are left (one the tree left out would go with the folder)
+            if node and not node.get('children') and 'L' in (node.get('nodeFlags') or []):
+                break
+            # Nothing is listed in it, but the tree doesn't show it empty yet: right after docs are moved out it
+            # still lists them for a moment.
+            await asyncio.sleep(1 + attempt)
+        else:
             return False
-        if await self.folder_contents(build):
-            return False    # the tree is behind: a doc it left out is still there, and would go with the folder
         # Right after a doc in it is deleted (a working-copy pipeline), Stroom can answer the delete without the
         # folder going, and right after the call it may not resolve yet still be there: it is removed only once it
         # still doesn't resolve a moment later.

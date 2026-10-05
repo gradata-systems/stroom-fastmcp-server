@@ -172,7 +172,9 @@ async def build_translation_xslt(
             sampled = {k['rule']: k for k in (result.get('sample_check') or {}).get('kept_unknown') or []}
             details = {'rules kept as EventDetail/Unknown': [
                 f"{r.name}: {r.allow_unknown}" + (f" (sample: {sampled[r.name]['records']} records; {sampled[r.name]['sample']})"
-                                                  if r.name in sampled else ' (no sample records checked)') for r in kept]}
+                                                  if r.name in sampled else ' (no sample records checked)')
+                + (f"; their values suggest {sampled[r.name]['suggested']}"
+                   if sampled.get(r.name, {}).get('suggested') else '') for r in kept]}
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
                                                    f"Keep {', '.join(r.name for r in kept)} as Unknown (what happened is "
                                                    f"not known) in the saved XSLT", details, confirmation_id)

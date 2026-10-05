@@ -1,8 +1,9 @@
 """A starting mapping drafted from the sample, and the draft handed back when a wrong mapping arrives."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from tests.test_xsltgen import SCHEMA, VALIDATOR, transform
+from tests.test_xsltgen import SCHEMA, SCHEMA_352, VALIDATOR, transform
 from tools import generation
 from utils.draftmap import draft_mapping
 from utils.xsltgen import TranslationMapping, generate
@@ -42,15 +43,18 @@ def test_the_draft_is_a_valid_mapping_with_the_obvious_homes_and_a_rule_per_kind
     assert by_path['EventSource/User/Id']['field'] == 'username'
     assert by_path['EventDetail/TypeId']['field'] == 'event_type' and by_path['EventDetail/Description']['field'] == 'message'
     assert by_path['EventSource/System/Name']['value'] == 'FortiOS firewall'
-    assert draft['kinds'] == ['TRAFFIC', 'LOGIN'] and [r['name'] for r in m['events']] == ['traffic', 'login', 'other']
+    # TRAFFIC's records are connections allowed between addresses: Network/Permit, not an Unknown placeholder.
+    assert draft['kinds'] == ['TRAFFIC', 'LOGIN'] and [r['name'] for r in m['events']] == ['traffic_permitted', 'login', 'other']
+    assert m['events'][0]['when'] == [{'field': 'event_type', 'equals': 'TRAFFIC'}, {'field': 'action', 'equals': 'ALLOW'}]
+    assert {'path': 'EventDetail/Network/Permit/Destination/Port', 'field': 'dst_port'} in m['events'][0]['fields']
     login = m['events'][1]
     assert {'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'} in login['fields']
     assert {'path': 'EventDetail/Authenticate/User/Id', 'field': 'username'} in login['fields']
-    assert any(f.get('data_name') == 'protocol' for f in m['events'][0]['fields'])   # unmapped fields ride as Data
-    assert any('replace EventDetail/Unknown' in n for n in draft['notes']) and any('Environment' in n for n in draft['notes'])
-    # As drafted, its only problems are the placeholders to decide; decided, it generates, validates against the
-    # schema, and the events come out right.
-    assert only_placeholders(generate(TranslationMapping.model_validate(m), SCHEMA, '4.1.0'))
+    assert {'path': 'EventDetail/Network/Permit/Data', 'data_name': 'rule_id', 'field': 'rule_id'} in m['events'][0]['fields']
+    assert any(n.startswith("Drafted from the sample's values") and 'Network/Permit for action ALLOW' in n for n in draft['notes'])
+    assert any('replace each EventDetail/Unknown' in n for n in draft['notes']) and any('Environment' in n for n in draft['notes'])
+    # As drafted it generates (no kind is left Unknown); it validates against the schema, and the events come out right.
+    assert generate(TranslationMapping.model_validate(m), SCHEMA, '4.1.0')['ok']
     result = generate(TranslationMapping.model_validate({**decided(m), 'unmatched': 'skip'}), SCHEMA, '4.1.0')
     assert result['ok'], result['problems']
     xml = ('<map xmlns="http://www.w3.org/2013/XSL/json"><map><string key="timestamp">2026-10-01T09:01:00.000Z</string>'
@@ -87,8 +91,57 @@ async def test_a_field_inventory_sent_as_the_mapping_gets_the_draft_back():
         assert result['draft_mapping']['input'] == 'json' and 'Edit draft_mapping' in result['hint']
         # The draft, sent back as the mapping, generates once its placeholders are decided.
         again = await generation.build_translation_xslt(ctx, result['draft_mapping'], sample=FW_JSON)
-        assert only_placeholders(again)
+        assert again['ok'], again['problems']      # every kind of this sample drafted with its action element
         again = await generation.build_translation_xslt(ctx, decided(result['draft_mapping']), sample=FW_JSON)
         assert again['ok'] and again['xslt']
         drafted = await generation.draft_translation_mapping(ctx, {'fw.jsonl': FW_JSON}, 'FortiOS firewall', environment='Prod')
-        assert only_placeholders(drafted['schema_check']) and drafted['mapping']['common'][2]['value'] == 'Prod'
+        assert drafted['schema_check']['ok'] and drafted['mapping']['common'][2]['value'] == 'Prod'
+
+
+FIREWALL_CSV = (
+    'timestamp,device,event_type,severity,src_ip,src_port,dst_ip,dst_port,protocol,action,rule_id,username,message\n'
+    '2026-10-01T09:00:12+10:00,FW-EDGE-01,TRAFFIC,INFO,192.0.2.10,54321,198.51.100.20,443,TCP,ALLOW,1001,,Outbound HTTPS allowed\n'
+    '2026-10-01T09:01:05+10:00,FW-EDGE-01,TRAFFIC,WARNING,203.0.113.45,49822,192.0.2.25,22,UDP,DENY,2003,,Inbound SSH blocked\n'
+    '2026-10-01T09:10:03+10:00,FW-EDGE-01,SYSTEM,INFO,,,,,N/A,START,,,Firewall logging service started\n'
+    '2026-10-01T09:10:30+10:00,FW-EDGE-01,SYSTEM,INFO,,,,,N/A,CONFIG_SAVED,,,Configuration saved\n'
+    '2026-10-01T09:11:15+10:00,FW-EDGE-01,ADMIN,INFO,192.0.2.100,,,,HTTPS,LOGIN_SUCCESS,,admin,Administrator logged in\n'
+    '2026-10-01T09:12:02+10:00,FW-EDGE-01,ADMIN,WARNING,203.0.113.90,,,,HTTPS,LOGIN_FAILED,,admin,Failed administrator login\n'
+    '2026-10-01T09:16:08+10:00,FW-EDGE-01,ADMIN,INFO,192.0.2.100,,,,HTTPS,LOGOUT,,admin,Administrator logged out\n'
+    '2026-10-01T09:17:00+10:00,FW-EDGE-01,ADMIN,NOTICE,192.0.2.100,,,,HTTPS,CONFIG_CHANGE,,admin,Policy 12 changed\n')
+
+
+def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_elements():
+    # Seen in VS Code (three sessions on this sample): the draft left every kind Unknown, the agent found Network's
+    # and Authenticate's structure hard, gave up, and asked the user to accept traffic and admin as Unknown.
+    from utils.draftmap import _records
+    from utils.localcheck import unknown_coverage
+    draft = draft_mapping({'fw.csv': FIREWALL_CSV}, 'Firewall', 'FW', 'Prod')
+    rules = {r['name']: r for r in draft['mapping']['events']}
+    assert list(rules) == ['admin_logon', 'admin_logoff', 'admin_config_change', 'traffic_permitted', 'traffic_denied',
+                           'system_config_change', 'system', 'other']     # kinds most common first, each action before
+    paths = lambda name: {f['path'] for f in rules[name]['fields']}  # noqa: E731
+    assert {'EventDetail/Network/Permit/Source/Device/IPAddress', 'EventDetail/Network/Permit/Destination/Port'} <= paths('traffic_permitted')
+    assert 'EventDetail/Network/Deny/Source/Port' in paths('traffic_denied')
+    protocol = next(f for f in rules['traffic_denied']['fields'] if f['path'].endswith('TransportProtocol'))
+    assert protocol['map'] == {'TCP': 'TCP', 'UDP': 'UDP'} and protocol['default'] == 'Other'   # the values it takes
+    logon = next(f for f in rules['admin_logon']['fields'] if f['path'] == 'EventDetail/Authenticate/Outcome/Success')
+    assert logon['map'] == {'LOGIN_SUCCESS': 'true', 'LOGIN_FAILED': 'false'}
+    assert {'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff'} in rules['admin_logoff']['fields']
+    assert 'EventDetail/Update/After/Configuration/Type' in paths('admin_config_change')
+    # START is left to the system rule, the only Unknown placeholder; the rest validates as drafted.
+    problems = generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA_352, '3.5.2')['problems']
+    assert len(problems) == 1 and problems[0].startswith('[system] writes EventDetail/Unknown'), problems
+
+    # The agent's give-up: each kind Unknown with a reason. Traffic and admin are refused with the rules to use;
+    # system's records show no plain action, so it goes to the user, with the suggestion for CONFIG_SAVED.
+    gave_up = {**draft['mapping'], 'events': [
+        {'name': kind, 'when': [{'field': 'event_type', 'equals': kind.upper()}], 'allow_unknown': 'the schema is complex',
+         'fields': [{'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}
+        for kind in ('traffic', 'admin', 'system')]}
+    _, records, _ = _records({'fw.csv': FIREWALL_CSV})
+    problems, kept = unknown_coverage(TranslationMapping.model_validate(gave_up), records)
+    assert [p.split(']')[0] for p in problems] == ['[traffic', '[admin']
+    assert "can't be kept as Unknown: 2 of its 2 sample records" in problems[0]
+    offered = json.loads(problems[0][problems[0].index('[{'):])
+    assert generate(TranslationMapping.model_validate({**draft['mapping'], 'events': offered}), SCHEMA_352, '3.5.2')['ok']
+    assert [k['rule'] for k in kept] == ['system'] and 'Update for action CONFIG_SAVED' in kept[0]['suggested']

@@ -51,3 +51,32 @@ that should come next.
 
 `Outcome` is omitted on success in many environments; include `Success=false` with a
 `Description` for failures.
+
+## Network, Update and Alert: the other common cases
+
+A firewall's or proxy's connection allowed or denied is `Network`, with the action as its child element
+(`Permit`, `Deny`, `Open`, `Close`, `Connect`, ...), not values in `Unknown/Data`:
+
+```
+<Network>
+  <Deny>                                 <!-- Permit for allowed, Deny for blocked -->
+    <Source><Device><IPAddress>203.0.113.45</IPAddress></Device><Port>49822</Port>
+            <TransportProtocol>TCP</TransportProtocol></Source>   <!-- TCP, UDP, ICMP, IGMP, Other -->
+    <Destination><Device><IPAddress>192.0.2.25</IPAddress></Device><Port>22</Port></Destination>
+    <Data Name="rule_id" Value="2003"/>
+  </Deny>
+</Network>
+```
+
+In a mapping: `EventDetail/Network/Deny/Source/Device/IPAddress`, `.../Source/Port`,
+`.../Destination/Device/IPAddress`, `.../Destination/Port`, `.../Data` (with `data_name`).
+
+A configuration change is `Update`, the new state under `After` (`Before` for the old):
+`EventDetail/Update/After/Configuration/Type` and `.../Configuration/Description`.
+
+A health or status message is `Alert`: `EventDetail/Alert/Type` (Vulnerability, IDS, Malware, Network, Change,
+Error, Other) and `EventDetail/Alert/Severity` (Info, Minor, Major, Critical).
+
+`Unknown` says what happened isn't known. It is for records no action element describes, not a way round a
+schema error in one: `draft_translation_mapping` drafts these elements where the sample's values show them,
+and `build_translation_xslt` refuses `allow_unknown` for connections and logons, giving the rules to use.

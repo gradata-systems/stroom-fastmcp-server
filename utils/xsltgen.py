@@ -118,6 +118,26 @@ class FieldMapping(BaseModel):
         return self
 
 
+# Example child paths for elements agents found hard to fill: (parent, element) -> paths below the element.
+_NETWORK_ACTION = ('Source/Device/IPAddress', 'Source/Port', 'Source/TransportProtocol', 'Destination/Device/IPAddress',
+                   'Destination/Port', 'Outcome/Success')
+SHAPES: dict[tuple[str, str], tuple[str, ...]] = {
+    **{('Network', a): _NETWORK_ACTION for a in ('Permit', 'Deny', 'Open', 'Close', 'Connect', 'Bind', 'Listen',
+                                                  'Send', 'Receive')},
+    ('EventDetail', 'Network'): ('Permit/Source/Device/IPAddress', 'Deny/Destination/Port'),
+    ('', 'Source'): ('Device/IPAddress', 'Port', 'TransportProtocol'),
+    ('', 'Destination'): ('Device/IPAddress', 'Port', 'TransportProtocol'),
+    ('', 'Device'): ('IPAddress', 'HostName'),
+    ('', 'Outcome'): ('Success', 'Description'),
+    ('', 'After'): ('Configuration/Type', 'Configuration/Description', 'File/Path', 'User/Id'),
+    ('', 'Before'): ('Configuration/Type', 'Configuration/Description', 'File/Path', 'User/Id'),
+    ('', 'Configuration'): ('Type', 'Name', 'Description'),
+    ('EventDetail', 'Authenticate'): ('Action', 'User/Id', 'Outcome/Success'),
+    ('EventDetail', 'Update'): ('After/Configuration/Type', 'After/Configuration/Description'),
+    ('EventDetail', 'Alert'): ('Type', 'Severity', 'Description'),
+}
+
+
 class Condition(BaseModel):
     """A test on the record; give field or xpath and one of equals, one_of, matches, present or in_dictionary."""
     field: str | None = Field(None, description="An input field, or a name from extract.")
@@ -692,7 +712,10 @@ class _Generator:
                 continue
             if not self.schema.is_leaf(last.decl):
                 options = [c.name for c in self.schema.children(last.decl)]
-                self._note(self.problems, f"{where}: {last.name} holds other elements; map one of {options}")
+                parent = chain[-2].name if len(chain) > 1 else ''
+                example = SHAPES.get((parent, last.name)) or SHAPES.get(('', last.name))
+                self._note(self.problems, f"{where}: {last.name} holds other elements; map one of {options}"
+                                          + (f", e.g. {', '.join(f'{path}/{e}' for e in example)}" if example else ''))
                 continue
             node = self._walk(root, chain, where)
             if node is None:
@@ -748,9 +771,14 @@ class _Generator:
             # element nearly always, and the draft's Unknown placeholders were being kept as they were.
             self._note(self.problems, f"[{rule.name}] writes EventDetail/Unknown, which says what happened is not known, "
                                       f"yet its conditions single these records out: use the action element that "
-                                      f"describes them (Alert, Authenticate, Network, Process, Create, Update, Delete, "
-                                      f"View, ...), with its own child elements. Only if none fits, set allow_unknown to "
-                                      f"the reason, in the user's words; they confirm it when the XSLT is saved.")
+                                      f"describes them, with its own child elements: connections allowed or denied "
+                                      f"Network/Permit or Network/Deny (Source and Destination with Device/IPAddress "
+                                      f"and Port), logons and logoffs Authenticate (Action, User/Id, Outcome/Success), "
+                                      f"configuration changes Update (After/Configuration/Type), alerts and health "
+                                      f"messages Alert (Type, Severity), processes started or stopped Process; also "
+                                      f"Create, Delete, View, Send, Receive. A schema problem in the action element is "
+                                      f"fixed from what it names, not avoided with Unknown. allow_unknown (the reason, "
+                                      f"which the user confirms) is only for records no action element describes.")
         source = root.kids.get('EventSource')
         acted = [f"{name}/User" for name, node in (detail.kids.items() if detail is not None else []) if 'User' in node.kids]
         if acted and (source is None or 'User' not in source.kids):
@@ -822,7 +850,16 @@ class _Generator:
             if kid.child.choice is not None and not kid.child.repeatable:
                 chosen.setdefault(kid.child.choice, []).append(kid.child.name)
         for names in chosen.values():
-            if len(names) > 1:
+            if len(names) > 1 and 'Unknown' in names and node.path == 'Event/EventDetail':
+                # The draft's Unknown placeholders kept beside the action element the agent added.
+                action = next(n for n in names if n != 'Unknown')
+                inner = node.kids[action]
+                into = f"EventDetail/{action}" + (f"/{next(iter(inner.kids))}" if action == 'Network' and inner.kids else '')
+                self._note(self.problems, f"[{rule}] EventDetail/{action} and EventDetail/Unknown are alternatives: "
+                                          f"remove the EventDetail/Unknown entries from this rule (Unknown was the "
+                                          f"draft's placeholder for the action), and carry their values as "
+                                          f"{into}/Data, data_name kept, or map them where they belong")
+            elif len(names) > 1:
                 self._note(self.problems, f"[{rule}] {node.path}: {names} are alternatives; an event has only one of "
                                           f"them (use separate event rules)")
         present = set(node.kids) | ({'Data'} if node.data else set())

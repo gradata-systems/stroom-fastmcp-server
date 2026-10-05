@@ -11,6 +11,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from utils.actions import action_rules, described
 from utils.dsgen import SplitterSpec, dry_run, infer_spec
 from utils.profile import _flatten, profile, profile_many, value_type, xml_fragments
 from utils.samples import as_named_samples
@@ -173,25 +174,44 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     def data_entries(action: str) -> list[dict[str, Any]]:
         return [{'path': f'EventDetail/{action}/Data', 'data_name': n, 'field': n} for n in rest]
 
+    user = next((e['field'] for e in common if e['path'] == 'EventSource/User/Id'), None)
+    message = next((e['field'] for e in common if e['path'] == 'EventDetail/Description'), None)
+    recognised: list[str] = []
     for kind in kinds:
+        name = re.sub(r'[^A-Za-z0-9]+', '_', kind).strip('_').lower() or 'event'
         if AUTH.search(kind):
             fields = [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff' if LOGOFF.search(kind) else 'Logon'}]
-            user = next((e['field'] for e in common if e['path'] == 'EventSource/User/Id'), None)
             if user:
                 fields.append({'path': 'EventDetail/Authenticate/User/Id', 'field': user})
             fields += data_entries('Authenticate')
-        else:
-            fields = data_entries('Unknown')
-        rules.append({'name': re.sub(r'[^A-Za-z0-9]+', '_', kind).strip('_').lower() or 'event',
-                      'when': [{'field': naming, 'equals': kind}], 'fields': fields})
+            rules.append({'name': name, 'when': [{'field': naming, 'equals': kind}], 'fields': fields})
+            continue
+        # The kind's own records often show its actions in another field (a firewall's TRAFFIC: action ALLOW or
+        # DENY; ADMIN: LOGIN_SUCCESS, LOGOUT, CONFIG_CHANGE): a rule per action, before the kind's own rule.
+        of_kind = [r for r in records if isinstance(r, dict) and r.get(naming) == kind]
+        found, left, split = action_rules(of_kind, names, [{'field': naming, 'equals': kind}], name, user, message,
+                                          skip={naming})
+        for found_rule in found:
+            # The rest of the record is carried as the action element's Data, as the Unknown rule did.
+            element = '/'.join(found_rule['fields'][0]['path'].split('/')[:3 if 'Network' in found_rule['fields'][0]['path'] else 2])
+            mapped = {f.get('field') for f in found_rule['fields']} | {split}
+            found_rule['fields'] += [{'path': f'{element}/Data', 'data_name': n, 'field': n} for n in rest if n not in mapped]
+        rules += found
+        if found:
+            recognised.append(f"{kind}: {described(found)}")
+        if not found or left:
+            rules.append({'name': name, 'when': [{'field': naming, 'equals': kind}], 'fields': data_entries('Unknown')})
+    if recognised:
+        notes.append("Drafted from the sample's values (check them): " + '; '.join(recognised) + ".")
     rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
                   + data_entries('Unknown')})
     if kinds:
-        notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}): replace EventDetail/Unknown by the right action "
-                     f"element for each (Authenticate, Network, Process, View, Create, Update, Delete, Alert, Send, Receive...) and "
-                     f"move its Data entries to the elements that mean them; 'other' catches the rest. build_translation_xslt "
-                     f"refuses a rule that still writes Unknown for sample records, unless the rule's allow_unknown gives the "
-                     f"reason no action element fits, which the user then confirms.")
+        notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}): replace each EventDetail/Unknown left by the "
+                     f"action element that describes the kind (Authenticate, Network, Process, View, Create, Update, Delete, "
+                     f"Alert, Send, Receive...), and move its Data entries into that element (e.g. EventDetail/Alert/Data); "
+                     f"'other' catches the rest. Work through the schema problems build_translation_xslt reports: each "
+                     f"names what the element takes. Unknown is for records no action element describes, not a way "
+                     f"round a schema error; build_translation_xslt refuses it where the values show an action.")
     else:
         notes.append("No field names the kind of event: every record is one 'other' event with Unknown/Data. Add rules "
                      "with conditions once you know how kinds are told apart.")

@@ -99,7 +99,8 @@ async def test_a_build_folder_is_removed_only_when_completely_empty(node, remove
     stroom = FakeExplorer('System/MCP Workspace', 'System/MCP Workspace/acme-v1')
     guard = WriteGuard(stroom, 'MCP Workspace')
     folder = {**stroom.folders['System/MCP Workspace/acme-v1'], '_path': 'System/MCP Workspace/acme-v1'}
-    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, node))):
+    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, node))), \
+            patch('security.guard.asyncio.sleep', AsyncMock()):
         assert await guard.remove_build_folder_if_empty('acme-v1') is removed
     deletes = [r for r in stroom.requests if r[0] == 'DELETE']
     assert deletes == ([('DELETE', '/explorer/v2/delete', {'docRefs': [{'type': 'Folder', 'uuid': folder['uuid'],
@@ -181,3 +182,23 @@ async def test_two_docs_made_one_after_the_other_share_one_build_folder():
         await guard.create('XSLT', 'ACME-Events-WORKING', 'acme-fix')
     made = [r for r in stroom.requests if r[1] == '/explorer/v2/create' and r[2]['docType'] == 'Folder']
     assert [r[2]['docName'] for r in made] == ['acme-fix']
+
+
+async def test_an_emptied_build_folder_is_removed_once_the_tree_catches_up():
+    # Seen in the translation suite: right after promotion moved its docs out, the tree still showed the build
+    # folder with children, and the folder was left behind.
+    stroom = FakeExplorer('System/MCP Workspace', 'System/MCP Workspace/acme-v1')
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    folder = {**stroom.folders['System/MCP Workspace/acme-v1'], '_path': 'System/MCP Workspace/acme-v1'}
+    behind = {'nodeFlags': ['FM', 'F', 'O'], 'children': [{'type': 'XSLT', 'name': 'moved'}]}
+    caught_up = {'nodeFlags': ['FM', 'F', 'L'], 'children': None}
+    nodes = AsyncMock(side_effect=[(folder, behind), (folder, caught_up)])
+    with patch.object(guard, '_build_node', nodes), patch.object(guard, 'folder_contents', AsyncMock(return_value=[])), \
+            patch('security.guard.asyncio.sleep', AsyncMock()):
+        assert await guard.remove_build_folder_if_empty('acme-v1') is True
+    # Docs really left in it: no waiting, no delete.
+    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, behind))), \
+            patch.object(guard, 'folder_contents', AsyncMock(return_value=[{'type': 'XSLT'}])), \
+            patch('security.guard.asyncio.sleep', AsyncMock()) as slept:
+        assert await guard.remove_build_folder_if_empty('acme-v1') is False
+    assert not slept.called

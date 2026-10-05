@@ -12,6 +12,7 @@ from typing import Any
 
 from lxml import etree
 
+from utils.actions import action_rules, described
 from utils.dsgen import SplitterSpec, dry_run
 from utils.profile import _XML_DECL, _flatten, xml_fragments
 from utils.timefmt import check_time_format
@@ -199,14 +200,32 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
         if name in writes_unknown:
             caught.setdefault(name, []).append(record)
     problems, kept = [], []
+    common = {f.path.strip('/'): f.field for f in mapping.common if f.field}
     for name, found in caught.items():
         rule, held = writes_unknown[name], traits(found)
-        if rule.allow_unknown:
-            kept.append({'rule': name, 'reason': rule.allow_unknown, 'records': len(found), 'sample': held})
+        # Values that show the action (ALLOW/DENY between addresses, LOGIN/LOGOUT, CONFIG_CHANGE) get the rules for it.
+        names = list(dict.fromkeys(k for r in found if isinstance(r, dict) for k in r))
+        shown, left, split = action_rules(found, names, [c.model_dump(exclude_none=True) for c in rule.when], name,
+                                          common.get('EventSource/User/Id'), common.get('EventDetail/Description'),
+                                          skip={c.field for c in rule.when if c.field})
+        use = (f" Their values show the action: {described(shown)}. Add these rules before '{name}' (they validate as "
+               f"they are; add Data entries as you like){f', leaving {split} {left} to it' if left else ''}: "
+               f"{json.dumps(shown)}") if shown else ''
+        # Connections allowed or denied, and logons, are never unknown; a configuration change is the user's call.
+        plain = [r for r in shown if any(f['path'].startswith(('EventDetail/Network/', 'EventDetail/Authenticate/'))
+                                         for f in r['fields'])]
+        if rule.allow_unknown and plain:
+            values = {v for r in plain for v in (r['when'][-1].get('one_of') or [r['when'][-1].get('equals')])}
+            known = sum(1 for r in found if isinstance(r, dict) and r.get(split) in values)
+            problems.append(f"[{name}] can't be kept as Unknown: {known} of its {len(found)} sample records are not "
+                            f"unknown events.{use}")
+        elif rule.allow_unknown:
+            kept.append({'rule': name, 'reason': rule.allow_unknown, 'records': len(found), 'sample': held,
+                         **({'suggested': f"{described(shown)} (rather than Unknown)"} if shown else {})})
         elif rule.when:
             problems.append(f"[{name}] keeps EventDetail/Unknown for {len(found)} of the {len(records)} sample records: "
                             f"{held}. Give them the action element these values describe, a rule per kind if they "
-                            f"differ (split on the field that tells them apart).")
+                            f"differ (split on the field that tells them apart).{use}")
         else:
             problems.append(f"[{name}] (the rule for records no other rule matches) writes EventDetail/Unknown for "
                             f"{len(found)} of the {len(records)} sample records: {held}. Give them rules with the action "
