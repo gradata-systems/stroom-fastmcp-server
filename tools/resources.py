@@ -208,7 +208,9 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
     draft_index_mapping) and any component templates builds the index
     template for the new index, following their naming, field type and structure conventions (its from_example
     notes say what came from where; names unlike the example's are renamed in the field plan, then build again).
-    When it fits the documents, the user confirms it as shown. If they correct it instead, check_index_template
+    When it fits the documents, it comes back as needs_review: show the user its dev_tools in the chat as a json
+    code block, then call again with reviewed=true, and they confirm it in a short form. If they correct it
+    instead, check_index_template
     with their version (and any component templates): when it fits, they confirm it there; when it does not, show
     the pipeline changes it needs and ask whether to make them (update the indexing XSLT, step again, check again)
     or to change the index template. The confirmed template is kept with the pipeline. Without an example,

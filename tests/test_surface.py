@@ -104,7 +104,8 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
 
     async def run(contents, dashboard=None):
         docs = {'i': index, 'd1': dashboard or {}}
-        stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[u]), put_doc=AsyncMock())
+        stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[u]), put_doc=AsyncMock(),
+                                 settings=SimpleNamespace(stroom_url='https://stroom.example', stroom_ui_url=None))
         ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False)})
         guard = SimpleNamespace(folder_contents=AsyncMock(return_value=contents))
         with patch.object(indexing, 'guard_from', lambda c: guard), \
@@ -123,8 +124,10 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
     reused, create, _ = await run([{'type': 'ElasticIndex', 'uuid': 'i', 'name': 'IDX'},
                                    {'type': 'Dashboard', 'uuid': 'd1', 'name': 'IDX-VERIFY'}], mine)
     assert reused['passed'] and reused['dashboard']['uuid'] == 'd1' and create.await_count == 0
+    # The link to give the user (seen in VS Code: they had to ask for it); none for an unsaved dashboard.
+    assert reused['dashboard']['link'].endswith('docType=Dashboard&docUuid=d1')
     elsewhere, create, searched = await run([])
-    assert elsewhere['dashboard']['saved'] is False and create.await_count == 0
+    assert elsewhere['dashboard']['saved'] is False and 'link' not in elsewhere['dashboard'] and create.await_count == 0
     assert searched.await_args.kwargs['dashboard_doc']['dashboardConfig']['components'][0]['settings']['dataSource']['uuid'] == 'i'
 
 

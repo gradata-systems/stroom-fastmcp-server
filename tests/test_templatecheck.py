@@ -349,14 +349,26 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
             patch('tools.indexing._documents', AsyncMock(return_value=documents)), \
             patch('tools.indexing.indexing_xslt_digest', AsyncMock(return_value='abc')), \
             patch('tools.indexing.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
-        asked = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
+        # Shown first: the whole request for the chat, formatted (seen in VS Code: in a form it was one unformatted
+        # line, and an invalid template was agreed).
+        shown = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
                                                       component_templates=COMPONENTS)
-        assert asked['status'] == 'needs_confirmation' and read_agreed_template(saved['description']) is None
-        assert asked['summary'] == "Use Elasticsearch index template 'ecs-acme-v2' for index 'ecs-acme-v2' (cluster ES_DEV), as shown"
-        assert asked['details']['index template'].startswith('PUT _index_template/ecs-acme-v2\n{')
+        assert shown['status'] == 'needs_review' and read_agreed_template(saved['description']) is None
+        assert shown['dev_tools'].startswith('PUT _index_template/ecs-acme-v2\n{\n  ')
+        assert 'json code block' in shown['hint'] and 'reviewed=true' in shown['hint']
+        # Then confirmed in a short form: lines, not the JSON.
+        asked = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
+                                                      component_templates=COMPONENTS, reviewed=True)
+        assert asked['status'] == 'needs_confirmation'
+        assert asked['summary'] == ("Use Elasticsearch index template 'ecs-acme-v2' for index 'ecs-acme-v2' (cluster "
+                                    "ES_DEV), as shown in the chat")
+        details = asked['details']
+        assert details['index template'] == 'ecs-acme-v2: the Dev Tools request shown in the chat'
+        assert details['applies to'].startswith('ecs-acme-v2* (priority ') and details['fields'].split(':')[0].isdigit()
+        assert '{' not in json.dumps({k: v for k, v in details.items() if k != 'notes'}).replace('{"', '').replace('"}', '')
         assert 'check_index_template with their version' in asked['hint']
         agreed = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
-                                                       component_templates=COMPONENTS,
+                                                       component_templates=COMPONENTS, reviewed=True,
                                                        confirmation_id=asked['confirmation_id'])
         assert agreed['agreed'] and 'commit to the cluster' in agreed['hint']
         kept = read_agreed_template(saved['description'])
@@ -366,9 +378,12 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         # The user corrects it (a higher priority): their version is confirmed and replaces the agreed one.
         corrected = {**agreed['template'], 'priority': 500}
         text = f"PUT _index_template/ecs-acme-v2\n{json.dumps(corrected)}"
-        asked = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS)
-        assert asked['status'] == 'needs_confirmation' and '"priority": 500' in asked['details']['index template']
-        await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS,
+        shown = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS)
+        assert shown['status'] == 'needs_review' and '"priority": 500' in shown['dev_tools']
+        asked = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS,
+                                                    reviewed=True)
+        assert asked['status'] == 'needs_confirmation' and '(priority 500)' in asked['details']['applies to']
+        await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS, reviewed=True,
                                             confirmation_id=asked['confirmation_id'])
         assert json.loads(read_agreed_template(saved['description'])['dev_tools'].split('\n', 1)[1])['priority'] == 500
         assert saved['description'].count('agreed index template (') == 1
@@ -415,3 +430,33 @@ def test_an_example_with_subobjects_false_maps_names_flat_and_allows_a_value_bes
     xslt = plan.xslt()
     assert '<map key="user">' in xslt and 'key="user.id"' not in xslt
     assert 'key="time"' in xslt and 'key="time.min"' in xslt
+
+
+def test_an_alias_in_the_example_becomes_a_field_when_the_pipeline_writes_it():
+    # Seen in VS Code: the example (stroom_twitter) had User.Id as an alias of User.Name. Copied into the new
+    # template, Elasticsearch refused it ("an alias must refer to an existing field"), yet both checks passed it.
+    from utils.templatecheck import compare, from_example
+    example = {'index_patterns': ['stroom-twitter*'], 'priority': 1, 'template': {'mappings': {'dynamic': True, 'properties': {
+        'StreamId': {'type': 'long'}, '@timestamp': {'type': 'date'},
+        'User.Name': {'type': 'text', 'fields': {'keyword': {'type': 'keyword'}}},
+        'User.Id': {'path': 'User.Name', 'type': 'alias'}}}}}
+    plan = FieldPlan(backend='elasticsearch', index_name='fortios-firewall', time_field='@timestamp', fields=[
+        PlannedField(name='StreamId', type='id', source='@StreamId'), PlannedField(name='EventId', type='id', source='@EventId'),
+        PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+        PlannedField(name='User.Id', type='keyword', source='EventSource/User/Id')])
+    planned = plan.elastic_template('fortios-firewall', 200)['body']
+    body, notes = from_example(planned, example, {})
+    user = body['template']['mappings']['properties']['User']['properties']['Id']
+    assert user == {'type': 'text', 'fields': {'keyword': {'type': 'keyword'}}}      # the target's type, not an alias
+    assert any("aliases in the example, but written by this pipeline" in n and 'User.Id' in n for n in notes)
+    docs = [{'StreamId': ('number', '1'), 'EventId': ('number', '1'), '@timestamp': ('string', '2026-10-01T00:00:00Z'),
+             'User': {'Id': ('string', 'admin')}}]
+    assert compare(body, docs, 'fortios-firewall')['compatible']
+    # The template as it was agreed in that session: both problems are blocking now.
+    agreed = {'index_patterns': ['fortios-firewall*'], 'template': {'mappings': {'properties': {
+        'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'}, '@timestamp': {'type': 'date'},
+        'User': {'type': 'object', 'properties': {'Id': {'path': 'User.Name', 'type': 'alias'}}}}}}}
+    check = compare(agreed, docs, 'fortios-firewall')
+    assert not check['compatible']
+    assert any("an alias of 'User.Name', which this template doesn't map" in b for b in check['blocking'])
+    assert any('User.Id: written by the pipeline, but mapped as an alias' in b for b in check['blocking'])

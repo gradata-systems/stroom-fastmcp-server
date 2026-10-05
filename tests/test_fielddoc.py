@@ -283,10 +283,8 @@ async def test_describe_document_still_returns_an_index_doc_when_its_survey_fail
     assert doc['name'] == 'IDX' and 'cluster unreachable' in doc['survey_error'] and 'survey' not in doc
 
 
-async def test_documenting_an_index_needs_a_change_line_and_takes_no_pipeline_arguments():
+async def test_documenting_an_index_takes_no_pipeline_arguments():
     from tools import builds
-    with pytest.raises(ToolError, match='Give change'):
-        await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n')
     with pytest.raises(ToolError, match='Leave them out with index_uuid'):
         await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n',
                                          change='Created', stream_ids=[1])

@@ -420,10 +420,17 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
             objects.update(object_nodes(((components[name].get('template') or {}).get('mappings')) or {}))
     objects.update(object_nodes(own))
     typed = bool(objects) and sum('type' in o for o in objects.values()) * 2 > len(objects)
-    final, left, kept, new, styled = {}, [], [], [], []
+    final, left, kept, new, styled, aliased = {}, [], [], [], [], []
     for path, spec in leaves.items():
         if path in from_components:
             left.append(path)
+        elif path in in_example and in_example[path].get('type') == 'alias':
+            # Seen in VS Code: the example's User.Id was an alias of User.Name. Copied, the new index had an alias of a
+            # field it lacks (Elasticsearch refused the template), and documents can't write to an alias anyway: the
+            # pipeline writes this field, so it is a field here, typed as the example types the alias's target.
+            target = in_example.get(in_example[path].get('path') or '') or {}
+            final[path] = (copy.deepcopy(target) if target.get('type') not in (None, 'alias', 'object') else spec)
+            aliased.append(path)
         elif path in in_example:
             final[path] = in_example[path]
             kept.append(path)
@@ -467,6 +474,9 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
         notes.append(f"left to the component templates (they map them): {left}")
     if kept:
         notes.append(f"typed as in the example: {kept}")
+    if aliased:
+        notes.append(f"aliases in the example, but written by this pipeline, so fields here (typed as each alias's "
+                     f"target): {aliased}")
     if styled:
         notes.append(f"new to this index, mapped in the example's style for their type: {styled}")
     if new:
@@ -581,6 +591,13 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                                   f"indexName to an index they match"})
     mapping = read_mapping((body.get('template') or {}).get('mappings') or {})
     for path, spec in mapping.fields.items():
+        target = spec.get('path')
+        if spec.get('type') == 'alias' and (not target or mapping.fields.get(target, {}).get('type') in (None, 'alias', 'object')):
+            # Not checked before: a template with such an alias was agreed, and Elasticsearch refused it.
+            blocking.append(f"{path}: an alias of '{target}', which this template doesn't map as a field, so "
+                            f"Elasticsearch refuses the template ('an alias must refer to an existing field')")
+            changes.append({'field': path, 'problem': f"alias of a field the template lacks ('{target}')",
+                            'change': f"drop the alias '{path}' from the template, or map '{target}'"})
         fmt = spec.get('format')
         if spec.get('type') in ('date', 'date_nanos') and fmt and any(
                 f.strip() not in ('strict_date_optional_time', 'date_optional_time', 'strict_date_time', 'date_time',
@@ -600,6 +617,13 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
     for path in sorted(emitted):
         values = emitted[path]
         spec = mapping.fields.get(path)
+        if spec is not None and spec.get('type') == 'alias':
+            blocking.append(f"{path}: written by the pipeline, but mapped as an alias (of '{spec.get('path')}'), and "
+                            f"documents can't write to an alias, so they are rejected")
+            changes.append({'field': path, 'problem': 'written, but mapped as an alias',
+                            'change': f"map '{path}' as a field in the template (as '{spec.get('path')}' is mapped), or "
+                                      f"stop writing it in the indexing XSLT"})
+            continue
         if spec is None:
             parent = next((p for p in _parents(path) if p in mapping.fields
                            and mapping.fields[p].get('type', 'object') not in OBJECT), None)
@@ -620,7 +644,8 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                             'change': f"change the indexing XSLT to write '{path}' as a valid {spec.get('type')}, or "
                                       f"map it with a type that takes these values"})
 
-    expected = [p for p, s in mapping.fields.items() if s.get('type', 'object') not in OBJECT and p not in emitted]
+    expected = [p for p, s in mapping.fields.items() if s.get('type', 'object') not in OBJECT and s.get('type') != 'alias'
+                and p not in emitted]
     for path in unmapped:
         dynamic = mapping.dynamic_for(path)
         renamed = difflib.get_close_matches(path, expected, n=1, cutoff=0.6)

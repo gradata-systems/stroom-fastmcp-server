@@ -232,6 +232,13 @@ async def misleading_search():
     return indexing._searchable('elasticsearch', [SearchCheck(field='User.Id', condition='CONTAINS', value='ali')])
 
 
+async def wildcard_on_an_address():
+    # Seen in VS Code: IpAddress EQUALS 192.0.2.* found nothing on Elasticsearch, and verify_index failed.
+    from tools.indexing import SearchCheck
+    return indexing._searchable('elasticsearch', [SearchCheck(field='IpAddress', value='192.0.2.*')], {'IpAddress'},
+                                [{'field': 'IpAddress', 'value': '10.0.*'}])
+
+
 async def a_deleted_feeds_stream():
     """Seen in VS Code: streams 15793567 and 15793566 belonged to a deleted feed of the same name."""
     from tools import streams
@@ -277,9 +284,9 @@ WRONG_MOVES = [
      ['"status": "needs_confirmation"', "Elastic Index doc 'FortiOS-V1'", '2 fields from', 'paste its index template']),
     ('go without an example unasked', lambda: draft(convention='ecs', without_example=True),
      ['"status": "needs_confirmation"', 'without an example index template']),
-    ('document with no change line', lambda: documentation(stream_ids=[5]), ['Give change']),
     ('weaken validation to get past an error', weaken_validation, ['Fix the output instead']),
     ('a search Elasticsearch answers wrongly through Stroom', misleading_search, ['use EQUALS']),
+    ('a wildcard on an ip field (VS Code)', wildcard_on_an_address, ["use EQUALS '192.0.2.0/24'", "use the CIDR range '10.0.0.0/16'"]),
     ('build from a deleted feed\'s stream of the same name (VS Code)', a_deleted_feeds_stream,
                     ['stream(s) [7] are older than feed FW-V1', 'earlier feed of that name, since deleted',
                      "The feed's own raw streams: [9]"]),

@@ -308,19 +308,23 @@ async def write_documentation(
     body = markdown.split('## Change log')[0].rstrip()
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
-    if not change.strip():
-        raise ToolError("Give change: one line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'")
+    change = change.strip()     # a new doc's is 'Created'; an update needs its own line (checked below)
     if index_uuid:
         if stream_ids or accept_errors:
             raise ToolError("stream_ids and accept_errors are for a pipeline's documentation; an existing index is "
                             "surveyed through Stroom instead. Leave them out with index_uuid.")
-        return await _document_index(ctx, build, index_uuid, body, change, confirmation_id)
+        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id)
     if not pipeline_uuid:
         raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
     stroom = gateway_from(ctx)
     pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
     kept = await kept_mapping(ctx, pipeline_uuid)
     generated_section = None
+    noted = []
+    if kept and kept['kind'] == 'translation' and stream_ids:
+        # An events pipeline's own Events output, given in place of its raw sample (seen in VS Code): the raw streams
+        # they were made from.
+        stream_ids, noted = await _raw_parents(stroom, stream_ids, pipeline_uuid)
     if kept:
         if not stream_ids:
             # Documentation goes down to the field, with the values the sample gave: it needs the sample.
@@ -387,6 +391,11 @@ async def write_documentation(
         beside = await _documentation_beside(stroom, original)
     existing = next((d for d in await _build_docs(ctx, build)
                      if d['type'] == 'Documentation' and d['name'] == name), None)
+    if not change:
+        if existing or beside:
+            raise ToolError("This updates the pipeline's documentation: give change, one line for the change log on "
+                            "what changed, e.g. 'Mapped CODE_TO_TOKEN'")
+        change = 'Created'
     if existing:
         doc = await write(existing)
     elif beside:
@@ -399,7 +408,28 @@ async def write_documentation(
         doc = await guard.create_filled('Documentation', name, build, write)
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
-                                        **({'field_mapping': generated_section} if generated_section else {})})
+                                        **({'field_mapping': generated_section} if generated_section else {}),
+                                        **({'note': '; '.join(noted)} if noted else {})})
+
+
+async def _raw_parents(stroom, stream_ids: list[int], pipeline_uuid: str) -> tuple[list[int], list[str]]:
+    """(stream ids, notes): an Events stream this pipeline made, in place of the raw stream it was made from."""
+    from tools.streams import _meta
+    out, notes = [], []
+    for stream_id in stream_ids:
+        try:
+            meta = await _meta(stroom, int(stream_id))
+        except (ToolError, ValueError):
+            out.append(stream_id)
+            continue
+        parent = meta.get('parentMetaId')
+        if meta.get('typeName') == 'Events' and meta.get('pipelineUuid') == pipeline_uuid and parent:
+            out.append(int(parent))
+            notes.append(f"stream {stream_id} is this pipeline's Events output: documented from raw stream {parent}, "
+                         f"which it was made from")
+        else:
+            out.append(stream_id)
+    return list(dict.fromkeys(out)), notes
 
 
 async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, change: str,
@@ -601,6 +631,18 @@ async def promote_build(
                 same = next((d for d in docs if d['type'] == 'Pipeline' and d['name'] == doc['name']
                              and not d['working_copy_of']), None)
                 target = (destinations.get(same['uuid']) or destinations.get('Pipeline')) if same else None
+            if not target and doc['type'] == 'Dashboard':
+                # A verification dashboard: wherever the index it searches goes (seen in VS Code: promotion stopped
+                # for want of its destination), else beside the pipelines.
+                try:
+                    config = (await stroom.get_doc('Dashboard', doc['uuid'])).get('dashboardConfig') or {}
+                    searched = {(c.get('settings') or {}).get('dataSource', {}).get('uuid')
+                                for c in config.get('components') or [] if c.get('type') == 'query'}
+                except ToolError:
+                    searched = set()
+                index = next((d for d in docs if d['type'] in ('ElasticIndex', 'Index') and d['uuid'] in searched), None)
+                target = ((destinations.get(index['uuid']) or destinations.get(index['type'])) if index else None) \
+                    or destinations.get('Pipeline')
             if not target and doc['type'] == 'Documentation':
                 # The documentation of a production pipeline (an in-place change's) or an existing index: beside it.
                 kinds = ('Pipeline', 'ElasticIndex', 'Index')

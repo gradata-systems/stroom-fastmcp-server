@@ -219,6 +219,11 @@ async def agreed(call, **kwargs):
         result = await call(**kwargs, **ids)
         if not (isinstance(result, dict) and str(result.get('status', '')).startswith('needs_')):
             return result
+        if result['status'] == 'needs_review':
+            # Shown to the user in the chat (an index template), then confirmed in a form.
+            print(f"    needs_review: {(result.get('dev_tools') or '').splitlines()[0]}")
+            kwargs['reviewed'] = True
+            continue
         key = 'confirmation_id' if result['status'] == 'needs_confirmation' else 'approval_id'
         print(f"    {result['status']}: {result['summary']}")
         ids[key] = result[key]

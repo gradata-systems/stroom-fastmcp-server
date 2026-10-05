@@ -150,9 +150,15 @@ async def get_field_conventions(
                         f"them to paste it. like_index and without_example are confirmed by the user in a form."}
     name = name or gateway_from(ctx).settings.default_convention
     if not name:
+        # Without the backend, an agent took this for the whole choice and went for a convention, though the user
+        # had their own index template (seen in VS Code).
+        first = ("" if backend else
+                 "Which backend first (find_pipeline_templates stage=indexing says): for Elasticsearch, call again with "
+                 "backend=elasticsearch, whose choices start with the user's own index template; these profiles are "
+                 "for Lucene, or for Elasticsearch only when the user has no template. ")
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
-                'hint': "Ask the user which convention to use, which existing index docs to follow, "
-                        "or how fields should be named. Do not assume one."}
+                'hint': first + "Ask the user which convention to use, which existing index docs to follow, "
+                                "or how fields should be named. Do not assume one."}
     if name not in profiles:
         raise ToolError(f"No convention profile '{name}'. Profiles: {', '.join(profiles) or 'none'}")
     profile = profiles[name]
@@ -398,6 +404,23 @@ async def find_elastic_clusters(
     return {'clusters': out}
 
 
+async def _the_cluster_in_use(stroom) -> str | None:
+    """The one Elastic Cluster doc the environment's Elastic Index docs use, or None when they use several, or
+    there are none."""
+    used = set()
+    try:
+        for value in ((await stroom.find_documents('*', ['ElasticIndex'], 50)).get('values') or []):
+            try:
+                doc = await stroom.get_doc('ElasticIndex', value['docRef']['uuid'])
+            except ToolError:
+                continue    # listed, but gone
+            if (doc.get('clusterRef') or {}).get('uuid'):
+                used.add(doc['clusterRef']['uuid'])
+    except ToolError:
+        return None
+    return used.pop() if len(used) == 1 else None
+
+
 async def create_index_doc(
         ctx: Context,
         build: Build,
@@ -419,10 +442,18 @@ async def create_index_doc(
     """
     stroom = gateway_from(ctx)
     if backend == 'elasticsearch':
+        # Seen in VS Code: refused for want of both, though the plan names the index and every Elastic Index doc in
+        # the environment used the same cluster. Both are shown in the user's form.
+        index_name = index_name or (plan.index_name if plan is not None else None)
+        why = ''
+        if not cluster_uuid:
+            cluster_uuid = await _the_cluster_in_use(stroom)
+            why = ' (the cluster the existing Elastic Index docs use)' if cluster_uuid else ''
         if not (index_name and cluster_uuid):
-            raise ToolError("Elasticsearch needs index_name and cluster_uuid (find_elastic_clusters)")
+            raise ToolError("Elasticsearch needs index_name (or plan=, which names it) and cluster_uuid: the existing "
+                            "Elastic Index docs use more than one cluster, or none (find_elastic_clusters lists them)")
         cluster = await stroom.get_doc('ElasticCluster', cluster_uuid)
-        target = {'cluster': cluster.get('name'), 'index name': index_name}
+        target = {'cluster': f"{cluster.get('name')}{why}", 'index name': index_name}
     else:
         target = {'volume group': volume_group}
     details = {'build': build, 'backend': backend, 'index doc': name, 'time field': time_field, **target}
@@ -514,7 +545,8 @@ async def create_indexing_pipeline(
         name: Annotated[str, Field(description="Pipeline name, e.g. 'Acme - Indexing'.")],
         template_uuid: Annotated[str, Field(description="Indexing template (find_pipeline_templates stage=indexing).")],
         xslt_uuid: Annotated[str, Field(description="The indexing XSLT, e.g. created from draft_index_mapping's draft.")],
-        index_uuid: Annotated[str | None, Field(description="Lucene: the Index doc.")] = None,
+        index_uuid: Annotated[str | None, Field(description="Lucene: the Index doc. Elasticsearch: the Elastic Index "
+                                                            "doc, which names the index and its cluster.")] = None,
         index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
         cluster_uuid: Annotated[str | None, Field(
             description="Elasticsearch: the cluster, if the template does not already set one.")] = None,
@@ -550,8 +582,19 @@ async def create_indexing_pipeline(
         element = next(e for e, p in open_props if p == 'index')
         props.append(PropertyValue(element=element, name='index', doc_uuid=index_uuid, doc_type='Index'))
     else:
+        if not index_name and index_uuid:
+            # The Elastic Index doc names the index and its cluster (seen in VS Code: refused for want of index_name
+            # though the doc was given).
+            try:
+                elastic = await stroom.get_doc('ElasticIndex', index_uuid)
+            except ToolError as e:
+                raise ToolError(f"index_uuid {index_uuid} is not an Elastic Index doc this template can index into: "
+                                f"give index_name (and cluster_uuid)") from e
+            index_name = elastic.get('indexName')
+            cluster_uuid = cluster_uuid or (elastic.get('clusterRef') or {}).get('uuid')
         if not index_name:
-            raise ToolError("This template indexes into Elasticsearch: give index_name")
+            raise ToolError("This template indexes into Elasticsearch: give index_name, or index_uuid (the Elastic "
+                            "Index doc, which names it)")
         element = next((e for e, p in open_props if p == 'indexName'), 'elasticIndexingFilter')
         props.append(PropertyValue(element=element, name='indexName', value=index_name))
         if (element, 'cluster') in open_props:
@@ -1047,20 +1090,55 @@ def _component_notes(missing: list[str]) -> list[str]:
             f"(GET _component_template/<name>) and check again with component_templates."] if missing else []
 
 
+def _template_summary(name: str, body: dict[str, Any], components: dict[str, Any], notes: list[str]) -> dict[str, Any]:
+    """The template in lines a confirmation form shows readably: the user reviews the whole request in the chat
+    first (seen in VS Code: the form showed it as one long unformatted line, and an invalid template was agreed)."""
+    template = body.get('template') or {}
+    mappings = template.get('mappings') or {}
+    fields = [(path, spec.get('type')) for path, spec in read_mapping_fields(body).items()
+              if spec.get('type') not in (None, 'object')]
+    settings = template.get('settings') or {}
+    settings = settings.get('index', settings) if isinstance(settings, dict) else {}
+
+    def flat(node: Any, prefix: str = '') -> list[str]:
+        if isinstance(node, dict):
+            return [line for k, v in node.items() for line in flat(v, f'{prefix}{k}.')]
+        return [f"{prefix[:-1]} {node}"]
+    patterns = body.get('index_patterns') or []
+    return {'index template': f"{name}: the Dev Tools request shown in the chat",
+            'applies to': f"{', '.join(patterns if isinstance(patterns, list) else [patterns])} (priority "
+                          f"{body.get('priority')})" + (', as a data stream' if 'data_stream' in body else ''),
+            **({'composed of': body['composed_of']} if body.get('composed_of') else {}),
+            **({'settings': ', '.join(flat(settings))} if settings else {}),
+            'fields': f"{len(fields)}: " + ', '.join(f"{p} ({t})" for p, t in fields[:30])
+                      + (f" (+{len(fields) - 30})" if len(fields) > 30 else ''),
+            'unmapped fields': {'false': 'kept in _source, not searchable', 'strict': 'refused',
+                                'runtime': 'runtime fields'}.get(str(mappings.get('dynamic')).lower(),
+                                                                'added by Elasticsearch (dynamic mapping)'),
+            **({'component templates': sorted(components)} if components else {}),
+            **({'notes': notes} if notes else {})}
+
+
 async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dict[str, Any], name: str,
                  body: dict[str, Any], components: dict[str, Any], notes: list[str],
-                 confirmation_id: str | None) -> Any:
-    """The user confirms the index template, as shown; once they have, it is kept with the pipeline as the agreed
-    one, which create_processor_filter asks them to confirm is committed to the cluster. None once agreed."""
+                 confirmation_id: str | None, reviewed: bool = False) -> Any:
+    """The user reviews the index template in the chat, then confirms it in a short form; once they have, it is
+    kept with the pipeline as the agreed one, which create_processor_filter asks them to confirm is committed to the
+    cluster. None once agreed."""
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
     await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
     dev_tools = f"PUT _index_template/{name}\n{json.dumps(body, indent=2)}"
-    details = {'index template': dev_tools, **({'component templates': sorted(components)} if components else {}),
-               **({'notes': notes} if notes else {})}
+    if not reviewed:
+        return {'status': 'needs_review', 'dev_tools': dev_tools,
+                'hint': f"Show the user this index template before anything else: dev_tools in the chat as a json code "
+                        f"block, exactly as it is (a form can't show it readably), with the notes on what came from "
+                        f"where. Then call {action} again with the same arguments plus reviewed=true: they confirm it "
+                        f"in a short form, or tell you what to change."}
     gate = await consent_from(ctx).require(
         ctx, 'confirmation', action, f"Use Elasticsearch index template '{name}' for index "
-        f"'{destination['index name']}' (cluster {destination['cluster']}), as shown", details, confirmation_id)
+        f"'{destination['index name']}' (cluster {destination['cluster']}), as shown in the chat",
+        _template_summary(name, body, components, notes), confirmation_id)
     if gate:
         return gate
     doc['description'] = with_agreed_template(doc.get('description'), {
@@ -1099,6 +1177,8 @@ async def propose_index_template(
         without_example: Annotated[bool, Field(
             description="Only when the user has said they have no example: the template is built from the field plan "
                         "alone, and they confirm it as shown.")] = False,
+        reviewed: Annotated[bool, Field(description="True once the user has been shown the template (dev_tools) in the "
+                                                    "chat, after a needs_review reply: they then confirm it in a form.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -1153,7 +1233,7 @@ async def propose_index_template(
                           "whether to change the indexing XSLT or the template. Not yet shown for confirmation.")
         return result
     gate = await _agree(ctx, 'propose_index_template', pipeline_uuid, destination, name, body, components, notes,
-                        confirmation_id)
+                        confirmation_id, reviewed)
     if gate:
         return _asking(gate, result)
     result.update({'agreed': True, 'hint': (
@@ -1175,6 +1255,8 @@ async def check_index_template(
             description="Only if the index template lists any in composed_of: those component templates, as the user gave them: each a Dev "
                         "Tools request (PUT _component_template/name {...}) or GET _component_template output.")] = [],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
+        reviewed: Annotated[bool, Field(description="True once the user has been shown the template (dev_tools) in the "
+                                                    "chat, after a needs_review reply: they then confirm it in a form.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -1211,7 +1293,7 @@ async def check_index_template(
                           "example_template builds the index template to agree.")
         return result
     gate = await _agree(ctx, 'check_index_template', pipeline_uuid, destination, name or destination['index name'],
-                        own, components, result['notes'], confirmation_id)
+                        own, components, result['notes'], confirmation_id, reviewed)
     if gate:
         return _asking(gate, result)
     result.update({'agreed': True, 'hint': (
@@ -1221,12 +1303,27 @@ async def check_index_template(
     return result
 
 
-def _searchable(backend: str, searches: list[SearchCheck]) -> None:
+def _cidr(value: str) -> str:
+    """The CIDR range a wildcard address means: 192.0.2.* is 192.0.2.0/24."""
+    known = [p for p in value.split('*')[0].split('.') if p.isdigit()][:3]
+    return f"{'.'.join(known + ['0'] * (4 - len(known)))}/{8 * len(known)}" if known else '10.0.0.0/8'
+
+
+def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] = frozenset(),
+                exact: list[dict[str, str]] = ()) -> None:
     """Searches whose answer would mislead: on Elasticsearch, Stroom (7.13) finds nothing for STARTS_WITH and
-    CONTAINS and matches every document for IS_NULL and IS_NOT_NULL, without an error; IN takes values separated
-    by commas."""
+    CONTAINS, nor for a wildcard on an ip field, and matches every document for IS_NULL and IS_NOT_NULL, without an
+    error; IN takes values separated by commas."""
     problems = []
+    for e in exact:
+        if backend == 'elasticsearch' and e.get('field') in ip_fields and '*' in str(e.get('value')):
+            problems.append(f"{e['field']} = '{e['value']}': {e['field']} is an ip field, where a wildcard finds "
+                            f"nothing; use the CIDR range '{_cidr(str(e['value']))}'")
     for s in searches:
+        if backend == 'elasticsearch' and s.field in ip_fields and s.condition == 'EQUALS' and '*' in s.value:
+            # Seen in VS Code: IpAddress EQUALS 192.0.2.* found 0 of the 10 documents it should have.
+            problems.append(f"{s.field} EQUALS '{s.value}': {s.field} is an ip field, where a wildcard finds nothing; "
+                            f"use EQUALS '{_cidr(s.value)}' (a CIDR range)")
         if s.condition == 'IN' and ',' not in s.value and ' ' in s.value.strip():
             problems.append(f"{s.field} IN '{s.value}': separate the values with commas")
         if backend == 'elasticsearch' and s.condition in ('STARTS_WITH', 'CONTAINS'):
@@ -1283,6 +1380,17 @@ async def verify_index(
     _searchable(backend, searches)
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
+    if backend == 'elasticsearch':
+        # Which fields are addresses, from the doc's own field list or Stroom's: a wildcard on them finds nothing.
+        typed = {f.get('fldName'): (f.get('nativeType') or f.get('fldType') or '').lower() for f in index.get('fields') or []}
+        if not typed:
+            try:
+                ref = {'type': 'ElasticIndex', 'uuid': index_uuid, 'name': index.get('name')}
+                typed = {f['name']: f['type'] for f in await _index_fields(stroom, 'ElasticIndex', ref)}
+            except Exception:    # a check on the searches, not a reason for verification to fail
+                typed = {}
+        _searchable(backend, searches, {n for n, t in typed.items() if t in ('ip', 'ipv4_address')},
+                    [e for e in exact if isinstance(e, dict)])
     name = dashboard_name or f"{index.get('name')}-VERIFY"
     fields = [f for f in fields if f not in _IDS]
     time_field = index.get('timeField') or index.get('timeFieldName')
@@ -1331,7 +1439,9 @@ async def verify_index(
         dashboard = {'uuid': made['uuid'], 'name': name, 'saved': True}
     searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
                                        searches=list(searches), pipeline_uuid=pipeline_uuid, dashboard_doc=doc)
-    result = {'dashboard': {**dashboard, **design}, **searched}
+    # The link to give the user (seen in VS Code: the user had to ask for it); an unsaved dashboard has none.
+    link = {'link': doc_link(stroom.settings, 'Dashboard', dashboard['uuid'])} if dashboard.get('saved') else {}
+    result = {'dashboard': {**dashboard, **link, **design}, **searched}
     if searched['passed']:
         # The plan's 'indexed' step is done for the build's pipelines that write to this index.
         recorded = []

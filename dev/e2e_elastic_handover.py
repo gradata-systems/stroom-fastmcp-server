@@ -214,8 +214,8 @@ async def main():
                   'without an example nothing is built to commit: the user is asked for theirs')
         # This user has none: built from the plan, shown for them to confirm (not confirmed yet).
         proposal = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, without_example=True)
-        e2e.check(proposal.get('status') == 'needs_confirmation', 'built from the plan alone only as the user confirms')
-        dev_tools = proposal['details']['index template']
+        e2e.check(proposal.get('status') == 'needs_review', 'built from the plan alone, shown to the user to review first')
+        dev_tools = proposal['dev_tools']
         proposal['template'] = json.loads(dev_tools.split(chr(10), 1)[1])
         print('    ' + dev_tools.splitlines()[0])
         e2e.check(proposal['template']['index_patterns'] == [f'{index}*'], "template covers the pipeline's index")
@@ -268,10 +268,10 @@ async def main():
                 'StreamId': {'type': 'long'}, 'EventId': {'type': 'long'}, '@timestamp': {'type': 'date'},
                 'user': {'properties': {'name': {'type': 'keyword', 'ignore_above': 128}}}}}}}))
         alone = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=standalone)
-        built = json.loads(alone['details']['index template'].split('\n', 1)[1])
+        built = json.loads(alone['dev_tools'].split('\n', 1)[1])
         props = built['template']['mappings']['properties']
-        e2e.check(alone.get('status') == 'needs_confirmation' and 'composed_of' not in built and built['priority'] == 120
-                 and 'component templates' not in alone['details']
+        e2e.check(alone.get('status') == 'needs_review' and 'composed_of' not in built and built['priority'] == 120
+                 and not alone.get('component_templates')
                  and not any('composed_of' in n for n in alone.get('from_example') or []),
                  'built with no component templates, none asked for')
         e2e.check(props['StreamId'] == {'type': 'long'} and props['@timestamp'] == {'type': 'date'}
@@ -289,8 +289,8 @@ async def main():
             '@timestamp': {'type': 'date'}}}}})
         asked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=example,
                                                       component_templates=[base])
-        e2e.check(asked.get('status') == 'needs_confirmation' and asked['details']['index template'].startswith(
-                 f'PUT _index_template/{index}\n'), f"the user is asked to confirm it as shown: {asked.get('summary')}")
+        e2e.check(asked.get('status') == 'needs_review' and asked['dev_tools'].startswith(f'PUT _index_template/{index}\n'),
+                 "the template is shown to the user first, in full, to review before they confirm it")
         final = await e2e.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
                                 events_stream_ids=events, example_template=example, component_templates=[base])
         body = final['template']
@@ -442,7 +442,7 @@ async def live(ctx, stroom: StroomGateway, csv: dict, events: list[int], es_temp
         print('\n### a standalone example: Elasticsearch resolves the built template as built')
         alone = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events,
                                                       example_template=LIVE_STANDALONE)
-        built = json.loads(alone['details']['index template'].split('\n', 1)[1])
+        built = json.loads(alone['dev_tools'].split('\n', 1)[1])
         e2e.check('composed_of' not in built and built['template']['mappings']['properties']['User']['properties']['Id']
                  == {'type': 'keyword', 'ignore_above': 256}
                  and built['template']['mappings']['properties']['Device']['type'] == 'object',

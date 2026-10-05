@@ -138,6 +138,27 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
             or profiled['format'] == 'xml fragments'}
 
 
+# Event-logging paths whose index fields make the verification dashboard's columns, in this order (seen in VS Code:
+# the user had to ask for the user column).
+_COLUMN_PATHS = ('EventTime/TimeCreated', 'EventSource/User/Id', 'EventSource/Device/HostName', 'IPAddress', 'TypeId',
+                 'Action', 'Outcome/Success')
+
+
+async def _suggested_columns(ctx: Context, pipeline_uuid: str) -> list[str]:
+    """The dashboard columns to suggest, from the index plan kept with the indexing XSLT: the time field, then the
+    fields for the user, host, addresses, event type, action and outcome."""
+    from tools.builds import kept_mapping
+    try:
+        kept = await kept_mapping(ctx, pipeline_uuid)
+    except Exception:   # a suggestion: never a reason for the plan to fail
+        return []
+    fields = ((kept or {}).get('payload') or {}).get('fields') or [] if (kept or {}).get('kind') == 'index' else []
+    chosen = []
+    for path in _COLUMN_PATHS:
+        chosen += [f['name'] for f in fields if (f.get('source') or '').endswith(path) and f['name'] not in chosen]
+    return chosen[:8]
+
+
 def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
               translation: str | None, indexing: str | None, processing: str | None = None,
               index: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
@@ -194,7 +215,9 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
             'build': build, 'index_uuid': (index or {}).get('uuid', '<the index doc uuid>'),
             'backend': (index or {}).get('backend', '<lucene or elasticsearch>'), 'stream_ids': events,
             'expected_documents': '<the Events records in those streams>',
-            'fields': '<the columns the user chose>', 'pipeline_uuid': ix}),
+            'fields': ("<the columns the user chose; suggest " + ', '.join((index or {}).get('columns') or [])
+                       + " and confirm them>" if (index or {}).get('columns') else '<the columns the user chose>'),
+            'pipeline_uuid': ix}),
             'the step is done once its searches pass'),
         'index_documented': (('write_documentation', {'build': build, 'pipeline_uuid': ix, 'stream_ids': events,
                                                       'markdown': '<the documentation, from the documentation guide>'}),
@@ -206,8 +229,9 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
     return {'tool': tool, 'arguments': arguments}, then
 
 
-async def status(ctx: Context, build: str) -> dict[str, Any]:
-    """Each plan step's state, read from the build."""
+async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Each plan step's state, read from the build; made, a doc the calling tool has just created, counts whether or
+    not the listing shows it yet."""
     from tools.builds import _build_docs, build_checks, kept_mapping
     from tools.processing import processing_status
     from tools.processing_writes import agreement_problem, elastic_destination
@@ -217,6 +241,11 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
     docs = await _build_docs(ctx, build)
+    if made and not any(d['uuid'] == made['uuid'] for d in docs):
+        # Just created, the explorer can leave it out for a moment (seen in the plan walk: create_feed's next named the
+        # feed step again, inviting a second feed).
+        docs = docs + [{'type': made['type'], 'uuid': made['uuid'], 'name': made['name'], 'path': None,
+                        'working_copy_of': None}]
     by_type: dict[str, list[dict[str, Any]]] = {}
     for d in docs:
         by_type.setdefault(d['type'], []).append(d)
@@ -304,7 +333,8 @@ async def status(ctx: Context, build: str) -> dict[str, Any]:
         processing = None if not filters else 'finished' if all(f['finished'] for f in filters) else 'running'
         found = (by_type.get('ElasticIndex') or by_type.get('Index') or [None])[0]
         if found:
-            index = {'uuid': found['uuid'], 'backend': 'elasticsearch' if found['type'] == 'ElasticIndex' else 'lucene'}
+            index = {'uuid': found['uuid'], 'backend': 'elasticsearch' if found['type'] == 'ElasticIndex' else 'lucene',
+                     'columns': await _suggested_columns(ctx, pending_ix['uuid'])}
         elif processing == 'finished':
             processing = 'no_index'    # searched through an index doc: a discovery build makes it now
     call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
@@ -338,12 +368,12 @@ async def build_status(ctx: Context, build: Build) -> dict[str, Any]:
     return await status(ctx, build)
 
 
-async def next_step(ctx: Context, build: str | None) -> dict[str, Any] | None:
+async def next_step(ctx: Context, build: str | None, made: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The first unfinished step of the build's plan, or None when the build is unknown or unreadable."""
     if not build:
         return None
     try:
-        return (await status(ctx, build))['next']
+        return (await status(ctx, build, made))['next']
     except Exception:   # the plan is advice: never fail a write over it
         return None
 
@@ -361,7 +391,9 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
                          f"here on" for k, (proposed, theirs) in changes.items())
         result['note'] = f"{result['note']} {said[0].upper()}{said[1:]}." if result.get('note') else said
     remember_build(ctx, build)
-    nxt = await next_step(ctx, build)
+    made = ({k: result[k] for k in ('type', 'uuid', 'name')}
+            if all(isinstance(result.get(k), str) for k in ('type', 'uuid', 'name')) else None)
+    nxt = await next_step(ctx, build, made)
     if nxt:
         result['next'] = nxt
         if nxt['step'] != 'promoted':

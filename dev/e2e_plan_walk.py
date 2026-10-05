@@ -154,8 +154,13 @@ class Walk:
         return done
 
     async def documented_step(self, call):
-        return await run(self.ctx, 'write_documentation', **fill(
-            call, markdown='## Purpose and data\n\nLogons from the walk.\n'), change='Created')
+        # As an agent got it wrong: the Events stream instead of the raw sample, and no change line. The server
+        # documents from the raw stream it was made from, and a new doc's change line is 'Created'.
+        written = await run(self.ctx, 'write_documentation', **fill(
+            call, markdown='## Purpose and data\n\nLogons from the walk.\n', stream_ids=self.events))
+        check('which it was made from' in (written.get('note') or '') and written.get('field_mapping'),
+              "documented from the raw sample, though given the Events stream, with no change line")
+        return written
 
     # Stage 2 ----------------------------------------------------------------------------------------------
 
@@ -193,8 +198,9 @@ class Walk:
             call, backend='elasticsearch', index_name=self.index_name, convention='ecs'),
             example_template=LIVE_EXAMPLE, component_templates=[LIVE_COMPONENT])
         self.plan = FieldPlan.model_validate(draft['plan'])
+        # The plan names the index: no index_name (an agent was refused for want of it).
         self.index = await run(self.ctx, 'create_index_doc', build=self.build, backend='elasticsearch',
-                               name=self.index_name, time_field=self.plan.time_field, index_name=self.index_name,
+                               name=self.index_name, time_field=self.plan.time_field, plan=self.plan,
                                cluster_uuid=self.cluster['uuid'])
         return self.index
 
@@ -207,7 +213,7 @@ class Walk:
         else:
             template = await fixtures(self.ctx.lifespan_context['stroom'])
             template = template[0]
-            target = {'index_name': self.index_name, 'cluster_uuid': self.cluster['uuid']}
+            target = {'index_uuid': self.index['uuid']}     # the Elastic Index doc names the index and cluster
         return await run(self.ctx, 'create_indexing_pipeline', build=self.build, name=f'{self.index_name} - Indexing',
                          template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], events_stream_ids=self.events, **target)
 
@@ -262,6 +268,8 @@ class Walk:
             elif call['tool'] == 'wait_for_processing':
                 result = await run(self.ctx, 'wait_for_processing', **fill(call))
             elif call['tool'] == 'verify_index':
+                check(call['arguments']['fields'].startswith('<the columns the user chose; suggest '),
+                      f"the plan suggests the dashboard's columns: {call['arguments']['fields']}")
                 fields = (['EventTime', 'UserId', 'HostName'] if self.backend == 'lucene'
                           else ['@timestamp', 'User.Id', 'TypeId'])
                 user = 'UserId' if self.backend == 'lucene' else 'User.Id'
@@ -292,8 +300,9 @@ class Walk:
 
     def _destinations(self) -> dict:
         folder = f'System/Walk Promoted {self.stamp}/{self.path}'
+        # No destination for the verification dashboard: it goes where the index it searches goes.
         return {t: folder for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation', 'Index',
-                                    'ElasticIndex', 'Dashboard')}
+                                    'ElasticIndex')}
 
     async def _events_pipeline(self) -> str:
         status = await build_status(self.ctx, self.build)
@@ -369,7 +378,8 @@ async def walk_path(ctx, path: str, stamp: str, es: httpx.AsyncClient | None) ->
         following = expected[i + 1] if i + 1 < len(expected) else None
         if following and isinstance(result, dict) and 'next' in result:
             check(result['next']['step'] == following and (result.get('done') is False) == (following != 'promoted'),
-                  f"the result's own next is {following}" + ('' if following == 'promoted' else ', and not done'))
+                  f"the result's own next is {following}" + ('' if following == 'promoted' else ', and not done')
+                  + f" (got {result['next']['step']}, done {result.get('done')})")
     check(any(p.startswith('moved Pipeline') for p in result['promoted']), f"promoted: {result['promoted'][:3]}")
 
 

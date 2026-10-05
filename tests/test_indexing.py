@@ -233,7 +233,7 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
         assert 'template' not in result and 'dev_tools' not in result
         assert 'a sibling discovery index uses' in result['hint'] and 'without_example=true' in result['hint']
         # Only when the user says they have none: built from the plan, and they confirm it as shown.
-        asked = await indexing.propose_index_template(ctx, 'p1', plan, [7], without_example=True)
+        asked = await indexing.propose_index_template(ctx, 'p1', plan, [7], without_example=True, reviewed=True)
     assert asked['status'] == 'needs_confirmation' and asked['template_name'] == 'stroom-discovery-acme-v1'
     assert asked['details']['notes'] == ['built from the field plan alone: the user has no example index template']
 
