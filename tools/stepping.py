@@ -37,6 +37,10 @@ async def _check_drafts(ctx: Context, draft_code: dict[str, str] | None) -> None
             raise ToolError(f"draft_code[{element!r}] is not stepped: " + '; '.join(result['errors']))
 
 
+# Records stepped from the head of each sample stream unless told otherwise.
+PER_STREAM = 50
+
+
 class _Pipeline:
     """What stepping needs to know about a pipeline, fetched once per tool call."""
 
@@ -45,6 +49,10 @@ class _Pipeline:
         merged = merge_layers(layers)
         self.types = {e['id']: e['type'] for e in merged['elements']}
         self.own = own_elements(layers)
+        # A JSON parser that wraps everything in one root map makes a JSON array a single record.
+        self.json_root_map = any(t == 'JSONParser' and not any(
+            p.get('element') == e and p.get('name') == 'addRootObject' and p.get('value') is False
+            for p in merged.get('properties') or []) for e, t in self.types.items())
 
     @classmethod
     async def load(cls, stroom: StroomGateway, uuid: str) -> '_Pipeline':
@@ -172,7 +180,7 @@ def _criteria(stream_id: int) -> dict[str, Any]:
 async def _step(stroom: StroomGateway, pipeline: _Pipeline, stream_id: int, step_type: str,
                 location: dict[str, Any] | None, code: dict[str, str] | None) -> dict[str, Any]:
     request = {'pipelineDoc': pipeline.doc, 'criteria': _criteria(stream_id), 'stepType': step_type, 'stepSize': 1,
-               'timeout': 30000, 'code': code or {}}
+               'timeout': stroom.settings.stroom_stepping_wait_ms, 'code': code or {}}
     if location:
         request['stepLocation'] = location
     return await stroom.step(request)
@@ -314,14 +322,14 @@ async def step_sample(
         max_records: Annotated[int | None, Field(
             ge=1, description="Stop after this many records (default: the server's max_sample_records).")] = None,
         records_per_stream: Annotated[int | None, Field(
-            ge=1, description="Step at most this many records from the start of each stream, e.g. for a broad "
-                              "check over a few big production streams.")] = None,
+            ge=1, description=f"Step at most this many records from the start of each stream (default "
+                              f"{PER_STREAM}, unless max_records is given: processing then checks every record).")] = None,
 ) -> dict[str, Any]:
     """
     Step every record of the sample streams to completion and return one verdict for the whole sample:
     error groups triaged (blocking / review / benign) with the records they affect, plus per-record
     status. This is the correctness check before processing; a blocking group means fix and step again.
-    With records_per_stream, only the head of each stream is stepped (a broad check on existing streams).
+    Large samples are stepped from the head of each stream (records_per_stream); processing covers the rest.
     """
     await _check_drafts(ctx, draft_code)
     from tools.streams import refuse_older_than_feed
@@ -329,9 +337,14 @@ async def step_sample(
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
+    # Large sample files (985 records each) were stepped a record per request on a remote Stroom: the head of each
+    # stream says whether the translation is right, and processing then reads every record.
+    if records_per_stream is None and not max_records:
+        records_per_stream = PER_STREAM
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     unknown: list[str] = []
+    per_stream: dict[int, int] = {}
     first_output = None
     for stream_id in stream_ids:
         result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
@@ -341,6 +354,7 @@ async def step_sample(
         stream_start = len(records)
         while result.get('foundRecord') and len(records) < cap and (
                 records_per_stream is None or len(records) - stream_start < records_per_stream):
+            per_stream[stream_id] = per_stream.get(stream_id, 0) + 1
             location = result['foundLocation']
             key = record_key(stream_id, location)
             found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
@@ -367,6 +381,14 @@ async def step_sample(
                               'first_record_output': first_output}
     if len(records) >= cap:
         result['hint'] = f"Stopped at {cap} records; the sample has more."
+    elif records_per_stream and any(n >= records_per_stream for n in per_stream.values()):
+        result['hint'] = (f"Stepped the first {records_per_stream} records of each stream: processing then reads every "
+                          f"record, and wait_for_processing reports any that fail.")
+    if pipeline.json_root_map and records and all(n == 1 for n in per_stream.values()):
+        result['hint'] = ((result.get('hint') or '') + " Each stream stepped as one record: a JSON array read with the "
+                          "parser's root map (jsonParser.addRootObject true) is a single record, however many items it "
+                          "holds. Set it false (update_pipeline set_properties=[{element: <the JSON parser>, name: "
+                          "addRootObject, value: false}]) so each item is a record.").strip()
     if not records:
         _nothing_stepped(result, markers, f"streams {stream_ids}")
     await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)

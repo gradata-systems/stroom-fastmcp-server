@@ -156,3 +156,66 @@ async def test_unknown_from_an_xslt_saved_without_a_mapping_blocks(ctx, monkeypa
 
 async def _async(value):
     return value
+
+
+@respx.mock
+async def test_a_slow_steps_follow_up_carries_its_own_cookies_and_none_are_shared(ctx):
+    # Two Stroom nodes behind an ingress with cookie affinity: a step outlasting Stroom's wait comes back unfinished,
+    # and the follow-up must reach the node holding the session. Seen: "No stepping session found" on 755 KB arrays.
+    stroom = ctx.lifespan_context['stroom']
+    route = respx.post(f'{API}/stepping/v1/step').mock(side_effect=[
+        httpx.Response(200, json={'complete': False, 'sessionUuid': 's1'},
+                       headers=[('set-cookie', 'INGRESSCOOKIE=node-b; Path=/; HttpOnly'),
+                                ('set-cookie', 'JSESSIONID=abc; Path=/')]),
+        httpx.Response(200, json={'complete': True, 'foundRecord': False}),
+        httpx.Response(200, json={'complete': True, 'foundRecord': False})])
+    await stroom.step({'stepType': 'FIRST'}, poll_seconds=0)
+    assert 'cookie' not in route.calls[0].request.headers
+    assert route.calls[1].request.headers['cookie'] == 'INGRESSCOOKIE=node-b; JSESSIONID=abc'
+    # Nothing kept for the next request, whoever makes it.
+    await stroom.step({'stepType': 'FIRST'}, poll_seconds=0)
+    assert 'cookie' not in route.calls[2].request.headers and len(stroom._client.cookies) == 0
+
+
+@respx.mock
+async def test_a_follow_up_on_another_node_says_why(ctx):
+    stroom = ctx.lifespan_context['stroom']
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=[
+        httpx.Response(200, json={'complete': False, 'sessionUuid': 's1'}),
+        httpx.Response(500, json={'message': 'No stepping session found for key: s1'})])
+    with pytest.raises(Exception, match='reached a Stroom node other than the one stepping it') as e:
+        await stroom.step({'stepType': 'FIRST'}, poll_seconds=0)
+    assert 'addRootObject' in str(e.value) and 'sessionAffinity' in str(e.value)
+
+
+@respx.mock
+async def test_large_streams_are_stepped_from_their_head(ctx, monkeypatch):
+    mock_pipeline()
+    monkeypatch.setattr(stepping, 'PER_STREAM', 2)
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=[httpx.Response(200, json=record(i)) for i in range(3)])
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    assert result['records_stepped'] == 2 and result['hint'].startswith('Stepped the first 2 records of each stream')
+
+
+async def test_a_json_array_mapping_sets_the_parser_to_read_each_item_as_a_record():
+    # Seen: four 755 KB arrays each stepped as one record of 985 events, every step outlasting Stroom's wait.
+    from unittest.mock import AsyncMock
+    from tools.pipeline_writes import PropertyValue, _json_array_parser
+    from utils.mappingstore import with_mapping
+    merged = {'elements': [{'id': 'jsonParser', 'type': 'JSONParser'}, {'id': 'translationFilter', 'type': 'XSLTFilter'}]}
+    xslt = [PropertyValue(element='translationFilter', name='xslt', doc_uuid='x1', doc_type='XSLT')]
+
+    def stroom_with(layout):
+        described = with_mapping('', 'translation', {'mapping': {'input': 'json', 'json_layout': layout}})
+        return SimpleNamespace(get_doc=AsyncMock(return_value={'description': described}))
+    added = await _json_array_parser(stroom_with('array'), merged, xslt)
+    assert (added.element, added.name, added.value) == ('jsonParser', 'addRootObject', False)
+    assert await _json_array_parser(stroom_with('lines'), merged, xslt) is None     # JSON lines need the root map
+    chosen = xslt + [PropertyValue(element='jsonParser', name='addRootObject', value=True)]
+    assert await _json_array_parser(stroom_with('array'), merged, chosen) is None   # the agent's own choice stands
+    # A pipeline stepping each array as one record says so.
+    layers = [{'pipelineData': {'elements': {'add': merged['elements']}}}]
+    assert stepping._Pipeline({'name': 'p'}, layers).json_root_map
+    layers[0]['pipelineData']['properties'] = {'add': [{'element': 'jsonParser', 'name': 'addRootObject',
+                                                        'value': {'boolean': False}}]}
+    assert not stepping._Pipeline({'name': 'p'}, layers).json_root_map

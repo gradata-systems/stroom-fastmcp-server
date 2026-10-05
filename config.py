@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs.
     stroom_ca_certs: Path | None = None
     stroom_request_timeout: float = 60.0
+    # How long Stroom works on a step before answering 'not yet' (a follow-up then needs the same Stroom node): under
+    # stroom_request_timeout, so a slow step finishes in its first request.
+    stroom_stepping_wait_ms: int = 55000
     # Path of the data receiver, relative to stroom_url.
     datafeed_path: str = '/stroom/datafeed'
 

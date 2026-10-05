@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
@@ -97,6 +98,9 @@ class StroomGateway:
             verify=trust(settings.stroom_ca_certs),
             timeout=settings.stroom_request_timeout,
             transport=transport,
+            # One client serves every user: a cookie Stroom (or an ingress) sets for one request must not ride along on
+            # another user's. A stepping follow-up carries its own first response's cookies explicitly (step).
+            cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
         )
 
     async def close(self) -> None:
@@ -124,12 +128,14 @@ class StroomGateway:
             raise ToolError(retry_after_expiry()['hint'])
         return {'Authorization': f'Bearer {token.token}'}
 
-    async def request(self, method: str, path: str, body: Any = None) -> Any:
-        """Send one request and return the decoded JSON body (None when empty).
+    async def request(self, method: str, path: str, body: Any = None, cookie: str | None = None,
+                      with_cookies: bool = False) -> Any:
+        """Send one request and return the decoded JSON body (None when empty); with_cookies, (body, the cookies the
+        response set, as a Cookie header). cookie is sent as the request's Cookie header.
 
         Failures become ToolErrors with Stroom's own reason, so the model can correct itself.
         """
-        headers = self._authorization()
+        headers = {**self._authorization(), **({'Cookie': cookie} if cookie else {})}
         started = time.perf_counter()
         who = {'method': method, 'path': path}
         try:
@@ -152,7 +158,11 @@ class StroomGateway:
             raise ToolError(f"Stroom rejected the request ({response.status_code}): {reason}")
 
         audit('stroom_request', outcome='success', status=response.status_code, took_ms=took_ms, **who)
-        return response.json() if response.content else None
+        data = response.json() if response.content else None
+        if with_cookies:
+            pairs = [c.split(';', 1)[0].strip() for c in response.headers.get_list('set-cookie')]
+            return data, '; '.join(p for p in pairs if '=' in p) or None
+        return data
 
     async def get(self, path: str) -> Any:
         return await self.request('GET', path)
@@ -260,13 +270,30 @@ class StroomGateway:
         that has not completed yet.
         """
         request = {k: v for k, v in request.items() if k != 'sessionUuid'}
-        result = await self.post('/stepping/v1/step', request)
+        # The session lives on the Stroom node that started the step: a follow-up carries the cookies the first
+        # response set, so an ingress with cookie affinity sends it to that node.
+        result, cookie = await self.request('POST', '/stepping/v1/step', request, with_cookies=True)
         waited = 0.0
         while not result.get('complete'):
             if waited >= max_wait:
-                await self.post('/stepping/v1/terminateStepping', {**request, 'sessionUuid': result['sessionUuid']})
+                await self.request('POST', '/stepping/v1/terminateStepping',
+                                   {**request, 'sessionUuid': result['sessionUuid']}, cookie=cookie)
                 raise ToolError("Stepping did not finish in time; try fewer records or a smaller stream")
             await asyncio.sleep(poll_seconds)
             waited += poll_seconds
-            result = await self.post('/stepping/v1/step', {**request, 'sessionUuid': result['sessionUuid']})
+            try:
+                result = await self.request('POST', '/stepping/v1/step', {**request, 'sessionUuid': result['sessionUuid']},
+                                            cookie=cookie)
+            except ToolError as e:
+                if 'No stepping session found' not in str(e):
+                    raise
+                # The session lives on the Stroom node that started the step; the follow-up reached another one.
+                raise ToolError(
+                    "A step outlasted Stroom's wait, and the follow-up for it reached a Stroom node other than the one "
+                    "stepping it (seen with several UI nodes behind a load balancer). Each record is likely too "
+                    "large: a JSON array whose pipeline has jsonParser.addRootObject true steps as one record, so "
+                    "set it false (update_pipeline). Otherwise this server's STROOM_URL must reach Stroom through "
+                    "something that keeps a client on one node: an ingress with cookie affinity (the follow-up "
+                    "carries its cookie), or a Service with sessionAffinity: ClientIP; or raise "
+                    "STROOM_STEPPING_WAIT_MS.") from e
         return result

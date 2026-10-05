@@ -99,11 +99,12 @@ brackets.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `STROOM_URL` | required | Stroom base URL [`stroom.url`] |
+| `STROOM_URL` | required | Stroom base URL [`stroom.url`]. With several Stroom nodes, a URL that keeps a client on one node: a stepping session lives on the node that started it, and a slow step's follow-up must reach it. Through an ingress with cookie affinity (`affinity: cookie`) the follow-up carries the cookie its first response set; the in-cluster Service needs `sessionAffinity: ClientIP` |
 | `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom [`stroom.audience`] |
 | `STROOM_UI_URL` | `STROOM_URL` | Base of Stroom links shown to users [`stroom.uiUrl`] |
 | `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
+| `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
 | `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one) [`oidc.issuerUrl`] |
 | `OIDC_AUDIENCE` | required | This server's audience [`oidc.audience`] |

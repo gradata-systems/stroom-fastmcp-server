@@ -93,6 +93,26 @@ class PropertyValue(BaseModel):
     value: str | int | bool | None = Field(None, description="For plain properties: the value.")
 
 
+async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any],
+                             properties: list[PropertyValue]) -> PropertyValue | None:
+    """jsonParser.addRootObject false when the translation XSLT's mapping reads a JSON array, unless set already: with
+    the parser's root map, the whole array is one record. Seen: four 755 KB arrays stepped as four records of 985
+    events each, every step outlasting Stroom's wait, until stepping failed altogether."""
+    parser = next((e['id'] for e in merged['elements'] if e['type'] == 'JSONParser'), None)
+    xslt = next((p for p in properties if p.name == 'xslt' and p.doc_uuid), None)
+    if not parser or not xslt or any(p.element == parser and p.name == 'addRootObject' for p in properties):
+        return None
+    try:
+        from utils.mappingstore import read_mapping
+        found = read_mapping((await stroom.get_doc('XSLT', xslt.doc_uuid)).get('description'))
+    except ToolError:
+        return None
+    mapping = (found[1] or {}).get('mapping') if found and found[0] == 'translation' else None
+    if mapping and mapping.get('input') == 'json' and mapping.get('json_layout', 'array') == 'array':
+        return PropertyValue(element=parser, name='addRootObject', value=False)
+    return None
+
+
 async def _value(stroom: StroomGateway, prop: PropertyValue) -> dict[str, Any]:
     if prop.doc_uuid:
         if not prop.doc_type:
@@ -286,6 +306,11 @@ async def create_pipeline(
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
     _keep_validation({e['id']: e['type'] for e in merged['elements']}, set_properties)
     properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
+    array = await _json_array_parser(stroom, merged, properties)
+    if array:
+        properties.append(array)
+        filled = list(filled or []) + [f"{array.element}.addRootObject = false (the mapping reads a JSON array: "
+                                       f"each item is a record)"]
     await _own_documents(ctx, build, properties, reuse_existing_docs)
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     refs = await reference_entries(stroom, merged, references)

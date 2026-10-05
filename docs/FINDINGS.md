@@ -192,6 +192,14 @@ A thirteenth session, on 0.16.18, with the same four files:
 | --- | --- | --- |
 | The terminal route not taken | The agent read each file (cut at 2,000 characters again), dropped the cut record and uploaded the first two whole records of each file as text, 1.5 to 1.6 KB: exact this time, with no cut marker left to refuse. The plan's `next` after `create_feed` named `upload_sample` with `sample: "<one file's text>"`, and `files=` was an exception for files "too large or cut short", a judgement the agent got wrong. | `files=` is the route for every sample file on the user's disk, whatever its size; `sample=` is only for text the user pasted into the chat. The plan's next call is `upload_sample` with `files`, and the tools that profile text say the start of each file is enough there, the files themselves going with `files=`. The plan walk takes that route, playing the terminal through the upload route. |
 
+A fourteenth session, on 0.16.19: the four files went up whole through the terminal (985 records each), then stepping failed:
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| A whole file as one record | The agent wrote its own mapping and created the pipeline without `jsonParser.addRootObject=false`: each 755 KB array stepped as a single record of 985 events. | `create_pipeline` sets `addRootObject` false itself when the translation XSLT's mapping reads a JSON array (unless set). `step_sample` says when a JSON pipeline stepped each stream as one record, and how to fix it. |
+| "No stepping session found" | Steps that large outlasted Stroom's 30 s wait and came back unfinished; the follow-up for the session reached the other Stroom node, and every step after the second failed with Stroom's 500. The server reached Stroom without the ingress's cookie affinity: its HTTP client kept cookies, but shared them across users. | Stroom works on a step for up to 55 s (`STROOM_STEPPING_WAIT_MS`), under the request timeout. A follow-up carries the cookies its own first response set; the shared client keeps none. When a follow-up still reaches the wrong node, the refusal says why and what keeps a client on one node. |
+| Every record, one request each | 3,940 records would have been 500 steps, one request each, against a remote Stroom. | `step_sample` steps the first 50 records of each stream by default; processing reads every record. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent
