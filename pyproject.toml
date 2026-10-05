@@ -1,6 +1,6 @@
 [project]
 name = "stroom-fastmcp-server"
-version = "0.16.17"
+version = "0.16.18"
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=44",
