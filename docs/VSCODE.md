@@ -105,6 +105,12 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
 - Workflows are slash commands, e.g. `/mcp.stroom.onboard_data_source`, `/mcp.stroom.onboard_existing_feed`,
   `/mcp.stroom.fix_pipeline_issue`.
 - Guides (`stroom://guide/...`) can be attached as context.
+- The agent reads sample files with VS Code's `read_file`, which cuts a line at 2,000 characters: a large file,
+  or one written on a single line (a JSON array), can't reach Stroom through the agent whole. For those it asks the
+  server for an upload ticket and runs a `curl` command in your terminal, which you approve: the file goes from your
+  disk to the server's `/upload` and on to Stroom as you, whole, without passing through the model. The ticket lasts
+  minutes and only uploads to that feed. Without a terminal, send the file yourself: in Stroom, the feed's Data tab,
+  Upload.
 - Confirmations and approvals appear as forms that you answer; the model never holds the answer. VS Code keeps
   the call open until you answer, so a form left open past your access token's lifetime can't be acted on when
   you do. The agent is then told to call again: VS Code sends a fresh token with the new call, and your answer is

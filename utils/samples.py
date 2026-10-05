@@ -27,11 +27,23 @@ def path_like(token: str) -> bool:
     return bool(token) and (bool(_PATH.match(token)) or bool(_REFERENCE.match(token)))
 
 
+# What a file reader leaves where it cut a file short: VS Code's read_file ends a long line with
+# '[... truncated at 2000 characters]'.
+_CUT = re.compile(r'truncated at \d[\d,]* (?:characters|chars|bytes|lines)|\[\.\.\.\s*(?:\d[\d,]* (?:more )?(?:characters|lines|bytes)|truncated)', re.I)
+
+
 def why_not_data(sample: str, name: str = 'sample') -> str | None:
-    """Why the text is not sample data: empty, a file path or list of paths, or an attachment reference."""
+    """Why the text is not sample data: empty, a file path or list of paths, an attachment reference, or a file
+    a reader cut short."""
     text = (sample or '').strip()
     if not text:
         return f"{name} is empty: pass the file's text"
+    cut = _CUT.search(text)
+    if cut:
+        return (f"{name} holds a file reader's cut ({cut.group(0)!r}): you didn't get the whole file, so what was passed "
+                f"isn't its data. Don't trim, complete or repair it (an agent completed a cut record with values it "
+                f"made up). Send the file with upload_sample files=[...] (a command per file for the user's terminal: it goes "
+                f"from their disk to Stroom whole, not through you); tools then take its stream_ids.")
     tokens = [t for t in re.split(r'[,\n;]+', text) if t.strip()]
     if tokens and len(tokens) <= 50 and all(path_like(t) for t in tokens):
         shown = tokens[0].strip()[:80]

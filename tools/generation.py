@@ -366,8 +366,8 @@ async def build_reference_xslt(
 
 async def draft_translation_mapping(
         ctx: Context,
-        samples: Annotated[SampleTexts | None, Field(description="The sample files' text (every line), by "
-                                                                                   "file name or as a list; not paths.")] = None,
+        samples: Annotated[SampleTexts | None, Field(description="The sample files' text, by file name or as a list, "
+                                                                                   "not paths: each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids.")] = None,
         source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller': names the system and generator "
                                                       "until the user confirms them.")] = '',
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,

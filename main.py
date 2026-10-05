@@ -17,6 +17,7 @@ from tools.resources import SERVER_INSTRUCTIONS
 from utils.consent import ConsentStore
 from utils.stroom import StroomGateway
 from utils.triage import ErrorRules
+from utils.uploads import UploadTickets, handle_upload
 from utils.version import SERVER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -26,13 +27,14 @@ configure_audit_log(settings.audit_log_file)
 rules = ErrorRules.load(settings.error_rules_file)
 policy = AccessPolicy.load(settings.access_policy_file)
 consent = ConsentStore(settings.use_elicitation, keys=[k.get_secret_value() for k in settings.request_state_keys])
+uploads = UploadTickets([k.get_secret_value() for k in settings.request_state_keys])
 
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     stroom = StroomGateway(settings)
     try:
-        yield {'stroom': stroom, 'rules': rules, 'policy': policy, 'consent': consent}
+        yield {'stroom': stroom, 'rules': rules, 'policy': policy, 'consent': consent, 'uploads': uploads}
     finally:
         await stroom.close()
 
@@ -81,6 +83,12 @@ async def healthz(request: Request) -> Response:
     """Liveness and readiness probe. Unauthenticated, and deliberately independent of Stroom, the OIDC provider and
     Elasticsearch so an outage there doesn't restart every replica. Says which version is running."""
     return PlainTextResponse(f'ok {SERVER_VERSION}')
+
+
+@mcp.custom_route('/upload', methods=['POST'], include_in_schema=False)
+async def upload(request: Request) -> Response:
+    """A sample file sent from the user's machine with a ticket from upload_sample files= (utils/uploads.py)."""
+    return await handle_upload(request, uploads, settings)
 
 
 from tools.plan import annotate_tools

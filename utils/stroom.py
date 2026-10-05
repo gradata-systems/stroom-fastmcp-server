@@ -86,8 +86,11 @@ class StroomGateway:
     and audits them by name. Only with dev_no_auth (no caller token) is the configured API key used.
     """
 
-    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None,
+                 authorization: dict[str, str] | None = None):
         self.settings = settings
+        # Outside a tool call (an upload with a ticket), the caller's token comes with the request, not the context.
+        self._fixed_authorization = authorization
         self._client = httpx.AsyncClient(
             base_url=settings.stroom_url.rstrip('/') + '/api',
             headers={'Accept': 'application/json'},
@@ -100,6 +103,8 @@ class StroomGateway:
         await self._client.aclose()
 
     def _authorization(self) -> dict[str, str]:
+        if self._fixed_authorization:
+            return self._fixed_authorization
         if self.settings.dev_no_auth:
             if not self.settings.stroom_api_key:
                 raise ToolError("dev_no_auth needs STROOM_MCP_STROOM_API_KEY to call Stroom")

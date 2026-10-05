@@ -15,13 +15,27 @@ from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples, check_sample
 from utils.stroom import gateway_from, set_body_text
+from utils.uploads import send_to_feed
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 
 
+def sent_by_user(settings, feed: dict[str, Any]) -> str:
+    """How the user sends a file the agent can't pass on whole: in the Stroom UI, or with curl, as a source would."""
+    from utils.stroom import doc_link
+    url = settings.stroom_url.rstrip('/') + settings.datafeed_path
+    return (f"A sample file you can't read whole (your reader cuts it, or it's too large to pass on) isn't passed "
+            f"through you: upload_sample feed={feed['name']} files=[...] gives a command per file to run in the "
+            f"user's terminal, sending it from their disk. Without a terminal, the user sends it: in Stroom, the "
+            f"feed ({doc_link(settings, 'Feed', feed['uuid'])}), its Data tab, Upload; or curl -X POST '{url}' -H "
+            f"'Feed: {feed['name']}' -H 'Authorization: Bearer <their token or API key>' --data-binary @<file>, and "
+            f"find_streams feed={feed['name']} gives its stream id. Either way, carry on with stream_ids.")
+
+
 async def profile_sample(
         ctx: Context,
-        sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long.")] = None,
+        sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long: "
+                                                       "each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids.")] = None,
         samples: Annotated[SampleTexts | None, Field(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
@@ -83,6 +97,7 @@ async def create_feed(
                                    50)).get('values') or []
     earlier = [r['meta']['id'] for r in rows if r['meta'].get('status') != 'DELETED'
                and (r['meta'].get('createMs') or 0) < (doc.get('createTimeMs') or 0)]
+    result['large_files'] = sent_by_user(stroom.settings, doc)
     if earlier:
         result['note'] = (f"Stroom still holds {len(earlier)}{'+' if len(rows) == 50 else ''} stream(s) from an earlier feed "
                           f"named {doc['name']}, since deleted (e.g. {earlier[:5]}); the UI doesn't show them. They are "
@@ -95,7 +110,13 @@ async def create_feed(
 async def upload_sample(
         ctx: Context,
         feed: Annotated[str, Field(description="Feed name, e.g. one created with create_feed.")],
-        sample: Annotated[str, Field(description="The raw data to send, exactly as the source produces it.")],
+        sample: Annotated[str | None, Field(description="The raw data to send, exactly as the source produces it: each file's whole text, exactly as read: never trimmed, completed, repaired or reformatted. If your file reader cut it (VS Code's read_file cuts a line at 2,000 characters: '[... truncated at 2000 characters]'), or it is too large to pass on whole, don't pass it: upload_sample files=[...] sends the file from the user's disk whole, and tools take its stream_ids.")] = None,
+        files: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Instead of sample, for files too large to pass through you or that your reader cuts short "
+                        "(VS Code's read_file cuts a line at 2,000 characters): their names or paths as the user's "
+                        "terminal sees them, e.g. 'sample-data/fortios/001_1.json'. Nothing is sent now: you get a "
+                        "short-lived ticket and a curl command per file to run in the user's terminal, which sends "
+                        "the file from their disk to Stroom whole, as them, and prints its stream id.")] = [],
         headers: Annotated[dict[str, str] | None, Field(
             description="Extra receipt headers, e.g. {'MyHost': 'ws01'}; readable in XSLT with stroom:meta().")] = None,
         stream_type: Annotated[str, Field(description="'Raw Events', or 'Raw Reference' for a reference feed.")] = 'Raw Events',
@@ -109,32 +130,78 @@ async def upload_sample(
     Send sample data to a feed through Stroom's datafeed receiver, as the real source would, and return
     the receipt id and the raw stream it created. Upload each sample file as its own call, so each becomes
     a stream and every file is stepped. Only upload to feeds in a build (test feeds for updates), never to a
-    production feed whose processor filters would pick the data up.
+    production feed whose processor filters would pick the data up. A file you can't read whole goes with files=
+    instead: a command per file for the user's terminal sends it from their disk, not through you.
     """
+    if files and not sample:
+        return await upload_ticket(ctx, feed, files, stream_type, headers)
+    if not sample:
+        raise ToolError("Give sample (a file's whole text, as read) or files (for files too large to pass through you, "
+                        "or that your reader cuts short)")
     check_sample(sample)
     stroom = gateway_from(ctx)
+    match = await _build_feed(ctx, feed)
+    receipt = {'Type': stream_type, **({'EffectiveTime': effective_time} if effective_time else {}), **(headers or {})}
+    sent = await send_to_feed(stroom, feed, sample.encode('utf-8'), receipt, stream_type)
+    if sent['stream_id'] is None:
+        return {'feed': feed, 'receipt_id': sent['receipt_id'], 'stream_id': None,
+                'hint': "Stroom accepted the data but the stream is not visible yet; check find_streams shortly."}
+    from tools.plan import build_of, with_next
+    return await with_next(ctx, await build_of(ctx, match), {
+        'feed': feed, **sent, 'hint': "One stream per sample file: upload the next file, or go on with the plan (next)."})
+
+
+async def _build_feed(ctx: Context, feed: str) -> dict[str, Any]:
+    """The feed's doc ref, refused unless it is in a build: samples never go to a production feed."""
     # A direct lookup: the explorer search index lags new documents by a moment.
-    match = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+    match = await gateway_from(ctx).get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
     if not match:
         raise ToolError(f"No feed named '{feed}'")
     await guard_from(ctx).check_managed(match)
-    started = int(time.time() * 1000) - 1000
-    receipt = {'Type': stream_type, **({'EffectiveTime': effective_time} if effective_time else {}), **(headers or {})}
-    response = await stroom.datafeed(feed, sample.encode('utf-8'), receipt)
-    terms = [{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed},
-             {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': stream_type}]
-    for _ in range(20):
-        rows = (await stroom.find_meta(terms, 5)).get('values') or []
-        fresh = [r['meta'] for r in rows if (r['meta'].get('createMs') or 0) >= started]
-        if fresh:
-            from tools.plan import build_of, with_next
-            return await with_next(ctx, await build_of(ctx, match), {
-                'feed': feed, 'receipt_id': response.text.strip(), 'stream_id': fresh[0]['id'],
-                'bytes': len(sample.encode('utf-8')),
-                'hint': "One stream per sample file: upload the next file, or go on with the plan (next)."})
-        await asyncio.sleep(0.5)
-    return {'feed': feed, 'receipt_id': response.text.strip(), 'stream_id': None,
-            'hint': "Stroom accepted the data but the stream is not visible yet; check find_streams shortly."}
+    return match
+
+
+async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_type: str,
+                        headers: dict[str, str] | None) -> dict[str, Any]:
+    """upload_sample with files=: a short-lived ticket for this feed and a curl command per file, for the user's
+    terminal (utils/uploads.py)."""
+    from utils.uploads import UploadTickets, commands
+    files = [files] if isinstance(files, str) else list(files)
+    if not files:
+        raise ToolError("Give files: the sample files' names or paths, one command each")
+    stroom = gateway_from(ctx)
+    match = await _build_feed(ctx, feed)
+    settings = stroom.settings
+    expires = time.time() + settings.upload_ticket_minutes * 60
+    authorization = None
+    if not settings.dev_no_auth:
+        from fastmcp.server.dependencies import get_access_token
+        token = get_access_token()
+        authorization = stroom._authorization()['Authorization']     # refused here if the token can't call Stroom
+        if token is not None and token.expires_at:
+            expires = min(expires, token.expires_at)
+    tickets = ctx.lifespan_context.setdefault('uploads', UploadTickets([]))
+    ticket = tickets.seal({'feed': feed, 'feed_uuid': match.get('uuid'), 'type': stream_type,
+                           'headers': headers or {}, 'auth': authorization, 'exp': int(expires),
+                           'sub': _subject()})
+    base = (settings.public_base_url or f'http://127.0.0.1:{settings.port}').rstrip('/')
+    minutes = max(1, int((expires - time.time()) // 60))
+    return {'feed': feed, 'expires_in_minutes': minutes, 'max_mb': settings.max_upload_mb,
+            'commands': commands(f'{base}/upload', ticket, files),
+            'hint': (f"Run each file's command in the user's terminal (powershell on Windows, else bash), from the "
+                     f"folder its path is relative to; they approve it. Each prints JSON with the stream_id. The "
+                     f"ticket lasts {minutes} minute(s) (no longer than their sign-in): if it runs out, call "
+                     f"upload_sample with files= again. Then go on with stream_ids. Don't read or pass the files' "
+                     f"text yourself.")}
+
+
+def _subject() -> str | None:
+    try:
+        from fastmcp.server.dependencies import get_access_token
+        token = get_access_token()
+        return token.subject if token is not None else None
+    except Exception:
+        return None
 
 
 class FieldNote(BaseModel):

@@ -1382,6 +1382,7 @@ name = "stroom-fastmcp-server"
 version = "0.16.17"
 source = { virtual = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "lxml" },
@@ -1400,6 +1401,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=44" },
     { name = "fastmcp", specifier = ">=4.0.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "lxml", specifier = ">=6.0" },

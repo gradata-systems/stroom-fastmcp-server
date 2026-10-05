@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # unseal (for rotation). Unset: a per-process key, which is fine for one replica. Every replica must share
     # them when there are several, so a repeated call can land on any of them.
     request_state_keys: Annotated[list[SecretStr], NoDecode] = []
+    # Sample files sent from the user's machine with a ticket (upload_ticket), not through the model: how long a
+    # ticket lasts (never past the sign-in it carries), and the largest file taken.
+    upload_ticket_minutes: int = 15
+    max_upload_mb: int = 100
     # Development only: no authentication, and Stroom is called with stroom_api_key. Refused unless the
     # server listens on localhost.
     dev_no_auth: bool = False

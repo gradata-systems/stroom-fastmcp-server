@@ -180,6 +180,12 @@ An eleventh session, on 0.16.16, ran end to end; with it, the Stroom nodes' logs
 | Every processor filter, every time | Status, the processed check and promotion asked Stroom for all processor filters (2,182 on the local stack) and kept one pipeline's; Stroom warned for each filter whose pipeline was deleted (121 calls, ten orphaned processors in production). | Asked by pipeline (`Processor Pipeline`, `IS_DOC_REF`). |
 | Where the time goes | Calls took a median of 26 s; Stroom's log has no request timings. Each request reloaded Stroom's signing key set ("Token names an unknown key id"), about 0.1 s. | Each `tool_call` audit event now carries `stroom_requests`, `stroom_ms`, the slowest request and `user_ms` (time in a form): the server's own log answers it next time. |
 
+A twelfth session onboarded four FortiOS JSON files of about 755 KB (985 records each, on one line):
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| Samples cut, then made up | VS Code's `read_file` cuts a line at 2,000 characters (`[... truncated at 2000 characters]`). The agent closed each JSON array after three records and uploaded that: 2.2 to 2.4 KB of each file. The third record of each had been cut; the agent completed it with values it made up (`service="BROADCAST"`, `app="Unknown"`, `sentpkt=1`, other MAC addresses, the `msg` left out). | Every tool taking sample text says it is each file's whole text as read, never trimmed, completed or repaired; a sample holding a reader's cut is refused. `upload_sample` with `files` gives a short-lived ticket for the feed and a `curl` command per file, which the agent runs in the user's terminal: the file goes from their disk to the server's `/upload` and on to Stroom as them, whole, without passing through the model. Without a terminal, `create_feed`'s reply says how the user sends it (the Stroom UI, or `curl` to the datafeed). |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent

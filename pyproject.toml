@@ -3,6 +3,7 @@ name = "stroom-fastmcp-server"
 version = "0.16.17"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=44",
     "fastmcp>=4.0.3",
     "httpx>=0.28",
     "lxml>=6.0",

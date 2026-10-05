@@ -94,3 +94,23 @@ def test_a_list_of_named_texts_and_doubly_escaped_newlines_are_read():
     assert as_named_samples([{'fw.log': FORTIOS}, FORTIOS]) == {'fw.log': FORTIOS, 'sample 2': FORTIOS}
     assert as_named_samples(['a,b\\n1,2\\n3,4']) == {'sample 1': 'a,b\n1,2\n3,4'}
     assert as_named_samples({'fw.json': '{"msg": "a\\nb"}\n{"msg": "c"}'})['fw.json'].count('\\n') == 1  # JSON escapes kept
+
+
+def test_a_file_a_reader_cut_short_is_not_sample_data():
+    # Seen: VS Code's read_file cut 755 KB one-line JSON files at 2,000 characters; the agent closed each array after
+    # three records, completing the cut one with values it made up, and uploaded that as the sample.
+    from utils.samples import why_not_data
+    cut = '[{"a": "1"}, {"b": "2 x=1 [... truncated at 2000 characters]'
+    assert "holds a file reader's cut ('[... truncated')" in why_not_data(cut)
+    assert 'upload_sample files=[...]' in why_not_data(cut, 'samples[0]')
+    assert why_not_data('msg="see [...] below" n=3\n') is None       # data that happens to hold [...]
+
+
+def test_the_feed_says_how_the_user_sends_a_file_themselves():
+    from types import SimpleNamespace
+    from tools.feeds import sent_by_user
+    settings = SimpleNamespace(stroom_url='https://stroom.example', stroom_ui_url=None, datafeed_path='/stroom/datafeed')
+    said = sent_by_user(settings, {'uuid': 'f1', 'name': 'FORTIOS-EVENTS-V1.0'})
+    assert 'upload_sample feed=FORTIOS-EVENTS-V1.0 files=[...]' in said
+    assert "curl -X POST 'https://stroom.example/stroom/datafeed' -H 'Feed: FORTIOS-EVENTS-V1.0'" in said
+    assert 'docType=Feed&docUuid=f1' in said and 'find_streams feed=FORTIOS-EVENTS-V1.0' in said
