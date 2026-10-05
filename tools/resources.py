@@ -184,14 +184,15 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
 
 7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch) and the Stroom pipeline
    template. Elasticsearch: find_elastic_clusters, then get_field_conventions backend=elasticsearch and offer the user
-   its three options, the example first: (a) the Elasticsearch index template a similar source's index uses, pasted
-   (GET _index_template/<name>, or an index's GET <index>/_mapping; only if it lists any in composed_of, those
-   component templates too, GET _component_template/<name>: many have none); (b) an existing index in Stroom to
-   follow (its existing_indexes; draft_index_mapping like_index=); (c) a convention profile, only when they have no
-   example (draft_index_mapping convention=... without_example=true, which the user confirms; without either an
-   example or that, draft_index_mapping drafts nothing and returns these options). Recommend none of them: the
-   choice is the user's. For (a), ask them to paste it into the chat and end your turn (a choice form cannot carry
-   it), and draft nothing until it arrives; (b), like (c), the user confirms in a form. With (a) or (b) there is no
+   its choices exactly as labelled, in order: From an index template (pasted: GET _index_template/<name>, or an
+   index's GET <index>/_mapping; only if it lists any in composed_of, those component templates too, GET
+   _component_template/<name>: many have none); Follow an existing index in Stroom (its existing_indexes;
+   draft_index_mapping like_index= reads its field names and types through Stroom, nothing to paste); and one choice
+   per convention profile, only when they have no example (draft_index_mapping convention=... without_example=true,
+   which the user confirms; without an example, an index or that, draft_index_mapping drafts nothing and returns
+   these choices). Recommend none of them: the choice is the user's. For the index template, ask them to paste it
+   into the chat and end your turn (a choice form cannot carry it), and draft nothing until it arrives; following an
+   index, like a convention, the user confirms in a form. With a template or an index there is no
    convention question: the example names the fields. Lucene:
    get_field_conventions, and ask the user which convention to follow.
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index

@@ -78,7 +78,17 @@ def test_the_verification_dashboard_shows_the_users_fields_newest_first_and_a_st
     assert text['showStepping'] is True and 'pipeline' not in text and text['tableId'] == 'table-VERIFY'
     assert text['streamIdField'] == {'id': columns['StreamId']['id'], 'name': 'StreamId'}
     assert text['recordNoField'] == {'id': columns['EventId']['id'], 'name': 'EventId'}
-    assert len(config['layout']['children']) == 3
+    # Laid out as Stroom's UI lays out a dashboard (seen on live: without sizes and the config's own settings, the UI
+    # showed the dashboard empty, though searches ran): the query above, the table and text pane side by side.
+    def panes(node):
+        return [t['id'] for t in node.get('tabs') or []] + [p for c in node.get('children') or [] for p in panes(c)]
+
+    def sized(node):
+        return 'preferredSize' in node and all(sized(c) for c in node.get('children') or [])
+    assert panes(config['layout']) == ['query-VERIFY', 'table-VERIFY', 'text-VERIFY'] and sized(config['layout'])
+    assert config['layout']['children'][1]['dimension'] == 0
+    assert config['layoutConstraints'] == {'fitWidth': True, 'fitHeight': True} and config['modelVersion']
+    assert config['designMode'] is False and config['preferredSize'] == {'width': 0, 'height': 0}
 
 
 def test_the_dashboard_window_starts_at_a_30_day_boundary_before_the_earliest_event():

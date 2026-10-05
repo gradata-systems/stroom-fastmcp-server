@@ -388,7 +388,11 @@ async def test_elasticsearch_asks_for_the_users_example_first_offering_existing_
     options = [o['option'] for o in asked['options']]
     assert asked['status'] == 'needs_guidance' and options[0].startswith('example index template')
     assert options[1] == 'follow an existing index in Stroom' and asked['options'][1]['existing_indexes'][0]['uuid'] == 'k'
-    assert options[2] == 'a convention profile' and 'ecs' in asked['options'][2]['profiles']
+    # One choice per option, labelled, the template first (an agent offered the rest and dropped the template).
+    assert [o['choice'] for o in asked['options']] == ['From an index template', 'Follow an existing index in Stroom',
+                                                       'ECS (Elastic Common Schema) convention', 'Stroom flat convention']
+    assert 'convention=ecs without_example=true' in asked['options'][2]['how']
+    assert 'exactly these 4 choices, in this order' in asked['hint'] and 'From an index template;' in asked['hint']
 
 
 async def test_an_existing_index_in_stroom_becomes_the_example_template():
@@ -396,18 +400,34 @@ async def test_an_existing_index_in_stroom_becomes_the_example_template():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from tools import indexing
-    stroom = SimpleNamespace(
-        get_doc=AsyncMock(return_value={'name': 'Keycloak', 'indexName': 'ecs-keycloak-v1'}),
-        post=AsyncMock(return_value={'values': [
-            {'fldName': 'user.name', 'fldType': 'KEYWORD'}, {'fldName': 'source.ip', 'fldType': 'IPV4_ADDRESS'},
-            {'fldName': '@timestamp', 'fldType': 'DATE'}, {'fldName': 'StreamId', 'fldType': 'LONG'}]}))
-    text, note = await indexing._example_from_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'k')
+    # The doc's own field list carries Elasticsearch's types (live FortiOS-V1: nativeType keyword, long, ip...).
+    fields = [{'fldName': 'user.name', 'fldType': 'KEYWORD', 'nativeType': 'keyword'},
+              {'fldName': 'source.ip', 'fldType': 'IPV4_ADDRESS', 'nativeType': 'ip'},
+              {'fldName': '@timestamp', 'fldType': 'DATE', 'nativeType': 'date'},
+              {'fldName': 'message', 'fldType': 'TEXT', 'nativeType': 'match_only_text'}]
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'Keycloak', 'indexName': 'ecs-keycloak-v1',
+                                                             'fields': fields}), post=AsyncMock())
+    text, note, read = await indexing._example_from_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'k')
     head, body = text.split('\n', 1)
     template = jsonlib.loads(body)
     assert head == 'PUT _index_template/ecs-keycloak-v1' and template['index_patterns'] == ['ecs-keycloak-v1*']
     props = template['template']['mappings']['properties']
     assert props['user']['properties']['name'] == {'type': 'keyword'} and props['source']['properties']['ip'] == {'type': 'ip'}
-    assert props['@timestamp'] == {'type': 'date'} and "Keycloak" in note and 'settings are not visible' in note
+    assert props['message'] == {'type': 'match_only_text'} and not stroom.post.called      # the exact type, kept
+    assert read == {'doc': 'Keycloak', 'index': 'ecs-keycloak-v1', 'fields': 4,
+                    'source': "the index doc's field list, with Elasticsearch's own types",
+                    'examples': ['user.name (keyword)', 'source.ip (ip)', '@timestamp (date)', 'message (match_only_text)']}
+    assert "Keycloak" in note and 'index template itself' in note
+    # A doc without its field list: Stroom's findFields, with Stroom's types mapped.
+    stroom.get_doc = AsyncMock(return_value={'name': 'Keycloak', 'indexName': 'ecs-keycloak-v1'})
+    stroom.post = AsyncMock(return_value={'values': [{'fldName': 'source.ip', 'fldType': 'IPV4_ADDRESS'}]})
+    text, _, read = await indexing._example_from_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'k')
+    assert jsonlib.loads(text.split('\n', 1)[1])['template']['mappings']['properties']['source']['properties']['ip'] == {'type': 'ip'}
+    assert read['source'].startswith("Stroom's field list")
+    # Nothing listed (an unreachable cluster): no form, the user is to paste the template.
+    stroom.post = AsyncMock(return_value={'values': []})
+    with pytest.raises(ToolError, match='paste its index template'):
+        await indexing._example_from_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'k')
 
 
 async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_form():
@@ -418,8 +438,10 @@ async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_fo
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(use_elicitation=False)})
     example = ("PUT _index_template/fortios-v1\n" + json.dumps({'index_patterns': ['fortios-v1*'], 'template': {
         'mappings': {'properties': {'source': {'properties': {'ip': {'type': 'ip'}}}}}}}),
-               "followed the fields of Elastic Index doc 'FortiOS-V1' (12 fields, read through Stroom); its template's "
-               "settings are not visible this way: ask the user for them, or keep the defaults")
+               "followed the fields of Elastic Index doc 'FortiOS-V1' (2 fields, ...)",
+               {'doc': 'FortiOS-V1', 'index': 'ecs-fortios-v1', 'fields': 2,
+                'source': "the index doc's field list, with Elasticsearch's own types",
+                'examples': ['source.ip (ip)', 'rule.id (keyword)']})
     read = AsyncMock(return_value=example)
     summarise = AsyncMock(return_value={'path_population': {}})
     with patch.object(indexing, '_example_from_index', read), \
@@ -427,8 +449,12 @@ async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_fo
             patch.object(indexing, '_conventions', lambda c: {'ecs': {}}):
         gate = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'fortinet-firewall-v1', like_index='a96e',
                                                   events_stream_ids=[9])
-    # Asked before anything is read from that index: an unreachable cluster can't stand in for the user's answer.
-    assert gate['status'] == 'needs_confirmation' and not summarise.called and not read.called
+    # The fields are read first, so the user sees what they'd get; nothing is drafted before they agree.
+    assert gate['status'] == 'needs_confirmation' and read.called and not summarise.called
     assert gate['summary'] == "Name the fields of index 'fortinet-firewall-v1' after an existing index in Stroom"
-    assert gate['details']['follow'] == "Elastic Index doc 'FortiOS-V1'"
-    assert 'paste your example index template' in gate['details']['instead']
+    assert gate['details']['follow'] == "Elastic Index doc 'FortiOS-V1' (index ecs-fortios-v1)"
+    assert gate['details']['read through Stroom'].startswith('2 fields from the index doc') and 'source.ip (ip)' in \
+        gate['details']['read through Stroom']
+    # What Stroom can't give: the template itself, which the user may still paste.
+    assert 'component templates' in gate['details']['not readable through Stroom']
+    assert 'paste its index template' in gate['details']['or']

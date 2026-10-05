@@ -46,13 +46,16 @@ def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
     return out
 
 
+_PROFILE_LABELS = {'ecs': 'ECS (Elastic Common Schema)', 'stroom-flat': 'Stroom flat'}
 _STROOM_TO_ES = {'keyword': 'keyword', 'text': 'text', 'long': 'long', 'integer': 'integer', 'id': 'long',
                   'float': 'float', 'double': 'double', 'date': 'date', 'ipv4_address': 'ip', 'boolean': 'boolean'}
 
 
-async def _example_from_index(ctx: Context, index: str) -> tuple[str, str]:
-    """An existing Elastic Index doc's fields (names and types, read through Stroom) as an example index template,
-    and a note of what it cannot say (the template's settings)."""
+async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[str, Any]]:
+    """An existing Elastic Index doc's fields as an example index template, a note for the draft, and what was read
+    (for the user's confirmation). The doc's own field list holds Elasticsearch's types (nativeType: keyword, ip,
+    date...); Stroom's findFields, the fallback, only its own (KEYWORD, LONG...). Neither gives the index template
+    itself: its settings, component templates, keyword sub-fields or ignore_above."""
     stroom = gateway_from(ctx)
     ref = None
     try:
@@ -65,26 +68,39 @@ async def _example_from_index(ctx: Context, index: str) -> tuple[str, str]:
             raise ToolError(f"No single Elastic Index doc named '{index}': give its uuid (get_field_conventions "
                             f"backend=elasticsearch lists them)")
         ref, doc = found[0], await stroom.get_doc('ElasticIndex', found[0]['uuid'])
-    fields = (await stroom.post('/dataSource/v1/findFields', {
-        'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})).get('values') or []
+    typed = [(f.get('fldName'), (f.get('nativeType') or '').lower()) for f in doc.get('fields') or []
+             if f.get('fldName') and f.get('nativeType')]
+    source = "the index doc's field list, with Elasticsearch's own types"
+    if not typed:
+        try:
+            listed = (await stroom.post('/dataSource/v1/findFields', {
+                'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})).get('values') or []
+        except ToolError:
+            listed = []
+        typed = [(f.get('fldName'), _STROOM_TO_ES.get((f.get('fldType') or '').lower())) for f in listed]
+        source = "Stroom's field list for it, with Stroom's types (Elasticsearch's own were not in the doc)"
     properties: dict[str, Any] = {}
-    for f in fields:
-        kind = _STROOM_TO_ES.get((f.get('fldType') or '').lower())
-        if not kind or not f.get('fldName'):
+    kept = []
+    for name, kind in typed:
+        if not kind or not name or kind in ('object', 'nested'):
             continue
         node = properties
-        *parents, leaf = f['fldName'].split('.')
+        *parents, leaf = name.split('.')
         for part in parents:
             node = node.setdefault(part, {'properties': {}}).setdefault('properties', {})
         node[leaf] = {'type': kind}
+        kept.append((name, kind))
     if not properties:
-        raise ToolError(f"Stroom lists no fields for '{ref['name']}' (its cluster may be unreachable): ask the user for "
-                        f"its index template instead")
+        raise ToolError(f"Stroom lists no fields for Elastic Index doc '{ref['name']}' (its cluster may be unreachable, "
+                        f"or it has never been searched): ask the user to paste its index template into the chat "
+                        f"(GET _index_template/<name>, with any component templates) and draft with example_template")
     name = doc.get('indexName') or ref['name']
     text = f"PUT _index_template/{name}\n" + json.dumps({'index_patterns': [f'{name}*'],
                                                           'template': {'mappings': {'properties': properties}}})
-    return text, (f"followed the fields of Elastic Index doc '{ref['name']}' ({len(fields)} fields, read through "
-                  f"Stroom); its template's settings are not visible this way: ask the user for them, or keep the defaults")
+    read = {'doc': ref['name'], 'index': doc.get('indexName'), 'fields': len(kept), 'source': source,
+            'examples': [f"{n} ({k})" for n, k in kept[:6]]}
+    return text, (f"followed the fields of Elastic Index doc '{ref['name']}' ({len(kept)} fields, read from {source}); "
+                  f"its index template itself (settings, component templates) is not visible through Stroom"), read
 
 
 async def get_field_conventions(
@@ -107,23 +123,31 @@ async def get_field_conventions(
         found = await gateway_from(ctx).find_documents('*', ['ElasticIndex'], 60)
         existing = [{'name': v['docRef'].get('name'), 'uuid': v['docRef'].get('uuid'), 'path': v.get('path')}
                     for v in found.get('values') or [] if v['docRef'].get('type') == 'ElasticIndex']
-        return {'status': 'needs_guidance', 'options': [
-            {'option': 'example index template (recommended)',
+        # One option per choice the user is offered, in order, each with the label to show: an agent offered
+        # "follow an existing index", ECS and Stroom flat, and dropped the template the user had.
+        options = [
+            {'choice': 'From an index template', 'option': 'example index template',
              'how': "The user pastes the Elasticsearch index template a similar source's index uses (Kibana Dev Tools: "
-                    "GET _index_template/<name>, or GET <index>/_mapping) into the chat: ask for it there and end your "
-                    "turn, as a choice form cannot carry it. Once pasted: draft_index_mapping example_template= it, "
-                    "exactly as given, and keep it for propose_index_template."},
-            {'option': 'follow an existing index in Stroom',
+                    "GET _index_template/<name>, or GET <index>/_mapping), with any component templates, into the "
+                    "chat: ask for it there and end your turn, as a choice form cannot carry it. Once pasted: "
+                    "draft_index_mapping example_template= it, exactly as given, and keep it for "
+                    "propose_index_template. The only choice that follows the template's settings and components."},
+            {'choice': 'Follow an existing index in Stroom', 'option': 'follow an existing index in Stroom',
              'how': "The user picks one of existing_indexes (a similar source's): draft_index_mapping like_index=<its "
-                    "uuid> takes its field names and types, read through Stroom. Its template's settings are not "
-                    "visible this way: ask the user for them, or keep the defaults.",
-             'existing_indexes': existing},
-            {'option': 'a convention profile',
-             'how': "Only when the user has no example: draft_index_mapping convention=<one of profiles>.",
-             'profiles': {n: p.get('description') for n, p in profiles.items()}}],
-            'hint': "Ask the user which, offering all three, the example first, and recommend none: it is their call, "
-                    "not yours. Draft nothing until they answer; if they choose the example, wait for them to paste "
-                    "it. like_index and without_example are confirmed by the user in a form."}
+                    "uuid> reads its field names and Elasticsearch types through Stroom, with nothing to paste, and "
+                    "the user confirms. Its index template itself (settings, component templates, keyword sub-fields) "
+                    "is not readable through Stroom: for those, the template is pasted (the first choice).",
+             'existing_indexes': existing}]
+        for profile_name, profile in profiles.items():
+            options.append({'choice': f"{_PROFILE_LABELS.get(profile_name, profile_name)} convention",
+                            'option': f'convention profile {profile_name}', 'description': profile.get('description'),
+                            'how': f"Only when the user has no example: draft_index_mapping convention={profile_name} "
+                                   f"without_example=true, which the user confirms in a form."})
+        return {'status': 'needs_guidance', 'options': options,
+                'hint': f"Ask the user which, with exactly these {len(options)} choices, in this order and with these "
+                        f"labels ({'; '.join(o['choice'] for o in options)}), and recommend none: it is their call, "
+                        f"not yours. Draft nothing until they answer; if they choose the index template, wait for "
+                        f"them to paste it. like_index and without_example are confirmed by the user in a form."}
     name = name or gateway_from(ctx).settings.default_convention
     if not name:
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
@@ -231,22 +255,21 @@ async def draft_index_mapping(
     profiles = _conventions(ctx)
     like_note = None
     if like_index and not example_template:
-        # Following another source's index is the user's choice, as the example is: they confirm which one, before
-        # anything is read from it.
-        try:
-            shown = (await gateway_from(ctx).get_doc('ElasticIndex', like_index)).get('name') or like_index
-        except ToolError:
-            shown = like_index
+        # Following another source's index is the user's choice, as the example is: its fields are read through
+        # Stroom first, so the user confirms what they'd get, and what only the template itself would give.
+        example_template, like_note, read = await _example_from_index(ctx, like_index)
         gate = await consent_from(ctx).require(
             ctx, 'confirmation', 'draft_index_mapping',
             f"Name the fields of index '{index_name}' after an existing index in Stroom", {
-                'follow': f"Elastic Index doc '{shown}'",
-                'settings': "its index template's settings are not visible through Stroom: Elasticsearch defaults, "
-                            "unless you give them",
-                'instead': "paste your example index template into the chat"}, confirmation_id)
+                'follow': f"Elastic Index doc '{read['doc']}'" + (f" (index {read['index']})" if read['index'] else ''),
+                'read through Stroom': f"{read['fields']} fields from {read['source']}, e.g. {', '.join(read['examples'])}",
+                'not readable through Stroom': "its index template itself: settings (shards, refresh), component "
+                                               "templates, keyword sub-fields and ignore_above. Elasticsearch defaults "
+                                               "for those, unless you paste the template",
+                'or': "paste its index template (with any component templates) into the chat to follow it whole"},
+            confirmation_id)
         if gate:
             return gate
-        example_template, like_note = await _example_from_index(ctx, like_index)
     if not convention and example_template:
         # The example names the fields; a profile only says which event paths are worth indexing.
         convention = 'ecs' if 'ecs' in profiles else next(iter(profiles), None)
@@ -582,21 +605,31 @@ def dashboard_config(source: dict[str, Any], fields: list[str], time_field: str 
     expression = {'type': 'operator', 'op': 'AND', 'children': [
         {'type': 'term', 'field': time_field, 'condition': 'BETWEEN', 'value': f'{window_start},day()+1d'}]
         if time_field and window_start else []}
-    table = {'type': 'table', 'queryId': query_id, 'fields': columns, 'extractValues': False,
-             'maxResults': [1000], 'pageSize': 100}
+    table = {'type': 'table', 'queryId': query_id, 'dataSourceRef': source, 'fields': columns, 'extractValues': False,
+             'maxResults': [1000], 'pageSize': 100, 'showDetail': False, 'modelVersion': '7.2.0'}
     text = {'type': 'text', 'tableId': table_id, 'showAsHtml': False, 'showStepping': True,
             'streamIdField': {'id': ids['StreamId']['id'], 'name': 'StreamId'},
-            'recordNoField': {'id': ids['EventId']['id'], 'name': 'EventId'}}
+            'recordNoField': {'id': ids['EventId']['id'], 'name': 'EventId'}, 'modelVersion': '7.8.0'}
+    size = lambda width, height: {'width': width, 'height': height}  # noqa: E731
+    # Laid out as a dashboard made in Stroom's UI is (live): every layout node sized, and the config's own size,
+    # constraints, model version and time range set. Without them the search API still ran the dashboard, but
+    # the UI showed it empty: no query, no widgets.
     return {'components': [
         {'type': 'query', 'id': query_id, 'name': 'Query', 'settings': {
             'type': 'query', 'dataSource': source, 'expression': expression,
             'automate': {'open': bool(expression['children']), 'refresh': False}}},
         {'type': 'table', 'id': table_id, 'name': 'Table', 'settings': table},
         {'type': 'text', 'id': text_id, 'name': 'Text', 'settings': text}],
-        'layout': {'type': 'splitLayout', 'dimension': 1, 'children': [
-            {'type': 'tabLayout', 'tabs': [{'id': query_id, 'visible': True}], 'selected': 0},
-            {'type': 'tabLayout', 'tabs': [{'id': table_id, 'visible': True}], 'selected': 0},
-            {'type': 'tabLayout', 'tabs': [{'id': text_id, 'visible': True}], 'selected': 0}]}}
+        'layout': {'type': 'splitLayout', 'preferredSize': size(200, 200), 'dimension': 1, 'children': [
+            {'type': 'tabLayout', 'preferredSize': size(200, 150), 'tabs': [{'id': query_id, 'visible': True}],
+             'selected': 0},
+            {'type': 'splitLayout', 'preferredSize': size(200, 700), 'dimension': 0, 'children': [
+                {'type': 'tabLayout', 'preferredSize': size(860, 700), 'tabs': [{'id': table_id, 'visible': True}],
+                 'selected': 0},
+                {'type': 'tabLayout', 'preferredSize': size(480, 700), 'tabs': [{'id': text_id, 'visible': True}],
+                 'selected': 0}]}]},
+        'layoutConstraints': {'fitWidth': True, 'fitHeight': True}, 'preferredSize': size(0, 0),
+        'designMode': False, 'timeRange': {'name': 'All time', 'condition': 'BETWEEN'}, 'modelVersion': '7.2.0'}
 
 
 def window_start(times: list[str]) -> str | None:
@@ -1274,6 +1307,11 @@ async def verify_index(
         doc = await stroom.get_doc('Dashboard', existing['uuid'])
         table = next(c for c in doc['dashboardConfig']['components'] if c['type'] == 'table')
         shown = [c['name'] for c in table['settings']['fields'] if c.get('visible', True)]
+        if 'layoutConstraints' not in doc['dashboardConfig']:
+            # Made before dashboards were laid out as Stroom's UI needs (it showed them empty): laid out again,
+            # its columns kept, so it shows what it searches.
+            doc['dashboardConfig'] = dashboard_config(source, shown, time_field, window)
+            doc = await stroom.put_doc(doc)
         if shown != fields:
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'verify_index',
                                                    f"Change the columns of dashboard '{name}'", design, confirmation_id)

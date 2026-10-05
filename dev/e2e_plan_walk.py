@@ -177,11 +177,17 @@ class Walk:
         check(offered.get('drafted') is False, 'a convention alone is not drafted: the user is asked for their example')
         existing = options['options'][1]['existing_indexes']
         check(bool(existing), f'existing indexes listed to follow: {len(existing)}')
-        asked = await TOOLS['draft_index_mapping'](self.ctx, backend='elasticsearch', index_name=self.index_name,
-                                                   events_stream_ids=call['arguments']['events_stream_ids'],
-                                                   like_index=existing[0]['uuid'])
-        check(asked.get('status') == 'needs_confirmation' and existing[0]['name'] in json.dumps(asked['details']),
-              f"following another index ({existing[0]['name']}) is the user's to confirm, in a form")
+        try:
+            asked = await TOOLS['draft_index_mapping'](self.ctx, backend='elasticsearch', index_name=self.index_name,
+                                                       events_stream_ids=call['arguments']['events_stream_ids'],
+                                                       like_index=existing[0]['uuid'])
+            # Its fields are read through Stroom first, so the user sees what they'd get before agreeing.
+            check(asked.get('status') == 'needs_confirmation' and existing[0]['name'] in json.dumps(asked['details'])
+                  and 'fields from' in asked['details']['read through Stroom'],
+                  f"following another index ({existing[0]['name']}) is the user's to confirm, its fields read first")
+        except ToolError as e:
+            # A cluster Stroom can't reach lists no fields: no form, the user is asked for the template instead.
+            check('paste its index template' in str(e), f"an index whose fields can't be read: {str(e)[:100]}")
         # The user pastes their example: the plan follows it.
         draft = await run(self.ctx, 'draft_index_mapping', **fill(
             call, backend='elasticsearch', index_name=self.index_name, convention='ecs'),

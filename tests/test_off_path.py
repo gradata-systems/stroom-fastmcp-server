@@ -210,7 +210,9 @@ async def draft(**kwargs):
     ctx.lifespan_context['stroom'].find_documents = AsyncMock(return_value={'values': []})
     ctx.lifespan_context['stroom'].get_doc = AsyncMock(return_value={'name': 'FortiOS-V1'})
     example = ('PUT _index_template/fortios-v1\n{"index_patterns": ["fortios-v1*"]}',
-               "followed the fields of Elastic Index doc 'FortiOS-V1' (2 fields, read through Stroom); ...")
+               "followed the fields of Elastic Index doc 'FortiOS-V1' (2 fields, ...)",
+               {'doc': 'FortiOS-V1', 'index': 'ecs-fortios-v1', 'fields': 2,
+                'source': "the index doc's field list, with Elasticsearch's own types", 'examples': ['source.ip (ip)']})
     with patch.object(indexing, '_conventions', lambda c: {'ecs': {}}), \
             patch.object(indexing, '_example_from_index', AsyncMock(return_value=example)):
         return await indexing.draft_index_mapping(ctx, 'elasticsearch', 'acme-v1', events_stream_ids=[5], **kwargs)
@@ -272,7 +274,7 @@ WRONG_MOVES = [
     ('draft an Elasticsearch index from a convention alone', lambda: draft(convention='ecs'),
      ['"drafted": false', 'example index template', 'like_index', 'without_example']),
     ('follow another index the user didn\'t choose (VS Code)', lambda: draft(like_index='FortiOS-V1'),
-     ['"status": "needs_confirmation"', "Elastic Index doc 'FortiOS-V1'", 'paste your example']),
+     ['"status": "needs_confirmation"', "Elastic Index doc 'FortiOS-V1'", '2 fields from', 'paste its index template']),
     ('go without an example unasked', lambda: draft(convention='ecs', without_example=True),
      ['"status": "needs_confirmation"', 'without an example index template']),
     ('document with no change line', lambda: documentation(stream_ids=[5]), ['Give change']),
