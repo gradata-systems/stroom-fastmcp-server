@@ -388,8 +388,16 @@ async def draft_translation_mapping(
     if build:
         from utils.sourcenotes import merged, notes_in_build
         source_notes = merged(await notes_in_build(ctx, build))
-    result = draft_mapping(samples, source_name, system_name, environment, source_notes)
     version = gateway_from(ctx).settings.event_logging_version
+    detail_check = None
+    if source_notes and source_notes.get('events'):
+        from utils.sourcenotes import detail_problem
+        try:
+            schema = await event_schema(ctx, version)
+            detail_check = lambda detail: detail_problem(schema, detail)   # noqa: E731
+        except Exception:   # the notes are followed unchecked rather than not at all
+            pass
+    result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check)
     try:
         checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)
         result['schema_check'] = {'ok': checked['ok'], 'problems': checked['problems'], 'warnings': checked['warnings'][:6]}

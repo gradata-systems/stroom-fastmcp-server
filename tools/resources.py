@@ -108,7 +108,8 @@ def _docs(source_docs: str) -> str:
     return (f"\n\nThe user supplied this source documentation. Keep it in Stroom with record_source_notes: the documents "
             f"themselves (documents=[{{title, text}}], verbatim) and, condensed from them, the field dictionary (each "
             f"field's meaning, its codes as values, the event-logging path it belongs in) and the event catalogue (each "
-            f"event with the field and value that show it in a record, its action element, TypeId, Action and outcome). "
+            f"event with the field and value that show it in a record, a value of its own for each event, its action element (e.g. Authenticate; for a connection allowed or denied, Network/Permit or Network/Deny), TypeId, Action and "
+            f"outcome). "
             f"Then draft_translation_mapping with build= drafts from the notes, and build_translation_xslt with build= "
             f"checks the mapping against the catalogue: resolve what it reports, or tell the user where the "
             f"documentation and the data disagree:\n{source_docs}") if source_docs else ''

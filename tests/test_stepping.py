@@ -101,3 +101,58 @@ async def test_incomplete_step_is_polled_with_its_session(ctx):
     assert poll['sessionUuid'] == 'abc'
     assert result['record'] == 4 and result['verdict'] == 'clean'
     assert result['elements']['translationFilter']['output'] == '<Events>4</Events>'
+
+
+def unknown_record(index):
+    out = (f'<Events xmlns="event-logging:3"><Event><EventDetail><TypeId>TRAFFIC</TypeId><Unknown/></EventDetail>'
+           f'</Event></Events>')
+    return {'complete': True, 'foundRecord': True, 'sessionUuid': f's{index}',
+            'foundLocation': {'metaId': 7, 'partIndex': 0, 'recordIndex': index},
+            'stepData': {'elementMap': {'translationFilter': {'input': '<records/>', 'output': out}}}}
+
+
+@respx.mock
+async def test_unknown_from_an_xslt_saved_without_a_mapping_blocks(ctx, monkeypatch):
+    # As an agent did: TRAFFIC records written as an empty EventDetail/Unknown by a hand-written XSLT, past every
+    # check build_translation_xslt makes, then processed and documented.
+    mock_pipeline()
+    tags = ['mcp-managed']
+
+    class Guard:
+        async def tags(self, ref):
+            return tags
+
+        async def tag(self, refs, names):
+            pass
+    monkeypatch.setattr(stepping, 'guard_from', lambda ctx: Guard())
+    kept = {'mapping': None}
+
+    async def kept_mapping(ctx, uuid):
+        return kept['mapping']
+    import tools.builds
+    monkeypatch.setattr(tools.builds, 'kept_mapping', kept_mapping)
+    monkeypatch.setattr(stepping, 'code_fingerprint', lambda *a, **k: _async({'x': 'v1'}))
+
+    def steps():
+        return [httpx.Response(200, json=unknown_record(0)), httpx.Response(200, json=record(1)),
+                httpx.Response(200, json={'complete': True, 'foundRecord': False})]
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps())
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    group = result['groups'][0]
+    assert result['verdict'] == 'blocking' and group['records'] == ['7:0']
+    assert group['examples'][0]['message'].startswith('1 of 2 records come out as EventDetail/Unknown')
+    assert 'build_translation_xslt' in group['examples'][0]['message']
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps()[:1])
+    located = await stepping.step_records(ctx, 'p-1', [{'stream': 7, 'record': 0}])
+    assert located['verdict'] == 'blocking' and 'EventDetail/Unknown' in located['groups'][0]['reason']
+
+    # Saved from a mapping, Unknown was checked and agreed there; a working copy of a production pipeline, or a
+    # pipeline outside a build, is someone else's design.
+    for mapping, tagged in (({'kind': 'mapping'}, ['mcp-managed']), (None, ['mcp-managed', 'mcp-copy-of-p-9']), (None, [])):
+        kept['mapping'], tags[:] = mapping, tagged
+        respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps())
+        assert (await stepping.step_sample(ctx, 'p-1', [7]))['verdict'] == 'clean', (mapping, tagged)
+
+
+async def _async(value):
+    return value

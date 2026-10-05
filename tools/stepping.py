@@ -195,6 +195,50 @@ def _empty_output(result: dict[str, Any], element: str, record: Any) -> list[dic
                         "Check xpath-default-namespace and the match patterns against the element's input."}]
 
 
+_UNKNOWN = re.compile(r'<(?:[\w.-]+:)?Unknown[\s>/]')     # EventDetail/Unknown: the schema's only Unknown
+
+
+def _writes_unknown(result: dict[str, Any], element: str) -> bool:
+    output = (((result.get('stepData') or {}).get('elementMap') or {}).get(element) or {}).get('output') or ''
+    return bool(_UNKNOWN.search(output))
+
+
+async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, element: str, unknown: list[str],
+                            total: int, draft_code: dict[str, str] | None) -> dict[str, Any] | None:
+    """A blocking group when a build's own pipeline writes EventDetail/Unknown from an XSLT saved without a mapping:
+    build_translation_xslt refuses Unknown where the records show an action and puts the rest to the user, and a
+    hand-written XSLT got past both (seen: every TRAFFIC record of a firewall sample as an empty Unknown)."""
+    if not unknown or draft_code:
+        return None
+    try:
+        tags = await guard_from(ctx).tags({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
+        if MANAGED not in tags or any(t.startswith('mcp-copy-of-') for t in tags):
+            return None     # not the build's own new pipeline: someone else's design
+        from tools.builds import kept_mapping
+        if await kept_mapping(ctx, pipeline_uuid):
+            return None     # saved from a mapping, where Unknown was checked and agreed
+    except Exception as e:   # the check is a guard on top; never fail the step over it
+        logger.warning("Couldn't check pipeline %s for Unknown events: %s", pipeline_uuid, e)
+        return None
+    message = (f"{len(unknown)} of {total} records come out as EventDetail/Unknown (e.g. {unknown[0]}), from an XSLT "
+               f"saved without a mapping, so nobody agreed to Unknown for them. Records whose values show what happened "
+               f"take that action element: a connection allowed or denied Network/Permit or Network/Deny, a logon "
+               f"Authenticate, a configuration change Update, an alert Alert. Draft the mapping from the sample "
+               f"(draft_translation_mapping) and save the XSLT with build_translation_xslt: it checks each rule against "
+               f"the records, and puts Unknown to the user for the records nothing else describes.")
+    return {'class': 'blocking', 'reason': 'Events written as EventDetail/Unknown that nobody agreed to',
+            'severity': 'ERROR', 'element': element, 'own_element': True, 'count': len(unknown),
+            'records_affected': len(unknown), 'examples': [{'message': message, 'location': None}],
+            'records': sorted(unknown)[:20]}
+
+
+def _block(summary: dict[str, Any], group: dict[str, Any] | None) -> None:
+    if group:
+        summary['groups'].insert(0, group)
+        summary['groups_by_class']['blocking'] = summary['groups_by_class'].get('blocking', 0) + 1
+        summary['verdict'] = 'blocking'
+
+
 def _nothing_stepped(result: dict[str, Any], markers: list[dict[str, Any]], where: str) -> None:
     """No record was stepped: never clean, and say why."""
     result['verdict'] = 'blocking'
@@ -286,6 +330,7 @@ async def step_sample(
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
+    unknown: list[str] = []
     first_output = None
     for stream_id in stream_ids:
         result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
@@ -300,6 +345,8 @@ async def step_sample(
             found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
             markers += found
             records.append({'record': key, 'errors': len(found)})
+            if _writes_unknown(result, pipeline.default_outputs()[-1]):
+                unknown.append(key)
             if first_output is None:
                 elements = (result.get('stepData') or {}).get('elementMap') or {}
                 first_output = {e: (elements.get(e) or {}).get('output', '')[:stroom.settings.max_stream_chars // 4]
@@ -311,6 +358,8 @@ async def step_sample(
     for group in summary['groups']:
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
+    _block(summary, await _unagreed_unknown(ctx, pipeline_uuid, pipeline.doc.get('name'), pipeline.default_outputs()[-1],
+                                            unknown, len(records), draft_code))
     result: dict[str, Any] = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records),
                               'records_with_errors': sum(1 for r in records if r['errors']),
                               'draft_code_used': sorted(draft_code or {}), **summary,
@@ -362,6 +411,7 @@ async def step_records(
     output_element = pipeline.default_outputs()[-1]
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
+    unknown: list[str] = []
     for loc in [RecordLocation.model_validate(x) for x in locations[:stroom.settings.max_sample_records]]:
         where = {'metaId': loc.stream, 'partIndex': loc.part, 'recordIndex': loc.record}
         key = record_key(loc.stream, where)
@@ -374,6 +424,8 @@ async def step_records(
         found = _markers(result, key) + _empty_output(result, output_element, key)
         output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
         events = len(_EVENT.findall(output))
+        if _UNKNOWN.search(output):
+            unknown.append(key)
         if loc.expect == 'none':
             # Left untranslated by choice: the no-elements check doesn't apply, but an Event does.
             found = [f for f in found if not f['message'].startswith('Output contains no XML elements')]
@@ -392,6 +444,8 @@ async def step_records(
     for group in summary['groups']:
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
+    _block(summary, await _unagreed_unknown(ctx, pipeline_uuid, pipeline.doc.get('name'), output_element, unknown,
+                                            len(records), draft_code))
     missing = [r['record'] for r in records if r.get('found') is False]
     uncovered = sorted({r['shape'] for r in records if r.get('shape') and (
         r.get('errors') or (r.get('events') == 0 and r.get('expect') != 'none'))})

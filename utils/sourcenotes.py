@@ -12,7 +12,7 @@ and what it is in event-logging terms). The notes doc carries them as a block th
 """
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 
 _BLOCK = re.compile(r'<!-- stroom-mcp source notes\n(.*?)\n-->', re.S)
@@ -78,12 +78,77 @@ def outcome_map(values: dict[str, str]) -> dict[str, str] | None:
     return out if out and len(out) == len(values) else None
 
 
+_NOT_ACTIONS = {'TypeId', 'Description', 'Classification', 'Purpose'}
+
+
+def detail_problem(schema, detail: str) -> str | None:
+    """Why an event's event_detail can't be its action element, or None: it must be an EventDetail action element that
+    takes Data (where the draft puts the event's other fields), so Network needs its action (Network/Permit)."""
+    detail = (detail or '').strip().strip('/')
+    if not detail:
+        return None
+    top = [c.name for c in schema.children(schema.resolve('EventDetail')[-1].decl) if c.name not in _NOT_ACTIONS]
+    try:
+        chain = schema.resolve(f'EventDetail/{detail}')[1:]     # below EventDetail
+    except ValueError:
+        chain = None
+    if not chain or chain[0].name in _NOT_ACTIONS:
+        hint = (" A connection allowed or denied is Network/Permit or Network/Deny."
+                if detail.split('/')[0].lower() in {'allow', 'allowed', 'accept', 'permit', 'deny', 'denied', 'block',
+                                                     'blocked', 'drop', 'reject', 'traffic'} else '')
+        return f"'{detail}' is not an EventDetail action element.{hint} The action elements: {', '.join(top)}"
+    below = [c.name for c in schema.children(chain[-1].decl)]
+    if 'Data' not in below or [c.name for c in chain] == ['Network']:
+        # Network's action is an element of its own (Permit, Deny, Connect...); v4 lets Network hold Data as well.
+        below = [b for b in below if b != 'Data']
+        return (f"'{detail}' needs its action below it: "
+                + ', '.join(f'{detail}/{c}' for c in below[:12]))
+    return None
+
+
+def catalogue_problems(events: list[dict[str, Any]], detail_check: Callable[[str], str | None] | None = None) -> list[str]:
+    """What makes an event catalogue unusable for drafting: an action element the schema doesn't have, and events a
+    record can't tell apart (the same field and value)."""
+    problems = []
+    seen: dict[tuple[str, str], str] = {}
+    for e in events:
+        label = e.get('event') or e.get('value') or '?'
+        problem = detail_check(e.get('event_detail') or '') if detail_check else None
+        if problem:
+            problems.append(f"{label}: {problem}")
+        if e.get('field') and e.get('value') not in (None, ''):
+            key = (e['field'], str(e['value']))
+            if key in seen:
+                problems.append(f"{seen[key]} and {label} are both {key[0]}={key[1]}: a record can't show which it is. "
+                                f"Give each the field and value that tell them apart (e.g. action=ALLOW and action=DENY), "
+                                f"or record them as one event")
+            else:
+                seen[key] = label
+    return problems
+
+
+def _detail_of(rule: dict[str, Any]) -> set[str]:
+    """The action elements a rule writes."""
+    paths = [f.get('path') or '' for f in rule.get('fields') or []]
+    return {p.split('/')[1] for p in paths if p.startswith('EventDetail/') and p.count('/') >= 2}
+
+
+def _covers(rule: dict[str, Any], field: str, value: str) -> bool:
+    return any(c.get('field') == field and (str(c.get('equals')) == value if c.get('equals') is not None
+                                            else value in [str(x) for x in c.get('one_of') or []])
+               for c in rule.get('when') or [])
+
+
 def apply_to_draft(mapping: dict[str, Any], names: list[str], values: dict[str, list[str]],
-                   notes: dict[str, Any]) -> dict[str, Any]:
+                   notes: dict[str, Any], detail_check: Callable[[str], str | None] | None = None) -> dict[str, Any]:
     """The draft mapping rebuilt from the notes where they speak: fields the dictionary places, one rule per
-    catalogued event the sample's fields can show. Returns what was applied, and what the sample and notes disagree on."""
+    catalogued event the sample's fields can show. Where the catalogue can't be followed (an action element the schema
+    doesn't have, Unknown, events with the same field and value), the rules the sample's own values gave are kept.
+    Returns what was applied, and what the sample and notes disagree on."""
     common: list[dict[str, Any]] = mapping['common']
-    applied: dict[str, Any] = {'fields': [], 'events': [], 'not_in_sample': [], 'not_in_catalogue': []}
+    sampled = [r for r in mapping['events'] if r.get('when')]
+    applied: dict[str, Any] = {'fields': [], 'events': [], 'not_in_sample': [], 'not_in_catalogue': [],
+                               'from_sample': []}
     by_field = {f['field']: f for f in notes.get('fields') or [] if f.get('field') in names}
     detail_fields: list[dict[str, Any]] = []
     for name, note in by_field.items():
@@ -108,9 +173,27 @@ def apply_to_draft(mapping: dict[str, Any], names: list[str], values: dict[str, 
     seen = {(e['field'], str(e['value'])) for e in events}
     taken = {e.get('field') for e in common} | {e['field'] for e in detail_fields} | {e['field'] for e in events}
     rest = [n for n in names if n not in taken and values.get(n)]
-    rules = []
+    twins = {k for k in seen if sum(1 for e in events if (e['field'], str(e['value'])) == k) > 1}
+    rules: list[dict[str, Any]] = []
     for e in events:
-        detail = (e.get('event_detail') or 'Unknown').strip() or 'Unknown'
+        detail = (e.get('event_detail') or 'Unknown').strip().strip('/') or 'Unknown'
+        key = (e['field'], str(e['value']))
+        why = ('the catalogue has more than one event for it' if key in twins
+               else (detail_check(detail) if detail_check and detail != 'Unknown' else None)
+               or ('the catalogue gives no action element' if detail == 'Unknown' else None))
+        if why:
+            # The sample's values say more than the catalogue here: keep the rules they gave, when they name an action.
+            kept = [r for r in sampled if _covers(r, *key) and _detail_of(r) - {'Unknown'}]
+            if kept:
+                fresh = [r for r in kept if r not in rules]
+                rules += fresh
+                if fresh:
+                    applied['from_sample'].append(
+                        f"{e['field']}={e['value']}: {why}, so the sample's rules are kept ("
+                        + '; '.join(f"{r['name']}: {', '.join(sorted(_detail_of(r)))}" for r in fresh) + ')')
+                continue
+            if detail != 'Unknown' and detail_check and detail_check(detail):
+                detail = 'Unknown'
         fields: list[dict[str, Any]] = []
         if e.get('type_id'):
             fields.append({'path': 'EventDetail/TypeId', 'value': str(e['type_id'])})
@@ -128,11 +211,16 @@ def apply_to_draft(mapping: dict[str, Any], names: list[str], values: dict[str, 
             fields.append({'path': 'EventDetail/Authenticate/User/Id', 'field': user})
         fields += [f for f in detail_fields if f['path'].startswith(f'EventDetail/{detail}/')
                    and not any(x['path'] == f['path'] for x in fields)]
+        # What the schema wants that the catalogue doesn't say (Authenticate's Action, Update's After), from the
+        # sample's rule for the same records when it writes the same element.
+        like = next((r for r in sampled if _covers(r, *key) and detail.split('/')[0] in _detail_of(r)), None)
+        if like:
+            fields += [f for f in like['fields'] if (f.get('path') or '').startswith(f'EventDetail/{detail}/')
+                       and not (f['path'].endswith('/Data') or any(x['path'] == f['path'] for x in fields))]
         fields += [{'path': f'EventDetail/{detail}/Data', 'data_name': n, 'field': n} for n in rest]
         rule: dict[str, Any] = {'name': re.sub(r'[^A-Za-z0-9]+', '_', str(e.get('event') or e['value'])).strip('_').lower()
                                 or 'event', 'when': [{'field': e['field'], 'equals': str(e['value'])}], 'fields': fields}
-        if detail == 'Unknown':
-            rule['allow_unknown'] = f"The source documentation gives no action for {e.get('event') or e['value']}"
+        # Unknown is not agreed here: build_translation_xslt puts it to the user with the records it catches.
         rules.append(rule)
         shown = str(e['value']) in values.get(e['field'], [])
         applied['events'].append(f"{e.get('event') or e['value']} ({e['field']}={e['value']}) -> {detail}"
@@ -143,7 +231,15 @@ def apply_to_draft(mapping: dict[str, Any], names: list[str], values: dict[str, 
         for v in dict.fromkeys(values.get(field, [])):
             if (field, v) not in seen:
                 applied['not_in_catalogue'].append(f"{field}={v}")
+    # Records of values the catalogue doesn't list keep the sample's rule when it names an action, not Unknown.
+    rules += [r for r in sampled if r not in rules and _detail_of(r) - {'Unknown'}
+              and not any(_covers(r, *k) for k in seen)]
     other = next((r for r in mapping['events'] if not r.get('when')), None)
+    names_used: set[str] = set()
+    for r in rules:
+        while r['name'] in names_used:
+            r['name'] += '_'
+        names_used.add(r['name'])
     mapping['events'] = rules + ([other] if other else [])
     return applied
 
@@ -186,8 +282,8 @@ def check_mapping(mapping: dict[str, Any], notes: dict[str, Any]) -> list[str]:
             continue
         paths = [f.get('path') or '' for f in rule.get('fields') or []]
         details = {p.split('/')[1] for p in paths if p.startswith('EventDetail/') and p.count('/') >= 2}
-        want = (e.get('event_detail') or '').strip()
-        if want and want not in details:
+        want = (e.get('event_detail') or '').strip().strip('/').split('/')[0]
+        if want and want != 'Unknown' and want not in details:
             problems.append(f"{label}: the documentation says {want}; rule '{rule.get('name')}' writes "
                             f"{', '.join(sorted(details)) or 'no action element'}")
         if e.get('type_id'):

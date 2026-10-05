@@ -90,3 +90,75 @@ def test_the_documentation_lists_the_source_fields_with_their_meanings():
     text = fields_markdown(NOTES)
     assert '| `res` | Status code | `0x0`: success; `0xC000006A`: failed: bad password |' in text
     assert fields_markdown({'fields': []}) == ''
+
+
+# The catalogue an agent recorded from a firewall sample alone (no documentation), as it was given.
+FIREWALL = ("timestamp,device,event_type,src_ip,src_port,dst_ip,dst_port,protocol,action,rule_id,username,message\n"
+            "2026-10-01T09:00:12+10:00,FW1,TRAFFIC,192.0.2.10,54321,198.51.100.20,443,TCP,ALLOW,1001,,HTTPS allowed\n"
+            "2026-10-01T09:01:05+10:00,FW1,TRAFFIC,203.0.113.45,49822,192.0.2.25,22,TCP,DENY,2003,,SSH blocked\n"
+            "2026-10-01T09:02:17+10:00,FW1,TRAFFIC,192.0.2.11,53002,198.51.100.53,53,UDP,ALLOW,1002,,DNS allowed\n"
+            "2026-10-01T09:10:00+10:00,FW1,ADMIN,192.0.2.5,50000,192.0.2.1,443,HTTPS,LOGIN_SUCCESS,0,admin,Admin logged in\n"
+            "2026-10-01T09:11:00+10:00,FW1,ADMIN,192.0.2.5,50000,192.0.2.1,443,HTTPS,LOGIN_FAILED,0,root,Bad password\n"
+            "2026-10-01T09:12:00+10:00,FW1,ADMIN,192.0.2.5,50000,192.0.2.1,443,HTTPS,CONFIG_CHANGE,0,admin,Policy changed\n"
+            "2026-10-01T09:20:00+10:00,FW1,SYSTEM,192.0.2.1,0,192.0.2.1,0,N/A,VPN_TUNNEL_DOWN,0,,Tunnel down\n")
+GUESSED = {'events': [
+    {'event': 'TRAFFIC-ALLOW', 'description': 'Network traffic allowed', 'field': 'event_type', 'value': 'TRAFFIC',
+     'event_detail': 'Allow'},
+    {'event': 'TRAFFIC-DENY', 'description': 'Network traffic blocked', 'field': 'event_type', 'value': 'TRAFFIC',
+     'event_detail': 'Deny'},
+    {'event': 'LOGIN-SUCCESS', 'description': 'Administrator logged in', 'field': 'action', 'value': 'LOGIN_SUCCESS',
+     'event_detail': 'Authenticate', 'success': True},
+    {'event': 'LOGIN-FAILED', 'description': 'Administrator failed to log in', 'field': 'action',
+     'value': 'LOGIN_FAILED', 'event_detail': 'Authenticate', 'success': False},
+    {'event': 'CONFIG-CHANGE', 'description': 'Configuration modified', 'field': 'action', 'value': 'CONFIG_CHANGE',
+     'event_detail': 'Update'},
+    {'event': 'VPN-DOWN', 'description': 'VPN tunnel disconnected', 'field': 'action', 'value': 'VPN_TUNNEL_DOWN',
+     'event_detail': 'Unknown'},
+]}
+
+
+def check(detail):
+    from utils.sourcenotes import detail_problem
+    return detail_problem(SCHEMA, detail)
+
+
+def test_a_catalogue_naming_no_action_element_or_twin_events_is_refused():
+    from utils.sourcenotes import catalogue_problems
+    problems = catalogue_problems(GUESSED['events'], check)
+    assert any(p.startswith("TRAFFIC-ALLOW: 'Allow' is not an EventDetail action element") and 'Network/Permit' in p
+               for p in problems)
+    assert any(p.startswith('TRAFFIC-ALLOW and TRAFFIC-DENY are both event_type=TRAFFIC') for p in problems)
+    assert len(problems) == 3                        # Authenticate, Update and Unknown are elements
+    assert "'Network' needs its action below it: " in check('Network') and 'Network/Permit' in check('Network')
+    assert check('Network/Permit') is None and check('Authenticate') is None
+    assert "'TypeId' is not an EventDetail action element" in check('TypeId')
+
+
+def test_where_the_catalogue_cant_be_followed_the_sample_s_own_rules_are_kept():
+    draft = draft_mapping(FIREWALL, 'Firewall', 'FW', 'Eval', source_notes=GUESSED, detail_check=check)
+    rules = {r['name']: r for r in draft['mapping']['events']}
+    elements = {name: {f['path'].split('/')[2] for f in r['fields'] if f['path'].startswith('EventDetail/Network/')}
+                for name, r in rules.items()}
+    assert elements['traffic_permitted'] == {'Permit'} and elements['traffic_denied'] == {'Deny'}
+    assert not any(f['path'].startswith(('EventDetail/Allow', 'EventDetail/Deny')) for r in rules.values()
+                   for f in r['fields'])
+    assert any(n.startswith("Kept from the sample's values") and 'event_type=TRAFFIC' in n for n in draft['notes'])
+    # The catalogue's own events, completed from the sample's rule for the same records where the schema wants more.
+    login = {f['path']: f for f in rules['login_success']['fields']}
+    assert 'EventDetail/Authenticate/Action' in login and login['EventDetail/Authenticate/Outcome/Success']['value'] == 'true'
+    assert 'EventDetail/Update/After/Configuration/Type' in {f['path'] for f in rules['config_change']['fields']}
+    # Unknown is left for the user to agree when the XSLT is built, never agreed by the draft.
+    assert not any(r.get('allow_unknown') for r in rules.values())
+    checked = generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0')
+    assert not [p for p in checked['problems'] if 'vpn_down' not in p], checked['problems']
+
+
+def test_a_catalogue_saying_unknown_is_not_held_against_a_better_rule():
+    mapping = draft_mapping(FIREWALL, 'Firewall', 'FW', 'Eval')['mapping']
+    vpn = {'events': [GUESSED['events'][-1]]}
+    for rule in mapping['events']:
+        if rule.get('when'):
+            continue
+        rule['fields'] = [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                          {'path': 'EventDetail/Alert/Type', 'value': 'Network'}]
+    assert not [p for p in check_mapping(mapping, vpn) if 'documentation says Unknown' in p]

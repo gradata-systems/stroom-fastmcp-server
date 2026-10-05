@@ -151,7 +151,9 @@ class FieldNote(BaseModel):
 class EventNote(BaseModel):
     event: str = Field(description="Source event id or action, e.g. '4624' or 'CODE_TO_TOKEN'.")
     description: str
-    event_detail: str = Field('', description="The EventDetail action element, e.g. Authenticate.")
+    event_detail: str = Field('', description="The EventDetail action element, e.g. Authenticate, Update, Alert; for "
+                                              "a network event, Network and its action: Network/Permit (a connection "
+                                              "allowed), Network/Deny, Network/Connect, Network/Close.")
     type_id: str = ''
     field: str = Field('', description="The field whose value shows this event in a record, e.g. 'evt'; with value, the "
                                        "draft makes a rule for it and build_translation_xslt checks the mapping against it.")
@@ -197,10 +199,25 @@ async def record_source_notes(
     (build=) drafts from them (fields where the dictionary puts them, a rule per catalogued event that gives the field
     and value showing it), build_translation_xslt (build=) checks a mapping against the catalogue, and
     write_documentation lists the source fields with their meanings. Promotion puts them beside the feed.
+
+    Only for documentation the user gave (pasted, attached, or already in Stroom): with none, don't call this.
+    Notes guessed from the sample aren't documentation, and the draft would follow them over the sample's own values
+    (draft_translation_mapping reads those itself).
     """
-    from utils.sourcenotes import REFERENCE_INFIX, block
+    from utils.sourcenotes import REFERENCE_INFIX, block, catalogue_problems, detail_problem
     fields = [FieldNote.model_validate(f) if isinstance(f, dict) else f for f in fields]
     events = [EventNote.model_validate(e) if isinstance(e, dict) else e for e in events]
+    if events:
+        from tools.generation import event_schema
+        try:
+            schema = await event_schema(ctx, gateway_from(ctx).settings.event_logging_version)
+            check = lambda detail: detail_problem(schema, detail)   # noqa: E731
+        except Exception:   # the schema is unreadable: the events are still checked for twins
+            check = None
+        problems = catalogue_problems([e.model_dump() for e in events], check)
+        if problems:
+            raise ToolError("Nothing recorded; the event catalogue can't be drafted from as it is: "
+                            + '; '.join(problems) + ". Correct the events and call again.")
     documents = [ReferenceDocument.model_validate(d) if isinstance(d, dict) else d for d in documents]
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)

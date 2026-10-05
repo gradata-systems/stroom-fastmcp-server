@@ -14,6 +14,10 @@ The sample is a directory's logon log whose codes mean nothing on their own (evt
 2. A long vendor manual, as Markdown the user attached in their client: the agent keeps it in parts (one
    record_source_notes call each), then reads only the passage about an event (describe_document find=), every
    reply within a budget; and a status-code table the user had already made in Stroom, registered by uuid.
+3. As an agent did with a firewall sample and no documentation: an event catalogue guessed from the sample, naming
+   'Allow' and 'Deny' as action elements and two events with the same field and value, is refused; corrected, the
+   draft follows it. A hand-written XSLT writing every record as EventDetail/Unknown doesn't step clean; saved
+   from the draft's mapping, it does, with each connection as Network/Permit or Network/Deny.
 """
 import asyncio
 import json
@@ -201,6 +205,88 @@ async def large(ctx, stroom: StroomGateway, stamp: str) -> None:
     e2e.check(worst[0] <= REPLY_BUDGET, f"the largest reply is {worst[1]}'s, {worst[0]:,} characters, within {REPLY_BUDGET:,}")
 
 
+FIREWALL = ("timestamp,device,event_type,src_ip,src_port,dst_ip,dst_port,protocol,action,rule_id,username,message\n"
+            "2026-10-01T09:00:12+10:00,FW1,TRAFFIC,192.0.2.10,54321,198.51.100.20,443,TCP,ALLOW,1001,,HTTPS allowed\n"
+            "2026-10-01T09:01:05+10:00,FW1,TRAFFIC,203.0.113.45,49822,192.0.2.25,22,TCP,DENY,2003,,SSH blocked\n"
+            "2026-10-01T09:02:17+10:00,FW1,TRAFFIC,192.0.2.11,53002,198.51.100.53,53,UDP,ALLOW,1002,,DNS allowed\n"
+            "2026-10-01T09:10:00+10:00,FW1,ADMIN,192.0.2.5,50000,192.0.2.1,443,HTTPS,LOGIN_SUCCESS,0,admin,Logged in\n"
+            "2026-10-01T09:11:00+10:00,FW1,ADMIN,192.0.2.5,50000,192.0.2.1,443,HTTPS,LOGIN_FAILED,0,root,Bad password\n")
+GUESSED = [
+    {'event': 'TRAFFIC-ALLOW', 'description': 'Network traffic allowed', 'field': 'event_type', 'value': 'TRAFFIC',
+     'event_detail': 'Allow'},
+    {'event': 'TRAFFIC-DENY', 'description': 'Network traffic blocked', 'field': 'event_type', 'value': 'TRAFFIC',
+     'event_detail': 'Deny'},
+    {'event': 'LOGIN-SUCCESS', 'description': 'Administrator logged in', 'field': 'action', 'value': 'LOGIN_SUCCESS',
+     'event_detail': 'Authenticate', 'success': True},
+    {'event': 'LOGIN-FAILED', 'description': 'Administrator failed to log in', 'field': 'action',
+     'value': 'LOGIN_FAILED', 'event_detail': 'Authenticate', 'success': False},
+]
+# Every record as an empty Unknown, as the agent's XSLT wrote the TRAFFIC records.
+UNKNOWN_XSLT = """<?xml version="1.1" encoding="UTF-8"?>
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns="event-logging:3" xmlns:stroom="stroom"
+    xpath-default-namespace="records:2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.0">
+  <xsl:template match="records">
+    <Events xsi:schemaLocation="event-logging:3 file://event-logging-v3.5.2.xsd" Version="3.5.2">
+      <xsl:apply-templates/>
+    </Events>
+  </xsl:template>
+  <xsl:template match="record">
+    <Event>
+      <EventTime><TimeCreated><xsl:value-of select="stroom:format-date(data[@name='timestamp']/@value, 'yyyy-MM-dd''T''HH:mm:ssXXX')"/></TimeCreated></EventTime>
+      <EventSource><System><Name>FW</Name><Environment>Eval</Environment></System><Generator>hand</Generator>
+        <Device><HostName><xsl:value-of select="data[@name='device']/@value"/></HostName></Device></EventSource>
+      <EventDetail><TypeId><xsl:value-of select="data[@name='event_type']/@value"/></TypeId><Unknown/></EventDetail>
+    </Event>
+  </xsl:template>
+</xsl:stylesheet>
+"""
+
+
+async def guessed(ctx, stroom: StroomGateway, stamp: str) -> None:
+    build, feed = f'e2e-fwnotes-{stamp}', f'E2E-FWNOTES-{stamp}'
+    print('\n### 3. a catalogue guessed from the sample, and a hand-written XSLT writing Unknown')
+    await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+    raw = (await feeds.upload_sample(ctx, feed, FIREWALL))['stream_id']
+    try:
+        await feeds.record_source_notes(ctx, build, 'Firewall', 'A firewall.', [], GUESSED)
+        e2e.check(False, 'the guessed catalogue is refused')
+    except Exception as e:
+        said = str(e)
+        e2e.check("'Allow' is not an EventDetail action element" in said and 'Network/Permit' in said
+                  and 'TRAFFIC-ALLOW and TRAFFIC-DENY are both event_type=TRAFFIC' in said,
+                  f"the guessed catalogue is refused, naming Network/Permit and the twin events: {said[:160]}...")
+    fixed = [{**GUESSED[0], 'field': 'action', 'value': 'ALLOW', 'event_detail': 'Network/Permit'},
+             {**GUESSED[1], 'field': 'action', 'value': 'DENY', 'event_detail': 'Network/Deny'}] + GUESSED[2:]
+    await feeds.record_source_notes(ctx, build, 'Firewall', 'A firewall.', [], fixed)
+
+    await translation.create_text_converter(ctx, build, feed, *e2e.CASES['csv']['converter'])
+    hand = await translation.save_xslt(ctx, build, f'{feed}-Events', code=UNKNOWN_XSLT)
+    template = next(v['docRef'] for v in (await stroom.find_documents('Event Data (Text)', ['Pipeline'], 20))['values']
+                    if v['docRef']['name'] == 'Event Data (Text)')
+    pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
+                                template_uuid=template['uuid'])
+    stepped = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    first = (stepped['groups'] or [{}])[0]
+    e2e.check(stepped['verdict'] == 'blocking' and 'nobody agreed' in first.get('reason', '')
+              and first['examples'][0]['message'].startswith('5 of 5 records come out as EventDetail/Unknown'),
+              f"the hand-written XSLT's Unknown events block: {first.get('reason')}")
+
+    draft = await generation.draft_translation_mapping(ctx, stream_ids=[raw], source_name='Firewall',
+                                                       system_name='FW', environment='Eval', build=build)
+    elements = {r['name']: sorted({f['path'] for f in r['fields'] if f['path'].startswith('EventDetail/Network/')})[:1]
+                for r in draft['mapping']['events']}
+    print(f"    {elements}")
+    await e2e.agreed(generation.build_translation_xslt, ctx=ctx, mapping=draft['mapping'], stream_ids=[raw],
+                     build=build, name=f'{feed}-Events', uuid=hand['uuid'])
+    stepped = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    e2e.check(stepped['verdict'] == 'clean', f"saved from the mapping, it steps clean: "
+                                              f"{[(g['class'], g['reason']) for g in stepped['groups']]}")
+    allowed = (await stepping.step_pipeline(ctx, pipeline['uuid'], raw, 0))['elements']['translationFilter']['output']
+    denied = (await stepping.step_pipeline(ctx, pipeline['uuid'], raw, 1))['elements']['translationFilter']['output']
+    e2e.check('<Permit>' in allowed and '<Deny>' in denied and '<Unknown' not in allowed + denied,
+              'the allowed connection is Network/Permit, the blocked one Network/Deny')
+
+
 async def main():
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
@@ -213,6 +299,7 @@ async def main():
     try:
         await small(ctx, stroom, stamp)
         await large(ctx, stroom, stamp)
+        await guessed(ctx, stroom, stamp)
         print('\nALL PASSED')
     finally:
         await stroom.close()
