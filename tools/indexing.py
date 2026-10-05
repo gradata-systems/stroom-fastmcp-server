@@ -23,7 +23,7 @@ from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from, edited
 from utils.fielddoc import index_field_mapping_markdown
-from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField
+from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
@@ -118,6 +118,19 @@ async def get_field_conventions(
     through Stroom).
     """
     profiles = _conventions(ctx)
+    templates = None
+    if not name and not backend and not gateway_from(ctx).settings.default_convention:
+        # Seen: an agent asked without the backend, got the profiles, then looked the backend up and asked again. When
+        # every indexing template has the same backend, that's the index's backend.
+        try:
+            from tools.templates import find_pipeline_templates
+            found = (await find_pipeline_templates(ctx, 'indexing')).get('candidates') or []
+            backends = {c.get('backend') for c in found if c.get('backend')}
+            if len(backends) == 1:
+                backend = backends.pop()
+                templates = [{k: c.get(k) for k in ('uuid', 'name', 'path', 'backend')} for c in found]
+        except Exception:   # the lookup is a shortcut; without it, the agent is told to find the backend itself
+            pass
     if not name and backend == 'elasticsearch':
         # Field names, types and structure come from what the environment already indexes: the user's example.
         found = await gateway_from(ctx).find_documents('*', ['ElasticIndex'], 60)
@@ -144,6 +157,8 @@ async def get_field_conventions(
                             'how': f"Only when the user has no example: draft_index_mapping convention={profile_name} "
                                    f"without_example=true, which the user confirms in a form."})
         return {'status': 'needs_guidance', 'options': options,
+                **({'backend': 'elasticsearch (every indexing template is an Elasticsearch one)',
+                    'indexing_templates': templates} if templates else {}),
                 'hint': f"Ask the user which, with exactly these {len(options)} choices, in this order and with these "
                         f"labels ({'; '.join(o['choice'] for o in options)}), and recommend none: it is their call, "
                         f"not yours. Draft nothing until they answer; if they choose the index template, wait for "
@@ -152,11 +167,13 @@ async def get_field_conventions(
     if not name:
         # Without the backend, an agent took this for the whole choice and went for a convention, though the user
         # had their own index template (seen in VS Code).
-        first = ("" if backend else
+        first = (f"The backend is {backend}: every indexing template is a {backend} one. " if templates else
+                 "" if backend else
                  "Which backend first (find_pipeline_templates stage=indexing says): for Elasticsearch, call again with "
                  "backend=elasticsearch, whose choices start with the user's own index template; these profiles are "
                  "for Lucene, or for Elasticsearch only when the user has no template. ")
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
+                **({'indexing_templates': templates} if templates else {}),
                 'hint': first + "Ask the user which convention to use, which existing index docs to follow, "
                                 "or how fields should be named. Do not assume one."}
     if name not in profiles:
@@ -289,9 +306,11 @@ async def draft_index_mapping(
               PlannedField(name='EventId', type='id', source='@EventId')]
     unused = []
     for path, spec in (profile.get('field_map') or {}).items():
-        if populated.get(path):
+        # A name is planned once, from the first of its paths the sample populates (the client's address, else the
+        # source address of whichever Network action the event records).
+        if population_of(path, populated) and not any(f.name == spec['name'] for f in fields):
             fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
-        else:
+        elif not population_of(path, populated):
             unused.append(path)
     example_notes, subobjects = [], True
     if example_template:
@@ -339,8 +358,11 @@ async def draft_index_mapping(
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
                      subobjects=subobjects, shared=list(shared))
     rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
-    unmapped = sorted(p for p in populated if not any(p == f.source for f in fields))
-    return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered, 'xslt': plan.xslt(),
+    # Network paths once, whichever action: one field for a source address, not one per Permit and Deny.
+    unmapped = sorted(dict.fromkeys(any_action(p) for p in populated
+                                    if populated[p] and not any(source_matches(f.source, p) for f in fields)))
+    # No XSLT here: save_xslt index_plan= generates it, and half the reply was code the agent never reads.
+    return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered,
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
             **({'from_example': example_notes} if example_template or shared else {}),
@@ -1133,8 +1155,11 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
         return {'status': 'needs_review', 'dev_tools': dev_tools,
                 'hint': f"Show the user this index template before anything else: dev_tools in the chat as a json code "
                         f"block, exactly as it is (a form can't show it readably), with the notes on what came from "
-                        f"where. Then call {action} again with the same arguments plus reviewed=true: they confirm it "
-                        f"in a short form, or tell you what to change."}
+                        f"where, and say it is not to go on the cluster until they've confirmed it. Then, in the same "
+                        f"turn, without waiting for a reply, call {action} again with the same arguments (example_template "
+                        f"and component_templates included) plus reviewed=true: the form that opens is where they "
+                        f"confirm it or say what to change. Seen: an agent ended its turn after showing it, and the user "
+                        f"committed the template before it was agreed."}
     gate = await consent_from(ctx).require(
         ctx, 'confirmation', action, f"Use Elasticsearch index template '{name}' for index "
         f"'{destination['index name']}' (cluster {destination['cluster']}), as shown in the chat",

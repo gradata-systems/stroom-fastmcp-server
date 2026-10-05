@@ -268,7 +268,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     plan = FieldPlan.model_validate(draft['plan'])
     e2e.check(any(f.name == 'stroom.feed' and f.type == 'keyword' for f in plan.fields) and plan.required() == [],
              "stroom.feed planned from the shared XSLT's own text")
-    e2e.check('<xsl:call-template name="stroomFields" />' in draft['xslt'] and 'key="stroom"' not in draft['xslt'],
+    e2e.check('<xsl:call-template name="stroomFields" />' in plan.xslt() and 'key="stroom"' not in plan.xslt(),
              'the indexing XSLT calls it instead of writing the field')
     xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
     indexer = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Indexing',

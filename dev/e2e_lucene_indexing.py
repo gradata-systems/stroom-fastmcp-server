@@ -44,7 +44,7 @@ async def index_stage(ctx, csv: dict, stamp: str):
                          time_field=plan.time_field)
     added = await indexing.set_index_fields(ctx, index['uuid'], plan)
     check(len(added['added']) == len(plan.fields), f"index fields added: {added['added']}")
-    xslt = await translation.create_xslt(ctx, csv['build'], f'{index_name}-XSLT', draft['xslt'])
+    xslt = await translation.create_xslt(ctx, csv['build'], f'{index_name}-XSLT', plan.xslt())
     pipeline = await agreed(indexing.create_indexing_pipeline, ctx=ctx, build=csv['build'], name=f'{index_name} - Indexing',
                             template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_uuid=index['uuid'])
     sample = await stepping.step_sample(ctx, pipeline['uuid'], events)
@@ -98,7 +98,7 @@ async def version_two(ctx, csv: dict, v1: dict, stamp: str):
     index = await agreed(indexing.create_index_doc, ctx=ctx, build=csv['build'], backend='lucene', name=name,
                          time_field=plan.time_field)
     await indexing.set_index_fields(ctx, index['uuid'], plan)
-    xslt = await translation.create_xslt(ctx, csv['build'], f'{name}-XSLT', draft['xslt'])
+    xslt = await translation.create_xslt(ctx, csv['build'], f'{name}-XSLT', plan.xslt())
     copy = await agreed(pipeline_writes.copy_pipeline, ctx=ctx, build=csv['build'], source_uuid=v1['pipeline']['uuid'],
                         new_name=f'{name} - Indexing', rename={'V1': 'V2'},
                         set_properties=[PropertyValue(element='xsltFilter', name='xslt', doc_uuid=xslt['uuid'], doc_type='XSLT'),

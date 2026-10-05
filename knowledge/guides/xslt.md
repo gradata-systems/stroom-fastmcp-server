@@ -148,7 +148,9 @@ with `Unknown`.
 A field no element of the schema means (a rule id, a byte count, a vendor's key) is carried as `Data` (a path ending
 `/Data`, with `data_name`) on the element it describes: `destination_key` under
 `EventDetail/Network/Connect/Destination/Data`, a source zone under `.../Source/Data`, anything else under the action
-element itself. Never invent an element for it, and never leave the event `Unknown` because of it. A build's
+element itself. Never invent an element for it, and never leave the event `Unknown` because of it. A rule's
+`data` list is short for those: `"data": ["rule_id", "bytes_sent"]` carries each as Data of the rule's action
+element, named after the field. Keep it when you change the element; the drafts use it. A build's
 translation XSLT written by hand (`save_xslt`) whose records come out as `Unknown` doesn't step clean: only
 `build_translation_xslt` can agree Unknown with the user.
 

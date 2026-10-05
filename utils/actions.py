@@ -3,8 +3,9 @@
 An agent left with EventDetail/Unknown placeholders and a schema it found awkward kept giving up: it marked
 firewall traffic and administrator logons Unknown and asked the user to agree. Some kinds are plain from their
 values: connections allowed or denied between addresses and ports are Network/Permit and Network/Deny; logons
-and logoffs are Authenticate; configuration changes are Update. For those, the draft writes the rules, and a
-rule that keeps them Unknown is given the rules to use instead.
+and logoffs are Authenticate; configuration changes are Update; a service started or stopped is Process; a
+device's health and state (CPU over a threshold, a VPN tunnel down) is Alert. For those, the draft writes the
+rules, and a rule that keeps them Unknown is given the rules to use instead.
 """
 import re
 from typing import Any
@@ -18,6 +19,16 @@ LOGOFF = re.compile(r'(logoff|logout|signout|sign_out)', re.I)
 FAILED = re.compile(r'(fail|denied|invalid|bad|reject|refused)', re.I)
 SUCCEEDED = re.compile(r'(success|succeeded|ok\b|accepted|allowed)', re.I)
 CONFIG = re.compile(r'(config|setting|policy)', re.I)
+PROCESS = re.compile(r'^(service_?)?(start(ed|ing|up)?|stop(ped|ping)?|shut_?down|restart(ed)?|boot(ed)?|reboot(ed)?)$', re.I)
+STOPPED = re.compile(r'(stop|shut)', re.I)
+ALERT = re.compile(r'(cpu|memory|disk|threshold|utili[sz]|overload|alarm|alert|tunnel|vpn|link|interface|exceed|'
+                   r'(^|_)(down|up|fail(ed|ure)?|error|critical|high|low)($|_))', re.I)
+NETWORK_ALERT = re.compile(r'(tunnel|vpn|link|interface|bgp|ospf|failover)', re.I)
+ERROR_ALERT = re.compile(r'(fail|error|critical)', re.I)
+SEVERITY = re.compile(r'^(severity|sev|level|log_?level|priority|pri)$', re.I)
+SEVERITIES = {'Info': r'^(info(rmational)?|notice|debug|low)$', 'Minor': r'^(warn(ing)?|minor|medium)$',
+              'Major': r'^(err(or)?|major|high)$', 'Critical': r'^(crit(ical)?|alert|emerg(ency)?|fatal|severe)$'}
+
 SPLITTER = re.compile(r'^(action|act|result|outcome|operation|op|activity|subtype|sub_?type|status|event_?action|verdict|disposition)$', re.I)
 FIELDS = {
     'src_ip': r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|source_?address|clientip)$',
@@ -60,7 +71,8 @@ def _splitter(records: list[dict[str, str]], names: list[str], skip: set[str]) -
             continue
         values = _values(records, name)
         if 1 <= len(values) <= MAX_VALUES and any(PERMIT.match(v) or DENY.match(v) or CONNECT.match(v) or CLOSE.match(v)
-                                                   or AUTH.search(v) or CONFIG.search(v) for v in values):
+                                                   or AUTH.search(v) or CONFIG.search(v) or PROCESS.match(v)
+                                                   or ALERT.search(v) for v in values):
             return name
     return None
 
@@ -110,7 +122,40 @@ def action_rules(records: list[Any], names: list[str], base: list[dict[str, Any]
     rule('config_change', changes, [{'path': 'EventDetail/Update/After/Configuration/Type', 'field': split},
                                     *([{'path': 'EventDetail/Update/After/Configuration/Description',
                                         'field': description}] if description else [])])
+    processes = [v for v in values if PROCESS.match(v) and v not in used]
+    rule('service', processes, [
+        {'path': 'EventDetail/Process/Action', 'field': split,
+         'map': {v: 'Shutdown' if STOPPED.search(v) else 'Startup' for v in processes}},
+        {'path': 'EventDetail/Process/Type', 'value': 'Service'},
+        {'path': 'EventDetail/Process/Command', 'field': description or split}])
+    alerts = [v for v in values if ALERT.search(v) and v not in used]
+    rule('alert', alerts, [
+        {'path': 'EventDetail/Alert/Type', 'field': split,
+         'map': {v: 'Network' if NETWORK_ALERT.search(v) else 'Error' if ERROR_ALERT.search(v) else 'Other'
+                 for v in alerts}},
+        *severity_fields(records, names)])
     return rules, [v for v in values if v not in used], split
+
+
+def severity_fields(records: list[dict[str, str]], names: list[str]) -> list[dict[str, Any]]:
+    """Alert/Severity from the record's severity field, when every value it holds is one the schema has a word for."""
+    field = next((n for n in names if SEVERITY.match(n.rsplit('.', 1)[-1])), None)
+    if not field:
+        return []
+    seen = _values(records, field)
+    mapped = {}
+    for value in seen:
+        word = next((w for w, pattern in SEVERITIES.items() if re.match(pattern, value, re.I)), None)
+        if word is None:
+            return []
+        mapped[value] = word
+    # The other usual words too, written as the sample writes them, so a CRITICAL the sample lacks still validates.
+    case = str.upper if all(v.isupper() for v in seen) else str.lower if all(v.islower() for v in seen) else None
+    if case:
+        for word in ('debug', 'info', 'notice', 'warning', 'warn', 'error', 'err', 'critical', 'crit', 'alert',
+                     'emergency', 'fatal'):
+            mapped.setdefault(case(word), next(w for w, pattern in SEVERITIES.items() if re.match(pattern, word, re.I)))
+    return [{'path': 'EventDetail/Alert/Severity', 'field': field, 'map': mapped}] if mapped else []
 
 
 def network_fields(side: str, net: dict[str, str], records: list[dict[str, str]]) -> list[dict[str, Any]]:

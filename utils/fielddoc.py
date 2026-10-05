@@ -12,7 +12,8 @@ from typing import Any
 from lxml import etree
 
 from utils.eventschema import EventSchema
-from utils.xsltgen import (RULE_MARK, Condition, EventRule, FieldMapping, TranslationMapping, literal)  # noqa: F401
+from utils.xsltgen import (RULE_MARK, Condition, EventRule, FieldMapping, TranslationMapping, kept_unknown,  # noqa: F401
+                           literal)
 
 EVT = 'event-logging:3'
 VALUES_SHOWN = 3
@@ -179,7 +180,7 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
     if mapping.for_each:
         lines += [f'Each record holds several events: one per `{mapping.for_each}` item. Sources marked "of the record" '
                   f'read the record round the items.', '']
-    kept = [r for r in mapping.events if r.allow_unknown]
+    kept = kept_unknown(mapping)
     if kept:
         lines += ['### Kept as Unknown', '']
         lines += [f"- `{r.name}` ({' and '.join(condition_text(c) for c in r.when) or 'records no other rule matches'}): "
@@ -361,6 +362,13 @@ def schema_description(schema: EventSchema | None, source: str) -> str:
     if '/@' in path:
         path, attribute = path.rsplit('/@', 1)
     said = ''
+    if schema is not None and '*' in path:
+        # Any Network action: what the schema says of the element under the first action it takes (Bind).
+        for action in ('Permit', 'Deny', 'Connect', 'Open', 'Close', 'Bind', 'Send', 'Receive', 'Listen'):
+            try:
+                return schema.describe(schema.resolve(path.replace('*', action, 1)))
+            except (ValueError, IndexError, AttributeError):
+                continue
     if schema is not None:
         try:
             said = schema.describe(schema.resolve(path))
@@ -559,7 +567,8 @@ def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None 
         per_document = [d.get(f.name, []) for d in documents] if documents is not None else None
         cells = [f'`{f.name}`', field_description(what, per_document), shown_type(plan, f.type), f"shared template `{shared.template}` of `{shared.href}`" if shared else f'`{f.source}`']
         if sampled:
-            pct = population.get(f.source)
+            from utils.fieldplan import population_of
+            pct = population_of(f.source, population)
             cells.append('always' if f.source.startswith('@') or shared else f'{pct:g}% of events' if pct is not None
                          else 'not in the sample')
         if documents is not None:

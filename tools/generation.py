@@ -25,7 +25,12 @@ from utils.xpathcheck import check_xpaths
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
 from utils.fielddoc import field_mapping_markdown, sampled_events
-from utils.xsltgen import TranslationMapping, generate
+from utils.xsltgen import TranslationMapping, compact_rules, generate, grouped, kept_unknown
+
+
+def _first_sentence(text: str, limit: int = 220) -> str:
+    first = re.split(r'(?<=\.) ', text, maxsplit=1)[0]
+    return first if len(first) <= limit else first[:limit - 20].rsplit(' ', 1)[0] + ' …'
 
 
 async def event_schema(ctx: Context, version: str) -> EventSchema:
@@ -185,7 +190,7 @@ async def build_translation_xslt(
                                          "streams before write_documentation, for the values the events get.")
     saved = None
     if result['ok'] and (build or uuid):
-        kept = [r for r in mapping.events if r.allow_unknown]
+        kept = kept_unknown(mapping)
         if kept:
             # Unknown says what happened is not known: the user agrees to that per rule, seeing what its records hold
             # (a form when the client has them, so the model cannot agree for them).
@@ -240,6 +245,7 @@ async def build_translation_xslt(
     if instructions['instructions']:
         result['standing_instructions'] = instructions['instructions']
         result['hint'] += " Check the mapping against standing_instructions (the most specific last)."
+    result['warnings'] = grouped(result.get('warnings') or [])
     return result
 
 
@@ -398,14 +404,19 @@ async def draft_translation_mapping(
         except Exception:   # the notes are followed unchecked rather than not at all
             pass
     result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check)
+    result['mapping'] = compact_rules(result['mapping'])
     try:
         checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)
-        result['schema_check'] = {'ok': checked['ok'], 'problems': checked['problems'], 'warnings': checked['warnings'][:6]}
+        # Each problem's first sentence: build_translation_xslt gives them whole, and the draft's notes say the rest.
+        result['schema_check'] = {'ok': checked['ok'],
+                                  'problems': [_first_sentence(p) for p in grouped(checked['problems'])],
+                                  'warnings': grouped(checked['warnings'])[:6]}
     except ToolError as e:
         result['schema_check'] = {'ok': None, 'note': str(e)}
     result['hint'] = ("Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
                       "time zone), then build_translation_xslt(mapping=this mapping, stream_ids=the sample streams (or sample=the "
-                      "texts), splitter=this splitter, build and name to save it).")
+                      "texts), splitter=this splitter, build and name to save it). A rule's data lists the fields it carries as Data "
+                      "of its action element; keep it when you change the element.")
     return result
 
 

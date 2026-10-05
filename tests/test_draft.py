@@ -52,7 +52,8 @@ def test_the_draft_is_a_valid_mapping_with_the_obvious_homes_and_a_rule_per_kind
     assert {'path': 'EventDetail/Authenticate/User/Id', 'field': 'username'} in login['fields']
     assert {'path': 'EventDetail/Network/Permit/Data', 'data_name': 'rule_id', 'field': 'rule_id'} in m['events'][0]['fields']
     assert any(n.startswith("Drafted from the sample's values") and 'Network/Permit for action ALLOW' in n for n in draft['notes'])
-    assert any('replace each EventDetail/Unknown' in n for n in draft['notes']) and any('Environment' in n for n in draft['notes'])
+    # Every kind has its action element: the note says so, rather than asking for Unknown placeholders to be replaced.
+    assert any('each with its action element' in n for n in draft['notes']) and any('Environment' in n for n in draft['notes'])
     # As drafted it generates (no kind is left Unknown); it validates against the schema, and the events come out right.
     assert generate(TranslationMapping.model_validate(m), SCHEMA, '4.1.0')['ok']
     result = generate(TranslationMapping.model_validate({**decided(m), 'unmatched': 'skip'}), SCHEMA, '4.1.0')
@@ -119,7 +120,7 @@ def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_ele
     draft = draft_mapping({'fw.csv': FIREWALL_CSV}, 'Firewall', 'FW', 'Prod')
     rules = {r['name']: r for r in draft['mapping']['events']}
     assert list(rules) == ['admin_logon', 'admin_logoff', 'admin_config_change', 'traffic_permitted', 'traffic_denied',
-                           'system_config_change', 'system', 'other']     # kinds most common first, each action before
+                           'system_config_change', 'system_service', 'other']     # kinds most common first
     paths = lambda name: {f['path'] for f in rules[name]['fields']}  # noqa: E731
     assert {'EventDetail/Network/Permit/Source/Device/IPAddress', 'EventDetail/Network/Permit/Destination/Port'} <= paths('traffic_permitted')
     assert 'EventDetail/Network/Deny/Source/Port' in paths('traffic_denied')
@@ -129,9 +130,11 @@ def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_ele
     assert logon['map'] == {'LOGIN_SUCCESS': 'true', 'LOGIN_FAILED': 'false'}
     assert {'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff'} in rules['admin_logoff']['fields']
     assert 'EventDetail/Update/After/Configuration/Type' in paths('admin_config_change')
-    # START is left to the system rule, the only Unknown placeholder; the rest validates as drafted.
-    problems = generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA_352, '3.5.2')['problems']
-    assert len(problems) == 1 and problems[0].startswith('[system] writes EventDetail/Unknown'), problems
+    # The logging service's START is a service starting (Process); no kind is left Unknown, and all of it validates.
+    service = {f['path']: f for f in rules['system_service']['fields']}
+    assert service['EventDetail/Process/Action']['map'] == {'START': 'Startup'}
+    assert service['EventDetail/Process/Type']['value'] == 'Service'
+    assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA_352, '3.5.2')['problems'] == []
 
     # The agent's give-up: each kind Unknown with a reason. Traffic and admin are refused with the rules to use;
     # system's records show no plain action, so it goes to the user, with the suggestion for CONFIG_SAVED.
@@ -145,7 +148,8 @@ def test_a_firewalls_traffic_and_admin_records_are_drafted_with_their_action_ele
     assert "can't be kept as Unknown: 2 of its 2 sample records" in problems[0]
     offered = json.loads(problems[0][problems[0].index('[{'):])
     assert generate(TranslationMapping.model_validate({**draft['mapping'], 'events': offered}), SCHEMA_352, '3.5.2')['ok']
-    assert [k['rule'] for k in kept] == ['system'] and 'Update for action CONFIG_SAVED' in kept[0]['suggested']
+    assert [k['rule'] for k in kept] == ['system'] and kept[0]['suggested'].startswith(
+        'Update for action CONFIG_SAVED; Process for action START')
 
 
 def test_fields_with_no_element_are_drafted_as_data_on_the_side_they_name():
@@ -169,3 +173,25 @@ def test_fields_with_no_element_are_drafted_as_data_on_the_side_they_name():
     assert {'path': 'EventSource/Device/HostName', 'field': 'sensor'} in draft['mapping']['common']
     # No kind is Unknown, and it generates as drafted.
     assert generate(TranslationMapping.model_validate(draft['mapping']), SCHEMA, '4.1.0')['ok']
+
+
+def test_health_and_state_records_are_drafted_as_alerts():
+    # The firewall sample of a VS Code run: CPU and VPN tunnel records were left Unknown by the draft; the agent made
+    # them Alert itself, taking two rounds over Alert/Type (it tried 'Firewall').
+    sample = ("timestamp,device,event_type,severity,src_ip,dst_ip,action,message\n"
+              "2026-10-01T09:00:00Z,FW1,SYSTEM,WARNING,,,HIGH_CPU,CPU over 85 percent\n"
+              "2026-10-01T09:01:00Z,FW1,SYSTEM,ERROR,,,VPN_TUNNEL_DOWN,Tunnel branch-01 down\n"
+              "2026-10-01T09:02:00Z,FW1,SYSTEM,INFO,,,VPN_TUNNEL_UP,Tunnel branch-01 restored\n"
+              "2026-10-01T09:03:00Z,FW1,SYSTEM,INFO,,,START,Logging service started\n")
+    rules = {r['name']: r for r in draft_mapping({'fw.csv': sample}, 'FW', 'FW', 'Prod')['mapping']['events']}
+    alert = {f['path']: f for f in rules['system_alert']['fields']}
+    assert rules['system_alert']['when'][-1] == {'field': 'action', 'one_of': ['HIGH_CPU', 'VPN_TUNNEL_DOWN', 'VPN_TUNNEL_UP']}
+    assert alert['EventDetail/Alert/Type']['map'] == {'HIGH_CPU': 'Other', 'VPN_TUNNEL_DOWN': 'Network',
+                                                      'VPN_TUNNEL_UP': 'Network'}
+    severity = alert['EventDetail/Alert/Severity']['map']
+    assert (severity['WARNING'], severity['ERROR'], severity['INFO']) == ('Minor', 'Major', 'Info')
+    assert severity['CRITICAL'] == 'Critical'       # a word the sample lacks, written as the sample writes them
+    assert 'system_service' in rules and not any(r.get('when') and any(
+        f['path'].startswith('EventDetail/Unknown') for f in r['fields']) for r in rules.values())
+    mapping = TranslationMapping.model_validate(draft_mapping({'fw.csv': sample}, 'FW', 'FW', 'Prod')['mapping'])
+    assert generate(mapping, SCHEMA_352, '3.5.2')['problems'] == []

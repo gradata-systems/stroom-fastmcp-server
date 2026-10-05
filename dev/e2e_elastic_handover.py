@@ -534,7 +534,7 @@ async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: s
         e2e.check(names.get('EventSource/User/Id') == 'user.id' and names.get('EventSource/User/Name') == 'user.name'
                  and names.get('EventSource/User/EmailAddress') == 'user.emailAddress',
                  f"the example's names: {sorted(names.values())}")
-        e2e.check('<map key="user">' in draft['xslt'] and 'key="user.id"' not in draft['xslt'],
+        e2e.check('<map key="user">' in plan.xslt() and 'key="user.id"' not in plan.xslt(),
                  'the indexing XSLT writes the user as an object')
         xslt = await translation.save_xslt(ctx, people['build'], f'{index}-XSLT', index_plan=plan)
         pipeline = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=people['build'],
@@ -589,7 +589,7 @@ async def live_structure(ctx, stroom: StroomGateway, es_template: dict, stamp: s
         draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', flat_index, 'ecs', events,
                                                    example_template=flat_example)
         flat = FieldPlan.model_validate(draft['plan'])
-        e2e.check(flat.subobjects is False and '<map key="user">' in draft['xslt'],
+        e2e.check(flat.subobjects is False and '<map key="user">' in flat.xslt(),
                  'the plan records subobjects: false; documents are still written nested')
         xslt = await translation.save_xslt(ctx, people['build'], f'{flat_index}-XSLT', index_plan=flat)
         flat_pipeline = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=people['build'],

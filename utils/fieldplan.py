@@ -9,11 +9,34 @@ copied with its own field names and Elasticsearch maps them dynamically, so noth
 Only StreamId, EventId and @timestamp are mapped explicitly.
 """
 import json
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from utils.xsltgen import SharedTemplate
+
+
+def source_matches(source: str, path: str) -> bool:
+    """Whether a plan source names this event path: '*' stands for one element, as in the XPath it is
+    (EventDetail/Network/*/Source/Device/IPAddress names the source address of a Permit, a Deny, a Connect...)."""
+    if '*' not in source:
+        return source == path
+    want, have = source.strip('/').split('/'), path.strip('/').split('/')
+    return len(want) == len(have) and all(w == '*' or w == h for w, h in zip(want, have))
+
+
+def population_of(source: str, population: dict[str, float]) -> float | None:
+    """How often a source is populated: a wildcard's paths summed (an event has one Network action)."""
+    if '*' not in source:
+        return population.get(source)
+    hits = [v for p, v in population.items() if source_matches(source, p)]
+    return min(100.0, sum(hits)) if hits else None
+
+
+def any_action(path: str) -> str:
+    """A Network path with its action as '*': the field is the same whichever action the event records."""
+    return re.sub(r'^EventDetail/Network/[^/]+/(?=.)', 'EventDetail/Network/*/', path)
 
 LogicalType = Literal['id', 'keyword', 'text', 'date', 'long', 'double', 'boolean', 'ip']
 Backend = Literal['lucene', 'elasticsearch']

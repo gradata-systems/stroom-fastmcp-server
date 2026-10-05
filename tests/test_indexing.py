@@ -458,3 +458,23 @@ async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_fo
     # What Stroom can't give: the template itself, which the user may still paste.
     assert 'component templates' in gate['details']['not readable through Stroom']
     assert 'paste its index template' in gate['details']['or']
+
+async def test_without_a_backend_the_only_indexing_backend_is_taken():
+    # Seen: asked without the backend, the agent got the profiles, looked the backend up and asked again.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tools import indexing, templates
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(default_convention=None))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    elastic = {'candidates': [{'uuid': 't1', 'name': 'Events to Elasticsearch', 'path': 'System', 'backend': 'elasticsearch'}]}
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {'description': 'ECS'}}), \
+            patch.object(templates, 'find_pipeline_templates', AsyncMock(return_value=elastic)):
+        asked = await indexing.get_field_conventions(ctx)
+    assert asked['options'][0]['choice'] == 'From an index template' and asked['backend'].startswith('elasticsearch')
+    assert asked['indexing_templates'][0]['uuid'] == 't1'
+    both = {'candidates': elastic['candidates'] + [{'uuid': 't2', 'name': 'Indexing', 'backend': 'lucene'}]}
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {'description': 'ECS'}}), \
+            patch.object(templates, 'find_pipeline_templates', AsyncMock(return_value=both)):
+        asked = await indexing.get_field_conventions(ctx)
+    assert 'profiles' in asked and asked['hint'].startswith('Which backend first')

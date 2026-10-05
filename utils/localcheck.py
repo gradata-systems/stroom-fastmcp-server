@@ -191,9 +191,8 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
     rule for the rest is refused here); a rule with it is reported for the user to confirm."""
     if mapping.for_each or not records:
         return [], []
-    writes_unknown = {r.name: r for r in mapping.events
-                      if any(f.path.strip('/').startswith('EventDetail/Unknown') for f in r.fields)
-                      or (not r.drop and any(f.path.strip('/').startswith('EventDetail/Unknown') for f in mapping.common))}
+    from utils.xsltgen import writes_unknown as unknown_in
+    writes_unknown = {r.name: r for r in mapping.events if unknown_in(mapping, r)}
     caught: dict[str, list[Any]] = {}
     for record in records:
         name = rule_of(mapping, record)

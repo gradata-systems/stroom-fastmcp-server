@@ -289,6 +289,12 @@ def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str
             continue
         hit = _match(field['source'], {k: v for k, v in example.items() if k not in used},
                      convention_names.get(field['source'], set()))
+        last = (_segments(field['source']) or [''])[-1]
+        if hit and _squash(hit) == _squash(last) and sum(
+                1 for f in fields if (_segments(f['source']) or [''])[-1] == last) > 1:
+            # The example's IpAddress names an address, but which? Seen: it took the source's of two, and the
+            # destination's was named apart. Both are named in the example's style instead.
+            hit = None
         if hit:
             new = hit
         elif style and not fits(name):
@@ -307,9 +313,11 @@ def names_from_example(fields: list[dict[str, str]], example: dict[str, dict[str
             renamed.append(f"{name} -> {hit}")
         used.add(new)
         out.append({**field, 'name': new})
+    from utils.fieldplan import any_action, source_matches
     sources = {f['source'] for f in out}
-    for path in populated:
-        if path in sources or path.startswith('@'):
+    # Network paths once, whichever action: the example's field takes every Permit's and Deny's address, not one.
+    for path in dict.fromkeys(any_action(p) for p in populated):
+        if path.startswith('@') or any(source_matches(s, path) or s == path for s in sources):
             continue
         hit = _match(path, {k: v for k, v in example.items() if k not in used}, convention_names.get(path, set()))
         if hit:

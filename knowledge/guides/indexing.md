@@ -41,6 +41,11 @@ drop): only `StreamId`,
 `EventId` and `@timestamp` are mapped explicitly, a JSON object held in a string is also indexed parsed as
 `<field>_json`, and the template is permissive (strings as keywords, a field limit, malformed values ignored).
 
+A network event records its connection under its action (`Network/Permit`, `Network/Deny`, ...): index the
+address, port and protocol once whichever action it is, with `*` for the action in the source
+(`EventDetail/Network/*/Source/Device/IPAddress`), never a field per action (`SourceIp.Permit`). The plan does this,
+and lists the paths it leaves out the same way.
+
 Events the index must not hold (heartbeats, a monitoring account) are left out at this step: give
 `draft_index_mapping` `drop_when` XPath tests on an Event, e.g. `"EventDetail/TypeId = 'Heartbeat'"`; the drafted
 XSLT applies templates only to the events none of them match.

@@ -18,7 +18,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from lxml import etree
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -160,6 +160,19 @@ class Condition(BaseModel):
         return self
 
 
+_NOT_ACTION = ('TypeId', 'Description', 'Classification', 'Purpose')
+
+
+def action_home(paths: list[str]) -> str | None:
+    """The action element a rule's paths write, where its Data goes: 'EventDetail/Authenticate', or
+    'EventDetail/Network/Permit' (Network's action is an element of its own)."""
+    for path in paths:
+        parts = path.strip('/').split('/')
+        if len(parts) >= 3 and parts[0] == 'EventDetail' and parts[1] not in _NOT_ACTION:
+            return '/'.join(parts[:3] if parts[1] == 'Network' and len(parts) >= 4 else parts[:2])
+    return None
+
+
 class EventRule(BaseModel):
     name: str = Field(description="Short name for this kind of event, e.g. 'logon'.")
     when: list[Condition] = Field(default_factory=list, description="All must hold. Empty: every record "
@@ -173,12 +186,71 @@ class EventRule(BaseModel):
         "user's words. It is kept in the XSLT and the documentation, and the user confirms it when the XSLT is saved. "
         "Without it, a rule with conditions that writes Unknown is a problem, as is the rule for the rest when it "
         "catches sample records."))
+    data: list[str] = Field(default_factory=list, description=(
+        "Input fields carried as Data of this rule's action element, each named after its field, e.g. ['rule_id', "
+        "'bytes_sent']: short for one '<action element>/Data' entry with data_name per field. The action element is "
+        "the one the rule's fields write (EventDetail/Network/Permit, EventDetail/Authenticate, ...)."))
 
     @field_validator('allow_unknown', mode='before')
     @classmethod
     def _reason(cls, value):
         # allow_unknown: true has no reason, which the generator reports; false is no allowance.
         return '' if value is True else None if value is False else value
+
+    @model_validator(mode='after')
+    def _data_entries(self):
+        # Expanded here, so every reader of the mapping (generator, checks, documentation) sees ordinary Data entries.
+        if self.data:
+            home = action_home([f.path for f in self.fields])
+            if home is None:
+                raise ValueError(f"[{self.name}] data needs the rule's action element: map one of its fields (e.g. "
+                                 f"EventDetail/Alert/Type) first, or give each as a '.../Data' entry with data_name")
+            have = {(f.path.strip('/'), f.data_name) for f in self.fields}
+            self.fields = self.fields + [FieldMapping(path=f'{home}/Data', data_name=n, field=n) for n in self.data
+                                         if (f'{home}/Data', n) not in have]
+            self.data = []
+        return self
+
+
+def compact_rules(mapping: dict[str, Any]) -> dict[str, Any]:
+    """The mapping with each rule's plain Data entries (a field as Data of its action element, named after itself)
+    folded into its data list: the same mapping, a third smaller, so a draft fits the client's reply inline."""
+    out = dict(mapping, events=[])
+    for rule in mapping.get('events') or []:
+        home = action_home([f.get('path') or '' for f in rule.get('fields') or []
+                            if not (f.get('path') or '').endswith('/Data')]) or ''
+        plain = [f for f in rule.get('fields') or [] if home and not home.endswith('/Unknown')
+                 and f.get('path') == f'{home}/Data' and f.get('field') and f.get('data_name') == f['field']
+                 and set(f) <= {'path', 'field', 'data_name'}]
+        if plain:
+            rule = dict(rule, fields=[f for f in rule['fields'] if f not in plain],
+                        data=list(rule.get('data') or []) + [f['field'] for f in plain])
+        out['events'].append(rule)
+    return out
+
+
+_RULE = re.compile(r'^\[([^\]]+)\] (.*)$', re.S)
+_LIST = re.compile(r"\[('[^\]]*')\]")
+
+
+def grouped(messages: list[str]) -> list[str]:
+    """Messages the same but for their rule (and the list they name) as one, '[rule1, rule2] ...' with the lists
+    merged: six rules' 'required [...] are left out' warnings were a quarter of a draft's reply."""
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for message in messages:
+        found = _RULE.match(message)
+        rule, body = (found.group(1), found.group(2)) if found else ('', message)
+        groups.setdefault(_LIST.sub('[…]', body) if rule else message, []).append((rule, body))
+    out = []
+    for members in groups.values():
+        if len(members) == 1 or not members[0][0]:
+            out += [f"[{r}] {b}" if r else b for r, b in members]
+            continue
+        items = list(dict.fromkeys(i for _, b in members for m in _LIST.findall(b)[:1]
+                                   for i in re.findall(r"'([^']*)'", m)))
+        body = _LIST.sub(lambda _: repr(items), members[0][1], count=1)
+        out.append(f"[{', '.join(r for r, _ in members)}] {body}")
+    return out
 
 
 class DropRule(BaseModel):
@@ -265,6 +337,17 @@ class SharedTemplate(BaseModel):
     with_params: dict[str, str] = Field(default_factory=dict, description=(
         "Parameters to pass, name -> XPath read from the record (or item), as the other XSLTs pass them "
         "(shared_xslt's with_params), e.g. {'ip': \"data[@name='ip']/@value\"}."))
+
+
+def writes_unknown(mapping: 'TranslationMapping', rule: 'EventRule') -> bool:
+    """Whether the rule's events get EventDetail/Unknown (its own fields, or the common ones it doesn't drop)."""
+    return (any(f.path.strip('/').startswith('EventDetail/Unknown') for f in rule.fields)
+            or (not rule.drop and any(f.path.strip('/').startswith('EventDetail/Unknown') for f in mapping.common)))
+
+
+def kept_unknown(mapping: 'TranslationMapping') -> list['EventRule']:
+    """The rules kept as Unknown: allow_unknown on a rule that writes Unknown (on any other rule it means nothing)."""
+    return [r for r in mapping.events if r.allow_unknown and writes_unknown(mapping, r)]
 
 
 class TranslationMapping(BaseModel):
@@ -792,6 +875,11 @@ class _Generator:
         self._root = root
         self._check_structure(rule.name, root, self.schema.event)
         detail = root.kids.get('EventDetail')
+        if detail is not None and rule.allow_unknown and 'Unknown' not in detail.kids:
+            # Seen: a rule moved from Unknown to Alert kept its allow_unknown, and the user was asked to keep it Unknown.
+            self._note(self.warnings, f"[{rule.name}] allow_unknown is ignored: the rule writes "
+                                      f"{', '.join(k for k in detail.kids if k not in ('TypeId', 'Description'))}, "
+                                      f"not Unknown. Remove it.")
         if detail is not None and 'Unknown' in detail.kids and rule.allow_unknown is not None and not rule.allow_unknown.strip():
             self._note(self.problems, f"[{rule.name}] allow_unknown takes the reason no action element describes these "
                                       f"records, as text (in the user's words), not true.")

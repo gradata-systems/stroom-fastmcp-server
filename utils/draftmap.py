@@ -226,7 +226,12 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         notes.append("Drafted from the sample's values (check them): " + '; '.join(recognised) + ".")
     rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
                   + data_entries('Unknown')})
-    if kinds:
+    unknown_kinds = [r for r in rules if r.get('when') and any(f['path'].startswith('EventDetail/Unknown') for f in r['fields'])]
+    if kinds and not unknown_kinds:
+        notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}), each with its action element; 'other' "
+                     f"catches the rest. Work through the schema problems build_translation_xslt reports: each names "
+                     f"what the element takes.")
+    elif kinds:
         notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}): replace each EventDetail/Unknown left by the "
                      f"action element that describes the kind (Authenticate, Network, Process, View, Create, Update, Delete, "
                      f"Alert, Send, Receive...), and move its Data entries into that element (e.g. EventDetail/Alert/Data); "

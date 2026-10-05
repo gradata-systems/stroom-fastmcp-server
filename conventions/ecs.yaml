@@ -10,6 +10,15 @@ field_map:
   EventSource/Device/HostName: {name: host.name, type: keyword}
   EventSource/Device/IPAddress: {name: host.ip, type: ip}
   EventSource/Client/IPAddress: {name: source.ip, type: ip}
+  EventSource/Client/Port: {name: source.port, type: long}
+  EventSource/Server/IPAddress: {name: destination.ip, type: ip}
+  EventSource/Server/Port: {name: destination.port, type: long}
+  # Network events, whichever action (Permit, Deny, Connect...): a name already planned from above is not planned again.
+  EventDetail/Network/*/Source/Device/IPAddress: {name: source.ip, type: ip}
+  EventDetail/Network/*/Source/Port: {name: source.port, type: long}
+  EventDetail/Network/*/Source/TransportProtocol: {name: network.transport, type: keyword}
+  EventDetail/Network/*/Destination/Device/IPAddress: {name: destination.ip, type: ip}
+  EventDetail/Network/*/Destination/Port: {name: destination.port, type: long}
   EventSource/User/Id: {name: user.name, type: keyword}
   EventDetail/TypeId: {name: event.code, type: keyword}
   EventDetail/Description: {name: message, type: text}

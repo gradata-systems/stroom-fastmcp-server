@@ -13,5 +13,13 @@ field_map:
   EventSource/Device/HostName: {name: HostName, type: keyword}
   EventSource/Device/IPAddress: {name: IPAddress, type: ip}
   EventSource/User/Id: {name: UserId, type: keyword}
+  EventSource/Client/IPAddress: {name: ClientIPAddress, type: ip}
+  EventSource/Server/IPAddress: {name: ServerIPAddress, type: ip}
+  # Network events, whichever action (Permit, Deny, Connect...).
+  EventDetail/Network/*/Source/Device/IPAddress: {name: SourceIPAddress, type: ip}
+  EventDetail/Network/*/Source/Port: {name: SourcePort, type: long}
+  EventDetail/Network/*/Source/TransportProtocol: {name: TransportProtocol, type: keyword}
+  EventDetail/Network/*/Destination/Device/IPAddress: {name: DestinationIPAddress, type: ip}
+  EventDetail/Network/*/Destination/Port: {name: DestinationPort, type: long}
   EventDetail/TypeId: {name: TypeId, type: keyword}
   EventDetail/Description: {name: Description, type: text}
