@@ -5,7 +5,7 @@ Stroom content for it: a feed, an event-logging translation pipeline, and an ind
 pipeline, stepped and verified before anything is promoted. It works with any MCP client that can sign the user
 in; it includes no agent or model of its own. See [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: 0.16.24, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+Status: 0.16.25, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 The server has 52 tools:
 
 | Group | Tools |
@@ -124,7 +124,7 @@ uv run python main.py
 ```
 
 TLS is required: the server refuses to start without a certificate unless a proxy in front terminates TLS
-(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` and the version (e.g. `ok 0.16.24`) for probes.
+(`STROOM_MCP_TLS_TERMINATED_UPSTREAM`), or it listens on localhost (development). `/healthz` answers `ok` and the version (e.g. `ok 0.16.25`) for probes.
 
 For local development, `STROOM_MCP_DEV_NO_AUTH=true` runs the server without sign-in and calls Stroom with
 `STROOM_MCP_STROOM_API_KEY`. The server refuses to start that way unless it is bound to localhost, and refuses the
