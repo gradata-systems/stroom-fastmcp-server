@@ -215,6 +215,15 @@ A sixteenth session, on 0.16.21: the four files went up whole from the terminal 
 | `addRootObject` never set | The agent created the pipeline before any XSLT and wrote the XSLT by hand: create_pipeline set `addRootObject` false only from a mapping, so with none it stayed true, each 755 KB array stepped as one record, and the warning sat at the end of a long reply. | The build's sample decides: create_pipeline, and update_pipeline when it attaches an XSLT later, set `addRootObject` false when the sample is a JSON array (update_pipeline says so). step_sample's warning is a review group at the front of the reply, only for a JSON array (JSON lines need the root map). |
 | TLS checks dropped | Windows curl.exe couldn't check the certificate's revocation (`CRYPT_E_NO_REVOCATION_CHECK`), and the agent added `--insecure`. | The commands reply says to add `--ssl-no-revoke` for that error, never `--insecure`. |
 
+From the test environment (air-gapped, on 0.16.24):
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| `No module named 'saxonche'` | build_translation_xslt failed in the deployed image: saxonche, which checks a mapping's XPaths against the sample, was a dev dependency, and the image installs without those. It loads only when a mapping has an XPath to check, so a sample read by plain fields never showed it, and CI installs dev dependencies. | A runtime dependency. A test reads the server's imports and fails when runtime code imports a dev-only package. |
+| A condition given whole | `"matches": {"value": "Event: \[User\]", "xpath": "/Event/EventData/Data"}` was refused ("Input should be a valid string"): the test's value and its input given together. | Spread out into the condition (`matches` and `xpath`), for equals, one_of, matches and in_dictionary. |
+| "empty sequence" fatal errors | json-to-xml on a value that is empty, or isn't JSON, stops processing; the user guarded the calls by hand. | Generated XSLT reads JSON in a field through `mcp:json-to-xml`, which gives nothing for such a value (xsl:try). check_xslt warns of an unguarded json-to-xml in a hand-written XSLT. |
+| Two shapes, JSON in a field | The sample's records came in two JSON structures; one held its event as JSON text in a field. The draft took one structure's fields for time, user and TypeId, so the other's events had no time or kind, and wrote the whole JSON line into an element. | A mapping's `json_fields` name fields holding JSON; `message.event_type` reads a key inside. The draft expands such fields' keys, never maps the text itself, and where shapes differ reads every shape's field in turn (`any_of`) for time, homes and TypeId, with rules for each shape's kinds and a note on the shapes. |
+
 ## The plan, followed as an agent would (`dev/e2e_plan_walk.py`, `tests/test_off_path.py`)
 
 The other suites call the tools in an order they already know, so none of them had checked the guidance an agent

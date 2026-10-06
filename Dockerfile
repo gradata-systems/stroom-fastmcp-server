@@ -18,6 +18,9 @@ COPY security/ security/
 COPY tools/ tools/
 COPY utils/ utils/
 ENV PATH=/app/.venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# Every dependency is in the image (Saxon among them); nothing is fetched at run time, so it runs air-gapped.
+# FastMCP would otherwise ask PyPI for a newer version of itself at each start.
+ENV FASTMCP_CHECK_FOR_UPDATES=off
 USER 10001
 EXPOSE 8000
 CMD ["python", "main.py"]

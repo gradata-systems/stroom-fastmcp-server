@@ -22,6 +22,11 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 The chart is `charts/stroom-mcp`, published to `oci://ghcr.io/gradata-systems/charts/stroom-mcp` on each release
 tag; the image is `ghcr.io/gradata-systems/stroom-fastmcp-server`.
 
+**Air-gapped clusters.** The image holds every dependency (Saxon, which checks a mapping's XPaths, among them) and
+fetches nothing at run time; FastMCP's check for a newer version of itself is off (`FASTMCP_CHECK_FOR_UPDATES=off`).
+Copy the image and the chart into your own registry and set `image.repository` to it. The server then reaches only
+Stroom, the OpenID Connect provider (its discovery document and signing keys) and the users' clients.
+
 ```yaml
 # values.yaml
 publicBaseUrl: https://stroom-mcp.example.com

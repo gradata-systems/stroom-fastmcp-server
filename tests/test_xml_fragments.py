@@ -64,7 +64,9 @@ def test_generated_xslt_reads_fragments_in_the_wrappers_namespace():
 def test_a_message_inside_json_inside_a_json_array_is_extracted_through_an_xpath():
     result = generate(TranslationMapping.model_validate({**EMBEDDED['reference']['mapping'], 'unmatched': 'skip'}), SCHEMA, '4.1.0')
     assert result['ok'], result['problems']
-    assert "analyze-string(string((json-to-xml(*[@key='payload'])/*/*[@key='msg'])[1])" in result['xslt']
+    # Read through the guarded helper: an empty payload, or one that isn't JSON, gives nothing, not a fatal error.
+    assert "analyze-string(string((mcp:json-to-xml(*[@key='payload'])/*/*[@key='msg'])[1])" in result['xslt']
+    assert '<xsl:function name="mcp:json-to-xml"' in result['xslt']
     record = ('<map><string key="host">gw01</string><string key="payload">{"ts": "2026-10-01T10:00:00.000Z", '
               '"msg": "user=alice action=LOGIN src=10.0.0.1 result=failure"}</string></map>')
     xslt = result['xslt'].replace("stroom:format-date(", "string(").replace(", 'yyyy-MM-dd''T''HH:mm:ssX')", ')')
@@ -75,6 +77,11 @@ def test_a_message_inside_json_inside_a_json_array_is_extracted_through_an_xpath
     assert event.findtext('e:EventSource/e:Client/e:IPAddress', namespaces=NS) == '10.0.0.1'
     assert event.findtext('.//e:Authenticate/e:Outcome/e:Success', namespaces=NS) == 'false'
     assert event.findtext('e:EventDetail/e:Description', namespaces=NS) == 'user=alice action=LOGIN src=10.0.0.1 result=failure'
+    # A payload that is empty, or isn't JSON, gives nothing to read: the record still goes through, no fatal error
+    # (seen in a test environment as "empty sequence" fatal errors, until json-to-xml was guarded by hand).
+    for payload in ('', 'not JSON at all', '{"truncated": '):
+        odd = record.replace(record[record.index('{"ts"'):record.index('</string></map>')], payload)
+        transform(xslt, f'<array xmlns="http://www.w3.org/2013/XSL/json">{odd}{record}</array>')
 
 
 def test_the_wrapper_is_checked_and_the_parser_can_be_swapped():

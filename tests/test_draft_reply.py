@@ -76,3 +76,25 @@ def test_allow_unknown_on_a_rule_that_writes_an_action_element_means_nothing():
     assert any(w.startswith('[system_alert] allow_unknown is ignored: the rule writes Alert') for w in warnings)
     kept = field_mapping_markdown(mapping, SCHEMA).split('### Kept as Unknown', 1)[1].split('###', 1)[0]
     assert '`other`' in kept and 'system_alert' not in kept
+
+
+def test_a_condition_given_with_its_input_inside_the_test_is_spread_out():
+    # Seen in a test environment: "matches": {"value": "Event: \[User\]", "xpath": "/Event/EventData/Data"}, refused
+    # with "Input should be a valid string".
+    from utils.xsltgen import Condition
+    c = Condition.model_validate({'matches': {'value': r'Event: \[User\]', 'xpath': '/Event/EventData/Data'}})
+    assert (c.matches, c.xpath, c.field) == (r'Event: \[User\]', '/Event/EventData/Data', None)
+    assert Condition.model_validate({'equals': {'value': 'LOGIN', 'field': 'action'}}).field == 'action'
+    assert Condition.model_validate({'one_of': {'values': ['a', 'b'], 'field': 'f'}}).one_of == ['a', 'b']
+
+
+def test_a_hand_written_xslt_reading_json_unguarded_is_warned():
+    from lxml import etree
+    from tools.validation import _unguarded_json
+    xsl = 'xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:stroom="stroom"'
+    bare = etree.fromstring(f'<xsl:stylesheet {xsl} version="3.0"><xsl:template match="x"><xsl:value-of '
+                            f'select="stroom:json-to-xml(message)/*/*[@key=\'a\']"/></xsl:template></xsl:stylesheet>')
+    guarded = etree.fromstring(f'<xsl:stylesheet {xsl} version="3.0"><xsl:template match="x"><xsl:value-of select="if '
+                               f'(normalize-space(message)) then json-to-xml(message) else ()"/><xsl:try><xsl:sequence '
+                               f'select="json-to-xml(m)"/><xsl:catch/></xsl:try></xsl:template></xsl:stylesheet>')
+    assert _unguarded_json(bare)[0].startswith('json-to-xml without a guard') and _unguarded_json(guarded) == []

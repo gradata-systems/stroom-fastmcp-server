@@ -139,6 +139,16 @@ SHAPES: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
+# A json-to-xml call in a mapping's xpath (bare, fn: or stroom:), read through the guarded mcp:json-to-xml.
+JSON_CALL = re.compile(r'(?<![\w:-])(?:fn:|stroom:)?json-to-xml\(')
+MCP_NS = 'stroom-mcp:functions'
+SAFE_JSON = (f'<xsl:function xmlns:xsl="{XSL}" xmlns:mcp="{MCP_NS}" name="mcp:json-to-xml" as="node()?">'
+             '<xsl:param name="text" as="item()*"/>'
+             '<xsl:variable name="json" select="string(($text)[1])"/>'
+             '<xsl:if test="normalize-space($json)"><xsl:try><xsl:sequence select="json-to-xml($json)"/>'
+             '<xsl:catch/></xsl:try></xsl:if></xsl:function>')
+
+
 class Condition(BaseModel):
     """A test on the record; give field or xpath and one of equals, one_of, matches, present or in_dictionary."""
     field: str | None = Field(None, description="An input field, or a name from extract.")
@@ -150,6 +160,20 @@ class Condition(BaseModel):
     in_dictionary: str | None = Field(None, description="The value is one of the lines of the Dictionary doc of "
                                                         "this name (a list, one entry per line).")
     scope: Scope | None = Field(None, description="With for_each: 'record' to test the record rather than the item.")
+
+    @model_validator(mode='before')
+    @classmethod
+    def _spread(cls, data):
+        # Seen: "matches": {"value": "Event: \\[User\\]", "xpath": "/Event/EventData/Data"}. The test's value and its
+        # input given together: the same condition, spread out.
+        if isinstance(data, dict):
+            for test in ('equals', 'one_of', 'matches', 'in_dictionary'):
+                given = data.get(test)
+                if isinstance(given, dict):
+                    value = next((given[k] for k in ('value', 'values', 'regex', 'pattern', test) if k in given), None)
+                    data = {**data, test: value, **{k: given[k] for k in ('field', 'xpath', 'scope')
+                                                     if k in given and data.get(k) is None}}
+        return data
 
     @model_validator(mode='after')
     def one_test(self):
@@ -367,6 +391,10 @@ class TranslationMapping(BaseModel):
         "json input only, from profile_sample: 'array' (one JSON array; set jsonParser.addRootObject=false on the "
         "pipeline, or leave it: both are matched) or 'lines' (one object per line, or concatenated objects; "
         "jsonParser.addRootObject must stay true, which wraps them all in one map)."))
+    json_fields: list[str] = Field(default_factory=list, description=(
+        "Input fields holding JSON text (an event serialised into a string field): a key inside one is the field "
+        "<field>.<key> (nested: <field>.<a>.<b>) in common, events, when and any_of. Read safely: a record whose "
+        "field is empty, or isn't JSON, gives nothing. Never map the field itself into an element."))
     extract: list[Extraction] = Field(default_factory=list, description=(
         "Fields parsed out of text fields with regular expressions, e.g. a message string holding the time, user "
         "and action; their names are then used as fields in common, events and when."))
@@ -532,8 +560,18 @@ class _Generator:
             # key, a repeat): a named template shared between rules has its own scope.
             self.declare_parts(ex)
             return f"${self.parts_name(ex)}/fn:match//fn:group[@nr={nr}]"
+        held = next((j for j in sorted(self.m.json_fields, key=len, reverse=True)
+                     if field_name and field_name.startswith(j + '.')), None) if xpath is None else None
+        if held:
+            # A key of the JSON a field holds: read through the guarded helper, so an empty field, or one that isn't
+            # JSON, gives nothing (seen: a whole JSON line written into TypeId, and fatal "empty sequence" errors).
+            base = self.source(held, None, scope)
+            keys = field_name[len(held) + 1:].split('.')
+            return f"mcp:json-to-xml(({base})[1])/*" + ''.join(f"/*[@key={literal(k)}]" for k in keys)
         if xpath is not None:
-            selector = xpath
+            # JSON held in a field, read safely: an empty value, or one that isn't JSON, gives nothing rather than
+            # stopping the pipeline ("empty sequence" fatal errors, seen in a test environment).
+            selector = JSON_CALL.sub('mcp:json-to-xml(', xpath)
         elif self.m.input == 'data_splitter':
             selector = '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
         elif self.m.input == 'json':
@@ -1196,13 +1234,17 @@ class _Generator:
                                       f"it (a Data entry if nothing else fits), or leave it out of names ('').")
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
+        uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True))))
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
-                 **({'map': MAP_NS} if uses_dict_map else {})}
+                 **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {})}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
         for href in dict.fromkeys(u.href for u in m.shared):     # imports come first in a stylesheet
             etree.SubElement(sheet, f'{{{XSL}}}import', href=href)
-        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else '') + (' map' if uses_dict_map else ''))
+        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else '') + (' map' if uses_dict_map else '')
+                  + (' mcp' if uses_json else ''))
+        if uses_json:
+            sheet.append(etree.fromstring(SAFE_JSON))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')

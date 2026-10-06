@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from utils.actions import action_rules, described
+from utils.actions import action_rules, described, read
 from utils.dsgen import SplitterSpec, dry_run, infer_spec
 from utils.profile import _flatten, profile, profile_many, value_type, xml_fragments
 from utils.samples import as_named_samples
@@ -123,14 +123,52 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         if spec is None:
             notes.append(f"The text's format could not be inferred ({fmt}): build_data_splitter with a regex spec first, "
                          f"then name its fields here.")
-    names: list[str] = []
-    for record in records:
-        names += [k for k in record if k not in names]
-    values = {n: [r[n] for r in records if r.get(n) not in (None, '')] for n in names}
-    types = {n: Counter(value_type(v) for v in vals).most_common(1)[0][0] if vals else 'empty' for n, vals in values.items()}
+    shapes = Counter(frozenset(k for k, v in r.items() if v not in (None, '')) for r in records if isinstance(r, dict))
 
-    taken: set[str] = set()
+    def survey() -> tuple[list[str], dict[str, list[str]], dict[str, str]]:
+        names: list[str] = []
+        for record in records:
+            names += [k for k in record if k not in names]
+        values = {n: [r[n] for r in records if r.get(n) not in (None, '')] for n in names}
+        types = {n: Counter(value_type(v) for v in vals).most_common(1)[0][0] if vals else 'empty'
+                 for n, vals in values.items()}
+        return names, values, types
+    names, values, types = survey()
+    # Fields holding JSON text: their keys are fields of their own (<field>.<key>, read through json_fields), and the
+    # text itself is never mapped into an element. Seen: a whole JSON line written into TypeId.
+    json_fields = [n for n in names if types[n] == 'embedded json']
+    if json_fields:
+        from utils.localcheck import with_json_fields
+        with_json_fields(records, json_fields)
+        names, values, types = survey()
+        mapping['json_fields'] = json_fields
+        inside = [n for n in names if any(n.startswith(j + '.') for j in json_fields)]
+        notes.append(f"{', '.join(repr(j) for j in json_fields)} {'holds' if len(json_fields) == 1 else 'hold'} JSON: "
+                     f"its keys are fields of their own, e.g. "
+                     f"{', '.join(repr(n) for n in inside[:4])} (json_fields). The text itself isn't mapped.")
+
+    taken: set[str] = set(json_fields)
     common: list[dict[str, Any]] = []
+
+    def covering(first: str, fits) -> list[str]:
+        """first, then the fields fitting the same test that the records lacking it hold: one record shape's time
+        field, then another's. Seen: two JSON shapes in one sample, and every event of the second without a time."""
+        chosen, lacking = [first], [r for r in records if isinstance(r, dict) and not r.get(first)]
+        while lacking:
+            more = next((n for n in names if n not in taken and n not in chosen and fits(n)
+                         and any(r.get(n) for r in lacking)), None)
+            if more is None:
+                break
+            chosen.append(more)
+            lacking = [r for r in lacking if not r.get(more)]
+        return chosen
+
+    def read_from(entry: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+        if len(fields) > 1:
+            entry.pop('field', None)
+            entry['any_of'] = fields
+        taken.update(fields)
+        return entry
     # Time: the first timestamp-typed field whose name says time, else the first timestamp-typed field; a date-only
     # field beside a time-of-day field (FortiOS's date= and time=) is joined.
     time_field = next((n for n in names if TIME.match(_key(n)) and types[n].startswith('timestamp')), None) \
@@ -150,6 +188,7 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     elif time_field:
         pattern = types[time_field][len('timestamp ('):-1]
         entry: dict[str, Any] = {'path': 'EventTime/TimeCreated', 'field': time_field}
+        read_from(entry, covering(time_field, lambda n: types[n] == types[time_field]))
         if pattern == 'epoch seconds':
             entry['time_format'] = 'epoch_s'
         elif pattern == 'epoch milliseconds':
@@ -171,8 +210,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         regex = re.compile(pattern, re.I)
         field = next((n for n in names if n not in taken and regex.match(_key(n)) and types[n] != 'empty'), None)
         if field:
-            common.append({'path': path, 'field': field})
-            taken.add(field)
+            common.append(read_from({'path': path, 'field': field},
+                                    covering(field, lambda n, rx=regex: rx.match(_key(n)) and types[n] != 'empty')))
     if not any(e['path'] == 'EventSource/Generator' for e in common):
         common.append({'path': 'EventSource/Generator', 'value': source_name or 'TODO generator'})
     if not any(e['path'] == 'EventSource/Device/HostName' for e in common):
@@ -180,26 +219,38 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                      "or stroom:meta('RemoteAddress') through xpath.")
 
     # Kinds of event: the first naming field with a handful of values.
-    naming = next((n for n in names if n not in taken and NAMING.match(_key(n)) and 1 <= len(set(values[n])) <= MAX_RULES), None)
+    def names_kinds(n: str) -> bool:
+        return bool(NAMING.match(_key(n))) and 1 <= len(set(values[n])) <= MAX_RULES
+    naming = next((n for n in names if n not in taken and names_kinds(n)), None)
+    namings = covering(naming, names_kinds) if naming else []
     if naming:
-        common.append({'path': 'EventDetail/TypeId', 'field': naming})
-        taken.add(naming)
+        common.append(read_from({'path': 'EventDetail/TypeId', 'field': naming}, namings))
     rest = [n for n in names if n not in taken and types[n] != 'empty']
-    kinds = [v for v, _ in Counter(values[naming]).most_common(MAX_RULES)] if naming else []
+    # (naming field, kind): each shape's kinds, from the records the earlier naming fields leave out.
+    pairs: list[tuple[str, str]] = []
+    for i, n in enumerate(namings):
+        own = [r[n] for r in records if isinstance(r, dict) and r.get(n) and not any(r.get(m) for m in namings[:i])]
+        pairs += [(n, v) for v, _ in Counter(own).most_common(MAX_RULES)]
+    kinds = [k for _, k in pairs]
     rules: list[dict[str, Any]] = []
 
     def data_entries(action: str) -> list[dict[str, Any]]:
         return [{'path': f'EventDetail/{action}/Data', 'data_name': n, 'field': n} for n in rest]
 
-    user = next((e['field'] for e in common if e['path'] == 'EventSource/User/Id'), None)
-    message = next((e['field'] for e in common if e['path'] == 'EventDetail/Description'), None)
+    # A field, or across record shapes several read in turn (any_of).
+    user = next((e.get('field') or e.get('any_of') for e in common if e['path'] == 'EventSource/User/Id'), None)
+    message = next((e.get('field') or e.get('any_of') for e in common if e['path'] == 'EventDetail/Description'), None)
     recognised: list[str] = []
-    for kind in kinds:
+    used_names: set[str] = set()
+    for naming, kind in pairs:
         name = re.sub(r'[^A-Za-z0-9]+', '_', kind).strip('_').lower() or 'event'
+        while name in used_names:
+            name += '_'
+        used_names.add(name)
         if AUTH.search(kind):
             fields = [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff' if LOGOFF.search(kind) else 'Logon'}]
             if user:
-                fields.append({'path': 'EventDetail/Authenticate/User/Id', 'field': user})
+                fields.append({'path': 'EventDetail/Authenticate/User/Id', **read(user)})
             fields += data_entries('Authenticate')
             rules.append({'name': name, 'when': [{'field': naming, 'equals': kind}], 'fields': fields})
             continue
@@ -224,11 +275,19 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
             rules.append({'name': name, 'when': [{'field': naming, 'equals': kind}], 'fields': data_entries('Unknown')})
     if recognised:
         notes.append("Drafted from the sample's values (check them): " + '; '.join(recognised) + ".")
+    naming = namings[0] if namings else None
     rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
                   + data_entries('Unknown')})
+    if len(shapes) > 1 and len(namings) + sum(1 for e in common if e.get('any_of')) > 0 and \
+            (len(namings) > 1 or any(e.get('any_of') for e in common)):
+        shared = [f"{e['path']} from {' or '.join(e['any_of'])}" for e in common if e.get('any_of')]
+        notes.append(f"The sample's records come in {len(shapes)} shapes (their fields differ): each element reads every "
+                     f"shape's field in turn ({'; '.join(shared)}), and each shape's kinds have rules. Check them "
+                     f"against each file.")
     unknown_kinds = [r for r in rules if r.get('when') and any(f['path'].startswith('EventDetail/Unknown') for f in r['fields'])]
     if kinds and not unknown_kinds:
-        notes.append(f"One rule per value of '{naming}' ({', '.join(kinds)}), each with its action element; 'other' "
+        notes.append(f"One rule per value of {' or '.join(repr(n) for n in namings)} ({', '.join(kinds)}), each with its "
+                     f"action element; 'other' "
                      f"catches the rest. Work through the schema problems build_translation_xslt reports: each names "
                      f"what the element takes.")
     elif kinds:

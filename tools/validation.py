@@ -177,6 +177,26 @@ def _event_element_problems(root: etree._Element, schema) -> list[str]:
     return problems
 
 
+_JSON_CALL = re.compile(r'(?<![\w-])(?:\w+:)?json-to-xml\(')
+
+
+def _unguarded_json(root: etree._Element) -> list[str]:
+    """json-to-xml on a value that may be empty or not JSON stops processing with a fatal error ("empty sequence",
+    seen in a test environment): each call outside an xsl:try, in an expression without an if guard."""
+    found = []
+    for el in root.iter():
+        if not isinstance(el.tag, str) or any(a.tag == f'{{{XSL}}}try' for a in el.iterancestors()):
+            continue
+        for name, value in el.attrib.items():
+            if _JSON_CALL.search(value) and not re.search(r'\bif\s*\(', value):
+                found.append(f"{name}=\"{value[:80]}\"")
+    if not found:
+        return []
+    return [f"json-to-xml without a guard ({'; '.join(found[:3])}): a record whose value is empty, or isn't JSON, stops "
+            f"processing with a fatal error. Guard it: select=\"if (normalize-space(x)) then json-to-xml(x) else ()\", "
+            f"inside xsl:try with an empty xsl:catch for text that isn't JSON. build_translation_xslt does this itself."]
+
+
 async def check_xslt(
         ctx: Context,
         xslt: XsltText,
@@ -204,6 +224,7 @@ async def check_xslt(
     function_errors, calls = _function_problems(xslt, root)
     errors += function_errors
     errors += _namespace_problems(root)
+    warnings += _unguarded_json(root)
     if root.find(f'.//{{{EVT}}}*') is not None:
         from tools.generation import event_schema
         events = root.find(f'.//{{{EVT}}}Events')

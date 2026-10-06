@@ -62,15 +62,28 @@ mapping's `extract`, a regular expression whose groups become fields, not with `
 The XSLT it writes holds `analyze-string(message, regex)` in a variable and reads each group from it; a record the
 pattern does not match gets no values, so its elements are left out and a rule can test `present: false`.
 
-**JSON** (the field holds a JSON document, sometimes after a text prefix): read it with an `xpath` using
-`json-to-xml()`, whose output is in the `http://www.w3.org/2005/xpath-functions` namespace:
+**JSON** (the field holds a JSON document): name the field in the mapping's `json_fields`, and read a key inside
+it as `<field>.<key>` (nested: `<field>.<a>.<b>`) wherever a field goes: in common, events, `when` and `any_of`.
+draft_translation_mapping does this itself for a field whose values are JSON. Never map the field itself into an
+element: the whole JSON line ends up in it.
 
 ```json
-{"path": "EventSource/User/Id", "xpath": "json-to-xml(*[@key='message'])/*/*[@key='user']"}
+{"json_fields": ["message"],
+ "common": [{"path": "EventSource/User/Id", "field": "message.user"}],
+ "events": [{"name": "login", "when": [{"field": "message.event_type", "equals": "login"}], "fields": [...]}]}
 ```
 
-There is no `stroom:json-parse()` or similar: `json-to-xml()` is the function, with no prefix. By hand, after a
-prefix:
+The generated XSLT reads it safely: a record whose field is empty, or isn't JSON, gives nothing for it rather than
+stopping processing (a bare `json-to-xml()` on such a value is a fatal error). An `xpath` using `json-to-xml()`, as
+in `json-to-xml(*[@key='message'])/*/*[@key='user']`, is read the same safe way; its output is in the
+`http://www.w3.org/2005/xpath-functions` namespace.
+
+When the sample's records come in different shapes (one file flat, another with the event as JSON in a field), an
+element reads every shape's field in turn with `any_of`, e.g. `{"path": "EventDetail/TypeId", "any_of":
+["event_type", "message.event_type"]}`, and each shape's kinds get rules.
+
+There is no `stroom:json-parse()` or similar: `json-to-xml()` is the function, with no prefix. By hand (guard it:
+`if (normalize-space(x)) then json-to-xml(x) else ()`, inside `xsl:try` for text that isn't JSON), after a prefix:
 
 ```xml
 <xsl:analyze-string select="json:string[@key='body']" regex="^.+?(\{{.+\}})$">

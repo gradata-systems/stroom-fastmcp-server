@@ -23,6 +23,7 @@ _processor = None
 def _saxon():
     global _processor
     if _processor is None:
+        # A runtime dependency: it was a dev one, and build_translation_xslt failed in a deployed image.
         from saxonche import PySaxonProcessor
         _processor = PySaxonProcessor(license=False)
     return _processor

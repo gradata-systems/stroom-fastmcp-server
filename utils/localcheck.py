@@ -54,14 +54,38 @@ def xml_value(record: etree._Element, path: str) -> str | None:
     return texts[0] if texts else None
 
 
+def with_json_fields(records: list[Any], json_fields: list[str]) -> list[Any]:
+    """Records with the keys of the JSON their json_fields hold added as <field>.<key>, as the XSLT reads them."""
+    if not json_fields:
+        return records
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for field in json_fields:
+            try:
+                held = json.loads(record.get(field) or '')
+            except (TypeError, ValueError):
+                continue
+            if isinstance(held, dict):
+                for key, value in _flatten(held).items():
+                    record.setdefault(f'{field}.{key}', value if isinstance(value, str) else json.dumps(value))
+    return records
+
+
 def sample_records(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None = None
                    ) -> tuple[list[Any], str | None]:
+    found, note = _sample_records(mapping, sample, splitter)
+    return with_json_fields(found, mapping.json_fields), note
+
+
+def _sample_records(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None = None
+                    ) -> tuple[list[Any], str | None]:
     """(records, note): dicts for data_splitter and json inputs, elements for xml inputs. Several sample files are
     read one by one (each with its own header line). The note says why nothing could be read."""
     if isinstance(sample, list):
         records, notes = [], []
         for text in sample:
-            found, note = sample_records(mapping, text, splitter)
+            found, note = _sample_records(mapping, text, splitter)
             records += found
             if note and note not in notes:
                 notes.append(note)

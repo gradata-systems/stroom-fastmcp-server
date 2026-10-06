@@ -41,6 +41,11 @@ TRANSPORT = ('TCP', 'UDP', 'ICMP', 'IGMP')
 MAX_VALUES = 12
 
 
+def read(source: str | list[str]) -> dict[str, Any]:
+    """The input entry for a field, or for several read in turn (any_of): each record shape's user, say."""
+    return {'any_of': list(source)} if isinstance(source, (list, tuple)) else {'field': source}
+
+
 def _name(field: str) -> str:
     return re.sub(r'[^A-Za-z0-9]+', '_', field).strip('_').lower() or 'event'
 
@@ -112,22 +117,22 @@ def action_rules(records: list[Any], names: list[str], base: list[dict[str, Any]
     logons = [v for v in values if AUTH.search(v) and not LOGOFF.search(v) and v not in used]
     outcome = {v: ('false' if FAILED.search(v) else 'true') for v in logons if FAILED.search(v) or SUCCEEDED.search(v)}
     rule('logon', logons, [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'},
-                           *([{'path': 'EventDetail/Authenticate/User/Id', 'field': user}] if user else []),
+                           *([{'path': 'EventDetail/Authenticate/User/Id', **read(user)}] if user else []),
                            *([{'path': 'EventDetail/Authenticate/Outcome/Success', 'field': split, 'map': outcome}]
                              if outcome and len(outcome) == len(logons) else [])])
     logoffs = [v for v in values if LOGOFF.search(v) and v not in used]
     rule('logoff', logoffs, [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff'},
-                             *([{'path': 'EventDetail/Authenticate/User/Id', 'field': user}] if user else [])])
+                             *([{'path': 'EventDetail/Authenticate/User/Id', **read(user)}] if user else [])])
     changes = [v for v in values if CONFIG.search(v) and v not in used]
     rule('config_change', changes, [{'path': 'EventDetail/Update/After/Configuration/Type', 'field': split},
                                     *([{'path': 'EventDetail/Update/After/Configuration/Description',
-                                        'field': description}] if description else [])])
+                                        **read(description)}] if description else [])])
     processes = [v for v in values if PROCESS.match(v) and v not in used]
     rule('service', processes, [
         {'path': 'EventDetail/Process/Action', 'field': split,
          'map': {v: 'Shutdown' if STOPPED.search(v) else 'Startup' for v in processes}},
         {'path': 'EventDetail/Process/Type', 'value': 'Service'},
-        {'path': 'EventDetail/Process/Command', 'field': description or split}])
+        {'path': 'EventDetail/Process/Command', **read(description or split)}])
     alerts = [v for v in values if ALERT.search(v) and v not in used]
     rule('alert', alerts, [
         {'path': 'EventDetail/Alert/Type', 'field': split,
