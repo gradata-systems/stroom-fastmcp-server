@@ -115,6 +115,8 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
   the call open until you answer, so a form left open past your access token's lifetime can't be acted on when
   you do. The agent is then told to call again: VS Code sends a fresh token with the new call, and your answer is
   kept, so you aren't asked twice.
+- Choices the onboarding needs from you (how an index's fields are named, which index to follow) are forms too,
+  so they look the same whichever model you use; before, some models asked them in the chat as plain text.
 - Something too long for a form is shown in the chat first: an Elasticsearch index template appears there as a
   Dev Tools request, and the form after it is a short summary to confirm.
 - Standing instructions from `AGENTS` docs in Stroom apply whoever connects; a workspace `AGENTS.md` can add

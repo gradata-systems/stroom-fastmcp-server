@@ -220,6 +220,28 @@ class ConsentStore:
                         f"the new values and no id to get a fresh {kind}."}
 
 
+    async def choose(self, ctx: Any, action: str, question: str, options: list[str]) -> str | None:
+        """The option the user picks in a form, or None when the client can't show one here (the agent then asks
+        them). Seen: an agent given the choices asked in the chat, on Gemma and on Claude alike, with no picker.
+        Cancelling the form stops the call, as declining a confirmation does."""
+        if not (self.use_elicitation and hasattr(ctx, 'elicit')) or _modern(ctx) or not options:
+            return None
+        try:
+            asked = time.perf_counter()
+            try:
+                answer = await ctx.elicit(question, list(options))
+            finally:
+                spent_waiting_for_user(round((time.perf_counter() - asked) * 1000))
+        except Exception as e:  # client without elicitation support
+            logger.info("Elicitation unavailable for a choice, left to the agent to ask: %s", e)
+            return None
+        chosen = getattr(answer, 'data', None) if getattr(answer, 'action', None) == 'accept' else None
+        audit('choice', action=action, question=question, outcome='chosen' if chosen else 'declined',
+              via='elicitation', **({'choice': chosen} if chosen else {}))
+        if not chosen:
+            raise ToolError(f"The user made no choice: {question}")
+        return chosen if chosen in options else None
+
     def _form_round(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
                     digest: str, editable: dict[str, tuple[str, str]] | None = None) -> Any:
         """Modern connections: None if agreed, an input-required result to ask, False if the client cannot."""

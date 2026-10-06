@@ -305,6 +305,13 @@ async def write_documentation(
     are kept with the doc, so triage does not raise them again. An update replaces the body and keeps the change log
     and the accepted errors, adding a line. Promoted with the pipeline.
     """
+    given = [AcceptedError.model_validate(x) if isinstance(x, dict) else x for x in accept_errors]
+    if any('EventDetail/Unknown' in f"{a.example} {a.matches or ''}" for a in given):
+        # Seen: the user asked to accept "3 of 50 records come out as EventDetail/Unknown" as benign, with nothing
+        # to say which events those were.
+        raise ToolError("Events written as EventDetail/Unknown aren't an error to accept as benign. Unknown is agreed "
+                        "with the user per rule in build_translation_xslt (allow_unknown), whose form shows what the "
+                        "records hold; or map them to their action element. Save the XSLT from its mapping there.")
     body = markdown.split('## Change log')[0].rstrip()
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")

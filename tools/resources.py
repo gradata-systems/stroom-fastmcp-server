@@ -27,7 +27,8 @@ _RULES = """Rules for every run:
   Only what you cannot resolve there (an inherited template element, reference data, the source data itself) goes
   to the user, with what you tried and an example. If the user says one is benign and can be ignored, record it:
   write_documentation accept_errors=[{element, example, reason in their words, matches: the kind it covers with * for
-  what varies, e.g. 'No HR record for user svc-*'}] (they confirm); it is then reported
+  what varies, e.g. 'No HR record for user svc-*'}] (they confirm; never Events written as Unknown: those are agreed
+  in build_translation_xslt with allow_unknown); it is then reported
   as benign, with their reason, and not raised again. A generated XSLT is saved by build_translation_xslt (build,
   name) and stepped as saved; code written by hand is tried with draft_code before it is saved.
 - Document what you build (write_documentation) and use the user's source notes for field meanings.
@@ -174,7 +175,8 @@ Stage 1, events:
 5. create_pipeline from that template (with the pipeline_properties build_translation_xslt returned, e.g.
    jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.
-6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream),
+6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream,
+   from code that stepped clean: after changing the XSLT, step again and reprocess_streams),
    check_events on the output. Then write_documentation for the events pipeline with stream_ids = the sample streams:
    its Field mapping section is generated from the kept mapping.
 
@@ -184,8 +186,9 @@ from (find_pipeline_templates, describe_template); an Elasticsearch index templa
 mappings and settings on the cluster (propose_index_template, check_index_template).
 
 7. find_pipeline_templates stage=indexing gives the backend (Lucene or Elasticsearch) and the Stroom pipeline
-   template. Elasticsearch: find_elastic_clusters, then get_field_conventions backend=elasticsearch and offer the user
-   its choices exactly as labelled, in order: From an index template (pasted: GET _index_template/<name>, or an
+   template. Elasticsearch: find_elastic_clusters, then get_field_conventions backend=elasticsearch, without asking
+   first: it asks the user in a form and its reply gives the next call. Only where it returns the choices instead
+   (needs_guidance, a client without forms), offer them exactly as labelled, in order: From an index template (pasted: GET _index_template/<name>, or an
    index's GET <index>/_mapping; only if it lists any in composed_of, those component templates too, GET
    _component_template/<name>: many have none); Follow an existing index in Stroom (its existing_indexes;
    draft_index_mapping like_index= reads its field names and types through Stroom, nothing to paste); and one choice
@@ -195,7 +198,7 @@ mappings and settings on the cluster (propose_index_template, check_index_templa
    into the chat and end your turn (a choice form cannot carry it), and draft nothing until it arrives; following an
    index, like a convention, the user confirms in a form. With a template or an index there is no
    convention question: the example names the fields. Lucene:
-   get_field_conventions, and ask the user which convention to follow.
+   get_field_conventions (it asks the user which convention to follow, in a form where the client has one).
 8. Propose, in one message, the backend, cluster or volume group, convention, Stroom pipeline template and index
    name (following the environment's versioned naming); create_index_doc once confirmed.
 9. describe_template on the indexing template: if its shared_xslt shows sibling indexing XSLTs calling shared

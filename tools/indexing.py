@@ -168,6 +168,12 @@ async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[
                   f"its index template itself (settings, component templates) is not visible through Stroom"), read
 
 
+async def _choose(ctx: Context, question: str, options: list[str]) -> str | None:
+    """The user's pick in a form, or None where the client has no form (the agent asks instead)."""
+    store = (getattr(ctx, 'lifespan_context', None) or {}).get('consent')
+    return await store.choose(ctx, 'get_field_conventions', question, options) if store else None
+
+
 async def get_field_conventions(
         ctx: Context,
         name: Annotated[str | None, Field(description="Convention profile to use; omit to list them.")] = None,
@@ -221,6 +227,27 @@ async def get_field_conventions(
                             'option': f'convention profile {profile_name}', 'description': profile.get('description'),
                             'how': f"Only when the user has no example: draft_index_mapping convention={profile_name} "
                                    f"without_example=true, which the user confirms in a form."})
+        chosen = await _choose(ctx, "How should the new index's fields be named?", [o['choice'] for o in options])
+        if chosen:
+            option = next(o for o in options if o['choice'] == chosen)
+            result = {'status': 'chosen', 'choice': chosen, 'how': option['how'],
+                      **({'indexing_templates': templates} if templates else {})}
+            if option['option'] == 'follow an existing index in Stroom' and existing:
+                labels = {f"{e['name']} ({e['path']})": e for e in existing}
+                pick = existing[0] if len(existing) == 1 else labels.get(
+                    await _choose(ctx, 'Which existing index should it follow?', list(labels)) or '')
+                if pick:
+                    result.update(like_index=pick['uuid'], hint=f"The user chose to follow '{pick['name']}': "
+                                  f"draft_index_mapping like_index={pick['uuid']} (with the events streams).")
+            elif option['option'] == 'example index template':
+                result['hint'] = ("Ask the user to paste the index template (and any component templates) into the "
+                                  "chat, and end your turn: a form can't carry it. Then draft_index_mapping "
+                                  "example_template= it, exactly as given.")
+            else:
+                profile_name = option['option'].removeprefix('convention profile ')
+                result['hint'] = (f"draft_index_mapping convention={profile_name} without_example=true (with the "
+                                  f"events streams).")
+            return result
         return {'status': 'needs_guidance', 'options': options,
                 **({'backend': 'elasticsearch (every indexing template is an Elasticsearch one)',
                     'indexing_templates': templates} if templates else {}),
@@ -237,6 +264,13 @@ async def get_field_conventions(
                  "Which backend first (find_pipeline_templates stage=indexing says): for Elasticsearch, call again with "
                  "backend=elasticsearch, whose choices start with the user's own index template; these profiles are "
                  "for Lucene, or for Elasticsearch only when the user has no template. ")
+        if backend == 'lucene' and profiles:
+            labels = {f"{_PROFILE_LABELS.get(n, n)} convention": n for n in profiles}
+            chosen = await _choose(ctx, "How should the new index's fields be named?", list(labels))
+            if chosen:
+                return {'status': 'chosen', 'choice': chosen, 'convention': labels[chosen],
+                        'hint': f"get_field_conventions name={labels[chosen]} for its field map, then "
+                                f"draft_index_mapping convention={labels[chosen]} (with the events streams)."}
         return {'status': 'needs_guidance', 'profiles': {n: p.get('description') for n, p in profiles.items()},
                 **({'indexing_templates': templates} if templates else {}),
                 'hint': first + "Ask the user which convention to use, which existing index docs to follow, "

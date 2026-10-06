@@ -83,7 +83,7 @@ STATES = [
     ('an events pipeline', facts('lucene', 'ev_stepped'), 'stepped', 'step_sample'),
     ('stepped clean', facts('lucene', 'events'), 'processed', 'create_processor_filter'),
     ('Events', facts('lucene', 'ev_documented'), 'documented', 'write_documentation'),
-    ('documented', facts('lucene', 'index_doc'), 'index', 'draft_index_mapping'),
+    ('documented', facts('lucene', 'index_doc'), 'index', 'get_field_conventions'),
     ('a Lucene index doc', facts('lucene', 'ix_pipeline'), 'indexing_pipeline', 'save_xslt'),
     ('a Lucene indexing pipeline', facts('lucene', 'ix_stepped'), 'indexed', 'step_sample'),
     ('stepped: no template step for Lucene', facts('lucene', 'agreed'), 'indexed', 'create_processor_filter'),

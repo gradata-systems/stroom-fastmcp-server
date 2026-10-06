@@ -222,8 +222,23 @@ async def _stream_is_array(stroom: StroomGateway, stream_id: int) -> bool:
         return False
 
 
+_TYPE_ID = re.compile(r'<(?:[\w.-]+:)?TypeId>([^<]*)<')
+_DATA = re.compile(r'<(?:[\w.-]+:)?Data\s+Name="([^"]*)"\s+Value="([^"]*)"')
+
+
+def _what_unknown_holds(outputs: list[str]) -> str:
+    """What the Unknown events hold, for a person to judge: their TypeIds and Data values, a few of each."""
+    values: dict[str, list[str]] = {}
+    for out in outputs:
+        for name, value in [('TypeId', t) for t in _TYPE_ID.findall(out)] + _DATA.findall(out):
+            seen = values.setdefault(name, [])
+            if value and value not in seen and len(seen) < 5:
+                seen.append(value)
+    return '; '.join(f"{k}: {', '.join(v)}" for k, v in list(values.items())[:6] if v)
+
+
 async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, element: str, unknown: list[str],
-                            total: int, draft_code: dict[str, str] | None) -> dict[str, Any] | None:
+                            total: int, draft_code: dict[str, str] | None, held: str = '') -> dict[str, Any] | None:
     """A blocking group when a build's own pipeline writes EventDetail/Unknown from an XSLT saved without a mapping:
     build_translation_xslt refuses Unknown where the records show an action and puts the rest to the user, and a
     hand-written XSLT got past both (seen: every TRAFFIC record of a firewall sample as an empty Unknown)."""
@@ -239,7 +254,8 @@ async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, 
     except Exception as e:   # the check is a guard on top; never fail the step over it
         logger.warning("Couldn't check pipeline %s for Unknown events: %s", pipeline_uuid, e)
         return None
-    message = (f"{len(unknown)} of {total} records come out as EventDetail/Unknown (e.g. {unknown[0]}), from an XSLT "
+    message = (f"{len(unknown)} of {total} records come out as EventDetail/Unknown (e.g. {unknown[0]}"
+               + (f"; they hold {held}" if held else '') + "), from an XSLT "
                f"saved without a mapping, so nobody agreed to Unknown for them. Records whose values show what happened "
                f"take that action element: a connection allowed or denied Network/Permit or Network/Deny, a logon "
                f"Authenticate, a configuration change Update, an alert Alert. Draft the mapping from the sample "
@@ -354,6 +370,7 @@ async def step_sample(
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     unknown: list[str] = []
+    unknown_out: list[str] = []
     per_stream: dict[int, int] = {}
     first_output = None
     for stream_id in stream_ids:
@@ -372,6 +389,8 @@ async def step_sample(
             records.append({'record': key, 'errors': len(found)})
             if _writes_unknown(result, pipeline.default_outputs()[-1]):
                 unknown.append(key)
+                unknown_out.append((((result.get('stepData') or {}).get('elementMap') or {})
+                                    .get(pipeline.default_outputs()[-1]) or {}).get('output') or '')
             if first_output is None:
                 elements = (result.get('stepData') or {}).get('elementMap') or {}
                 first_output = {e: (elements.get(e) or {}).get('output', '')[:stroom.settings.max_stream_chars // 4]
@@ -384,7 +403,7 @@ async def step_sample(
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
     _block(summary, await _unagreed_unknown(ctx, pipeline_uuid, pipeline.doc.get('name'), pipeline.default_outputs()[-1],
-                                            unknown, len(records), draft_code))
+                                            unknown, len(records), draft_code, _what_unknown_holds(unknown_out)))
     result: dict[str, Any] = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records),
                               'records_with_errors': sum(1 for r in records if r['errors']),
                               'draft_code_used': sorted(draft_code or {}), **summary,
@@ -457,6 +476,7 @@ async def step_records(
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     unknown: list[str] = []
+    unknown_out: list[str] = []
     for loc in [RecordLocation.model_validate(x) for x in locations[:stroom.settings.max_sample_records]]:
         where = {'metaId': loc.stream, 'partIndex': loc.part, 'recordIndex': loc.record}
         key = record_key(loc.stream, where)
@@ -471,6 +491,7 @@ async def step_records(
         events = len(_EVENT.findall(output))
         if _UNKNOWN.search(output):
             unknown.append(key)
+            unknown_out.append(output)
         if loc.expect == 'none':
             # Left untranslated by choice: the no-elements check doesn't apply, but an Event does.
             found = [f for f in found if not f['message'].startswith('Output contains no XML elements')]
@@ -490,7 +511,7 @@ async def step_records(
         group['records'] = sorted({m['record'] for m in markers
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
     _block(summary, await _unagreed_unknown(ctx, pipeline_uuid, pipeline.doc.get('name'), output_element, unknown,
-                                            len(records), draft_code))
+                                            len(records), draft_code, _what_unknown_holds(unknown_out)))
     missing = [r['record'] for r in records if r.get('found') is False]
     uncovered = sorted({r['shape'] for r in records if r.get('shape') and (
         r.get('errors') or (r.get('events') == 0 and r.get('expect') != 'none'))})

@@ -213,6 +213,24 @@ async def test_wait_counts_only_the_given_filters_outputs(ctx):
     assert latest['gate'] == 'pass' and latest['streams'] == [{'input': 5, 'events': [30], 'errors': []}]
 
 
+
+@respx.mock
+async def test_wait_fails_while_the_current_code_has_not_stepped_clean(ctx):
+    # Seen: a filter made after a clean step went on processing once the XSLT was replaced by one that never stepped
+    # clean (Unknown nobody agreed to), and the agent documented and indexed its output.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9, 'pipelineUuid': 'p1'}}]}))
+    respx.post(f'{API}/processorTask/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9}, 'status': 'COMPLETE'}]}))
+    respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'meta': {'id': 30, 'pipelineUuid': 'p1', 'typeName': 'Events', 'processorFilterId': 9}}]}))
+    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
+    assert result['gate'] == 'fail' and result['streams'][0]['events'] == [30]
+    assert result['problems'] == ["The pipeline's current code has not stepped clean: its output may not be what was "
+                                  "checked. step_sample over the sample streams until the verdict is clean, then "
+                                  "reprocess_streams"]
+
 @respx.mock
 async def test_with_no_processor_filter_there_is_nothing_to_wait_for(ctx):
     # Seen in VS Code: create_processor_filter was refused, and the agent waited out 200 seconds of "tasks still

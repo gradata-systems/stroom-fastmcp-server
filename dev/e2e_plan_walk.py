@@ -52,7 +52,7 @@ PATHS = {
 # The first call `next` names for each step (indexed names the next one as it goes: the filter, the wait, verify_index).
 FIRST_CALL = {'feed': 'create_feed', 'samples': 'upload_sample', 'converter': 'build_data_splitter',
               'translation': 'draft_translation_mapping', 'pipeline': 'find_pipeline_templates', 'stepped': 'step_sample',
-              'processed': 'create_processor_filter', 'documented': 'write_documentation', 'index': 'draft_index_mapping',
+              'processed': 'create_processor_filter', 'documented': 'write_documentation', 'index': 'get_field_conventions',
               'indexing_pipeline': 'save_xslt', 'index_template': 'step_sample', 'indexed': 'create_processor_filter',
               'index_documented': 'write_documentation', 'promoted': 'promote_build'}
 # Lucene has no template step: the new indexing pipeline is stepped as the first call of indexed.
@@ -190,6 +190,9 @@ class Walk:
     # Stage 2 ----------------------------------------------------------------------------------------------
 
     async def index_step(self, call):
+        # next names get_field_conventions, which asks the user how fields are named (a form, where the client has
+        # one; here, guidance); the drafts below are what its reply leads to, over the Events streams.
+        call = {'tool': 'draft_index_mapping', 'arguments': {'events_stream_ids': self.events}}
         if self.backend == 'lucene':
             await TOOLS['get_field_conventions'](self.ctx)   # guidance: the user picks the convention
             draft = await run(self.ctx, 'draft_index_mapping', **fill(

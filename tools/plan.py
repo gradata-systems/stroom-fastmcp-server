@@ -190,9 +190,10 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
         'documented': (('write_documentation', {'build': build, 'pipeline_uuid': tr, 'stream_ids': raw,
                                                 'markdown': '<the documentation, from the documentation guide>'}),
                        'the Field mapping section is generated'),
-        'index': (('draft_index_mapping', {'backend': '<the agreed backend>', 'index_name': '<the agreed name>',
-                                           'convention': '<the agreed convention>', 'events_stream_ids': events}),
-                  'then create_index_doc with plan= once the user confirms'),
+        'index': (('get_field_conventions', {}),
+                  'go straight on, without asking first: it finds the backend and asks the user, in a form, how the '
+                  'index\'s fields are named; then draft_index_mapping as its reply says (index_name, events_stream_ids='
+                  f'{events}), and create_index_doc with plan= once the user confirms'),
         'indexing_pipeline': (('save_xslt', {'build': build, 'name': '<index name>-XSLT',
                                              'index_plan': '<the plan from draft_index_mapping>'}),
                               'then create_indexing_pipeline with that XSLT and the index'),

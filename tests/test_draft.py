@@ -196,3 +196,22 @@ def test_health_and_state_records_are_drafted_as_alerts():
         f['path'].startswith('EventDetail/Unknown') for f in r['fields']) for r in rules.values())
     mapping = TranslationMapping.model_validate(draft_mapping({'fw.csv': sample}, 'FW', 'FW', 'Prod')['mapping'])
     assert generate(mapping, SCHEMA_352, '3.5.2')['problems'] == []
+
+
+def test_the_user_can_keep_unknown_after_seeing_what_the_values_suggest():
+    # Refused first, with the rules the values show; kept only when the user, shown them, still wants Unknown, and
+    # then put to them in the form with those suggestions.
+    from utils.draftmap import _records
+    from utils.localcheck import unknown_coverage
+    draft = draft_mapping({'fw.csv': FIREWALL_CSV}, 'Firewall', 'FW', 'Prod')
+    _, records, _ = _records({'fw.csv': FIREWALL_CSV})
+
+    def traffic(**extra):
+        return {**draft['mapping'], 'events': [
+            {'name': 'traffic', 'when': [{'field': 'event_type', 'equals': 'TRAFFIC'}], 'allow_unknown': 'the user said so',
+             'fields': [{'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}], **extra}]}
+    problems, kept = unknown_coverage(TranslationMapping.model_validate(traffic()), records)
+    assert problems[0].startswith("[traffic] can't be kept as Unknown") and 'keep_unknown: true' in problems[0]
+    problems, kept = unknown_coverage(TranslationMapping.model_validate(traffic(keep_unknown=True)), records)
+    assert problems == [] and kept[0]['rule'] == 'traffic' and kept[0]['against_suggestion']
+    assert kept[0]['suggested'].startswith('Network/Permit for action ALLOW')

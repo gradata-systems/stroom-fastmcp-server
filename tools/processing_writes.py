@@ -531,6 +531,11 @@ async def wait_for_processing(
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
                             "ask the user which to keep")
+    if not await stepped_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline_uuid}):
+        # Seen: a filter made after a clean step kept processing once the XSLT was replaced by one that never stepped
+        # clean, and the agent went on to document and index its output.
+        problems.append("The pipeline's current code has not stepped clean: its output may not be what was checked. "
+                        "step_sample over the sample streams until the verdict is clean, then reprocess_streams")
     result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
               'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
               'hint': None if finished else "Tasks were still running at the timeout; call again."}

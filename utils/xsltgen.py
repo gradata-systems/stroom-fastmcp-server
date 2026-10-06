@@ -210,6 +210,10 @@ class EventRule(BaseModel):
         "user's words. It is kept in the XSLT and the documentation, and the user confirms it when the XSLT is saved. "
         "Without it, a rule with conditions that writes Unknown is a problem, as is the rule for the rest when it "
         "catches sample records."))
+    keep_unknown: bool = Field(False, description=(
+        "With allow_unknown, only when the user still wants Unknown after being shown the action elements the "
+        "records' values suggest (a refusal names them): e.g. they said so in the chat. They confirm it in the form, "
+        "which shows those suggestions. Never set it to get past a refusal on your own."))
     data: list[str] = Field(default_factory=list, description=(
         "Input fields carried as Data of this rule's action element, each named after its field, e.g. ['rule_id', "
         "'bytes_sent']: short for one '<action element>/Data' entry with data_name per field. The action element is "

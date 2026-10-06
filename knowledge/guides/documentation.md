@@ -85,7 +85,8 @@ are for a pipeline's documentation.
 each kind of error with its class (blocking, review, benign), element, severity, count and an example. Errors the
 agent's own content caused are fixed before documenting, not listed as accepted. An error the agent could not
 resolve (an inherited element, reference data, the source data) and the user says is benign is passed as
-`accept_errors` (element, an example as triage showed it, the user's reason, and optionally `matches`: the kind of
+`accept_errors` (not Events written as `EventDetail/Unknown`: those are agreed per rule in `build_translation_xslt`,
+`allow_unknown`, which is refused here) (element, an example as triage showed it, the user's reason, and optionally `matches`: the kind of
 message it covers, with `*` for what varies, e.g. `No HR record for user svc-*`, matched anywhere in the message;
 without it, the example's numbers and quoted values vary); the user confirms, and it is recorded in
 the section, in a block the server reads. From then on triage reports that kind of error for the pipeline as benign,

@@ -23,9 +23,10 @@ pattern and priority, settings, fields and types). They confirm it, or correct i
 they say the cluster admin has committed it, `create_processor_filter` starts indexing. An alias in the example
 becomes a field when the pipeline writes that field (documents can't write to an alias), typed as its target.
 
-The choice is the user's: `get_field_conventions backend=elasticsearch` gives the choices with their labels (From
-an index template, Follow an existing index in Stroom, then a convention per profile); offer exactly those, in
-order, recommending none. An example is pasted into the chat, as a choice form can't carry it, so ask for it there
+The choice is the user's: `get_field_conventions backend=elasticsearch` asks them in a form, with the choices as a
+picker (From an index template, Follow an existing index in Stroom, then a convention per profile), and its reply
+(`status: chosen`) gives the next call; call it without asking first. Where the client has no forms, it returns the
+choices (`needs_guidance`): offer exactly those, in order, recommending none. An example is pasted into the chat, as a choice form can't carry it, so ask for it there
 and wait for it before drafting. Following an existing index in Stroom (`like_index`) reads its field names and
 Elasticsearch types through Stroom, with nothing to paste, and the user confirms it in a form that says what was
 read; its template's settings and component templates aren't readable that way, so they paste the template for

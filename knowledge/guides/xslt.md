@@ -141,9 +141,11 @@ fields, and anchor the pattern. A record the pattern does not match gets no valu
 left out; a rule can test that with `{"field": "ts", "present": false}` (and `drop` it, or map it to `Unknown`
 with `allow_unknown` set to the reason, in the user's words: a rule that writes `Unknown` for sample records is
 refused without it, as the kind it singles out nearly always has an action element, and the user confirms the
-reason when the XSLT is saved, seeing what those records hold). `allow_unknown` is refused outright for records
-that are connections or logons, with the rules to use; a schema error in an action element is fixed, not avoided
-with `Unknown`.
+reason when the XSLT is saved, seeing what those records hold). `allow_unknown` is refused for records that are
+connections or logons, or whose values give a rule for each of them, with the rules to use; a schema error in an
+action element is fixed, not avoided with `Unknown`. Only if the user, shown those rules, still wants Unknown (they
+can say so in the chat), set `keep_unknown: true` with `allow_unknown`: they confirm it in the form, which shows
+what the values suggest. Never set it to get past the refusal yourself.
 
 A field no element of the schema means (a rule id, a byte count, a vendor's key) is carried as `Data` (a path ending
 `/Data`, with `data_name`) on the element it describes: `destination_key` under

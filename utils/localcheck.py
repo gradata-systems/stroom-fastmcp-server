@@ -240,15 +240,19 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
         # Every record it catches has a rule from its own values (an alert, a service starting, a configuration
         # saved): seen, an agent folded the draft's rules into 'other' as Unknown and the user had to decline the form.
         covered = bool(shown) and not left
-        if rule.allow_unknown and (plain or covered):
+        if rule.allow_unknown and (plain or covered) and not rule.keep_unknown:
             values = {v for r in (shown if covered else plain)
                       for v in (r['when'][-1].get('one_of') or [r['when'][-1].get('equals')])}
             known = sum(1 for r in found if isinstance(r, dict) and r.get(split) in values)
             problems.append(f"[{name}] can't be kept as Unknown: {known} of its {len(found)} sample records are not "
-                            f"unknown events.{use}")
+                            f"unknown events. Only if the user, shown the rules below, still wants them Unknown (they "
+                            f"can say so in the chat): keep_unknown: true on the rule with allow_unknown, and they "
+                            f"confirm it in the form.{use}")
         elif rule.allow_unknown:
+            # keep_unknown: the user chose Unknown over the action elements the values suggest; the form shows them.
             kept.append({'rule': name, 'reason': rule.allow_unknown, 'records': len(found), 'sample': held,
-                         **({'suggested': f"{described(shown)} (rather than Unknown)"} if shown else {})})
+                         **({'suggested': f"{described(shown)} (rather than Unknown)"} if shown else {}),
+                         **({'against_suggestion': True} if rule.keep_unknown and shown else {})})
         elif rule.when:
             problems.append(f"[{name}] keeps EventDetail/Unknown for {len(found)} of the {len(records)} sample records: "
                             f"{held}. Give them the action element these values describe, a rule per kind if they "

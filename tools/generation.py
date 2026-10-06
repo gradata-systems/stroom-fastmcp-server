@@ -213,9 +213,12 @@ async def build_translation_xslt(
                     **({'their values suggest': held['suggested']} if held and held.get('suggested') else {})}
             caught = '; '.join(f"{r.name}: {sampled[r.name]['records']} records ({_kinds(sampled[r.name]['sample'])})"
                                for r in kept if r.name in sampled)
+            against = [k['rule'] for k in sampled.values() if k.get('against_suggestion')]
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
                                                    f"Keep {', '.join(r.name for r in kept)} as Unknown (what happened is "
-                                                   f"not known) in the saved XSLT" + (f": {caught}" if caught else ''),
+                                                   f"not known) in the saved XSLT" + (f": {caught}" if caught else '')
+                                                   + (f". For {', '.join(against)}, the records' values show their "
+                                                      f"action (see 'their values suggest')" if against else ''),
                                                    details, confirmation_id)
             if gate:
                 return gate
