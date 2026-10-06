@@ -100,3 +100,34 @@ def test_a_shared_object_in_an_indexing_xslt_and_a_lucene_one():
     text = lucene.xslt()
     assert '<xsl:import href="Common-Lucene-V1" />' in text and 'name="Guid"' not in text
     assert '<xsl:call-template name="guid"><xsl:with-param name="n" select="1" /></xsl:call-template>' in text
+
+
+
+def test_shared_functions_are_described_with_their_namespace_and_how_importers_call_them():
+    from utils.sharedxslt import describe, usage
+    shared = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:gs="urn:gs" '
+              'xmlns:xs="http://www.w3.org/2001/XMLSchema" version="3.0">'
+              '<xsl:function name="gs:isLocalIpAddress" as="xs:boolean"><xsl:param name="ipAddress" as="xs:string"/>'
+              '<xsl:sequence select="starts-with($ipAddress, \'10.\')"/></xsl:function></xsl:stylesheet>')
+    assert describe(shared)['functions'] == {'gs:isLocalIpAddress': {
+        'prefix': 'gs', 'namespace': 'urn:gs', 'params': ['ipAddress as xs:string'], 'returns': 'xs:boolean'}}
+    caller = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:gs="urn:gs" version="3.0">'
+              '<xsl:import href="IP Lookup"/><xsl:template match="record">'
+              '<xsl:if test="not(gs:isLocalIpAddress($sourceIp))"/></xsl:template></xsl:stylesheet>')
+    [use] = usage(caller, {'IP Lookup': shared})
+    assert use['function'] == 'gs:isLocalIpAddress' and use['namespace'] == 'urn:gs' and use['calls'] == 1
+    assert use['example'] == 'not(gs:isLocalIpAddress($sourceIp))' and 'own_copy' not in use
+
+
+
+def test_a_call_in_a_part_template_is_placed_where_that_template_is_applied():
+    # Seen live: the house style calls shared templates inside a networkSource mode, applied in Network/Connect/Source.
+    from utils.sharedxslt import calls_of
+    caller = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns="event-logging:3" version="3.0">'
+              '<xsl:template match="node()" mode="event"><Event><EventDetail><Network><Connect><Source>'
+              '<xsl:apply-templates select="." mode="networkSource"/></Source></Connect></Network></EventDetail></Event>'
+              '</xsl:template><xsl:template match="node()" mode="networkSource"><Device>'
+              '<xsl:call-template name="ipAddressToLocation"/></Device></xsl:template></xsl:stylesheet>')
+    [call] = calls_of(caller, {'ipAddressToLocation': ['Location']})
+    assert call['within'] == 'EventDetail/Network/Connect/Source/Device'
+    assert call['at'] == ['EventDetail/Network/Connect/Source/Device/Location']

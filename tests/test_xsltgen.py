@@ -67,7 +67,7 @@ def test_generated_xslt_writes_valid_events_in_schema_order():
 
 
 def test_elements_repeated_across_rules_are_written_once_as_named_templates():
-    xslt = generate(mapping(), SCHEMA, '4.1.0')['xslt']
+    xslt = generate(mapping(style={'layout': 'inline'}), SCHEMA, '4.1.0')['xslt']
     sheet = etree.fromstring(xslt.encode())
     ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
     named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
@@ -76,7 +76,8 @@ def test_elements_repeated_across_rules_are_written_once_as_named_templates():
     assert len(sheet.findall(".//xsl:call-template[@name='event_source']", ns)) == 2
     assert '<!-- event_source: logon, other -->' in xslt
     # One rule: nothing repeats, so everything stays inline.
-    single = generate(mapping(events=[{'name': 'logon', 'fields': LOGON}]), SCHEMA, '4.1.0')['xslt']
+    single = generate(mapping(events=[{'name': 'logon', 'fields': LOGON}], style={'layout': 'inline'}), SCHEMA,
+                      '4.1.0')['xslt']
     assert 'call-template' not in single
 
 
@@ -85,7 +86,7 @@ def test_only_the_same_element_at_the_same_path_is_shared():
     logoff = [f if f['path'] != 'EventDetail/Authenticate/Action' else {**f, 'value': 'Logoff'} for f in LOGON]
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON},
              {'name': 'logoff', 'when': [{'field': 'action', 'equals': 'logout'}], 'fields': logoff}]
-    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    result = generate(mapping(events=rules, style={'layout': 'inline'}), SCHEMA, '4.1.0')
     ns = {'xsl': 'http://www.w3.org/1999/XSL/Transform', 'e': 'event-logging:3'}
     sheet = etree.fromstring(result['xslt'].encode())
     named = {t.get('name'): t for t in sheet.findall('xsl:template[@name]', ns)}
@@ -116,7 +117,7 @@ def test_variables_only_for_fields_read_often_and_declared_where_used():
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': logon},
              {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
                                           {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
-    result = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    result = generate(mapping(events=rules, style={'layout': 'inline'}), SCHEMA, '4.1.0')
     xslt = result['xslt']
     assert all(reads >= 3 for _, reads in variable_reads(xslt)), variable_reads(xslt)
     sheet = etree.fromstring(xslt.encode())
@@ -133,7 +134,7 @@ def test_variables_only_for_fields_read_often_and_declared_where_used():
 
 
 def test_style_sets_names_and_when_to_use_variables():
-    style = {'naming': 'camelCase', 'variable_min_reads': 1, 'inline_map_max_keys': 0}
+    style = {'naming': 'camelCase', 'variable_min_reads': 1, 'inline_map_max_keys': 0, 'layout': 'inline'}
     xslt = generate(mapping(style=style), SCHEMA, '4.1.0')['xslt']
     sheet = etree.fromstring(xslt.encode())
     assert {t.get('name') for t in sheet.findall(f'{XSL_NS}template[@name]')} == {'eventTime', 'eventSource'}
@@ -506,3 +507,123 @@ def test_an_invented_child_is_offered_as_data_of_the_nearest_element_that_takes_
         {'path': 'EventDetail/Network/Connect/Destination/Key', 'field': 'result'}]}]
     problem = next(p for p in generate(mapping(events=rules), SCHEMA_352, '3.5.2')['problems'] if 'Destination/Key' in p)
     assert '{"path": "EventDetail/Network/Connect/Destination/Data", "data_name": "result", "field": "result"}' in problem
+
+
+XSL_URI = 'http://www.w3.org/1999/XSL/Transform'
+
+
+def test_by_default_each_event_kind_and_shared_part_is_a_template_rule_with_its_own_mode():
+    # The house style seen in the live translations: match="node()" mode="eventTypeLogon", applied with select=".".
+    result = generate(mapping(style={'naming': 'camelCase'}), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    sheet = etree.fromstring(result['xslt'].encode())
+    ns = {'xsl': XSL_URI, 'e': 'event-logging:3'}
+    modes = {t.get('mode'): t for t in sheet.findall("xsl:template[@match='node()']", ns)}
+    assert set(modes) == {'eventTypeLogon', 'eventTypeOther', 'eventTime', 'eventSource'}
+    assert not sheet.findall('xsl:template[@name]', ns) and 'call-template' not in result['xslt']
+    record = sheet.find("xsl:template[@mode='event']", ns)
+    applied = [a.get('mode') for a in record.iterfind('.//xsl:apply-templates', ns)]
+    assert applied == ['eventTypeLogon', 'eventTypeOther']
+    assert all(a.get('select') == '.' for a in record.iterfind('.//xsl:apply-templates', ns))
+    assert modes['eventTypeLogon'].find('e:Event/xsl:apply-templates[@mode="eventSource"]', ns) is not None
+    assert record.find('.//e:Event', ns) is None    # the events are in their kinds' templates
+    events = transform(result['xslt'], RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert events.findtext('.//{event-logging:3}Authenticate/{event-logging:3}User/{event-logging:3}Id') == "o'neil"
+
+
+def test_named_layout_calls_a_template_per_event_kind():
+    result = generate(mapping(style={'layout': 'named'}), SCHEMA, '4.1.0')
+    sheet = etree.fromstring(result['xslt'].encode())
+    ns = {'xsl': XSL_URI}
+    assert {t.get('name') for t in sheet.findall('xsl:template[@name]', ns)} == {
+        'event_type_logon', 'event_type_other', 'event_time', 'event_source'}
+    record = sheet.find("xsl:template[@mode='event']", ns)
+    assert [c.get('name') for c in record.iterfind('.//xsl:call-template', ns)] == ['event_type_logon', 'event_type_other']
+    assert VALIDATOR.validate(transform(result['xslt'], RECORDS))
+    with pytest.raises(ValidationError):
+        mapping(style={'layout': 'one-big-template'})
+
+
+SHARED_FUNCTIONS = """<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:gs="urn:gs"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema" version="3.0">
+  <xsl:function name="gs:shout" as="xs:string"><xsl:param name="text" as="xs:string"/>
+    <xsl:value-of select="upper-case($text)"/></xsl:function>
+</xsl:stylesheet>"""
+
+
+def test_shared_functions_are_imported_and_called_in_xpaths():
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': LOGON + [
+                 {'path': 'EventDetail/Authenticate/Data', 'data_name': 'loud', 'xpath': "gs:shout(data[@name='user']/@value)"}]},
+             {'name': 'other', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'action'},
+                                          {'path': 'EventDetail/Unknown/Data', 'data_name': 'action', 'field': 'action'}]}]
+    shared = {'href': 'Common Functions', 'prefix': 'gs', 'namespace': 'urn:gs'}
+    result = generate(mapping(events=rules, functions=[shared]), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    sheet = etree.fromstring(result['xslt'].encode())
+    assert [i.get('href') for i in sheet.findall(f'{{{XSL_URI}}}import')] == ['Common Functions']
+    assert sheet.nsmap['gs'] == 'urn:gs' and 'gs' in sheet.get('exclude-result-prefixes').split()
+    # Run as Stroom would, with the import resolved to the shared document.
+    from pathlib import Path
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, 'Common Functions').write_text(SHARED_FUNCTIONS, encoding='utf-8')
+        main = Path(tmp, 'main.xsl')
+        main.write_text(result['xslt'], encoding='utf-8')
+        with PySaxonProcessor(license=False) as proc:
+            executable = proc.new_xslt30_processor().compile_stylesheet(stylesheet_file=str(main))
+            events = etree.fromstring(executable.transform_to_string(xdm_node=proc.parse_xml(xml_text=RECORDS)).encode())
+    assert events.find(".//{event-logging:3}Data[@Name='loud']").get('Value') == "O'NEIL"
+    # A prefix called but not bound, and one taken by the XSLT itself, are problems; an unused entry a warning.
+    unbound = generate(mapping(events=rules), SCHEMA, '4.1.0')
+    assert any("calls gs:... functions, but no functions entry binds 'gs'" in p for p in unbound['problems'])
+    taken = generate(mapping(events=rules, functions=[{**shared, 'prefix': 'xs'}]), SCHEMA, '4.1.0')
+    assert any("prefix 'xs' is the XSLT's own" in p for p in taken['problems'])
+    unused = generate(mapping(functions=[shared]), SCHEMA, '4.1.0')
+    assert unused['ok'] and any('nothing calls gs:...' in w for w in unused['warnings'])
+
+
+DOMAIN_RECORDS = r"""<records xmlns="records:2">
+<record><data name="time" value="2026-09-28T10:00:00.000Z"/><data name="action" value="login"/><data name="user" value="CORP\bob"/>
+<data name="result" value="ok"/><data name="sid" value="s1"/></record>
+</records>"""
+
+
+def test_a_conversion_several_elements_use_is_one_function_of_the_xslts_own():
+    # The environment's translations keep repeated conversions in xsl:functions (gs:parseTimestamp): so does this.
+    logon = [f if f['path'] != 'EventDetail/Authenticate/User/Id' else {**f, 'transform': 'strip_domain'} for f in LOGON]
+    base = [f if f['path'] != 'EventSource/User/Id' else {**f, 'transform': 'strip_domain'} for f in BASE]
+    rules = [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': logon}]
+    result = generate(mapping(common=base, events=rules), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    xslt = result['xslt']
+    sheet = etree.fromstring(xslt.encode())
+    functions = sheet.findall(f'{{{XSL_URI}}}function')
+    assert [f.get('name') for f in functions] == ['mcp:strip_domain']
+    assert xslt.count("replace(replace(") == 1 and xslt.count('mcp:strip_domain(') == 2   # defined once, called twice
+    events = transform(xslt, DOMAIN_RECORDS)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert [u.text for u in events.iter('{event-logging:3}Id')] == ['bob', 'bob']
+    # 0: always inline; one use: inline too.
+    inline = generate(mapping(common=base, events=rules, style={'function_min_uses': 0}), SCHEMA, '4.1.0')['xslt']
+    assert 'xsl:function' not in inline and inline.count('replace(replace(') == 2
+    once = generate(mapping(events=rules), SCHEMA, '4.1.0')['xslt']
+    assert 'xsl:function' not in once
+
+
+def test_a_time_format_several_elements_use_is_one_function():
+    timed = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': "dd/MM/yyyy HH:mm:ss", 'timezone': '+10:00'}]
+    rules = [{'name': 'logon', 'fields': LOGON + [
+        {'path': 'EventDetail/Authenticate/Data', 'data_name': 'seen', 'field': 'time', 'time_format': "dd/MM/yyyy HH:mm:ss",
+         'timezone': '+10:00'},
+        {'path': 'EventDetail/Authenticate/Data', 'data_name': 'stamp', 'field': 'sid', 'time_format': 'epoch_ms'}]}]
+    result = generate(mapping(common=timed + BASE[1:], events=rules, style={'naming': 'camelCase'}), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    sheet = etree.fromstring(result['xslt'].encode())
+    [function] = sheet.findall(f'{{{XSL_URI}}}function')
+    assert function.get('name') == 'mcp:parseTime'
+    assert function.find(f'{{{XSL_URI}}}sequence').get('select') == \
+        "stroom:format-date($value, 'dd/MM/yyyy HH:mm:ss', '+10:00')"
+    assert result['xslt'].count('mcp:parseTime(') == 2 and 'mcp' in sheet.get('exclude-result-prefixes').split()
+    # Used once, epoch_ms stays inline.
+    assert 'stroom:format-date(string(' in result['xslt']

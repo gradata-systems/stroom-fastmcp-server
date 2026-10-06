@@ -198,6 +198,8 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_appr
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
 
 
+IN_BUILD = SimpleNamespace(tags=AsyncMock(return_value=['mcp-generated', 'mcp-build-b']))
+
 @respx.mock
 async def test_wait_counts_only_the_given_filters_outputs(ctx):
     respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
@@ -207,9 +209,10 @@ async def test_wait_counts_only_the_given_filters_outputs(ctx):
     respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': [
         {'meta': {'id': 20, 'pipelineUuid': 'p1', 'typeName': 'Events', 'processorFilterId': 3}},
         {'meta': {'id': 30, 'pipelineUuid': 'p1', 'typeName': 'Events', 'processorFilterId': 9}}]}))
-    everything = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5)
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        everything = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5)
+        latest = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
     assert everything['gate'] == 'fail' and 'filter_id' in everything['problems'][0]
-    latest = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
     assert latest['gate'] == 'pass' and latest['streams'] == [{'input': 5, 'events': [30], 'errors': []}]
 
 
@@ -224,12 +227,17 @@ async def test_wait_fails_while_the_current_code_has_not_stepped_clean(ctx):
         {'processorFilter': {'id': 9}, 'status': 'COMPLETE'}]}))
     respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': [
         {'meta': {'id': 30, 'pipelineUuid': 'p1', 'typeName': 'Events', 'processorFilterId': 9}}]}))
-    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)):
+    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)),             patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
         result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
     assert result['gate'] == 'fail' and result['streams'][0]['events'] == [30]
     assert result['problems'] == ["The pipeline's current code has not stepped clean: its output may not be what was "
                                   "checked. step_sample over the sample streams until the verdict is clean, then "
                                   "reprocess_streams"]
+    # Promoted, it keeps no record of its steps (seen in e2e: production v1 failed the gate on new data): not gated.
+    promoted = SimpleNamespace(tags=AsyncMock(return_value=['mcp-generated']))
+    with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)),             patch('tools.processing_writes.guard_from', return_value=promoted):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=5, filter_id=9)
+    assert result['gate'] == 'pass' and result['problems'] == []
 
 @respx.mock
 async def test_with_no_processor_filter_there_is_nothing_to_wait_for(ctx):

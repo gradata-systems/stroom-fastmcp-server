@@ -163,7 +163,10 @@ Stage 1, events:
    shared XSLTs (xsl:import, found by name) its other pipelines' XSLTs use: each named template they call, where (at,
    e.g. EventSource/Device or Meta), what it writes and reads (stroom:meta) and the parameters they pass. Use the same
    ones: the mapping's shared entries (href, template, at, with_params), and map nothing below those elements, as
-   the shared template writes them (twice fails validation). find_documents (content=...) for other XSLTs to reuse.
+   the shared template writes them (twice fails validation). It lists their xsl:functions too (namespace,
+   parameters, calls): call them in xpaths, with a functions entry (href, prefix, namespace) per shared XSLT.
+   find_documents (content=...) for other XSLTs to reuse. An XSLT style in the standing instructions, or one the
+   user asks for, goes in the mapping's style (layout, naming, variables).
    draft_translation_mapping with the sample streams gives a
    mapping to edit (its notes say what to decide: the action element per kind of event, System Name, Environment, a
    time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams, splitter=the spec) with
@@ -176,7 +179,7 @@ Stage 1, events:
    jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream,
-   from code that stepped clean: after changing the XSLT, step again and reprocess_streams),
+   from code that stepped clean, in a build: after changing the XSLT, step again and reprocess_streams),
    check_events on the output. Then write_documentation for the events pipeline with stream_ids = the sample streams:
    its Field mapping section is generated from the kept mapping.
 

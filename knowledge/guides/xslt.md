@@ -159,22 +159,30 @@ translation XSLT written by hand (`save_xslt`) whose records come out as `Unknow
 ## Style
 
 The mapping's `style` decides how the XSLT reads. Take it from an XSLT style section in the standing instructions
-(AGENTS docs) when there is one; otherwise leave the defaults:
+(AGENTS docs) when there is one, or from what the user asks for; otherwise leave the defaults:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `naming` | `snake_case` | Variables and named templates: `client_ip`, `event_source`, `action_to_success`. Also `camelCase`, `PascalCase`, `kebab-case`. |
+| `naming` | `snake_case` | Variables, templates, modes and the XSLT's own functions: `client_ip`, `event_source`, `action_to_success`. Also `camelCase`, `PascalCase`, `kebab-case`. |
 | `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable, declared in the one rule that uses it, or at the top when several do. Fewer reads stay inline. 1: always variables. |
 | `inline_map_max_keys` | 3 | A value map used by one element with at most this many keys is written inline as an `if`; longer or shared ones become one `xsl:map`. 0: always `xsl:map`. |
+| `function_min_uses` | 2 | A conversion this many elements use (a time format, or a `strip_domain`, `domain` or `digits` transform) is declared once as an `xsl:function` (`mcp:parse_time`, `mcp:strip_domain`) and called; fewer stay inline. 0: always inline. |
+| `layout` | `modes` | `modes`: each event kind is a template rule with its own mode (`match="node()" mode="eventTypeLogon"` with `camelCase` naming), applied to the record with `select="."` from the record template's `xsl:choose`; parts several kinds share are mode templates too. `named`: the same with named templates and `xsl:call-template`. `inline`: every kind written in the `xsl:choose`. |
 
-Elements that come out the same in several rules (EventTime, EventSource, ...) are written once as named
-templates, whatever the style.
+Elements that come out the same in several rules (EventTime, EventSource, ...) are written once, in a template of
+the layout's kind, whatever the style.
 
 ## Reuse
 
 Existing pipelines `xsl:import` shared XSLTs by document name (e.g. `IP Lookup`) and keep field
 mappings in Dictionary docs. Find them with `find_documents (content=...)` and `describe_template`
-before writing new code, and check imports resolve with `check_xslt`.
+before writing new code, and check imports resolve with `check_xslt`. A mapping uses a shared XSLT two ways:
+its named templates through `shared` (called in the element's place), and its `xsl:function`s through
+`functions` (`href`, `prefix`, `namespace`, as `describe_template`'s `shared_xslt` gives them), called in any
+xpath: `"xpath": "gs:parseTimestamp(data[@name='eventtime']/@value)"`. Conditions compare strings, so test a
+boolean function as `string(gs:isLocalIpAddress(...))` with `equals: 'true'`. An xpath calling a prefix that
+no `functions` entry binds is a problem. Stroom steps the XSLT with its imports; the local checks skip these
+xpaths.
 
 ## Checking a draft
 

@@ -96,6 +96,28 @@ async def at(ctx, build: str, step: str, tool: str | None = None) -> dict:
     return nxt
 
 
+FOLLOW_FIXTURE = 'E2E-Follow-Fixture'
+
+
+async def follow_fixture(stroom: StroomGateway, cluster: dict) -> None:
+    """An Elasticsearch index doc for "follow an existing index" to offer: a fresh stack has none (the walk had
+    relied on what earlier runs left)."""
+    found = [v for v in (await stroom.find_documents(FOLLOW_FIXTURE, ['ElasticIndex'], 5)).get('values') or []
+             if v['docRef'].get('name') == FOLLOW_FIXTURE]
+    if found:
+        return
+    parent = await stroom.post('/explorer/v2/find', {
+        'filter': {'includedTypes': ['Folder'], 'nameFilter': 'Template Pipelines', 'requiredPermissions': ['VIEW']},
+        'pageRequest': {'offset': 0, 'length': 5}})
+    node = await stroom.post('/explorer/v2/create', {
+        'docType': 'ElasticIndex', 'docName': FOLLOW_FIXTURE, 'permissionInheritance': 'DESTINATION',
+        'destinationFolder': parent['values'][0]['docRef'] if parent.get('values') else None})
+    ref = node.get('docRef', node)
+    doc = await stroom.get_doc('ElasticIndex', ref['uuid'])
+    doc['clusterRef'], doc['indexName'] = cluster, 'e2e-follow-fixture'
+    await stroom.put_doc(doc)
+
+
 class Walk:
     """The agent's decisions, and what it has made so far."""
 
@@ -202,6 +224,7 @@ class Walk:
                                    time_field=self.plan.time_field, plan=self.plan)
             return self.index
         self.cluster = await live_cluster(self.ctx.lifespan_context['stroom'])
+        await follow_fixture(self.ctx.lifespan_context['stroom'], self.cluster)
         options = await TOOLS['get_field_conventions'](self.ctx, backend='elasticsearch')
         check(options['options'][0]['option'].startswith('example index template'), "the user's example is offered first")
         # Wrong moves: a convention alone drafts nothing; another index is the user's choice, in a form.
@@ -259,10 +282,12 @@ class Walk:
         check(message.startswith('No Elasticsearch index template has been agreed')
               and f'propose_index_template pipeline_uuid={pipeline_uuid}' in message,
               'indexing before the template is agreed is refused, naming the call that agrees it')
-        unasked = await run(self.ctx, 'propose_index_template', pipeline_uuid=pipeline_uuid, plan=self.plan,
-                            events_stream_ids=self.events)
-        check(unasked.get('needs') == 'example_template' and 'dev_tools' not in unasked,
-              "without the user's example nothing is built for the cluster")
+        # The example the user pasted for the draft is kept in the build, so it isn't asked for again. Not agreed here:
+        # the plan's own step agrees it below.
+        unasked = await TOOLS['propose_index_template'](self.ctx, pipeline_uuid=pipeline_uuid, plan=self.plan,
+                                                        events_stream_ids=self.events)
+        check(unasked.get('status') == 'needs_review' and 'PUT _index_template/' in unasked.get('dev_tools', ''),
+              "not passed again, the user's example kept from the draft builds the template, for the user to review")
         started = time.monotonic()
         waited = await run(self.ctx, 'wait_for_processing', pipeline_uuid=pipeline_uuid, stream_ids=self.events,
                            expect_events=False, timeout_seconds=60)

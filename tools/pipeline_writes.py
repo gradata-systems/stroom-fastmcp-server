@@ -402,8 +402,12 @@ async def copy_pipeline(
                         f"template's structure and takes later fixes to it. copy_pipeline is for a new version or a working "
                         f"copy of a source's own pipeline (e.g. Acme-Door-V1.2-Events).")
     data = copy.deepcopy(source.get('pipelineData') or {})
+    # Not those set_properties replaces: a copy nothing uses, and its name may be the replacement's (seen: v2's XSLT
+    # made first, then V1's copied and renamed to the same name, which the build refuses).
+    replaced = {(p.element, p.name) for p in set_properties}
     owned = [p['value']['entity'] for p in (data.get('properties') or {}).get('add') or []
-             if (p.get('value') or {}).get('entity', {}).get('type') in OWNED_TYPES]
+             if (p.get('value') or {}).get('entity', {}).get('type') in OWNED_TYPES
+             and (p.get('element'), p.get('name')) not in replaced]
     names = {}
     for entity in owned:
         name = entity['name']

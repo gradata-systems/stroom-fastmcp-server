@@ -220,11 +220,16 @@ class ConsentStore:
                         f"the new values and no id to get a fresh {kind}."}
 
 
-    async def choose(self, ctx: Any, action: str, question: str, options: list[str]) -> str | None:
+    async def choose(self, ctx: Any, action: str, question: str, options: list[str]) -> Any:
         """The option the user picks in a form, or None when the client can't show one here (the agent then asks
         them). Seen: an agent given the choices asked in the chat, on Gemma and on Claude alike, with no picker.
-        Cancelling the form stops the call, as declining a confirmation does."""
-        if not (self.use_elicitation and hasattr(ctx, 'elicit')) or _modern(ctx) or not options:
+        Cancelling the form stops the call, as declining a confirmation does. On a modern connection, the form
+        comes back as an input-required result for the tool to return; its answer arrives with the repeated call."""
+        if not self.use_elicitation or not options:
+            return None
+        if _modern(ctx):
+            return self._choice_round(ctx, action, question, options)
+        if not hasattr(ctx, 'elicit'):
             return None
         try:
             asked = time.perf_counter()
@@ -241,6 +246,40 @@ class ConsentStore:
         if not chosen:
             raise ToolError(f"The user made no choice: {question}")
         return chosen if chosen in options else None
+
+    def _choice_round(self, ctx: Any, action: str, question: str, options: list[str]) -> Any:
+        """Modern connections: the choice made (kept in the call's state, so a later question in the same call
+        can follow it), an input-required result to ask, or None if the client has no forms."""
+        state = _call_state(ctx)
+        key = 'choice-' + hashlib.sha256(f"{action}\n{question}".encode()).hexdigest()[:16]
+        made = (state.get('choices') or {}).get(key)
+        if made in options:
+            return made
+        try:
+            responses = ctx.input_responses
+        except Exception:
+            responses = None
+        answer = (responses or {}).get(key) if responses else None
+        if answer is not None and state.get('asked_choice') == key:
+            action_taken = getattr(answer, 'action', None) or (answer.get('action') if isinstance(answer, dict) else None)
+            content = getattr(answer, 'content', None) or (answer.get('content') if isinstance(answer, dict) else None) or {}
+            chosen = content.get('choice') if action_taken == 'accept' else None
+            audit('choice', action=action, question=question, outcome='chosen' if chosen in options else 'declined',
+                  via='form', **({'choice': chosen} if chosen in options else {}))
+            if chosen not in options:
+                raise ToolError(f"The user made no choice: {question}")
+            state.setdefault('choices', {})[key] = chosen
+            state.pop('asked_choice', None)
+            return chosen
+        if not _client_can_answer_forms(ctx):
+            return None
+        state['asked_choice'] = key
+        audit('choice', action=action, question=question, outcome='requested', via='form')
+        form = mcp_types.ElicitRequest(params=mcp_types.ElicitRequestFormParams(
+            message=question, requested_schema={'type': 'object', 'required': ['choice'], 'properties': {
+                'choice': {'type': 'string', 'title': question, 'enum': list(options)}}}))
+        return mcp_types.InputRequiredResult(input_requests={key: form},
+                                            request_state=json.dumps(state, sort_keys=True))
 
     def _form_round(self, ctx: Any, kind: Kind, action: str, summary: str, details: dict[str, Any],
                     digest: str, editable: dict[str, tuple[str, str]] | None = None) -> Any:

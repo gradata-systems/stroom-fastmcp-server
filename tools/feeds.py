@@ -14,7 +14,7 @@ from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples, check_sample
-from utils.stroom import gateway_from, set_body_text
+from utils.stroom import body_text, gateway_from, set_body_text
 from utils.uploads import send_to_feed
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -289,7 +289,7 @@ async def record_source_notes(
     Notes guessed from the sample aren't documentation, and the draft would follow them over the sample's own values
     (draft_translation_mapping reads those itself).
     """
-    from utils.sourcenotes import REFERENCE_INFIX, block, catalogue_problems, detail_problem
+    from utils.sourcenotes import REFERENCE_INFIX, block, catalogue_problems, detail_problem, read_notes
     fields = [FieldNote.model_validate(f) if isinstance(f, dict) else f for f in fields]
     events = [EventNote.model_validate(e) if isinstance(e, dict) else e for e in events]
     if events:
@@ -306,6 +306,13 @@ async def record_source_notes(
     documents = [ReferenceDocument.model_validate(d) if isinstance(d, dict) else d for d in documents]
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
+    # Called again for the same source (a long manual sent a part at a time), the build's docs are updated, not made
+    # twice: the build refuses a second doc of one name.
+    contents = {(d['type'], d['name']): d for d in await guard.folder_contents(build)}
+
+    async def written(name: str, fill) -> dict[str, Any]:
+        there = contents.get(('Documentation', name))
+        return await fill(there) if there else await guard.create_filled('Documentation', name, build, fill)
     kept_docs = []
     for d in [d for d in documents if d.uuid]:
         # Already in Stroom (uploaded by the user): kept where it is, and named in the notes.
@@ -319,8 +326,18 @@ async def record_source_notes(
             doc = await stroom.get_doc('Documentation', ref['uuid'])
             set_body_text(doc, text)
             return await stroom.put_doc(doc)
-        kept = await guard.create_filled('Documentation', name, build, keep)
+        kept = await written(name, keep)
         kept_docs.append({'uuid': kept['uuid'], 'name': kept['name']})
+    notes_name = f'{source} source notes'
+    earlier = {}
+    if ('Documentation', notes_name) in contents:
+        earlier = read_notes(body_text(await stroom.get_doc('Documentation', contents[('Documentation', notes_name)]['uuid']))) or {}
+    # What earlier calls recorded stays, unless this one gives the same field or event again.
+    given_fields, given_events = {f.field for f in fields}, {e.event for e in events}
+    fields = [FieldNote.model_validate(f) for f in earlier.get('fields') or [] if f.get('field') not in given_fields] + fields
+    events = [EventNote.model_validate(e) for e in earlier.get('events') or [] if e.get('event') not in given_events] + events
+    references = list(dict.fromkeys([*(earlier.get('references') or []), *references]))
+    kept_names = list(dict.fromkeys([*(earlier.get('documents') or []), *(d['name'] for d in kept_docs)]))
     lines = [f'# {source} source notes', '', summary.strip(), '']
     if fields:
         lines += ['## Field dictionary', '', '| Field | Meaning | Type | Example | Event-logging path |',
@@ -331,18 +348,18 @@ async def record_source_notes(
         lines += ['## Event catalogue', '', '| Event | Description | EventDetail | TypeId |', '| --- | --- | --- | --- |']
         lines += [f'| {e.event} | {e.description} | {e.event_detail} | {e.type_id} |' for e in events]
         lines.append('')
-    if references or kept_docs:
-        lines += ['## Sources', ''] + [f'- {r}' for r in references] + [f"- `{d['name']}` (kept in Stroom)" for d in kept_docs]
+    if references or kept_names:
+        lines += ['## Sources', ''] + [f'- {r}' for r in references] + [f"- `{n}` (kept in Stroom)" for n in kept_names]
     lines += ['', block({'source': source, 'fields': [f.model_dump(exclude_defaults=True) for f in fields],
                          'events': [e.model_dump(exclude_defaults=True) for e in events],
-                         'documents': [d['name'] for d in kept_docs]})]
+                         'documents': kept_names, **({'references': references} if references else {})})]
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
         set_body_text(doc, '\n'.join(lines) + '\n')
         return await stroom.put_doc(doc)
 
-    doc = await guard.create_filled('Documentation', f'{source} source notes', build, write)
+    doc = await written(notes_name, write)
     from tools.plan import with_next
     usable = [e.event for e in events if e.field and e.value]
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'fields': len(fields),

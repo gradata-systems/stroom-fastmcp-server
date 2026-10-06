@@ -34,9 +34,10 @@ async def _pipeline_index(ctx: Context) -> dict[str, dict[str, Any]]:
     Stroom has no "children of" query, so this reads each pipeline doc once.
     """
     cached = ctx.lifespan_context.get('pipeline_index')
-    if cached and time.monotonic() - cached[0] < _INDEX_TTL:
-        return cached[1]
     stroom = gateway_from(ctx)
+    # Seen: a pipeline created a minute after the index was read was missing from its template's children.
+    if cached and time.monotonic() - cached[0] < _INDEX_TTL and cached[0] > getattr(stroom, 'pipelines_changed', 0.0):
+        return cached[1]
     found = await stroom.find_all_documents('type:Pipeline', ['Pipeline'])
     refs = [v for v in found if v['docRef'].get('type') == 'Pipeline']
     semaphore = asyncio.Semaphore(8)
@@ -323,7 +324,7 @@ async def shared_xslt_usage(ctx: Context, pipelines: list[dict[str, Any]], limit
             if not hrefs:
                 continue
             for use in usage(text, {h: await shared(h) for h in hrefs}):
-                key = (use['href'], use.get('template'), tuple(use.get('at') or []))
+                key = (use['href'], use.get('template'), use.get('function'), tuple(use.get('at') or []))
                 row = seen.setdefault(key, {**{k: v for k, v in use.items() if k != 'within'}, 'used_by': []})
                 row['used_by'].append(pipeline['name'])
     for row in seen.values():
@@ -358,9 +359,10 @@ async def describe_template(
     if shared:
         result['shared_xslt'] = shared
         result['shared_xslt_hint'] = (
-            "These pipelines' XSLTs call named templates from shared XSLTs. Use the same ones in the new XSLT where "
-            "they are called (the mapping's or field plan's shared entries: href, template, at), and do not map the "
-            "elements they write: an element written twice fails schema validation.")
+            "These pipelines' XSLTs call named templates and functions from shared XSLTs. Use the same ones in the "
+            "new XSLT where they are called (the mapping's or field plan's shared entries: href, template, at), and do "
+            "not map the elements they write: an element written twice fails schema validation. Functions are called "
+            "in the mapping's xpaths, with a functions entry (href, prefix, namespace) for each shared XSLT.")
     return result
 
 

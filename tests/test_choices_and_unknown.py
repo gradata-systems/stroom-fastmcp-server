@@ -78,3 +78,54 @@ async def test_unknown_is_not_accepted_as_a_benign_error():
                                          markdown='## Purpose\n', accept_errors=[{
                                              'element': 'translationFilter', 'reason': 'odd actions',
                                              'example': '3 of 50 records come out as EventDetail/Unknown'}])
+
+
+
+async def test_on_a_modern_connection_the_choices_are_a_form_returned_and_answered_with_the_repeated_call():
+    # VS Code may connect with the 2026-07-28 protocol, with no server-initiated requests: the form is the result.
+    import mcp_types
+    from tests.test_consent import ModernCtx
+
+    def ctx(**kwargs):
+        c = ModernCtx(**kwargs)
+        base = ctx_with(FormClient(), [('k', 'Keycloak'), ('f', 'Fortigate')])
+        c.lifespan_context = base.lifespan_context
+        return c
+    store = ConsentStore(use_elicitation=True)
+    with patch.object(indexing, '_conventions', lambda ctx: {}):
+        first = ctx()
+        first.lifespan_context['consent'] = store
+        asked = await indexing.get_field_conventions(first, backend='elasticsearch')
+        assert isinstance(asked, mcp_types.InputRequiredResult)
+        [(key, form)] = asked.input_requests.items()
+        assert form.params.requested_schema['properties']['choice']['enum'][1] == 'Follow an existing index in Stroom'
+        second = ctx(responses={key: {'action': 'accept', 'content': {'choice': 'Follow an existing index in Stroom'}}},
+                     state=asked.request_state)
+        second.lifespan_context['consent'] = store
+        which = await indexing.get_field_conventions(second, backend='elasticsearch')
+        [(key2, form2)] = which.input_requests.items()
+        assert form2.params.message == 'Which existing index should it follow?'
+        third = ctx(responses={key2: {'action': 'accept', 'content': {'choice': 'Fortigate (System / Elastic Indices)'}}},
+                    state=which.request_state)
+        third.lifespan_context['consent'] = store
+        got = await indexing.get_field_conventions(third, backend='elasticsearch')
+    assert got['status'] == 'chosen' and got['like_index'] == 'f'
+
+
+async def test_a_pipeline_copy_leaves_out_the_documents_set_properties_replaces():
+    # Seen in e2e: v2's XSLT was made first, then v1's was copied and renamed to the same name, which the build refused.
+    from tools import pipeline_writes
+    from tools.pipeline_writes import PropertyValue
+    source = {'name': 'ACME-V1 - Indexing', 'pipelineData': {'properties': {'add': [
+        {'element': 'xsltFilter', 'name': 'xslt', 'value': {'entity': {'type': 'XSLT', 'uuid': 'x1', 'name': 'ACME-V1-XSLT'}}},
+        {'element': 'dsParser', 'name': 'textConverter',
+         'value': {'entity': {'type': 'TextConverter', 'uuid': 't1', 'name': 'ACME-V1'}}}]}}}
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value=source))
+    ctx = SimpleNamespace(lifespan_context={'consent': ConsentStore(use_elicitation=False)})
+    with patch.object(pipeline_writes, 'gateway_from', lambda ctx: stroom), \
+            patch.object(pipeline_writes, 'guard_from', lambda ctx: SimpleNamespace()), \
+            patch('tools.templates.template_reason', AsyncMock(return_value=None)):
+        asked = await pipeline_writes.copy_pipeline(
+            ctx, build='acme-v2', source_uuid='p1', new_name='ACME-V2 - Indexing', rename={'V1': 'V2'},
+            set_properties=[PropertyValue(element='xsltFilter', name='xslt', doc_uuid='x2', doc_type='XSLT')])
+    assert asked['status'] == 'needs_confirmation' and asked['details']['copied documents'] == ['ACME-V2']

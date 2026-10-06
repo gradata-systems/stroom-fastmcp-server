@@ -90,7 +90,9 @@ def xpath_inputs(mapping: TranslationMapping) -> dict[str, list[str]]:
     for ex in mapping.extract:
         if ex.xpath:
             used.setdefault(ex.xpath, []).append('extract')
-    return {x: u for x, u in used.items() if 'stroom:' not in x and '$' not in x}
+    # Not those calling a shared XSLT's functions: only Stroom, which imports it, can run them.
+    imported = [f'{f.prefix}:' for f in mapping.functions]
+    return {x: u for x, u in used.items() if 'stroom:' not in x and '$' not in x and not any(p in x for p in imported)}
 
 
 def check_xpaths(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None = None) -> list[str]:

@@ -162,3 +162,39 @@ def test_a_catalogue_saying_unknown_is_not_held_against_a_better_rule():
         rule['fields'] = [{'path': 'EventDetail/TypeId', 'field': 'action'},
                           {'path': 'EventDetail/Alert/Type', 'value': 'Network'}]
     assert not [p for p in check_mapping(mapping, vpn) if 'documentation says Unknown' in p]
+
+
+async def test_notes_recorded_again_for_a_source_are_merged_into_its_one_doc():
+    # Seen in e2e: a long manual sent a part at a time; the second call made the notes doc again, which the build
+    # refused (one doc per name).
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tools import feeds
+    first = f"# Acme directory source notes\n\nSummary.\n\n{block({**NOTES, 'documents': ['Acme directory reference - part 1']})}\n"
+    docs = {'n1': {'type': 'Documentation', 'uuid': 'n1', 'name': 'Acme directory source notes', 'data': first}}
+    saved = []
+
+    async def put_doc(doc):
+        saved.append(doc)
+        return doc
+    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: dict(docs.get(u) or {'uuid': u, 'name': 'new'})),
+                             put_doc=put_doc)
+
+    async def create_filled(doc_type, name, build, fill):
+        docs['r2'] = {'type': doc_type, 'uuid': 'r2', 'name': name}
+        return await fill(docs['r2'])
+    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[{k: docs['n1'][k] for k in ('type', 'uuid', 'name')}]),
+                            create_filled=AsyncMock(side_effect=create_filled))
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), patch.object(feeds, 'guard_from', lambda ctx: guard), \
+            patch('tools.plan.with_next', AsyncMock(side_effect=lambda ctx, build, result: result)):
+        result = await feeds.record_source_notes(
+            SimpleNamespace(lifespan_context={}), 'acme', 'Acme directory', 'Summary.', fields=[
+                {'field': 'usr', 'meaning': 'The account', 'event_logging_path': 'EventSource/User/Id'}],
+            documents=[{'title': 'part 2', 'text': 'More of the manual.'}])
+    assert result['uuid'] == 'n1'           # the doc already there, written again: not a second one
+    assert [c.args[1] for c in guard.create_filled.call_args_list] == ['Acme directory reference - part 2']
+    notes = read_notes(saved[-1]['data'])
+    assert [f['field'] for f in notes['fields']] == ['evt', 'src', 'res', 'usr']    # usr given again: the new one
+    assert next(f for f in notes['fields'] if f['field'] == 'usr')['meaning'] == 'The account'
+    assert [e['event'] for e in notes['events']] == ['4624', '4625', '4634', '4648']
+    assert notes['documents'] == ['Acme directory reference - part 1', 'Acme directory reference - part 2']

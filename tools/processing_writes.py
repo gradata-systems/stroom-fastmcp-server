@@ -531,7 +531,10 @@ async def wait_for_processing(
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
                             "ask the user which to keep")
-    if not await stepped_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline_uuid}):
+    ref = {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline_uuid}
+    # Only while the pipeline is in a build, where its code changes: a promoted one keeps no record of its steps.
+    in_build = any(t.startswith('mcp-build-') for t in await guard_from(ctx).tags(ref))
+    if in_build and not await stepped_clean(ctx, ref):
         # Seen: a filter made after a clean step kept processing once the XSLT was replaced by one that never stepped
         # clean, and the agent went on to document and index its output.
         problems.append("The pipeline's current code has not stepped clean: its output may not be what was checked. "

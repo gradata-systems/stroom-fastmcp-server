@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
@@ -80,6 +81,10 @@ def _reason(response: httpx.Response) -> str:
     return str(body)
 
 
+# Writes that change pipelines or where documents sit: a pipeline doc itself, or the explorer tree.
+_CHANGES_PIPELINES = re.compile(r'^/(pipeline/v1/|explorer/v2/(create|copy|move|delete))')
+
+
 class StroomGateway:
     """Calls the Stroom REST API (`/api/...`) as the MCP caller.
 
@@ -90,6 +95,7 @@ class StroomGateway:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None,
                  authorization: dict[str, str] | None = None):
         self.settings = settings
+        self.pipelines_changed = 0.0      # when this server last changed a pipeline or the explorer tree
         # Outside a tool call (an upload with a ticket), the caller's token comes with the request, not the context.
         self._fixed_authorization = authorization
         self._client = httpx.AsyncClient(
@@ -158,6 +164,9 @@ class StroomGateway:
             raise ToolError(f"Stroom rejected the request ({response.status_code}): {reason}")
 
         audit('stroom_request', outcome='success', status=response.status_code, took_ms=took_ms, **who)
+        if method != 'GET' and _CHANGES_PIPELINES.match(path):
+            # A pipeline made, copied, moved, changed or deleted: what was cached about them is out of date.
+            self.pipelines_changed = time.monotonic()
         data = response.json() if response.content else None
         if with_cookies:
             pairs = [c.split(';', 1)[0].strip() for c in response.headers.get_list('set-cookie')]

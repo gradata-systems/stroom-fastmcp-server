@@ -168,8 +168,9 @@ async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[
                   f"its index template itself (settings, component templates) is not visible through Stroom"), read
 
 
-async def _choose(ctx: Context, question: str, options: list[str]) -> str | None:
-    """The user's pick in a form, or None where the client has no form (the agent asks instead)."""
+async def _choose(ctx: Context, question: str, options: list[str]) -> Any:
+    """The user's pick in a form, None where the client has no form (the agent asks instead), or on a modern
+    connection the form itself, for the tool to return."""
     store = (getattr(ctx, 'lifespan_context', None) or {}).get('consent')
     return await store.choose(ctx, 'get_field_conventions', question, options) if store else None
 
@@ -228,14 +229,19 @@ async def get_field_conventions(
                             'how': f"Only when the user has no example: draft_index_mapping convention={profile_name} "
                                    f"without_example=true, which the user confirms in a form."})
         chosen = await _choose(ctx, "How should the new index's fields be named?", [o['choice'] for o in options])
+        if chosen is not None and not isinstance(chosen, str):
+            return chosen       # the form, on a modern connection: the answer comes with the repeated call
         if chosen:
             option = next(o for o in options if o['choice'] == chosen)
             result = {'status': 'chosen', 'choice': chosen, 'how': option['how'],
                       **({'indexing_templates': templates} if templates else {})}
             if option['option'] == 'follow an existing index in Stroom' and existing:
                 labels = {f"{e['name']} ({e['path']})": e for e in existing}
-                pick = existing[0] if len(existing) == 1 else labels.get(
-                    await _choose(ctx, 'Which existing index should it follow?', list(labels)) or '')
+                which = None if len(existing) == 1 else await _choose(
+                    ctx, 'Which existing index should it follow?', list(labels))
+                if which is not None and not isinstance(which, str):
+                    return which
+                pick = existing[0] if len(existing) == 1 else labels.get(which or '')
                 if pick:
                     result.update(like_index=pick['uuid'], hint=f"The user chose to follow '{pick['name']}': "
                                   f"draft_index_mapping like_index={pick['uuid']} (with the events streams).")
@@ -267,6 +273,8 @@ async def get_field_conventions(
         if backend == 'lucene' and profiles:
             labels = {f"{_PROFILE_LABELS.get(n, n)} convention": n for n in profiles}
             chosen = await _choose(ctx, "How should the new index's fields be named?", list(labels))
+            if chosen is not None and not isinstance(chosen, str):
+                return chosen
             if chosen:
                 return {'status': 'chosen', 'choice': chosen, 'convention': labels[chosen],
                         'hint': f"get_field_conventions name={labels[chosen]} for its field map, then "

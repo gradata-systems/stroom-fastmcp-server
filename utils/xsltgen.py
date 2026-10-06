@@ -1,15 +1,18 @@
 """Generate an event-logging translation XSLT from a field mapping.
 
 The model says which input field (or constant) goes to which event-logging path, per event type. This
-module writes the XSLT: the right input namespace, one template per record, elements in schema order,
-time conversion with stroom:format-date, value maps, and guards so empty inputs leave elements out rather
-than writing empty ones. Elements that come out the same in several places (EventTime, EventSource, ...)
-are written once, as named templates. A field read several times in a template (in enclosing guards as well
-as its own element) goes into a variable holding its non-blank values, declared in the rule that uses it, so
-guards read `$src_ip or $src_port`; one read only by its element stays inline. Value maps shared by several
-elements, or too long to read as an if, are declared once as xsl:map variables and read with the lookup
-operator, $action_to_success?($action), which gives nothing rather than an error for an empty input. Names
-and these thresholds follow the mapping's style, which a style guide in the AGENTS docs can set.
+module writes the XSLT: the right input namespace, a template per record that picks the event kind, elements
+in schema order, time conversion with stroom:format-date, value maps, and guards so empty inputs leave elements
+out rather than writing empty ones. Each event kind has its own template (by default a template rule with a mode,
+applied to the record), and elements that come out the same in several kinds (EventTime, EventSource, ...) are
+written once, in a template of their own, as is a conversion several elements use (an xsl:function). Shared
+XSLTs are imported for their named templates and functions. A field read several times in a template (in
+enclosing guards as well as its own element) goes into a variable holding its non-blank values, declared in the
+rule that uses it, so guards read `$src_ip or $src_port`; one read only by its element stays inline. Value maps
+shared by several elements, or too long to read as an if, are declared once as xsl:map variables and read with the
+lookup operator, $action_to_success?($action), which gives nothing rather than an error for an empty input. Names,
+the layout and these thresholds follow the mapping's style, which a style guide in the AGENTS docs, or the user,
+can set.
 
 Mistakes the schema can catch (unknown paths, invalid constants, two alternatives of a choice) come back as
 problems per mapping entry instead of as XSLT for the model to debug.
@@ -43,6 +46,7 @@ JSON_RECORDS = {'array': '/array/map | /map/array/map', 'lines': '/map/map'}
 DOC_VALUES_SHOWN = 3
 # A value map used by one element with at most this many keys is written inline, as an if.
 INLINE_MAP_KEYS = 3
+FUNCTION_MIN_USES = 2
 # A field read fewer times than this in a template is written where it's used, not held in a variable: an
 # element's own guard and value are two reads, so a variable needs a third, such as an enclosing guard.
 VARIABLE_MIN_READS = 3
@@ -298,6 +302,16 @@ class XsltStyle(BaseModel):
     inline_map_max_keys: int = Field(INLINE_MAP_KEYS, ge=0, description=(
         "A value map used by one element with at most this many keys is written inline as an if; longer or "
         "shared maps are declared once as an xsl:map. 0: always an xsl:map."))
+    function_min_uses: int = Field(FUNCTION_MIN_USES, ge=0, description=(
+        "A conversion (a time format, or a strip_domain, domain or digits transform) used by at least this many "
+        "elements is declared once as an xsl:function (mcp:parse_time, mcp:strip_domain) and called where it's "
+        "needed; fewer are written inline. 0: always inline."))
+    layout: Literal['modes', 'named', 'inline'] = Field('modes', description=(
+        "How the templates are laid out. modes: each event kind, and each part several kinds share, is a template "
+        "rule with its own mode (match=\"node()\" mode=\"eventTypeLogon\" in camelCase), applied to the record "
+        "with select=\".\". named: the same, as named templates called with xsl:call-template. inline: every event "
+        "kind written in the record template's xsl:choose, shared parts still named templates. Set it from an AGENTS "
+        "style guide or when the user asks for one."))
 
 
 class Extraction(BaseModel):
@@ -367,6 +381,21 @@ class SharedTemplate(BaseModel):
         "(shared_xslt's with_params), e.g. {'ip': \"data[@name='ip']/@value\"}."))
 
 
+class SharedFunctions(BaseModel):
+    """A shared XSLT whose xsl:functions the mapping's xpaths call, as the environment's other XSLTs call them."""
+    href: str = Field(description="The shared XSLT document, as the other pipelines import it, e.g. 'IP Lookup'.")
+    prefix: str = Field(description="The prefix its functions are called with, e.g. 'gs' for gs:isLocalIpAddress().")
+    namespace: str = Field(description="The namespace that prefix is bound to in the shared XSLT (describe_template's "
+                                       "shared_xslt gives it with each function), e.g. 'http://example.com/xslt'.")
+
+    @field_validator('prefix')
+    @classmethod
+    def _ncname(cls, value: str) -> str:
+        if not re.fullmatch(r'[A-Za-z_][\w.-]*', value) or value.lower().startswith('xml'):
+            raise ValueError(f"prefix {value!r} is not a namespace prefix (letters, digits, _ . -; not xml...)")
+        return value
+
+
 def writes_unknown(mapping: 'TranslationMapping', rule: 'EventRule') -> bool:
     """Whether the rule's events get EventDetail/Unknown (its own fields, or the common ones it doesn't drop)."""
     return (any(f.path.strip('/').startswith('EventDetail/Unknown') for f in rule.fields)
@@ -420,6 +449,13 @@ class TranslationMapping(BaseModel):
         "Named templates from shared XSLTs (xsl:import) that the environment's other translations call, e.g. one "
         "writing EventSource/Device from stream meta: the XSLT imports them and calls each in its element's place, "
         "in every event. Map nothing below those elements; the shared template writes them."))
+    functions: list[SharedFunctions] = Field(default_factory=list, description=(
+        "Shared XSLTs whose xsl:functions the xpaths (fields, conditions, extractions, with_params) call, as the "
+        "environment's other XSLTs do (describe_template's shared_xslt lists them): the XSLT imports each and binds "
+        "its prefix. E.g. {'href': 'IP Lookup', 'prefix': 'gs', 'namespace': '...'}, then a field's \"xpath\": "
+        "\"gs:parseTimestamp(data[@name='eventtime']/@value)\". Conditions compare strings: test a boolean function "
+        "as string(gs:isLocalIpAddress(...)) with equals 'true'. Stroom steps the XSLT with the import; the local "
+        "checks don't run these xpaths."))
 
 
 def is_call(expr: str) -> bool:
@@ -441,6 +477,52 @@ def is_call(expr: str) -> bool:
             if depth == 0:
                 return n == len(text) - 1
     return False
+
+
+# Prefixes the generated XSLT binds itself, or XPath's own: a functions entry may not rebind one to another namespace.
+KNOWN_PREFIXES = {'xsl': XSL, 'xsi': XSI, 'xs': XS, 'stroom': 'stroom', 'fn': 'http://www.w3.org/2005/xpath-functions',
+                  'map': 'http://www.w3.org/2005/xpath-functions/map', 'array': 'http://www.w3.org/2005/xpath-functions/array',
+                  'math': 'http://www.w3.org/2005/xpath-functions/math', 'mcp': 'stroom-mcp:functions'}
+FUNCTION_PREFIX = re.compile(r'(?<![\w.:$@-])([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*\s*\(')
+
+
+def mapping_xpaths(m: 'TranslationMapping') -> list[str]:
+    """Every xpath a mapping gives: fields' and lookups', conditions', extractions', for_each and shared parameters."""
+    entries = list(m.common) + [f for r in m.events for f in r.fields]
+    conditions = [c for r in m.events for c in r.when] + [c for d in m.drop_when for c in d.when]
+    found = [e.xpath for e in entries] + [e.lookup.xpath for e in entries if e.lookup] + [c.xpath for c in conditions] \
+        + [x.xpath for x in m.extract] + [m.for_each] + [v for u in m.shared for v in u.with_params.values()]
+    return [x for x in found if x]
+
+
+# Transforms worth a function of their own when repeated; lower, upper and trim are one XPath call already.
+FUNCTION_TRANSFORMS = ('strip_domain', 'domain', 'digits')
+
+
+def transform_expr(t: str | None, one: str) -> str:
+    """A transform applied to one value."""
+    if t == 'lower':
+        return f"lower-case({one})"
+    if t == 'upper':
+        return f"upper-case({one})"
+    if t == 'trim':
+        return f"normalize-space({one})"
+    if t == 'strip_domain':
+        return f"replace(replace({one}, '^[^\\\\]*\\\\', ''), '@.*$', '')"
+    if t == 'domain':
+        return f"replace({one}, '^(?:([^\\\\]*)\\\\.*|[^@]*@(.*))$', '$1$2')"
+    if t == 'digits':
+        return f"replace({one}, '[^0-9]', '')"
+    return one
+
+
+def time_expr(fmt: str, tz: str | None, one: str) -> str:
+    """One value in a time format, as Stroom's ISO 8601 time."""
+    if fmt == 'epoch_ms':
+        return f"stroom:format-date(string({one}))"
+    if fmt == 'epoch_s':
+        return f"stroom:format-date(string(xs:integer(xs:decimal({one}) * 1000)))"
+    return f"stroom:format-date({one}, {literal(fmt)}{', ' + literal(tz) if tz else ''})"
 
 
 def literal(text: str) -> str:
@@ -513,6 +595,70 @@ class _Generator:
                 paths.setdefault(tuple(entry.map.items()), set()).add(entry.path.strip('/'))
         self._xsl_maps = {items for items, used in paths.items()
                           if len(used) > 1 or len(items) > mapping.style.inline_map_max_keys}
+        self._check_functions()
+        self._own_functions = self._choose_functions()
+
+    @staticmethod
+    def conversions(entry: FieldMapping) -> list[tuple]:
+        """The conversions an entry's value goes through that could be a function: its transform, its time format."""
+        found = [('transform', entry.transform)] if entry.transform in FUNCTION_TRANSFORMS else []
+        if entry.time_format and not entry.map and not entry.repeat:
+            found.append(('time', entry.time_format, entry.timezone))
+        return found
+
+    def _choose_functions(self) -> dict[tuple, str]:
+        """The conversions used by style.function_min_uses elements or more -> their function's name."""
+        least = self.m.style.function_min_uses
+        if not least:
+            return {}
+        places: dict[tuple, set[str]] = {}
+        for entry in self.m.common + [f for rule in self.m.events for f in rule.fields]:
+            for conversion in self.conversions(entry):
+                places.setdefault(conversion, set()).add(entry.path.strip('/') + f"[{entry.data_name or ''}]")
+        names: dict[tuple, str] = {}
+        naming = self.m.style.naming
+        for conversion in sorted((c for c, used in places.items() if len(used) >= least), key=repr):
+            if conversion[0] == 'transform':
+                base = conversion[1]
+            else:
+                base = {'epoch_ms': 'from-epoch-ms', 'epoch_s': 'from-epoch-s'}.get(conversion[1], 'parse-time')
+            names[conversion] = unique_name(style_name(base, naming), set(names.values()) | {'json-to-xml'}, naming)
+        return names
+
+    def own_functions(self) -> list[etree._Element]:
+        """The XSLT's own functions, one per repeated conversion: a value in, the converted value out."""
+        out = []
+        for conversion, name in self._own_functions.items():
+            body = transform_expr(conversion[1], '$value') if conversion[0] == 'transform' \
+                else time_expr(conversion[1], conversion[2], '$value')
+            function = etree.Element(f'{{{XSL}}}function', name=f'mcp:{name}', **{'as': 'xs:string?'})
+            # Any one item, as the inline expression takes it: a node's text, or a number from an xpath.
+            etree.SubElement(function, f'{{{XSL}}}param', name='value', **{'as': 'item()?'})
+            etree.SubElement(function, f'{{{XSL}}}sequence', select=body)
+            out.append(function)
+        return out
+
+    def _check_functions(self) -> None:
+        """Each function prefix an xpath calls is bound, by the generator or a shared XSLT in functions, and each
+        functions entry is called somewhere."""
+        m = self.m
+        bound: dict[str, str] = {}
+        for f in m.functions:
+            if KNOWN_PREFIXES.get(f.prefix, f.namespace) != f.namespace:
+                self._note(self.problems, f"functions: prefix '{f.prefix}' is the XSLT's own, for "
+                                          f"{KNOWN_PREFIXES[f.prefix]}; bind {f.namespace} ({f.href}) to another")
+            elif bound.get(f.prefix, f.namespace) != f.namespace:
+                self._note(self.problems, f"functions: prefix '{f.prefix}' is bound to two namespaces")
+            bound[f.prefix] = f.namespace
+        called = {p for x in mapping_xpaths(m) for p in FUNCTION_PREFIX.findall(x)}
+        for prefix in sorted(called - set(KNOWN_PREFIXES) - set(bound)):
+            self._note(self.problems, f"An xpath calls {prefix}:... functions, but no functions entry binds '{prefix}': "
+                                      f"add the shared XSLT that defines them (href, prefix, namespace; "
+                                      f"describe_template's shared_xslt lists them)")
+        for f in m.functions:
+            if f.prefix not in called and f.prefix not in KNOWN_PREFIXES:
+                self._note(self.warnings, f"functions: nothing calls {f.prefix}:... ({f.href}); leave it out, or call "
+                                          f"its functions in the xpaths that need them")
 
     def _note(self, bucket: list[str], message: str) -> None:
         if message not in bucket:
@@ -643,20 +789,8 @@ class _Generator:
     def scalar(self, entry: FieldMapping, src: str) -> str:
         """The entry's one value, transformed as asked; src is the variable or selector holding its values."""
         one = f"{src}[1]"
-        t = entry.transform
-        if t == 'lower':
-            return f"lower-case({one})"
-        if t == 'upper':
-            return f"upper-case({one})"
-        if t == 'trim':
-            return f"normalize-space({one})"
-        if t == 'strip_domain':
-            return f"replace(replace({one}, '^[^\\\\]*\\\\', ''), '@.*$', '')"
-        if t == 'domain':
-            return f"replace({one}, '^(?:([^\\\\]*)\\\\.*|[^@]*@(.*))$', '$1$2')"
-        if t == 'digits':
-            return f"replace({one}, '[^0-9]', '')"
-        return one
+        name = self._own_functions.get(('transform', entry.transform))
+        return f"mcp:{name}({one})" if name else transform_expr(entry.transform, one)
 
     def ref(self, field_name: str | None, xpath: str | None, label: str, scope: str | None = None) -> str:
         """A variable holding the input's non-blank values, declared at the top of the template being written,
@@ -760,12 +894,10 @@ class _Generator:
             return expr
         fmt, tz = entry.time_format, entry.timezone
         one = self.scalar(entry, src) if entry.transform else f"{src}[1]"
-        if fmt == 'epoch_ms':
-            expr = f"stroom:format-date(string({one}))"
-        elif fmt == 'epoch_s':
-            expr = f"stroom:format-date(string(xs:integer(xs:decimal({one}) * 1000)))"
+        if fmt and ('time', fmt, tz) in self._own_functions:
+            expr = f"mcp:{self._own_functions[('time', fmt, tz)]}({one})"
         elif fmt:
-            expr = f"stroom:format-date({one}, {literal(fmt)}{', ' + literal(tz) if tz else ''})"
+            expr = time_expr(fmt, tz, one)
         else:
             expr = one if entry.transform else src
         if entry.default is not None:
@@ -1071,7 +1203,7 @@ class _Generator:
                 loop = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(item.repeat))
                 self.emit_element(loop, item, self.test_of(item), inline=True)
             elif not inline and self.shareable(item) and self.key(item) in self.shared:
-                etree.SubElement(parent, f'{{{XSL}}}call-template', name=self.template_for(item))
+                self.invoke(parent, self.template_for(item))
             else:
                 self.emit_element(parent, item, enclosing, inline)
 
@@ -1207,14 +1339,28 @@ class _Generator:
             # of one path are numbered.
             naming = self.m.style.naming
             # Not a shared template's name either: the importing XSLT's own template would override it.
-            taken = {name for name, _ in self._templates.values()} | {u.template for u in self.m.shared}
+            taken = ({name for name, _ in self._templates.values()} | {u.template for u in self.m.shared}
+                     | set(self._rule_names.values()) | {'event', 'item'})
             parts = node.path.split('/')[1:]
             names = [style_name('-'.join(parts[-n:]), naming) for n in range(1, len(parts) + 1)]
             name = next((n for n in names if n not in taken), None) or unique_name(names[-1], taken, naming)
-            template = etree.Element(f'{{{XSL}}}template', name=name)
+            template = self.new_template(name)
             self._templates[k] = (name, template)
             self.in_scope(template, lambda: self.emit_element(template, node, None, inline=False))
         return self._templates[k][0]
+
+    def new_template(self, name: str) -> etree._Element:
+        """A template of the layout's kind: a template rule with its own mode, or a named template."""
+        if self.m.style.layout == 'modes':
+            return etree.Element(f'{{{XSL}}}template', match='node()', mode=name)
+        return etree.Element(f'{{{XSL}}}template', name=name)
+
+    def invoke(self, parent: etree._Element, name: str) -> None:
+        """Run a template of the layout's kind on the record (or item): it keeps the context, and $record."""
+        if self.m.style.layout == 'modes':
+            etree.SubElement(parent, f'{{{XSL}}}apply-templates', select='.', mode=name)
+        else:
+            etree.SubElement(parent, f'{{{XSL}}}call-template', name=name)
 
     def stylesheet(self, version: str) -> tuple[str, list[dict]]:
         m = self.m
@@ -1228,6 +1374,16 @@ class _Generator:
         # Drop conditions are rules without an event, tried first.
         rules = [EventRule(name=f'drop: {d.reason}', when=d.when, drop=True) for d in m.drop_when] + list(m.events)
         trees = [(rule, None if rule.drop else self.tree(rule)) for rule in rules]
+        # Each event kind's template, named before the shared parts' templates are, which avoid these names.
+        self._rule_names: dict[str, str] = {}
+        if m.style.layout != 'inline':
+            taken = {u.template for u in m.shared} | {'event', 'item'}
+            for rule in m.events:
+                if not rule.drop:
+                    name = unique_name(style_name(f'event-type-{rule.name}', m.style.naming), taken, m.style.naming)
+                    self._rule_names[rule.name] = name
+                    taken.add(name)
+        self._rule_templates: list[tuple[str, etree._Element]] = []
         catch_all = [r.name for r in rules[:-1] if not r.when]
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
@@ -1238,16 +1394,20 @@ class _Generator:
                                       f"it (a Data entry if nothing else fits), or leave it out of names ('').")
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
-        uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True))))
+        uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
+            or bool(self._own_functions)     # the mcp prefix: the guarded JSON helper and the XSLT's own functions
+        bound = {f.prefix: f.namespace for f in m.functions}
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
-                 **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {})}
+                 **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {}), **bound}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
-        for href in dict.fromkeys(u.href for u in m.shared):     # imports come first in a stylesheet
+        # Imports come first in a stylesheet: one per document, for its named templates or its functions.
+        for href in dict.fromkeys([u.href for u in m.shared] + [f.href for f in m.functions]):
             etree.SubElement(sheet, f'{{{XSL}}}import', href=href)
-        sheet.set('exclude-result-prefixes', 'stroom xs' + (' fn' if m.extract else '') + (' map' if uses_dict_map else '')
-                  + (' mcp' if uses_json else ''))
-        if uses_json:
+        own = ['stroom', 'xs'] + (['fn'] if m.extract else []) + (['map'] if uses_dict_map else []) \
+            + (['mcp'] if uses_json else [])
+        sheet.set('exclude-result-prefixes', ' '.join(own + [p for p in bound if p not in own]))
+        if m.json_fields or JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True))):
             sheet.append(etree.fromstring(SAFE_JSON))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
@@ -1279,13 +1439,23 @@ class _Generator:
                     holder.append(etree.Comment(f' {rule.name}: left untranslated on purpose '))
                     summary.append({'event': rule.name, 'when': when, 'dropped': True})
                 else:
+                    name = self._rule_names.get(rule.name)
+                    home = holder
+                    if name:
+                        # The kind's own template, run on the record; its variables are declared in it.
+                        self.invoke(holder, name)
+                        home = self.new_template(name)
+                        self._rule_templates.append((rule.name, home))
                     if rule.allow_unknown:
                         reason = rule.allow_unknown.replace('--', '-')
-                        holder.append(etree.Comment(f' {rule.name}: EventDetail/Unknown on purpose: {reason} '))
-                    event = etree.SubElement(holder, f'{{{EVT}}}Event')
+                        home.append(etree.Comment(f' {rule.name}: EventDetail/Unknown on purpose: {reason} '))
+                    event = etree.SubElement(home, f'{{{EVT}}}Event')
                     if self.mark_rules:
                         event.append(etree.Comment(f'{RULE_MARK}{rule.name}'))
-                    self.emit(event, root)
+                    if name:
+                        self.in_scope(home, lambda: self.emit(event, root))
+                    else:
+                        self.emit(event, root)
                     summary.append({'event': rule.name, 'when': when,
                                     'fields': sorted({(e.path.strip('/') + (f"[{e.data_name}]" if e.data_name else ''))
                                                       for e in m.common + rule.fields})})
@@ -1298,10 +1468,11 @@ class _Generator:
 
         self.in_scope(record_template, write_rules)
         self.tidy_variables(record_template)
-        for _, template in self._templates.values():
+        for template in [t for _, t in self._rule_templates] + [t for _, t in self._templates.values()]:
             self.tidy_variables(template)
         if self.uses_record:
-            for template in [record_template] + [t for _, t in self._templates.values()]:
+            for template in [record_template] + [t for _, t in self._rule_templates] \
+                    + [t for _, t in self._templates.values()]:
                 if '$record' in etree.tostring(template, encoding='unicode'):
                     template.insert(0, etree.Element(f'{{{XSL}}}param', name='record', tunnel='yes'))
         for n, (items, name) in enumerate(self._maps.items()):
@@ -1323,9 +1494,14 @@ class _Generator:
                                       f"the feed that loads each as a pipeline reference (create_pipeline references, or "
                                       f"update_pipeline (references=...)); find_reference_data lists the maps and their feeds.")
         # Called with the record as context, so they read its fields just as the event rules do.
+        for rule_name, template in self._rule_templates:
+            sheet.append(etree.Comment(f' {rule_name} '))
+            sheet.append(template)
         for k, (name, template) in self._templates.items():
             sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))
             sheet.append(template)
+        for function in self.own_functions():
+            sheet.append(function)
         text = etree.tostring(sheet, pretty_print=True, xml_declaration=True, encoding='UTF-8').decode('utf-8')
         return text, summary
 
