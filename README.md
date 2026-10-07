@@ -159,6 +159,11 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_index_versions.py` | A new version of a production Elasticsearch indexing pipeline: v1 built, agreed, indexed and promoted; v2 copied with an added field (diff limited to it), its template from v1's agreed one, committed, started on new Events only; new data indexed by both (v1 unchanged, still running); searched both ways; v2 documented and promoted beside v1 |
 | `dev/e2e_evaluate_and_fix.py` | A production pipeline the server did not build, with a schema failure and a mistranslated field: evaluated (errors first: the failure, and the record it loses; inputs never read; the events), a fix suggested and proven, the report promoted beside it; then a reported issue located, reproduced, proven (an unrelated error not in its way) and applied in place, with backups and its documentation updated |
 | `dev/e2e_shared_xslt.py` | Shared XSLTs (`xsl:import`): found through sibling pipelines and read by name; a translation and an indexing XSLT call them in place (Event/Meta and EventSource/Device from `stroom:meta()`, a JSON object), mapping an element twice refused, Events valid with one of each |
+| `dev/e2e_formats.py` | The formats sources send, each onboarded with the server's own Data Splitter and draft: quoted CSV (doubled quotes), TSV, pipe, headerless CSV (plain and quoted), syslog RFC 3164 and RFC 5424 with a key=value body, CEF alone and after syslog, quoted key=value, JSON lines and arrays, XML documents and XML fragments with their own namespace |
+| `dev/e2e_fragments.py` | XML fragments end to end (the parser replaced, the wrapper set), and regexes: a '-' for the text's en dash refused at once with where it stops |
+| `dev/e2e_records_source.py` | A source whose own XML is `<records><record>`: profiled, translated, validated and indexed as the source's XML, not a Data Splitter's `records:2` |
+| `dev/e2e_stream_types.py` | Templates found by what they are, under names no standard template has; Raw Reference (the reference template and loader by structure, a lookup through a loader resolved with none named) and Records (a pipeline writing Records, indexed as records) |
+| `dev/e2e_xslt_style.py` | How generated XSLT is written: each layout giving the same Events in Stroom, shared functions found in a sibling and called, the processing gate on replaced code, Unknown agreed with the user |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 
 Every Elasticsearch index the suites build is searched both ways (`dev/searching.py`): through Stroom's dashboards, as people will search, with each hit traced back to its record, and directly in Elasticsearch, as an independent check; both must return the expected count. Lucene (`dev/e2e_lucene_indexing.py`) is searched through Stroom only.
@@ -180,3 +185,17 @@ Claude subscription, never an API key. `--workflow fix_errors` (or `change_event
 (`dev/eval/workflows.py`: its setup, prompt, the user's facts and a scorer reading Stroom), and with `--reference`
 checks that setup and scorer without a model. The Stroom API checks (`dev/api_checks`) prove the APIs the server relies on, which were built for the Stroom UI;
 what has been found and tested, locally and live, is in [docs/FINDINGS.md](docs/FINDINGS.md).
+
+## Releasing
+
+```
+uv run python dev/release.py --dry-run     # every check, nothing changed
+uv run python dev/release.py --wait        # the next patch version, released; then CI's result
+```
+
+It releases from master with nothing uncommitted. When the code has changed since the last tag and the docs haven't,
+it stops and lists the changes: write up what changed first (docs/FINDINGS.md for what was found and done, the tool
+catalogue and e2e tables in docs/DESIGN.md, the guides in knowledge/ that agents read, the tools' own descriptions),
+or give `--docs-unchanged "why"` when nothing a reader sees changed. The unit tests it runs check those tables, and
+the evaluation README, list every tool, e2e suite, case and workflow the code has. It then bumps the version
+everywhere it is held, commits, tags `vX.Y.Z` and pushes; CI builds the container image and the Helm chart.

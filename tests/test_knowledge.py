@@ -76,6 +76,9 @@ def test_the_design_lists_every_e2e_suite():
     suites = {p.stem for p in (ROOT / 'dev').glob('e2e_*.py')} - {'e2e_cleanup'}   # a utility, not a suite
     missing = sorted(s for s in suites if f'dev/{s}.py' not in DESIGN)
     assert not missing, f"e2e suites DESIGN's table lacks: {missing}"
+    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+    missing = sorted(s for s in suites if f'dev/{s}.py' not in readme)
+    assert not missing, f"e2e suites the README's table lacks: {missing}"
 
 
 def test_the_evaluation_readme_lists_every_case_and_workflow():
