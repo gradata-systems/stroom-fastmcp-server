@@ -33,7 +33,11 @@ sys.path.insert(0, str(ROOT / 'dev'))
 
 import e2e_translation as e2e  # noqa: E402
 from e2e_generator import FIREWALL, MAPPINGS  # noqa: E402
-from e2e_shared_xslt import COMMON_EVENT, SHARED_EVENT, TEXT_TEMPLATE, fixture_template, shared_doc  # noqa: E402
+from e2e_shared_xslt import COMMON_EVENT, SHARED_EVENT, fixture_template, shared_doc  # noqa: E402
+
+# A template of this suite's own: shared with e2e_shared_xslt, its children from both suites' runs filled the
+# survey's ten, those of the other suite sorting first, and this run's sibling went unread.
+TEXT_TEMPLATE = 'E2E Style Text'
 from fastmcp.exceptions import ToolError  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from tools import (builds, feeds, generation, indexing, pipeline_writes, processing_writes, stepping,  # noqa: E402

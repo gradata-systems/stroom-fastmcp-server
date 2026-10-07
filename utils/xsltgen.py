@@ -596,6 +596,7 @@ class _Generator:
         self.derived: dict[str, tuple[Extraction, int]] = {}
         self._parts: dict[int, str] = {}
         self._keep: set[str] = set()
+        self._extracted_texts: set[str] = set()     # variables holding text an extraction reads
         # Dictionary docs read at run time: (name, 'map' for key=value lines, 'set' for a list) -> variable.
         self._dicts: dict[tuple[str, str], str] = {}
         self.reference_maps: set[str] = set()
@@ -604,7 +605,10 @@ class _Generator:
         self.uses_record = False
         for n, extraction in enumerate(mapping.extract):
             self._check_extraction(n, extraction)
-            base = style_name(f"{extraction.field or 'text'}-parts", mapping.style.naming)
+            # Named for what it extracts (srcip_parts), not numbered after its source: seen as body_parts_3, _5,
+            # _4 and _6 for four extractions of one field, declared out of order.
+            first = next((n for n in extraction.names if n), None)
+            base = style_name(f"{first or extraction.field or 'text'}-parts", mapping.style.naming)
             self._parts[id(extraction)] = unique_name(base, self._keep, mapping.style.naming)
             self._keep.add(self._parts[id(extraction)])
             for nr, name in enumerate(extraction.names, 1):
@@ -709,6 +713,36 @@ class _Generator:
         if set(ex.flags) - set('imsxq'):
             self._note(self.problems, f"{where}: flags are any of i, m, s, x, q; not {ex.flags!r}")
 
+    def rule_header(self, rule: 'EventRule', conditional: bool) -> str:
+        """The comment over a rule's template: which records it handles, the event it writes, and the input it
+        reads. Seen: only the rule's name (<!-- traffic_allow -->), so the template had to be read to know."""
+        if rule.when:
+            records = 'records where ' + ' and '.join(condition_words(c) for c in rule.when)
+        else:
+            records = 'records no other rule matches' if conditional else 'every record'
+        home = action_home([f.path for f in rule.fields])
+        type_id = next((e for e in rule.fields + self.m.common if e.path.strip('/') == 'EventDetail/TypeId'), None)
+        element = home.removeprefix('EventDetail/') if home else None
+        writes = (f"{'an' if element[0] in 'AEIOU' else 'a'} {element} event" if element else 'an event')
+        if type_id is not None and type_id.value is not None:
+            writes += f' (TypeId {type_id.value})'
+        elif type_id is not None and type_id.field:
+            writes += f' (TypeId from {type_id.field})'
+        read: list[str] = []
+        for entry in rule.fields:
+            for name in ([entry.field] if entry.field else []) + list(entry.any_of or []):
+                if name not in read:
+                    read.append(name)
+        sources = sorted({self.derived[n][0].field or 'an xpath' for n in read if n in self.derived})
+        reads = ''
+        if read:
+            reads = f" from {', '.join(read[:10])}{', ...' if len(read) > 10 else ''}"
+            if sources:
+                reads += f" (extracted from {', '.join(sources)})" if all(n in self.derived for n in read) else \
+                    f" ({', '.join(n for n in read if n in self.derived)} extracted from {', '.join(sources)})"
+        why = f" Unknown on purpose: {rule.allow_unknown}." if rule.allow_unknown else ''
+        return _comment(f"Rule '{rule.name}': {records}. Writes {writes}{reads}.{why}")
+
     def parts_name(self, ex: Extraction) -> str:
         return self._parts[id(ex)]
 
@@ -720,9 +754,12 @@ class _Generator:
             return
         if ex.field in self.derived:
             self.declare_parts(self.derived[ex.field][0])
-        text = self.source(ex.field, ex.xpath, ex.scope)
+        # The text read once, as the field's own variable ($body), however many extractions read it: seen as
+        # string((*[@key='body'])[1]) written out for each of four.
+        text = self.ref(ex.field, ex.xpath, 'text', ex.scope)
+        self._extracted_texts.add(text[1:])
         flags = f", {literal(ex.flags)}" if ex.flags else ''
-        self._scope[name] = f"analyze-string(string(({text})[1]), {literal(ex.regex)}{flags})"
+        self._scope[name] = f"analyze-string(string({text}[1]), {literal(ex.regex)}{flags})"
 
     # --- input addressing ---
     def source(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
@@ -1286,7 +1323,10 @@ class _Generator:
             pattern = re.compile(r'\$' + re.escape(name) + r'(?![\w.-])')
             reads = [(el, attr) for el in template.iter() if el is not variable
                      for attr in ('test', 'select') if pattern.search(el.get(attr) or '')]
-            if sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
+            # Text two extractions read stays a variable, whatever the style's threshold: each is a regex over it.
+            parsed = sum(len(re.findall(r'analyze-string\(string\(\$' + re.escape(name) + r'\[1\]\)', el.get(attr)))
+                         for el, attr in reads) if name in self._extracted_texts else 0
+            if parsed < 2 and sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
                 template.remove(variable)
                 plain = raw[name] if name not in self._xpath_names or is_call(raw[name]) else f'({raw[name]})'
                 # A Data Splitter or JSON field has one value per record, so its test reads naturally as
@@ -1411,7 +1451,7 @@ class _Generator:
                     name = unique_name(style_name(f'event-type-{rule.name}', m.style.naming), taken, m.style.naming)
                     self._rule_names[rule.name] = name
                     taken.add(name)
-        self._rule_templates: list[tuple[str, etree._Element]] = []
+        self._rule_templates: list[tuple[str, etree._Element]] = []     # (its header, the template)
         catch_all = [r.name for r in rules[:-1] if not r.when]
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
@@ -1473,7 +1513,7 @@ class _Generator:
                         # The kind's own template, run on the record; its variables are declared in it.
                         self.invoke(holder, name)
                         home = self.new_template(name)
-                        self._rule_templates.append((rule.name, home))
+                        self._rule_templates.append((self.rule_header(rule, conditional), home))
                     if rule.allow_unknown:
                         reason = rule.allow_unknown.replace('--', '-')
                         home.append(etree.Comment(f' {rule.name}: EventDetail/Unknown on purpose: {reason} '))
@@ -1522,16 +1562,42 @@ class _Generator:
                                       f"the feed that loads each as a pipeline reference (create_pipeline references, or "
                                       f"update_pipeline (references=...)); find_reference_data lists the maps and their feeds.")
         # Called with the record as context, so they read its fields just as the event rules do.
-        for rule_name, template in self._rule_templates:
-            sheet.append(etree.Comment(f' {rule_name} '))
+        for header, template in self._rule_templates:
+            sheet.append(etree.Comment(header))
             sheet.append(template)
         for k, (name, template) in self._templates.items():
-            sheet.append(etree.Comment(f" {name}: {', '.join(self.users[k])} "))
+            users = self.users[k]
+            sheet.append(etree.Comment(_comment(f"{name}: shared by the rule{'s' if len(users) > 1 else ''} "
+                                                f"{', '.join(repr(u) for u in users)}")))
             sheet.append(template)
         for function in self.own_functions():
             sheet.append(function)
         text = etree.tostring(sheet, pretty_print=True, xml_declaration=True, encoding='UTF-8').decode('utf-8')
         return text, summary
+
+
+def _comment(text: str, width: int = 112) -> str:
+    """Text for an XML comment: no '--' (a comment can't hold it), and wrapped, its later lines indented under
+    the first."""
+    import textwrap
+    text = re.sub(r'-{2,}', '-', text).rstrip('-')
+    return '\n'.join(textwrap.wrap(text, width, initial_indent=' ', subsequent_indent='       ',
+                                    break_long_words=False, break_on_hyphens=False)) + ' '
+
+
+def condition_words(c: Condition) -> str:
+    """A condition as a reader says it: action = accept, type in traffic, event."""
+    src = c.field if c.field is not None else c.xpath
+    src += ' (of the record)' if c.scope == 'record' else ''
+    if c.equals is not None:
+        return f'{src} = {c.equals}'
+    if c.one_of is not None:
+        return f"{src} in {', '.join(c.one_of)}"
+    if c.matches is not None:
+        return f'{src} matches {c.matches}'
+    if c.in_dictionary is not None:
+        return f'{src} in the dictionary {c.in_dictionary}'
+    return f"{src} {'present' if c.present else 'empty'}"
 
 
 def generate(mapping: TranslationMapping, schema: EventSchema, version: str, mark_rules: bool = False) -> dict:

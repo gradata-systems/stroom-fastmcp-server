@@ -42,7 +42,8 @@ def test_extracted_fields_read_like_input_fields_and_json_lines_match_the_parser
     assert result['ok'], result['problems']
     xslt = result['xslt']
     assert 'xmlns:fn="http://www.w3.org/2005/xpath-functions"' in xslt
-    assert "analyze-string(string((*[@key='message'])[1]), '^(\\S+) (\\S+) (\\S+) (.*)$')" in xslt
+    # The result named for what it extracts; the text, read once here, written in place (a variable for several).
+    assert "<xsl:variable name=\"ts_parts\" select=\"analyze-string(string(*[@key='message'][1]), '^(\\S+) (\\S+) (\\S+) (.*)$')" in xslt
     assert 'select="/map/map" mode="event"' in xslt
     # The summary names the extracted field, not the group it comes from.
     assert result['events'][0]['when'] == ["action = 'LOGIN'"]
@@ -90,7 +91,7 @@ def test_an_extraction_can_read_an_extracted_field():
     m.common += [type(m.common[0]).model_validate(e) for e in extra]
     result = generate(m, SCHEMA, '4.1.0')
     assert result['ok'], result['problems']
-    assert result['xslt'].index('name="message_parts"') < result['xslt'].index('name="desc_parts"')
+    assert result['xslt'].index('name="ts_parts"') < result['xslt'].index('name="client_ip_parts"')
     events = transform(result['xslt'], JSON_LINES)
     logon = events.findall('e:Event', NS)[0]
     assert logon.findtext('e:EventSource/e:Client/e:IPAddress', namespaces=NS) == '10.0.0.1'
@@ -101,3 +102,27 @@ def test_documentation_names_the_extracted_fields():
     assert text.startswith('### Extracted fields')
     assert '- `ts`, `user`, `action`, `desc`: parsed from `message` with `^(\\S+) (\\S+) (\\S+) (.*)$`' in text
     assert etree.fromstring(generate(mapping(), SCHEMA, '4.1.0')['xslt'].encode()) is not None
+
+
+def test_text_several_extractions_read_is_one_variable_and_rules_say_what_they_do():
+    # Seen: string((*[@key='body'])[1]) written out for each of four extractions, their results named body_parts_3,
+    # _5, _4 and _6, and each rule's template headed by its name alone.
+    extract = [{'field': 'message', 'regex': rf'{k}=(\S+)', 'names': [k]} for k in ('src', 'dst')]
+    m = mapping(extract=extract, events=[
+        {'name': 'connection', 'when': [{'field': 'src', 'present': True}], 'fields': [
+            {'path': 'EventDetail/TypeId', 'value': 'connection'},
+            {'path': 'EventDetail/Network/Open/Source/Device/IPAddress', 'field': 'src'},
+            {'path': 'EventDetail/Network/Open/Destination/Device/IPAddress', 'field': 'dst'}]},
+        {'name': 'other', 'allow_unknown': 'lines with no addresses carry no activity', 'fields': [
+            {'path': 'EventDetail/TypeId', 'value': 'other'},
+            {'path': 'EventDetail/Unknown/Data', 'data_name': 'message', 'field': 'message'}]}])
+    result = generate(m, SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    xslt = result['xslt']
+    rule = xslt[xslt.index("<!-- Rule 'connection'"):xslt.index("<!-- Rule 'other'")]
+    assert rule.count("*[@key='message']") == 1 and 'name="src_parts"' in rule and 'name="dst_parts"' in rule
+    assert r"analyze-string(string($message[1]), 'dst=(\S+)')" in rule
+    assert ' '.join(rule.split()).startswith("<!-- Rule 'connection': records where src present. Writes a Network/Open "
+                                             "event (TypeId connection) from src, dst (extracted from message). -->")
+    assert ("Writes an Unknown event (TypeId other) from message. Unknown on purpose: lines with no addresses"
+            in ' '.join(xslt.split()))

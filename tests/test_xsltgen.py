@@ -74,7 +74,7 @@ def test_elements_repeated_across_rules_are_written_once_as_named_templates():
     assert set(named) == {'event_time', 'event_source'}
     assert len(sheet.findall('.//e:EventSource', ns)) == 1
     assert len(sheet.findall(".//xsl:call-template[@name='event_source']", ns)) == 2
-    assert '<!-- event_source: logon, other -->' in xslt
+    assert "<!-- event_source: shared by the rules 'logon', 'other' -->" in xslt
     # One rule: nothing repeats, so everything stays inline.
     single = generate(mapping(events=[{'name': 'logon', 'fields': LOGON}], style={'layout': 'inline'}), SCHEMA,
                       '4.1.0')['xslt']
