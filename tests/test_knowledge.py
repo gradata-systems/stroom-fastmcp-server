@@ -56,3 +56,33 @@ def test_the_guide_index_lists_every_guide():
     source = re.sub(r'"\s*\n\s*"', '', (ROOT / 'tools' / 'resources.py').read_text(encoding='utf-8'))
     listed = set(re.findall(r'Working guides: ([^"]+)"', source)[0].rstrip('.').split(', '))
     assert listed == set(GUIDES), (listed ^ set(GUIDES))
+
+
+# The docs list what the code has: a tool, an e2e suite, an evaluation case or workflow added without them fails here,
+# so a release can't go out with the docs behind (dev/release.py runs these).
+PROMPT_NAMES = {'onboard_data_source', 'onboard_existing_feed', 'update_events_pipeline', 'update_indexing_pipeline',
+                'index_event_data', 'create_discovery_index', 'evaluate_events_pipeline', 'fix_pipeline_issue',
+                'document_index'}
+DESIGN = (ROOT / 'docs' / 'DESIGN.md').read_text(encoding='utf-8')
+
+
+def test_the_design_lists_every_tool_and_only_tools_and_prompts():
+    rows = set(re.findall(r'^\| `([a-z_]+)`', DESIGN, re.M))
+    assert TOOLS - rows == set(), f"tools DESIGN's catalogue lacks: {sorted(TOOLS - rows)}"
+    assert rows - TOOLS - PROMPT_NAMES == set(), f"DESIGN rows that are no tool or prompt: {sorted(rows - TOOLS - PROMPT_NAMES)}"
+
+
+def test_the_design_lists_every_e2e_suite():
+    suites = {p.stem for p in (ROOT / 'dev').glob('e2e_*.py')} - {'e2e_cleanup'}   # a utility, not a suite
+    missing = sorted(s for s in suites if f'dev/{s}.py' not in DESIGN)
+    assert not missing, f"e2e suites DESIGN's table lacks: {missing}"
+
+
+def test_the_evaluation_readme_lists_every_case_and_workflow():
+    import sys
+    sys.path.insert(0, str(ROOT / 'dev' / 'eval'))
+    import workflows
+    readme = (ROOT / 'dev' / 'eval' / 'README.md').read_text(encoding='utf-8')
+    cases = [p.stem for p in (ROOT / 'dev' / 'eval' / 'cases').glob('*.yaml')]
+    assert not [c for c in cases if f'`{c}`' not in readme], 'evaluation cases the README lacks'
+    assert not [w for w in workflows.WORKFLOWS if f'`{w}`' not in readme], 'workflows the README lacks'
