@@ -25,9 +25,29 @@ PARSER_FOR_FORMAT = {
     'xml': ('XMLParser', 'CombinedParser'), 'xml fragments': ('XMLFragmentParser', 'CombinedParser'),
     'delimited': ('DSParser', 'CombinedParser'), 'syslog rfc5424': ('DSParser', 'CombinedParser'),
     'syslog rfc3164': ('DSParser', 'CombinedParser'), 'key=value': ('DSParser', 'CombinedParser'),
-    'unknown text': ('DSParser', 'CombinedParser'),
+    'unknown text': ('DSParser', 'CombinedParser'), 'cef': ('DSParser', 'CombinedParser'),
 }
-TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'unknown text'}
+TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'unknown text', 'cef'}
+
+
+async def templates_reading(ctx: Context, fmt: str) -> str:
+    """The environment's translation templates whose parser reads the format, by name as they are there: no
+    template is assumed to exist, or to be called anything (seen: guidance naming 'Event Data (XML)' wherever)."""
+    from tools.templates import find_pipeline_templates
+    readers = PARSER_FOR_FORMAT.get(fmt, ('DSParser', 'CombinedParser'))
+    try:
+        candidates = (await find_pipeline_templates(ctx, 'translation'))['candidates']
+    except Exception:
+        candidates = []
+    fitting = [c['name'] for c in candidates if c.get('parser') in readers]
+    if fitting:
+        return f"{', '.join(fitting[:3])} (its parser, {readers[0]}, reads {fmt}; find_pipeline_templates stage=translation)"
+    if fmt == 'xml fragments':
+        xml = [c['name'] for c in candidates if c.get('parser') == 'XMLParser']
+        if xml:
+            return f"{xml[0]} with replace_parser='XMLFragmentParser' (no template here parses XML fragments)"
+    return (f"none found that reads {fmt} (a {readers[0]}): ask the user which pipeline to base it on "
+            f"(find_pipeline_templates stage=translation lists what there is)")
 
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
@@ -444,8 +464,7 @@ async def start_onboarding(
     profiled = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
-    template = {'JSONParser': 'Event Data (JSON)', 'XMLParser': 'Event Data (XML)',
-                'XMLFragmentParser': "Event Data (XML) with replace_parser='XMLFragmentParser'"}.get(parser, 'Event Data (Text)')
+    template = await templates_reading(ctx, fmt)
     plan = checklist()
     # Given streams, the feed and samples exist already: the build itself says what is next.
     nxt = await next_step(ctx, name) if stream_ids else None
@@ -453,7 +472,7 @@ async def start_onboarding(
         **({'read': notes} if notes else {}),
         'build': name, 'folder': folder['_path'], 'source': source_name,
         'profile': profiled,
-        'parser': parser, 'template': f"{template} (confirm with find_pipeline_templates stage=translation)",
+        'parser': parser, 'template': template,
         'text_converter': ('needed: build_data_splitter from a spec, then save_text_converter' if fmt in TEXT_FORMATS else
                            'needed: the XML fragment wrapper (profile text_converter)' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),

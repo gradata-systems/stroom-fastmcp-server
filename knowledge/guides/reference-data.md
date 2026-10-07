@@ -31,12 +31,15 @@ How it fits together:
    ```
 
    Records the table should not contribute (disabled accounts, say) are left out with `drop_when`, conditions with
-   a reason, as in a translation mapping. Process the reference stream (`create_processor_filter`,
-   `wait_for_processing output_type='Reference'`): the pipeline writes `Reference` streams.
-3. **The events pipeline names the feed** as a pipeline reference on its translation step, loaded by the
-   standard `Reference Loader` pipeline: `create_pipeline references=[{"feed": "ACME-USERS", "loader_pipeline":
-   "Reference Loader"}]`, or `update_pipeline (references=...)` on a pipeline that exists. Without this the lookups find
-   nothing and stepping shows a lookup warning on every record.
+   a reason, as in a translation mapping. Process the reference stream (`create_processor_filter`, then
+   `wait_for_processing`, which takes the output type, `Reference`, from the pipeline): the pipeline writes
+   `Reference` streams. A whole-feed filter takes the feed's own stream type, `Raw Reference`.
+3. **The events pipeline names the feed** as a pipeline reference on its translation step:
+   `create_pipeline references=[{"feed": "ACME-USERS"}]`, or `update_pipeline (references=...)` on a pipeline that
+   exists. The loader is found, not assumed: the one other pipelines already load that feed with, else the
+   environment's only loader (a pipeline with a `ReferenceDataFilter`; `find_reference_data` lists them, and with
+   several, give `loader_pipeline`). Without the reference the lookups find nothing and stepping shows a lookup
+   warning on every record.
 4. **The translation looks keys up**: `{"path": "EventSource/User/UserDetails/Organisation", "lookup": {"map":
    "USER_TO_DEPARTMENT", "field": "user", "path": "department"}}`. `path` names an element inside the value
    (omit it for a text value). A key the map lacks gives no value, so the element is left out, or `default` is

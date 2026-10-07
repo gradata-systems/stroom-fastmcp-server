@@ -13,7 +13,7 @@ from security.policy import DEFAULT_MARKERS, AccessPolicy, StageMarkers
 from tools.pipelines import chain_order, merge_layers
 from utils.stroom import StroomGateway, gateway_from
 
-Stage = Literal['translation', 'indexing', 'discovery', 'reference']
+Stage = Literal['translation', 'indexing', 'discovery', 'reference', 'records']
 # The property that makes each element type do something; unset means a child must supply it.
 KEY_PROPERTIES = {'XSLTFilter': ('xslt',), 'DSParser': ('textConverter',), 'CombinedParser': ('textConverter',),
                   'XMLFragmentParser': ('textConverter',),
@@ -110,8 +110,10 @@ async def find_pipeline_templates(
         ctx: Context,
         stage: Annotated[Stage, Field(description="translation (Raw Events to Events; always the first pipeline for a "
                                                   "new source), indexing (Events to an index), discovery (raw structured "
-                                                  "data straight to an index) or reference (a Raw Reference feed to "
-                                                  "the reference-data maps stroom:lookup() reads).")],
+                                                  "data straight to an index), reference (a Raw Reference feed to "
+                                                  "the reference-data maps stroom:lookup() reads) or records (a source "
+                                                  "to a Records stream of records:2 records). Found by what each "
+                                                  "pipeline does, whatever it's called and wherever it is.")],
 ) -> dict[str, Any]:
     """
     Stroom pipeline templates (pipelines a new pipeline inherits from; not Elasticsearch index templates, which
@@ -136,14 +138,19 @@ async def find_pipeline_templates(
     ranked = []
     for p in index.values():
         why = ('configured' if configured(p) else 'inherited_by_others' if children.get(p['uuid'], 0) >= 2
-               else 'standard' if p['path'].startswith('System/Template Pipelines') else None)
+               else 'standard' if p['path'].startswith('System/Template Pipelines')
+               # Neither named nor placed as one: a pipeline of its own that leaves what a child supplies (its XSLT,
+               # its text converter) unset is a template by what it is, wherever it is and whatever it's called.
+               else 'template_like' if not p['parent_uuid'] else None)
         if why:
             ranked.append((why, p))
-    order = {'configured': 0, 'inherited_by_others': 1, 'standard': 2}
+    order = {'configured': 0, 'inherited_by_others': 1, 'standard': 2, 'template_like': 3}
     candidates = []
     for why, p in sorted(ranked, key=lambda x: (order[x[0]], -children.get(x[1]['uuid'], 0))):
+        if len(candidates) >= 10:
+            break
         shape = await _shape(stroom, p['uuid'], policy.markers())
-        if shape['stage'] != stage:
+        if shape['stage'] != stage or (why == 'template_like' and not shape['child_must_supply']):
             continue
         candidates.append({'uuid': p['uuid'], 'name': p['name'], 'path': p['path'], 'source': why,
                            'children': children.get(p['uuid'], 0), **{k: v for k, v in shape.items() if k != 'properties'}})
@@ -151,8 +158,10 @@ async def find_pipeline_templates(
     if not candidates:
         result['hint'] = "No template found for this stage; ask the user which pipeline to base it on."
     elif stage == 'translation' and not any(c['parser'] in ('XMLFragmentParser', 'CombinedParser') for c in candidates):
+        xml = [c['name'] for c in candidates if c['parser'] == 'XMLParser']
         result['xml_fragments'] = ("No template parses XML fragments (several root elements, e.g. one <Event> per "
-                                   "line). For such data, create_pipeline from the Event Data (XML) template with "
+                                   "line). For such data, create_pipeline from a translation template whose parser is "
+                                   "the XMLParser" + (f" ({', '.join(xml)})" if xml else '') + " with "
                                    "replace_parser='XMLFragmentParser' and an XML_FRAGMENT text converter on "
                                    "xmlFragmentParser.textConverter (profile_sample gives the wrapper).")
     return result
@@ -175,6 +184,10 @@ async def template_reason(ctx: Context, uuid: str) -> str | None:
     children = [p['name'] for p in index.values() if p['parent_uuid'] == uuid]
     if children:
         return f"{len(children)} pipeline(s) inherit from it ({', '.join(children[:3])}{'...' if len(children) > 3 else ''})"
+    if not entry['parent_uuid']:
+        open_slots = (await _shape(gateway_from(ctx), uuid))['child_must_supply']
+        if open_slots:
+            return f"it leaves {', '.join(f'{s}' for s in open_slots[:3])} for a child to set"
     return None
 
 

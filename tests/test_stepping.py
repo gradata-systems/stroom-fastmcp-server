@@ -89,6 +89,23 @@ async def test_events_with_no_event_in_any_record_are_blocking_and_one_event_is_
     result = await stepping.step_sample(ctx, 'p-1', [7])
     assert all(g['reason'] != 'No record produced an Event' for g in result['groups'])   # a dropped record is fine
 
+
+@respx.mock
+async def test_reference_data_with_no_reference_in_any_record_is_blocking(ctx):
+    # Seen: a directory's header read as a record (columns col1 ...), the key found nowhere: an empty referenceData,
+    # no Reference stream, and stepping said clean.
+    mock_pipeline()
+    empty = '<referenceData xmlns="reference-data:2" version="2.0.1"/>'
+    steps = []
+    for n in range(2):
+        step = record(n)
+        step['stepData']['elementMap']['translationFilter']['output'] = empty
+        steps.append(httpx.Response(200, json=step))
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps + [httpx.Response(200, json={'complete': True, 'foundRecord': False})])
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    assert result['verdict'] == 'blocking' and result['groups'][0]['reason'] == 'No record produced reference data'
+    assert 'col1, col2' in result['groups'][0]['examples'][0]['message']
+
 @respx.mock
 async def test_nothing_stepped_is_never_clean(ctx):
     mock_pipeline()

@@ -53,3 +53,17 @@ def test_data_splitter_records_and_what_is_not_evaluated():
     # Stroom functions and variables need Stroom; for_each xpaths read items: none of these are evaluated.
     assert check_xpaths(mapping("stroom:meta('Feed')"), EMBEDDED) == []
     assert check_xpaths(mapping('nothing', for_each="*[@key='items']/*"), EMBEDDED) == []
+
+
+def test_a_regex_replacement_is_checked_though_it_has_dollars():
+    # Seen: replace(..., '$1:$2') skipped as if $1 were a variable, so an xpath selecting nothing (a JSON field
+    # named as if it were an element) passed: the MAC address it should have written was empty in every event.
+    mac = "replace(upper-case(replace({}, '[.:-]', '')), '^(..)(..)(..)(..)(..)(..)$', '$1:$2:$3:$4:$5:$6')"
+    sample = '[{"host": "sw1", "time": "2026-10-01T10:00:00Z", "mac": "001a.2b3c.4d5e"}]'
+    more = lambda x: [{'path': 'EventSource/Device/MACAddress', 'xpath': x}]  # noqa: E731
+    time = "*[@key='time']"
+    [warning] = check_xpaths(mapping(time, more=more(mac.format('mac'))), sample)
+    assert 'used for EventSource/Device/MACAddress' in warning and 'selects nothing' in warning
+    assert check_xpaths(mapping(time, more=more(mac.format("*[@key='mac']"))), sample) == []
+    # A variable outside the literals is still the XSLT's to bind: not evaluated here.
+    assert check_xpaths(mapping(time, more=more("concat($prefix, *[@key='mac'])")), sample) == []

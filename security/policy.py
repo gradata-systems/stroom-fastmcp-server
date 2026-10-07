@@ -5,7 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
-Stage = Literal['translation', 'indexing', 'discovery', 'reference']
+Stage = Literal['translation', 'indexing', 'discovery', 'reference', 'records']
 
 
 class TemplateSource(BaseModel):
@@ -20,7 +20,9 @@ class StageMarkers(BaseModel):
 
 
 DEFAULT_MARKERS = {'translation': StageMarkers(schema_groups=['EVENTS'], stream_types=['Events']),
-                   'reference': StageMarkers(schema_groups=['REFERENCE_DATA'], stream_types=['Reference'])}
+                   'reference': StageMarkers(schema_groups=['REFERENCE_DATA'], stream_types=['Reference']),
+                   # A pipeline that writes records:2 records as a stream of their own (e.g. a source's parsed text).
+                   'records': StageMarkers(schema_groups=['RECORDS'], stream_types=['Records'])}
 
 
 class AccessPolicy(BaseModel):

@@ -52,9 +52,11 @@ def swap_parser(merged: dict[str, Any], new_type: str) -> tuple[dict[str, Any], 
 
 class PipelineReference(BaseModel):
     """Reference data an XSLT step reads with stroom:lookup(): a feed of Reference streams, loaded by a loader
-    pipeline (the standard 'Reference Loader' unless the environment has its own; find_reference_data)."""
+    pipeline (find_reference_data lists the environment's loaders)."""
     feed: str = Field(description="The reference feed's name.")
-    loader_pipeline: str = Field('Reference Loader', description="The loader pipeline's name (or UUID).")
+    loader_pipeline: str | None = Field(None, description=(
+        "The loader pipeline's name or UUID. Left out: the one other pipelines already load this feed with, else "
+        "the environment's only loader (find_reference_data lists them); no name is assumed."))
     element: str | None = Field(None, description="The XSLT element that does the lookups; defaults to the "
                                                   "pipeline's translation step.")
 
@@ -79,6 +81,7 @@ async def _doc_ref_by_name(stroom: StroomGateway, doc_type: str, name: str) -> d
 async def reference_entries(stroom: StroomGateway, merged: dict[str, Any], references: list[PipelineReference]
                             ) -> list[dict[str, Any]]:
     """pipelineReferences entries for the references, on the element asked for or the first XSLT step."""
+    from tools.reference import resolve_loader
     xslt_steps = [e for e in chain_order(merged['elements'], merged['links'])
                   if {x['id']: x['type'] for x in merged['elements']}.get(e) == 'XSLTFilter']
     out = []
@@ -87,7 +90,8 @@ async def reference_entries(stroom: StroomGateway, merged: dict[str, Any], refer
         if not element:
             raise ToolError("The pipeline has no XSLT step to attach reference data to")
         out.append({'element': element, 'name': 'pipelineReference',
-                    'pipeline': await _doc_ref_by_name(stroom, 'Pipeline', ref.loader_pipeline),
+                    'pipeline': await _doc_ref_by_name(stroom, 'Pipeline', ref.loader_pipeline
+                                                       or await resolve_loader(stroom, ref.feed)),
                     'feed': await _doc_ref_by_name(stroom, 'Feed', ref.feed), 'streamType': 'Reference'})
     return out
 

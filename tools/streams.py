@@ -108,6 +108,11 @@ async def read_stream(
     if sum(len(r) for r in records) >= limit:
         result['truncated'] = True
         result['hint'] = "Record data was trimmed; read fewer records at a time."
+    elif len(records) < record_count and first_record + len(records) < (result['total_records'] or 0):
+        # The size limit was reached before the next whole record: the rest from where this stops.
+        result['next_first_record'] = first_record + len(records)
+        result['hint'] = (f"{len(records)} whole records fit the size limit; read on with "
+                          f"first_record={result['next_first_record']}.")
     return result
 
 
@@ -257,7 +262,12 @@ async def read_records(stroom: StroomGateway, stream_id: int, first: int, count:
     records, used = [], 0
     index = first
     while True:
-        data = (body.get('data') or '')[:char_budget - used]
+        whole = body.get('data') or ''
+        if body.get('dataType') == 'SEGMENTED' and records and len(whole) > char_budget - used:
+            # An event cut at the budget is not well-formed XML: seen validated as "attributes construct error". It
+            # is left for the next page (first_record) rather than returned cut; only a first record is ever cut.
+            return records, first_body
+        data = whole[:char_budget - used]
         records.append(_root_closed(data) if body.get('dataType') == 'SEGMENTED' else data)
         used += len(data)
         index += 1

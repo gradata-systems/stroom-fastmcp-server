@@ -179,11 +179,13 @@ async def build_translation_xslt(
     elif sample is not None:
         for text in (sample if isinstance(sample, list) else [sample]):
             check_sample(text)
+    inferred = False
     if sample and mapping.input == 'data_splitter' and splitter is None:
         # Without the spec no record could be read, so nothing was checked: the rule for the rest went to the user
         # as "no sample records checked", logoffs and all. The spec is inferred, as build_data_splitter does.
         from utils.dsgen import infer_spec
         splitter, _ = infer_spec(sample[0] if isinstance(sample, list) else sample)
+        inferred = splitter is not None
         if splitter is not None:
             result['warnings'].append("sample: read with the Data Splitter spec inferred from it (as build_data_splitter "
                                       "does); give splitter if the build's converter differs")
@@ -194,6 +196,13 @@ async def build_translation_xslt(
         extraction_problems, extraction_warnings = check_extractions(mapping, sample, splitter, records)
         check['problems'] += extraction_problems
         check['warnings'] += extraction_warnings
+        if inferred:
+            # Read with a guess at the converter, a field the guess doesn't name may be one the build's own converter
+            # does (seen: a hand-written syslog splitter's 'pwd' refused, as the inferred one has no such field).
+            missing = [p for p in check['problems'] if p.startswith("field '") and ' is in none of the ' in p]
+            check['problems'] = [p for p in check['problems'] if p not in missing]
+            check['warnings'] += [f"{p} (the sample was read with an inferred Data Splitter: give splitter if the "
+                                  f"build's converter names its fields otherwise)" for p in missing]
         result['sample_check'] = {**check, **({'note': note} if note else {})}
         result['warnings'] += [f"sample: {w}" for w in check['warnings']]
         if check['problems']:
@@ -395,7 +404,7 @@ async def build_reference_xslt(
                                                                 "newest this Stroom holds.")] = None,
 ) -> dict[str, Any]:
     """
-    Write the XSLT of a reference-data pipeline (a child of the Reference Data template) from a mapping: for
+    Write the XSLT of a reference-data pipeline (a child of the reference-data template) from a mapping: for
     each record and map, a <reference> with the map name, key and value in reference-data:2. The events
     pipeline then names the feed as a pipeline reference and its mapping reads the map with lookup.
     """
@@ -407,7 +416,7 @@ async def build_reference_xslt(
     result = generate_reference(mapping, version)
     result['schema_version'] = version
     result['hint'] = ("Fix the problems and call again." if not result['ok'] else
-                      "save_xslt it; create_pipeline from the Reference Data template (find_pipeline_templates "
+                      "save_xslt it; create_pipeline from the reference-data template (find_pipeline_templates "
                       "stage=reference) with combinedParser.textConverter (if the feed is text) and translationFilter.xslt; "
                       "create_processor_filter on the Raw Reference stream; wait_for_processing output_type='Reference'. "
                       "Then give the events pipeline references=[{feed, loader_pipeline}].")

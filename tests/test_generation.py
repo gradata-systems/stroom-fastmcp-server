@@ -173,3 +173,20 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
         assert done['saved']['uuid'] == 'x-1'
         # Checking without saving asks nothing.
         assert 'status' not in await generation.build_translation_xslt(ctx, kept)
+
+
+async def test_a_field_an_inferred_splitter_lacks_is_a_warning_not_a_refusal():
+    # Seen: a hand-written syslog splitter names a field 'pwd'; the sample, read with the spec inferred from it,
+    # has 'pid' instead, and the mapping was refused though the build's converter does write 'pwd'.
+    m = mapping()
+    m.common.append(m.common[0].model_copy(update={'path': 'EventSource/Device/Name', 'field': 'hosts',
+                                                   'value': None, 'time_format': None}))
+    sample = ('time,action,user,result,sid,host,port\n2026-09-28T10:00:00.000Z,login,alice,ok,s1,ws01,22\n'
+              '2026-09-28T10:03:00.000Z,login,bob,fail,s2,ws03,22\n')
+    ctx, (schema, instructions) = ctx_and_patches()
+    with schema, instructions:
+        guessed = await generation.build_translation_xslt(ctx, m, sample=sample)
+        assert guessed['ok'], guessed['problems']
+        assert any("field 'hosts'" in w and 'inferred Data Splitter' in w for w in guessed['warnings'])
+        given = await generation.build_translation_xslt(ctx, m, sample=sample, splitter={'kind': 'delimited', 'header': True})
+        assert not given['ok'] and any("field 'hosts'" in p for p in given['problems'])

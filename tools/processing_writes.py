@@ -80,6 +80,29 @@ def _pipeline_term(ref: dict[str, Any]) -> dict[str, Any]:
             'docRef': {'type': 'Pipeline', 'uuid': ref['uuid'], 'name': ref['name']}}
 
 
+async def feed_stream_type(stroom: StroomGateway, feed: str) -> str:
+    """The stream type a feed receives (Raw Events, Raw Reference, ...), from the feed itself."""
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+        return (await stroom.get_doc('Feed', ref['uuid'])).get('streamType') or 'Raw Events'
+    except Exception:
+        return 'Raw Events'
+
+
+async def output_stream_type(stroom: StroomGateway, pipeline_uuid: str) -> str:
+    """The stream type a pipeline writes, from its stream appender (Events, Reference, Records, ...)."""
+    try:
+        merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    except Exception:
+        return 'Events'
+    types = {e['id']: e['type'] for e in merged['elements']}
+    for prop in merged['properties']:
+        if types.get(prop['element']) == 'StreamAppender' and prop['name'] == 'streamType' and prop.get('value'):
+            value = prop['value']
+            return value if isinstance(value, str) else str((value or {}).get('string') or value)
+    return 'Events'
+
+
 async def _is_indexing(stroom: StroomGateway, pipeline_uuid: str) -> bool:
     merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
     return any(e['type'] in INDEXING_ELEMENTS for e in merged['elements'])
@@ -209,7 +232,8 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]],
                 targets.setdefault((meta.get('feedName'), meta.get('typeName')), _pipeline_terms(expression))
         if not own and not await _is_indexing(stroom, pipeline['uuid']):
             for feed in survey_feeds:
-                targets.setdefault((feed, 'Raw Events'), [])
+                # The feed's own stream type (a reference feed's is Raw Reference), not Raw Events assumed.
+                targets.setdefault((feed, await feed_stream_type(stroom, feed)), [])
         for (feed, stream_type), extra in sorted(targets.items()):
             if feed and not feed.endswith('-MCP-TEST'):
                 plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra})
@@ -321,7 +345,9 @@ async def create_processor_filter(
         stream_ids: Annotated[list[int] | int | str | None, ONE_OR_MORE, Field(
             description="Process exactly these streams (the sample). The default and safest scope.")] = None,
         feed: Annotated[str | None, Field(description="Or process a whole feed's streams of stream_type.")] = None,
-        stream_type: Annotated[str, Field(description="Stream type to process with a feed scope.")] = 'Raw Events',
+        stream_type: Annotated[str | None, Field(description=(
+            "Stream type to process with a feed scope. Left out: Events for a pipeline that indexes Events, else "
+            "the feed's own (Raw Events, Raw Reference, ...)."))] = None,
         created_after: Annotated[str | None, Field(
             description="With a feed scope: only streams created after this ISO time. Required for a feed scope.")] = None,
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
@@ -351,6 +377,15 @@ async def create_processor_filter(
     await _build_feeds_only(ctx, pipeline, stream_ids, feed)
     if stream_ids:
         await refuse_older_than_feed(ctx, stream_ids)
+    if feed and not created_after:
+        raise ToolError("A feed-wide filter needs created_after, so it does not reprocess the feed's history")
+    if feed and not stream_type:
+        from tools.templates import _shape
+        try:
+            indexes_events = (await _shape(stroom, pipeline_uuid)).get('stage') == 'indexing'
+        except Exception:
+            indexes_events = await _is_indexing(stroom, pipeline_uuid)
+        stream_type = 'Events' if indexes_events else await feed_stream_type(stroom, feed)
     source = await _events_source(ctx, pipeline, source_pipeline_uuid, stream_ids, stream_type, source_confirmation_id)
     if source and 'status' in source:
         return source
@@ -490,8 +525,9 @@ async def wait_for_processing(
                         "pipelines, which write to an index and should produce no Error stream.")] = True,
         filter_id: Annotated[int | None, Field(
             description="Only count outputs from this processor filter, e.g. the one reprocess_streams made.")] = None,
-        output_type: Annotated[str, Field(description="The stream type expected per input: 'Events', or 'Reference' "
-                                                      "for a reference-data pipeline.")] = 'Events',
+        output_type: Annotated[str | None, Field(description=(
+            "The stream type expected per input (Events, Reference, Records, ...). Left out: what the pipeline "
+            "writes, from its stream appender."))] = None,
 ) -> dict[str, Any]:
     """
     Wait until the pipeline's processor tasks finish, then report per input stream the output (Events, or
@@ -501,6 +537,7 @@ async def wait_for_processing(
     stroom = gateway_from(ctx)
     deadline = time.monotonic() + timeout_seconds
     from tools.plan import build_of, with_next
+    inferred = output_type is None
     while True:
         status = await processing_status(ctx, pipeline_uuid)
         if not status['filters']:
@@ -510,6 +547,8 @@ async def wait_for_processing(
                 'problems': ["This pipeline has no processor filter, so nothing is processing and there is nothing to "
                              "wait for."],
                 'hint': "create_processor_filter first. If it was refused, do what its message says; don't wait."})
+        if inferred and output_type is None:
+            output_type = await output_stream_type(stroom, pipeline_uuid)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
         all_have_output = all(outputs.values()) or not expect_events
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False

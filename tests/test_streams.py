@@ -28,3 +28,20 @@ async def test_segmented_records_are_read_well_formed():
     raw = {'data': 'a,b\n1,2\n</Events>', 'dataType': 'NON_SEGMENTED'}   # raw data is returned as it is
     stroom.fetch_data = AsyncMock(return_value=raw)
     assert (await streams.read_records(stroom, 7, 0, 1, None, 100_000))[0] == [raw['data']]
+
+
+async def test_a_record_the_size_limit_would_cut_is_left_for_the_next_page():
+    # Seen: 100 events of a large stream read at once, the last cut mid-attribute and validated as "attributes
+    # construct error". Whole records only, and where to read on.
+    event = ('<?xml version="1.1" encoding="UTF-8"?><Events xmlns="event-logging:3"><Event><EventDetail>'
+             '<TypeId>x</TypeId></EventDetail></Event></Events>')
+    body = {'data': event, 'dataType': 'SEGMENTED', 'totalItemCount': {'count': 10}}
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(max_stream_chars=len(event) * 3 - 5))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    read = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5)
+    assert len(read['records']) == 2 and all(etree.fromstring(r.encode()) is not None for r in read['records'])
+    assert read['next_first_record'] == 2 and 'truncated' not in read
+    # A single record larger than the limit is still returned (cut), flagged.
+    stroom.settings.max_stream_chars = 40
+    one = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5)
+    assert len(one['records']) == 1 and one['truncated']

@@ -99,9 +99,20 @@ def xpath_inputs(mapping: TranslationMapping) -> dict[str, list[str]]:
     for ex in mapping.extract:
         if ex.xpath:
             used.setdefault(ex.xpath, []).append('extract')
-    # Not those calling a shared XSLT's functions: only Stroom, which imports it, can run them.
+    # Not those calling a shared XSLT's functions: only Stroom, which imports it, can run them; nor those reading a
+    # variable, which only the XSLT binds.
     imported = [f'{f.prefix}:' for f in mapping.functions]
-    return {x: u for x, u in used.items() if 'stroom:' not in x and '$' not in x and not any(p in x for p in imported)}
+    return {x: u for x, u in used.items() if 'stroom:' not in x and not _reads_variable(x)
+            and not any(p in x for p in imported)}
+
+
+_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _reads_variable(xpath: str) -> bool:
+    """Whether the xpath reads a variable ($name), outside its string literals: a regex replacement's $1 is not one
+    (seen: every reformatting replace(..., '$1:$2') went unchecked, one selecting nothing among them)."""
+    return bool(re.search(r'\$[A-Za-z_]', _LITERAL.sub("''", xpath)))
 
 
 # Characters a regex written from memory gets wrong: what the text has, and what the regex was likely given.

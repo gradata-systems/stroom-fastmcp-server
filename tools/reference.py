@@ -1,11 +1,12 @@
 """Reference data an environment already loads: the maps stroom:lookup() can read, where they come from, and the
 loader pipelines that serve them. Reference-data content is written with the ordinary tools: a feed of stream
-type Raw Reference (create_feed), a child of the Reference Data template (create_pipeline, stage=reference) with
+type Raw Reference (create_feed), a child of the reference-data template (create_pipeline, stage=reference) with
 an XSLT from build_reference_xslt, and the events pipeline naming the feed as a pipeline reference."""
 import re
 from typing import Annotated, Any
 
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 from lxml import etree
 from pydantic import Field
 
@@ -65,8 +66,9 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
     The reference maps this environment loads, for stroom:lookup() in a translation (a mapping's `lookup`):
     each map's name, key and value shape, the pipeline and feed(s) that load it, the loader pipeline to name
     as a pipeline reference, and which pipelines already use that feed. Also the loader pipelines themselves
-    (Reference Loader) and the template for new reference-data pipelines. New reference data: create_feed
-    (stream_type 'Raw Reference'), build_reference_xslt, create_pipeline from the Reference Data template.
+    (pipelines with a ReferenceDataFilter, whatever they're called) and the template for new reference-data
+    pipelines (by its output). New reference data: create_feed (stream_type 'Raw Reference'), build_reference_xslt,
+    create_pipeline from that template.
     """
     stroom = gateway_from(ctx)
     # XSLTs that write reference data, then the pipelines that run each (their JSON names the XSLT's uuid).
@@ -126,19 +128,15 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
     for m in maps.values():
         m['used_by'] = sorted({u for feed in m['feeds'] for u in (used.get(feed) or {}).get('used_by', [])})
         m['loader'] = next(((used.get(feed) or {}).get('loader') for feed in m['feeds'] if used.get(feed)), None)
-    standard = await stroom.find_documents('Reference Loader', ['Pipeline'], 10)
-    for v in standard.get('values') or []:
-        ref = v['docRef']
-        if ref.get('type') == 'Pipeline' and ref.get('name') == 'Reference Loader' and ref['uuid'] not in {l['uuid'] for l in loaders}:
-            loaders.append({'uuid': ref['uuid'], 'name': ref['name'], 'path': (v.get('path') or '').replace(' / ', '/')})
-    template = None
-    for v in (await stroom.find_documents('Reference Data', ['Pipeline'], 10)).get('values') or []:
-        ref = v['docRef']
-        if ref.get('type') == 'Pipeline' and ref.get('name') == 'Reference Data':
-            shape = await _shape(stroom, ref['uuid'])
-            template = {'uuid': ref['uuid'], 'name': ref['name'], 'path': (v.get('path') or '').replace(' / ', '/'),
-                        'child_must_supply': shape['child_must_supply']}
-            break
+    # Loaders and the template by what they are, not what they're called (no 'Reference Loader' or 'Reference
+    # Data' is assumed to exist): a complete pipeline with a ReferenceDataFilter loads reference data; a template whose
+    # output is reference data makes it.
+    for loader in await loader_pipelines(stroom):
+        if loader['uuid'] not in {l['uuid'] for l in loaders}:
+            loaders.append(loader)
+    from tools.templates import find_pipeline_templates
+    found = (await find_pipeline_templates(ctx, 'reference'))['candidates']
+    template = ({k: found[0][k] for k in ('uuid', 'name', 'path', 'child_must_supply')} if found else None)
     return {'maps': sorted(maps.values(), key=lambda m: m['map']),
             'references_in_use': sorted(used.values(), key=lambda u: u['feed'] or ''),
             'loaders': loaders, 'reference_data_template': template,
@@ -146,8 +144,50 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
                      "as a reference (create_pipeline references=[{feed, loader_pipeline}] or update_pipeline (references=...)). "
                      "No map for what you need: build the reference data (create_feed stream_type='Raw Reference', "
                      "upload_sample stream_type='Raw Reference', build_reference_xslt, create_pipeline from the "
-                     "Reference Data template, process, wait_for_processing output_type='Reference'), or keep a small "
+                     "reference-data template (reference_data_template; find_pipeline_templates stage=reference), "
+                     "process, wait_for_processing), or keep a small "
                      "static table in a Dictionary (save_dictionary) and use `dictionary` in the mapping.")}
+
+
+async def loader_pipelines(stroom) -> list[dict[str, Any]]:
+    """Pipelines that load reference data: a ReferenceDataFilter reading streams as they are (no XSLT left for a
+    child to set), whatever they're called and wherever they are."""
+    found = await stroom.post('/explorer/v2/findInContent', {
+        'filter': {'matchType': 'CONTAINS', 'pattern': 'ReferenceDataFilter', 'caseSensitive': True},
+        'pageRequest': {'offset': 0, 'length': 200}})
+    out: list[dict[str, Any]] = []
+    for value in found.get('values') or []:
+        ref = (value.get('docContentMatch') or {}).get('docRef') or {}
+        if ref.get('type') != 'Pipeline' or ref.get('uuid') in {o['uuid'] for o in out}:
+            continue
+        shape = await _shape(stroom, ref['uuid'])
+        # A loader reads Reference streams as they are: no XSLT left for a child (a parser's text converter may be
+        # unset; Stroom's own loader leaves its CombinedParser's empty).
+        if shape['stage'] == 'loader' and not any(s['property'] == 'xslt' for s in shape['child_must_supply']):
+            out.append({'uuid': ref['uuid'], 'name': ref.get('name')})
+    return out
+
+
+async def resolve_loader(stroom, feed: str) -> str:
+    """The loader for a reference feed, when the agent names none: the one other pipelines already load that feed
+    with, else the environment's only loader. Several, and none in use: the agent asks which."""
+    referencing = await stroom.post('/explorer/v2/findInContent', {
+        'filter': {'matchType': 'CONTAINS', 'pattern': 'pipelineReference', 'caseSensitive': True},
+        'pageRequest': {'offset': 0, 'length': 200}})
+    for value in referencing.get('values') or []:
+        ref = (value.get('docContentMatch') or {}).get('docRef') or {}
+        if ref.get('type') != 'Pipeline':
+            continue
+        for r in merge_layers(await stroom.pipeline_layers(ref['uuid']))['references']:
+            if (r.get('feed') or {}).get('name') == feed and (r.get('pipeline') or {}).get('uuid'):
+                return r['pipeline']['uuid']
+    loaders = await loader_pipelines(stroom)
+    if len(loaders) == 1:
+        return loaders[0]['uuid']
+    raise ToolError(f"Which pipeline loads reference feed {feed}? "
+                    + (f"This Stroom has several loaders: {', '.join(l['name'] for l in loaders)}; name one as "
+                       f"loader_pipeline." if loaders else
+                       "This Stroom has no reference-data loader (a pipeline with a ReferenceDataFilter): ask the user."))
 
 
 ALL_TOOLS = [find_reference_data]

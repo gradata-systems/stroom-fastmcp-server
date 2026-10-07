@@ -124,5 +124,6 @@ Two things follow from the wrapper:
 
 The pipeline needs an `XMLFragmentParser` element. Use a template whose chain has one (`find_pipeline_templates`
 shows `parser`, and `child_must_supply` names its `textConverter`); when the environment has none, it says so, and
-`create_pipeline` from the Event Data (XML) template with `replace_parser: XMLFragmentParser` puts one in place of
-the `XMLParser`, with the converter on `xmlFragmentParser.textConverter`.
+`create_pipeline` from a translation template whose parser is the `XMLParser` (whatever it is called here) with
+`replace_parser: XMLFragmentParser` puts one in place of the `XMLParser`, with the converter on
+`xmlFragmentParser.textConverter`.

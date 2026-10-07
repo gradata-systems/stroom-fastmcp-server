@@ -1,4 +1,4 @@
-"""The evaluation set: nineteen samples, onboarded end to end, scored the same way whoever does the work.
+"""The evaluation set: thirty-four samples, onboarded end to end, scored the same way whoever does the work.
 
     uv run python dev/eval/run_eval.py --reference [case ...]   # no model: each case's reference solution
     uv run python dev/eval/run_eval.py --request 06             # the request to give an agent for a case
@@ -66,8 +66,34 @@ def load_cases(only: list[str] | None = None) -> list[dict[str, Any]]:
 
 
 def samples_of(case: dict[str, Any]) -> list[str]:
-    """A case's sample files: `samples` (several), else the one `sample`."""
-    return list(case.get('samples') or [case['sample']])
+    """A case's sample files: `samples` (several), else the one `sample`. For a case whose samples are files on the
+    user's disk (`files`), `sample` is the excerpt the user shows; the files themselves are case_files."""
+    if case.get('samples') or case.get('sample'):
+        return list(case.get('samples') or [case['sample']])
+    # Files only: what the user shows of them, their first lines, as they read on screen.
+    encodings = {f['name']: f.get('encoding') or 'utf-8' for f in case['files']}
+    return ['\n'.join(data.decode(encodings[name]).splitlines()[:EXCERPT]) + '\n' for name, data in case_files(case)]
+
+
+EXCERPT = 6
+_FILES: dict[str, list[tuple[str, bytes]]] = {}
+
+
+def case_files(case: dict[str, Any]) -> list[tuple[str, bytes]]:
+    """A case's sample files on the user's disk, as bytes: each `text` in its `encoding` (UTF-8 unless given), or
+    made by a generator in generated.py (`generate: {kind, ...}`), as a source too large to paste would be."""
+    import generated
+    if case['id'] in _FILES:
+        return _FILES[case['id']]
+    files = _FILES.setdefault(case['id'], [])
+    for f in case.get('files') or []:
+        if 'generate' in f:
+            spec = dict(f['generate'])
+            data = getattr(generated, spec.pop('kind'))(**spec).encode('utf-8')
+        else:
+            data = f['text'].encode(f.get('encoding') or 'utf-8')
+        files.append((f['name'], data))
+    return files
 
 
 def sample_text(case: dict[str, Any]) -> str:
@@ -84,7 +110,10 @@ def sample_text(case: dict[str, Any]) -> str:
 def request_text(case: dict[str, Any]) -> str:
     """What to ask an agent for this case."""
     docs = f"\n\nThe vendor's documentation:\n\n{case['source_docs'].strip()}" if case.get('source_docs') else ''
-    return f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{sample_text(case)}{docs}"
+    files = (f"\n\nThe sample files, in the current folder: {', '.join(n for n, _ in case_files(case))}."
+             if case.get('files') else '')
+    return (f"{case['request'].strip()}\n\nUse the stroom-flat field convention for the index.\n\n{sample_text(case)}"
+            f"{files}{docs}")
 
 
 # --- scoring ---
@@ -138,15 +167,22 @@ def path_values(events: list[etree._Element], path: str) -> set[str]:
     return {(node.text or '').strip() for e in events for alt in path.split('|') for node in e.findall(_steps(alt))}
 
 
-def score_events(score: Score, case: dict[str, Any], records: list[str], validity: list[bool]) -> None:
+def score_events(score: Score, case: dict[str, Any], records: list[str], validity: list[bool],
+                 total: int | None = None) -> None:
+    """total: how many records the Events streams hold, when only some were read (a large source); the count is
+    scored on it, and the types, paths and validity on the records read."""
     expected = case['expected']
     events, types = event_facts(records)
     score.events, score.valid_events, score.event_types = len(events), sum(validity), sorted(types)
+    counted = total if total is not None else len(events)
     # An expected type may name alternatives the source fits equally (Authenticate|Authorise for a badge at a door).
     score.missing_types = sorted(t for t in expected['event_types'] if not set(t.split('|')) & types)
     score.missing_paths = sorted({p for p in expected['paths'] for e in events if not has_path(e, p)})
-    if len(events) != expected['records']:
-        score.problems.append(f"{len(events)} events, expected {expected['records']}")
+    if counted != expected['records']:
+        score.problems.append(f"{counted} events, expected {expected['records']}")
+    if total is not None:
+        score.notes.append(f"{total} events in the Events streams; {len(events)} read and checked")
+        score.events = total
     if score.valid_events != len(validity) or not validity:
         score.problems.append(f"{len(validity) - score.valid_events} of {len(validity)} Events records invalid")
     # Values some event must hold exactly, e.g. a free-text message carried whole, or a time from the right field.
@@ -155,6 +191,12 @@ def score_events(score: Score, case: dict[str, Any], records: list[str], validit
     for path, values in missing_values.items():
         if values:
             score.problems.append(f"no event has {path} = {values}")
+    # Values no event may hold: a source's "-" for none written as a user, say.
+    held_wrongly = {path: sorted(set(values) & path_values(events, path))
+                    for path, values in (expected.get('forbidden_values') or {}).items()}
+    for path, values in held_wrongly.items():
+        if values:
+            score.problems.append(f"events have {path} = {values}, which none should")
     # Types no event may have: Unknown for a source whose every record has an action element.
     forbidden = sorted(set(expected.get('forbidden_types') or []) & types)
     if forbidden:
@@ -164,9 +206,9 @@ def score_events(score: Score, case: dict[str, Any], records: list[str], validit
     for d in misplaced:
         score.problems.append(f"{'not every' if d.get('every', True) else 'no'} event has Data {d['name']!r}"
                               f"{' = ' + repr(d['value']) if 'value' in d else ''} under {d['at']}")
-    score.stage1 = (len(events) == expected['records'] and bool(validity) and all(validity)
+    score.stage1 = (counted == expected['records'] and bool(validity) and all(validity)
                     and not score.missing_types and not score.missing_paths and not any(missing_values.values())
-                    and not forbidden and not misplaced)
+                    and not any(held_wrongly.values()) and not forbidden and not misplaced)
 
 
 def data_held(events: list[etree._Element], spec: dict[str, Any]) -> bool:
@@ -188,13 +230,16 @@ Call = Callable[..., Awaitable[dict[str, Any]]]
 
 
 async def check_output(call: Call, score: Score, case: dict[str, Any], events_stream_ids: list[int]) -> None:
-    records, validity = [], []
+    records, validity, totals, cut = [], [], 0, False
     for stream_id in events_stream_ids:
         read = await call('read_stream', stream_id=stream_id, first_record=0, record_count=100)
-        for record in read.get('records') or []:
+        got = read.get('records') or []
+        totals += read.get('total_records') or len(got)
+        cut = cut or (read.get('total_records') or 0) > len(got)
+        for record in got:
             records.append(record)
             validity.append(bool((await call('validate_events', events_xml=record)).get('valid')))
-    score_events(score, case, records, validity)
+    score_events(score, case, records, validity, totals if cut else None)
 
 
 def local_ctx() -> SimpleNamespace:
@@ -238,12 +283,30 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
     try:
         reference = case['reference']
         samples = samples_of(case)
-        splitter = SplitterSpec.model_validate(reference['splitter']) if reference.get('splitter') else None
+        # The server's own Data Splitter (build_data_splitter, inferred or from a spec) when the case gives no
+        # converter of its own: saved in the build, where create_pipeline finds it for the parser.
+        by_server = bool(reference.get('splitter')) and not reference.get('converter')
+        splitter = (SplitterSpec.model_validate(reference['splitter'])
+                    if reference.get('splitter') and not by_server else None)
         # As an agent should: the samples' text is sent once, to upload_sample; the mapping is then checked against
         # every sample stream, read by the server, and the XSLT saved with it in the build, so its code never comes back.
-        await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
-        raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed,
+                         encoding=reference.get('feed_encoding') or 'UTF-8')
+        if case.get('files'):
+            # Files on the user's disk go whole, as the upload command sends them: their bytes, not text.
+            from utils.uploads import send_to_feed
+            raws = [(await send_to_feed(stroom, feed, data, {'Type': 'Raw Events'}, 'Raw Events'))['stream_id']
+                    for _, data in case_files(case)]
+        else:
+            raws = [(await feeds.upload_sample(ctx, feed, sample))['stream_id'] for sample in samples]
         raw = raws[0]
+        if by_server:
+            spec = None if reference['splitter'] == 'infer' else reference['splitter']
+            ds = await generation.build_data_splitter(ctx, stream_ids=raws, spec=spec, save_as=feed, build=build)
+            if ds.get('unmatched_count') or not ds.get('saved'):
+                raise RuntimeError(f"the server's Data Splitter: {ds.get('unmatched_count')} unmatched, saved "
+                                   f"{bool(ds.get('saved'))}: {str(ds.get('hint') or ds.get('notes') or '')[:300]}")
+            splitter = SplitterSpec.model_validate(ds['spec'])
         generated = await e2e.agreed(generation.build_translation_xslt, ctx=ctx,
                                     mapping=TranslationMapping.model_validate(reference['mapping']),
                                     stream_ids=raws, splitter=splitter, build=build, name=f'{feed}-Events')
@@ -288,6 +351,8 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         converter, replace_parser = reference.get('converter'), reference.get('replace_parser')
         if converter:
             code = e2e.CSV_SPLITTER if converter == 'csv_header' else converter
+            if converter == 'profile':   # the server's own: the text converter profile_sample gives for the sample
+                code = (await feeds.profile_sample(ctx, samples[0]))['text_converter']['code']
             tc = await translation.create_text_converter(ctx, build, feed, reference.get('converter_type', 'DATA_SPLITTER'), code)
             parser = pipeline_writes.element_id(replace_parser) if replace_parser else 'dsParser'
             props.append(PropertyValue(element=parser, name='textConverter', doc_uuid=tc['uuid'], doc_type='TextConverter'))

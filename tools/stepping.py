@@ -59,9 +59,11 @@ class _Pipeline:
         return cls(await stroom.get(f'/pipeline/v1/{uuid}'), await stroom.pipeline_layers(uuid))
 
     def default_outputs(self) -> list[str]:
-        """The pipeline's own XSLT steps, which is where its translation happens."""
+        """The pipeline's own XSLT steps, which is where its translation happens; with no XSLT at all (a pipeline
+        writing its parser's records as Records), the parser, whose output is what is written."""
         own_xslt = [e for e, t in self.types.items() if e in self.own and t == 'XSLTFilter']
-        return own_xslt or [e for e, t in self.types.items() if t == 'XSLTFilter'][-1:]
+        return (own_xslt or [e for e, t in self.types.items() if t == 'XSLTFilter'][-1:]
+                or [e for e, t in self.types.items() if t in _PARSERS][:1])
 
 
 async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
@@ -267,7 +269,22 @@ async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, 
             'records': sorted(unknown)[:20]}
 
 
+_PARSERS = {'XMLParser', 'XMLFragmentParser', 'JSONParser', 'DSParser', 'CombinedParser'}
 _EVENTS_ROOT = re.compile(r'<(?:[\w.-]+:)?Events[\s>/]')
+_REFERENCE_ROOT = re.compile(r'<(?:[\w.-]+:)?referenceData[\s>/]')
+_REFERENCE = re.compile(r'<(?:[\w.-]+:)?reference[\s>]')
+
+
+def _no_reference(element: str, keys: list[str]) -> dict[str, Any]:
+    """The verdict when a reference-data XSLT wrote referenceData for every record and a reference for none (seen: a
+    directory whose header line was read as a record, the columns named col1..., and the key field found nowhere;
+    processing then wrote no Reference stream, and nothing said why)."""
+    message = (f"None of the {len(keys)} records produced reference data: the XSLT writes referenceData, but no "
+               f"<reference>. Usually the key or value fields aren't in the records (the Data Splitter's field names: "
+               f"a header line read as data names them col1, col2 ...), or the namespace it reads them in.")
+    return {'class': 'blocking', 'reason': 'No record produced reference data', 'severity': 'ERROR', 'element': element,
+            'own_element': True, 'count': len(keys), 'records_affected': len(keys),
+            'examples': [{'message': message, 'location': None}], 'records': keys[:20]}
 
 
 def _no_events(element: str, keys: list[str]) -> dict[str, Any]:
@@ -388,6 +405,7 @@ async def step_sample(
     unknown: list[str] = []
     unknown_out: list[str] = []
     wrote_events, wrote_an_event = 0, 0     # records whose output is event-logging Events; of those, with an Event
+    wrote_reference, wrote_a_reference = 0, 0
     per_stream: dict[int, int] = {}
     first_output = None
     for stream_id in stream_ids:
@@ -409,6 +427,9 @@ async def step_sample(
             if _EVENTS_ROOT.search(output):
                 wrote_events += 1
                 wrote_an_event += bool(_EVENT.search(output))
+            if _REFERENCE_ROOT.search(output):
+                wrote_reference += 1
+                wrote_a_reference += bool(_REFERENCE.search(output))
             if _writes_unknown(result, pipeline.default_outputs()[-1]):
                 unknown.append(key)
                 unknown_out.append((((result.get('stepData') or {}).get('elementMap') or {})
@@ -428,6 +449,8 @@ async def step_sample(
                                             unknown, len(records), draft_code, _what_unknown_holds(unknown_out)))
     if records and wrote_events == len(records) and not wrote_an_event:
         _block(summary, _no_events(pipeline.default_outputs()[-1], [r['record'] for r in records]))
+    if records and wrote_reference == len(records) and not wrote_a_reference:
+        _block(summary, _no_reference(pipeline.default_outputs()[-1], [r['record'] for r in records]))
     result: dict[str, Any] = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records),
                               'records_with_errors': sum(1 for r in records if r['errors']),
                               'draft_code_used': sorted(draft_code or {}), **summary,

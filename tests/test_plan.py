@@ -30,14 +30,17 @@ async def test_results_carry_the_next_step_until_promotion():
 
 async def test_start_onboarding_profiles_every_file_and_returns_the_plan():
     guard = SimpleNamespace(build_folder=AsyncMock(return_value={'_path': 'System/MCP Workspace/onboard-fortios-firewall', 'uuid': 'f'}))
+    # The environment's own templates, whatever they're called: no 'Event Data (Text)' is assumed.
+    here = {'candidates': [{'name': 'json-in v3', 'parser': 'JSONParser'}, {'name': 'Acme text v2', 'parser': 'DSParser'}]}
     with patch.object(plan, 'guard_from', lambda c: guard), \
+            patch('tools.templates.find_pipeline_templates', AsyncMock(return_value=here)), \
             patch('tools.instructions.applicable_instructions', AsyncMock(return_value={'instructions': []})):
         result = await plan.start_onboarding(None, 'FortiOS firewall', {
             'a.log': 'date=2026-10-01 time=10:00:00 srcip=10.0.0.1 action=accept\n' * 3,
             'b.log': 'date=2026-10-02 time=10:00:00 srcip=10.0.0.2 action=deny dstport=443\n' * 3})
     assert result['build'] == 'onboard-fortios-firewall' and result['done'] is False
     assert result['profile']['format'] == 'key=value' and result['parser'] == 'DSParser'
-    assert result['template'].startswith('Event Data (Text)') and result['text_converter'].startswith('needed: build_data_splitter')
+    assert result['template'].startswith('Acme text v2 (its parser, DSParser') and result['text_converter'].startswith('needed: build_data_splitter')
     assert result['next']['step'] == 'feed' and len(result['plan']) == 15
     assert result['next']['call'] == {'tool': 'create_feed', 'arguments': {
         'build': 'onboard-fortios-firewall', 'name': '<the feed name the user confirmed>'}}

@@ -507,3 +507,23 @@ async def test_an_index_doc_given_as_the_cluster_is_named_with_its_cluster():
                                         r"'ES_PROD' \(cluster_uuid=c1\)"):
         await indexing.create_index_doc(ctx, build='b', backend='elasticsearch', name='fw', index_name='fw-v1',
                                         cluster_uuid='a96e', time_field='@timestamp')
+
+
+async def test_documents_are_counted_not_the_rows_of_one_page():
+    # Seen: 32,000 indexed events verified as 100, the first page of a search, and the index failed verification.
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from tools import indexing
+    dashboard = {'uuid': 'd', 'name': 'V', 'dashboardConfig': {'components': [
+        {'type': 'query', 'id': 'q', 'settings': {'dataSource': {}}},
+        {'type': 'table', 'id': 't', 'name': 'T', 'settings': {'fields': [{'name': 'StreamId'}, {'name': 'EventId'}]}}]}}
+
+    async def search(ctx, dash, expression, length=100):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            return {'rows': [{'All': 'all', 'Count': '32000'}], 'errors': []}
+        return {'rows': [{'StreamId': '706', 'EventId': str(n)} for n in range(1, 101)], 'errors': []}
+    with patch.object(indexing, '_search', search):
+        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [706, 707], 32000, retries=0,
+                                                  dashboard_doc=dashboard)
+    assert result['passed'] and result['checks'][0]['returned'] == 32000 and len(result['checks'][0]['sample']) == 3

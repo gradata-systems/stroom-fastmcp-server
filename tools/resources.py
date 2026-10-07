@@ -75,7 +75,7 @@ stream_ids shows every kind of event the sample holds; map variants with any_of.
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
 XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an
-XML_FRAGMENT wrapper converter: a template with one, else create_pipeline from Event Data (XML) with
+XML_FRAGMENT wrapper converter: a template with one, else create_pipeline from a template whose parser is the XMLParser, with
 replace_parser='XMLFragmentParser'; fragments without a namespace take the wrapper's, records:2. The XSLT reads
 the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json for JSON, root
 /map for JSON lines, /array for an array), so set xpath-default-namespace to it.
@@ -92,7 +92,7 @@ EventDetail/<Action>/Data with data_name): never invent an element for it, and n
 of it. Sources:
 field, any_of (first of several names), value, xpath, lookup (reference data); modifiers: transform (lower, upper,
 trim, strip_domain, domain, digits), dictionary, map, default, time_format. Values the record does not carry come
-from reference data (find_reference_data; build_reference_xslt and a Reference Data pipeline for new tables; the
+from reference data (find_reference_data; build_reference_xslt and a reference-data pipeline for new tables; the
 events pipeline names the feed in references) or from a Dictionary doc (save_dictionary). Text fields holding several
 values (a message string with a time, user, action and description) are parsed with the mapping's extract (a
 regular expression whose groups become fields), not with substring-before/after chains; JSON held in a string is

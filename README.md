@@ -170,11 +170,13 @@ Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (
 `dev/e2e_cleanup.py STAMP --apply` removes the run afterwards: filters, streams (marked deleted), documents and
 folders.
 
-The evaluation set in [dev/eval](dev/eval/README.md) has 21 cases across CSV, JSON, XML, syslog and key=value, each
-with a reference solution: `--reference` runs those through the local stack without a model, and `--request` prints
+The evaluation set in [dev/eval](dev/eval/README.md) has 34 cases across CSV, TSV and pipe-delimited text, JSON,
+XML and XML fragments, syslog, CEF and key=value (large files and a non-UTF-8 file among them), each with a
+reference solution (`dev/eval/offline.py` checks them with no Stroom): `--reference` runs those through the local stack without a model, and `--request` prints
 the request to give an agent, whatever runs it. `dev/eval/run_agent.py` runs them with headless Claude Code as the
 agent and a scripted user, on Haiku by default (`--model default` for Claude Code's own), on the CLI's sign-in: the
-Claude subscription, never an API key. `--workflow document_index` runs a workflow beyond onboarding
+Claude subscription, never an API key. `--workflow fix_errors` (or `change_event_type`, `records_output`,
+`document_index`) runs a workflow beyond onboarding
 (`dev/eval/workflows.py`: its setup, prompt, the user's facts and a scorer reading Stroom), and with `--reference`
 checks that setup and scorer without a model. The Stroom API checks (`dev/api_checks`) prove the APIs the server relies on, which were built for the Stroom UI;
 what has been found and tested, locally and live, is in [docs/FINDINGS.md](docs/FINDINGS.md).

@@ -78,7 +78,8 @@ def xml_fragment_setup(namespace: str | None, record: str) -> dict[str, Any]:
                            'note': "The wrapper the XMLFragmentParser puts round the fragments (its textConverter); "
                                    "use the template's own wrapper if it already sets one."},
         'parser': "XMLFragmentParser: a template whose chain has one (child_must_supply names its textConverter), "
-                  "else create_pipeline from Event Data (XML) with replace_parser='XMLFragmentParser'",
+                  "else create_pipeline from a translation template whose parser is the XMLParser, with "
+                  "replace_parser='XMLFragmentParser'",
         'xslt_input': {'namespace': effective, 'root': '/', 'record': f'*/{record}',
                        'note': ("The fragments declare no namespace, so inside the wrapper they take its default "
                                 "namespace, records:2: set xml_namespace to that." if not namespace else
@@ -223,6 +224,24 @@ def _array_head(text: str, limit: int) -> list[Any] | None:
     return items or None
 
 
+_NAME_CELL = re.compile(r'^[A-Za-z_][A-Za-z0-9_.-]{0,40}$')
+
+
+def _names_a_header(rows: list[list[str]]) -> bool:
+    """A first line of names (user, src_ip, eventTime), each unique, over columns whose values aren't names like it:
+    a header the sniffer missed because every column is text (seen: user,name,department,site over people's names,
+    the header read as a record and the columns called col1, col2 ...)."""
+    first, body = rows[0], [r for r in rows[1:] if r]
+    if len(set(first)) != len(first) or not all(_NAME_CELL.match(c.strip()) for c in first):
+        return False
+    differing = 0
+    for n, name in enumerate(first):
+        values = [r[n].strip() for r in body if n < len(r)]
+        if values and name not in values and not all(_NAME_CELL.match(v) and v.islower() == name.islower() for v in values):
+            differing += 1
+    return differing >= max(1, len(first) // 2)
+
+
 def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     text = sample.strip('﻿\r\n ')
     lines = [line for line in text.splitlines() if line.strip()]
@@ -236,7 +255,7 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             records = [_xml_record_fields(rec) for rec in root if isinstance(rec.tag, str)][:max_records]
             return {**result, 'format': 'xml', 'root': etree.QName(root).localname, 'namespace': etree.QName(root).namespace,
                     'record_element': record_tag, 'records': sum(children.values()), 'fields': _inventory(records),
-                    'suggested_parser': 'XMLParser (Event Data (XML) template)', 'text_converter': 'none: the XMLParser reads the document'}
+                    'suggested_parser': 'XMLParser (a translation template with one: find_pipeline_templates)', 'text_converter': 'none: the XMLParser reads the document'}
         except etree.XMLSyntaxError:
             fragments = xml_fragments(text)
             if fragments:
@@ -255,13 +274,13 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
             data = json.loads(text)
             records = [_flatten(r) for r in data[:max_records] if isinstance(r, dict)]
             return {**result, 'format': 'json array', 'records': len(data), 'fields': _inventory(records),
-                    'suggested_parser': 'JSONParser (Event Data (JSON) template)', **JSON_SETUP['array']}
+                    'suggested_parser': 'JSONParser (a translation template with one: find_pipeline_templates)', **JSON_SETUP['array']}
         except ValueError:
             head = _array_head(text, max_records)
             if head and all(isinstance(r, dict) for r in head):
                 return {**result, 'format': 'json array', 'records': len(head), 'fields': _inventory(
                     [_flatten(r) for r in head]), 'note': 'the array is cut short here: these are its first records',
-                    'suggested_parser': 'JSONParser (Event Data (JSON) template)', **JSON_SETUP['array']}
+                    'suggested_parser': 'JSONParser (a translation template with one: find_pipeline_templates)', **JSON_SETUP['array']}
     json_lines = []
     for line in lines[:max_records]:
         try:
@@ -275,18 +294,18 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     if json_lines and (len(json_lines) == whole or (len(json_lines) == whole - 1 and len(lines) <= max_records
                                                     and len(json_lines) >= 2)):
         return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
-                'suggested_parser': 'JSONParser, one object per line (Event Data (JSON) template)', **JSON_SETUP['lines']}
+                'suggested_parser': 'JSONParser, one object per line (a translation template with one: find_pipeline_templates)', **JSON_SETUP['lines']}
 
     if sum(bool(CEF.search(line)) for line in lines) >= 0.8 * len(lines):
         # CEF, alone or after a syslog header: seen read as key=value, its header fields taken for keys and its
         # values cut at their first space.
         return {**result, 'format': 'cef', 'records': len(lines), 'examples': lines[:3],
                 'suggested_parser': "Data Splitter for CEF: the header's fields, then the extension's key=value pairs, "
-                                    "whose values may hold spaces (build_data_splitter infers it; Event Data (Text) "
-                                    "template)"}
+                                    "whose values may hold spaces (build_data_splitter infers it; a translation template with a "
+                                    "DSParser)"}
     if sum(bool(SYSLOG_5424.match(line)) for line in lines) >= 0.8 * len(lines):
         return {**result, 'format': 'syslog rfc5424', 'records': len(lines), 'examples': lines[:3],
-                'suggested_parser': 'Data Splitter with a regex per RFC 5424 part (Event Data (Text) template)'}
+                'suggested_parser': 'Data Splitter with a regex per RFC 5424 part (a translation template with a DSParser: find_pipeline_templates)'}
     if sum(bool(SYSLOG_3164.match(line)) for line in lines) >= 0.8 * len(lines):
         return {**result, 'format': 'syslog rfc3164', 'records': len(lines), 'examples': lines[:3],
                 'suggested_parser': 'Data Splitter with a regex for PRI, timestamp, host, tag and message'}
@@ -294,19 +313,21 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     kv = [dict((k, v.strip('"')) for k, v in KEY_VALUE.findall(line)) for line in lines[:max_records]]
     if kv and sum(len(r) >= 3 for r in kv) >= 0.8 * len(kv):
         return {**result, 'format': 'key=value', 'records': len(lines), 'fields': _inventory(kv),
-                'suggested_parser': 'Data Splitter splitting on spaces then = (Event Data (Text) template)'}
+                'suggested_parser': 'Data Splitter splitting on spaces then = (a translation template with a DSParser: find_pipeline_templates)'}
 
     try:
         dialect = csv.Sniffer().sniff('\n'.join(lines[:20]), delimiters=',\t|;')
         has_header = csv.Sniffer().has_header('\n'.join(lines[:20]))
         rows = list(csv.reader(io.StringIO('\n'.join(lines[:max_records + 1])), dialect))
+        if not has_header and len(rows) > 1:
+            has_header = _names_a_header(rows)
         header = rows[0] if has_header else [f'col{i + 1}' for i in range(len(rows[0]))]
         body = rows[1:] if has_header else rows
         records = [dict(zip(header, row)) for row in body]
         return {**result, 'format': 'delimited', 'delimiter': dialect.delimiter, 'has_header': has_header,
                 'columns': header, 'records': len(lines) - (1 if has_header else 0), 'fields': _inventory(records),
                 'suggested_parser': 'Data Splitter for delimited data' + (' with a header row' if has_header else '')
-                                    + ' (Event Data (Text) template)'}
+                                    + ' (a translation template with a DSParser: find_pipeline_templates)'}
     except csv.Error:
         pass
     return {**result, 'format': 'unknown text', 'examples': lines[:5],

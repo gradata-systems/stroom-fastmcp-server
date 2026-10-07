@@ -362,6 +362,10 @@ async def draft_index_mapping(
     """
     if discovery:
         return _draft_discovery(backend, index_name, discovery)
+    if events_stream_ids:
+        # First, whatever else is asked: the streams must be Events (a Records stream, or a source's own data, is
+        # refused with how to index it).
+        await require_events(gateway_from(ctx), events_stream_ids)
     if backend == 'elasticsearch' and not (example_template or like_index):
         # Names, types and structure come from what the environment already indexes: the agent asks the user,
         # and indexing from a convention alone is the user's call, made in a form, not the agent's.
@@ -671,6 +675,11 @@ async def require_events(stroom, stream_ids: list[int]) -> None:
     <records> stream taken as the Events to plan an index from, and a plan drafted from nothing)."""
     for stream_id in stream_ids:
         meta = await _meta(stroom, stream_id)
+        if meta.get('typeName') == 'Records':
+            raise ToolError(f"Stream {stream_id} is a Records stream: records:2 records, not Events, so an event-"
+                            f"logging field plan doesn't fit it. Index records as they are: draft_index_mapping "
+                            f"discovery={{'input': 'delimited', 'timestamp_field': ...}} (it reads records:2 data "
+                            f"elements by name), on an indexing template with an XMLParser.")
         if meta.get('typeName') != 'Events':
             raise ToolError(f"Stream {stream_id} is {meta.get('typeName')!r}, not Events: the source's own data, "
                             f"whatever its XML or records look like. An index holds the Events an events pipeline "
@@ -1163,6 +1172,25 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
     return {'rows': rows, 'errors': (result.get('errors') or []) + (table_result.get('errors') or [])}
 
 
+async def _count(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any]) -> tuple[int | None, list]:
+    """How many documents the expression finds, however many: the dashboard's table asked for count() grouped on a
+    constant, so one row holds it. Counting the rows of a search stopped at its first page (100) and at the table's
+    maxResults (seen: 32,000 documents counted as 100)."""
+    components = dashboard['dashboardConfig']['components']
+    table = next(c for c in components if c['type'] == 'table')
+    counting = {**table['settings'], 'fields': [
+        {'id': 'mcp-all', 'name': 'All', 'expression': '"all"', 'group': 0, 'visible': True},
+        {'id': 'mcp-count', 'name': 'Count', 'expression': 'count()', 'format': {'type': 'NUMBER'}, 'visible': True}]}
+    found = await _search(ctx, {**dashboard, 'dashboardConfig': {**dashboard['dashboardConfig'], 'components': [
+        c if c is not table else {**table, 'settings': counting} for c in components]}}, expression, length=1)
+    if not found['rows']:
+        return (0 if not found['errors'] else None), found['errors']
+    try:
+        return int(float(found['rows'][0].get('Count') or 0)), found['errors']
+    except ValueError:
+        return None, found['errors']
+
+
 Condition = Literal['EQUALS', 'NOT_EQUALS', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH', 'MATCHES_REGEX', 'GREATER_THAN',
                     'GREATER_THAN_OR_EQUAL_TO', 'LESS_THAN', 'LESS_THAN_OR_EQUAL_TO', 'BETWEEN', 'IN', 'IS_NULL',
                     'IS_NOT_NULL']
@@ -1231,28 +1259,36 @@ async def run_test_searches(
     term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
     by_stream = {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in stream_ids]}
     for attempt in range(retries + 1):
-        found = await _search(ctx, dashboard, by_stream)
-        if len(found['rows']) >= expected_documents or attempt == retries:
+        counted, count_errors = await _count(ctx, dashboard, by_stream)
+        if (counted or 0) >= expected_documents or attempt == retries:
             break
         await asyncio.sleep(5)
+    found = await _search(ctx, dashboard, by_stream)
+    counted = len(found['rows']) if counted is None else counted
     checks = [{'check': f'documents for streams {stream_ids}', 'expected': expected_documents,
-               'returned': len(found['rows']), 'pass': len(found['rows']) == expected_documents,
-               'errors': found['errors'], 'sample': found['rows'][:3]}]
+               'returned': counted, 'pass': counted == expected_documents,
+               'errors': count_errors + found['errors'], 'sample': found['rows'][:3]}]
     for item in exact:
         res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
             term(item['field'], 'EQUALS', item['value'])]})
         checks.append({'check': f"{item['field']} = {item['value']}", 'returned': len(res['rows']),
                        'pass': len(res['rows']) >= 1, 'errors': res['errors'], 'sample': res['rows'][:2]})
     if time_range:
-        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
-            term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}")]})
+        between = {'type': 'operator', 'op': 'AND', 'children': [
+            term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}")]}
+        n, errors = await _count(ctx, dashboard, between)
+        n = n if n is not None else len((await _search(ctx, dashboard, between))['rows'])
         checks.append({'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
-                       'expected': time_range.get('expected'), 'returned': len(res['rows']),
-                       'pass': len(res['rows']) == time_range.get('expected', len(res['rows'])), 'errors': res['errors']})
+                       'expected': time_range.get('expected'), 'returned': n,
+                       'pass': n == time_range.get('expected', n), 'errors': errors})
     for search in searches or []:
-        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
-            term(search.field, search.condition, search.value)]})
+        expression = {'type': 'operator', 'op': 'AND', 'children': [term(search.field, search.condition, search.value)]}
+        res = await _search(ctx, dashboard, expression)
         n = len(res['rows'])
+        if search.expected is not None and n >= 100:
+            # A page is full: the number is counted, not the rows of the first page.
+            counted, _ = await _count(ctx, dashboard, expression)
+            n = n if counted is None else counted
         checks.append({'check': f"{search.field} {search.condition} {search.value}".rstrip(), 'expected': search.expected,
                        'returned': n, 'pass': (n >= 1 if search.expected is None else n == search.expected)
                        and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],

@@ -414,7 +414,7 @@ def kept_unknown(mapping: 'TranslationMapping') -> list['EventRule']:
 
 class TranslationMapping(BaseModel):
     input: Literal['data_splitter', 'json', 'xml', 'xml_fragments'] = Field(
-        description="What the XSLT reads: data_splitter (Event Data (Text)), json (JSONParser), xml (the source XML, "
+        description="What the XSLT reads: data_splitter (a Data Splitter's records), json (JSONParser), xml (the source XML, "
                     "one document), xml_fragments (XMLFragmentParser: several root elements, one record each, inside "
                     "its converter's wrapper).")
     root: str | None = Field(None, description="Root element to match. Defaults: 'records' (data_splitter), '/' (json, "

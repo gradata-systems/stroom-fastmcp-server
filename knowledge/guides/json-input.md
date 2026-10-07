@@ -1,6 +1,7 @@
 # JSON input
 
-JSON is parsed by the `JSONParser` element of the Event Data (JSON) template. It needs no text converter: a
+JSON is parsed by the `JSONParser` element of a translation template that has one (`find_pipeline_templates`
+shows each template's `parser`; in a standard Stroom, Event Data (JSON)). It needs no text converter: a
 Data Splitter is for text, and a converter holding a `<jsonParser>` element parses nothing (`save_text_converter`
 refuses one). The parser turns JSON into XML in the namespace `http://www.w3.org/2013/XSL/json` (not the
 `xpath-functions` namespace that `json-to-xml()` uses):

@@ -25,7 +25,7 @@ def _summary(doc: dict[str, Any]) -> dict[str, Any]:
 
 def _check_converter(converter_type: str, code: str) -> None:
     """A Data Splitter is a <dataSplitter> document. JSON needs no text converter at all: the JSONParser element
-    of the Event Data (JSON) template parses it, and a converter holding a <jsonParser> element parses nothing."""
+    of a JSON translation template parses it, and a converter holding a <jsonParser> element parses nothing."""
     if converter_type == 'XML_FRAGMENT':
         if not (re.search(r'<!ENTITY\s+fragment\s+SYSTEM\s+["\']fragment["\']', code) and '&fragment;' in code):
             raise ToolError("Not saved: an XML_FRAGMENT converter is the wrapper the XMLFragmentParser puts round the "
@@ -36,7 +36,7 @@ def _check_converter(converter_type: str, code: str) -> None:
     if converter_type != 'DATA_SPLITTER':
         return
     if re.search(r'<\s*json', code, re.IGNORECASE):
-        raise ToolError("Not saved: a text converter cannot parse JSON. Use the Event Data (JSON) template, whose "
+        raise ToolError("Not saved: a text converter cannot parse JSON. Use a translation template whose parser is the JSONParser (find_pipeline_templates), whose "
                         "JSONParser element parses the raw JSON (JSON lines included) with no text converter; the "
                         "XSLT then reads map/string elements in namespace http://www.w3.org/2013/XSL/json "
                         "(stroom://guide/json-input).")
@@ -85,7 +85,7 @@ async def create_text_converter(
 ) -> dict[str, Any]:
     """
     Create a text converter in the build folder (see stroom://guide/data-splitter), for templates whose parser
-    needs one (DSParser.textConverter in find_pipeline_templates). Not for JSON: the Event Data (JSON)
+    needs one (DSParser.textConverter in find_pipeline_templates). Not for JSON: a JSON translation template's
     template's JSONParser parses JSON, one object per line or an array, with no converter.
     """
     _check_converter(converter_type, code)

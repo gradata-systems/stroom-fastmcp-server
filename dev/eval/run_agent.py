@@ -44,8 +44,8 @@ from typing import Any
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_eval import (MAX_HINTS, RESULTS, ROOT, Score, check_output, criterion, load_cases, local_ctx,  # noqa: E402
-                      print_score, sample_text, summary)
+from run_eval import (MAX_HINTS, RESULTS, ROOT, Score, case_files, check_output, criterion, load_cases,  # noqa: E402
+                      local_ctx, print_score, sample_text, summary)
 
 STROOM_URL = 'http://127.0.0.1:18080'
 SERVER = 'stroom'
@@ -53,6 +53,9 @@ PROMPT = 'onboard_data_source'
 # Besides the server's own tools: reading its resources (the guides and conventions the prompt points to).
 RESOURCE_TOOLS = ['ListMcpResourcesTool', 'ReadMcpResourceTool']
 PENDING_ID = re.compile(r'(?:conf|appr)-[a-z2-7]+\.[a-z2-7]{16}')   # utils/consent.py's pending ids
+ES = 'http://127.0.0.1:19200'
+# utils/uploads.py's commands: the file and the ticket's URL, the one quoted argument besides it.
+UPLOAD = re.compile(r'--data-binary "@(?P<file>[^"]+)" "(?P<url>[^"]+)"')
 
 USER_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['action', 'reply'],
@@ -104,7 +107,11 @@ class AgentScore(Score):
 
 def first_message(prompt: str, case: dict[str, Any], build: str, feed: str) -> str:
     # Lucene: the local stack has an Elasticsearch cluster doc (dev/e2e_elastic_handover.py) but no Elasticsearch.
-    return (f"{prompt}\n\n{case['request'].strip()}\n\nThose are all the sample files there are. Index into Lucene "
+    files = ''
+    if case.get('files'):
+        files = (f"\n\nThe sample files are on my disk, in my terminal's current folder: "
+                 f"{', '.join(n for n, _ in case_files(case))}. What's above is only their first lines.")
+    return (f"{prompt}\n\n{case['request'].strip()}{files}\n\nThose are all the sample files there are. Index into Lucene "
             f"(there is no Elasticsearch here) with the stroom-flat field convention. Name the build `{build}` and the "
             f"feed `{feed}`. Stop once the index is verified and both pipelines are documented; don't promote the build.")
 
@@ -184,11 +191,13 @@ class Agent:
                      '--allowedTools', ','.join([f'mcp__{SERVER}', *RESOURCE_TOOLS]), '--permission-mode', 'dontAsk',
                      '--output-format', 'stream-json', '--verbose', *(['--effort', effort] if effort else [])]
         self.cost, self.tool_calls, self.self_confirmed = 0.0, 0, 0
+        self.last_events: list[dict[str, Any]] = []
 
     async def send(self, message: str) -> dict[str, Any]:
         session = ['--resume', self.session] if self.started else ['--session-id', self.session]
         self.started = True
         events = await claude([*self.args, *session], message, self.workdir, self.transcript, self.timeout)
+        self.last_events = events
         init = next((e for e in events if e.get('type') == 'system' and e.get('subtype') == 'init'), None)
         if init:
             status = {s.get('name'): s.get('status') for s in init.get('mcp_servers') or []}
@@ -205,6 +214,72 @@ class Agent:
             'is_error': True, 'result': 'no result from claude'}
         self.cost += result.get('total_cost_usd') or 0.0
         return result
+
+
+def tool_outputs(events: list[dict[str, Any]]) -> list[Any]:
+    """The tools' results in a turn's stream-json events, parsed where they are JSON."""
+    out = []
+    for e in events:
+        if e.get('type') != 'user':
+            continue
+        for block in (e.get('message') or {}).get('content') or []:
+            if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                continue
+            content = block.get('content')
+            texts = [content] if isinstance(content, str) else [c.get('text') or '' for c in content or [] if isinstance(c, dict)]
+            for text in texts:
+                try:
+                    out.append(json.loads(text))
+                except ValueError:
+                    out.append(text)
+    return out
+
+
+def _found(value: Any, key: str) -> list[Any]:
+    """Every value of the key, anywhere in a parsed result."""
+    if isinstance(value, dict):
+        return ([value[key]] if key in value else []) + [v for item in value.values() for v in _found(item, key)]
+    if isinstance(value, list):
+        return [v for item in value for v in _found(item, key)]
+    return []
+
+
+class UserSide:
+    """What the user does outside the chat when the agent hands it over: runs the upload commands upload_sample gave
+    (each sends a file from their folder to its ticket's URL, as the curl command would), and has the cluster admin
+    apply an index template propose_index_template gave. Done once each; the agent is told what came of it."""
+
+    def __init__(self, workdir: Path):
+        self.workdir, self.done = workdir, set()
+
+    async def act(self, events: list[dict[str, Any]]) -> str | None:
+        said = []
+        results = tool_outputs(events)
+        async with httpx.AsyncClient(timeout=300) as client:
+            for commands in [c for r in results for c in _found(r, 'commands') if isinstance(c, list)]:
+                for command in commands:
+                    match = UPLOAD.search(str(command.get('bash') or command.get('powershell') or '')) \
+                        if isinstance(command, dict) else None
+                    if not match or match.group('url') in self.done:
+                        continue
+                    self.done.add(match.group('url'))
+                    path = self.workdir / match.group('file')
+                    if not path.is_file():
+                        said.append(f"{match.group('file')}: curl: (26) Failed to open/read local data from file")
+                        continue
+                    response = await client.post(match.group('url'), content=path.read_bytes())
+                    said.append(f"{match.group('file')}: {response.text.strip()[:500]}")
+            for request in [d for r in results for d in _found(r, 'dev_tools') if isinstance(d, str)]:
+                if request in self.done or not request.lstrip().startswith('PUT '):
+                    continue
+                self.done.add(request)
+                line, _, body = request.strip().partition('\n')
+                response = await client.put(f"{ES}/{line.split(None, 1)[1].lstrip('/')}", content=body,
+                                            headers={'Content-Type': 'application/json'})
+                said.append(f"The cluster admin applied {line}: HTTP {response.status_code}")
+        if not said:
+            return None
+        return "I ran what you gave me. The output:\n" + '\n'.join(said)
 
 
 WORKFLOW_ROLE = """You play the user in an evaluation of an AI agent working in Stroom through an MCP server. You know
@@ -226,7 +301,11 @@ async def play_user(case: dict[str, Any], agent_said: str, model: str, workdir: 
                     role: str = USER_ROLE, context: str | None = None) -> dict[str, str]:
     """The scripted user's decision on the agent's last message: {'action', 'reply'}."""
     said = agent_said if len(agent_said) <= 8000 else agent_said[:2000] + '\n[...]\n' + agent_said[-6000:]
-    context = context if context is not None else f"## The request\n\n{case['request'].strip()}\n\n{sample_text(case)}"
+    if context is None:
+        context = f"## The request\n\n{case['request'].strip()}\n\n{sample_text(case)}"
+        if case.get('user_knows'):
+            # What the user knows of their source without it being in the request, for when the agent asks.
+            context += f"\n\n## What else you know (answer from this only when asked)\n\n{case['user_knows'].strip()}"
     message = f"{role}\n\n{context}\n\n## The agent's latest message\n\n{said}"
     events = await claude([*isolation_args(model), '--tools', '', '--output-format', 'json', '--json-schema',
                            json.dumps(USER_SCHEMA), '--no-session-persistence'], message, workdir, None, 300)
@@ -251,7 +330,10 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
     hints = list(case.get('hints') or [])
     with tempfile.TemporaryDirectory(prefix='stroom-eval-') as tmp:
         workdir = Path(tmp)
+        for name, data in case_files(case):
+            (workdir / name).write_bytes(data)
         agent = Agent(model, args.effort, server_url, workdir, transcript, args.turn_timeout)
+        user_side = UserSide(workdir)
         try:
             message = first_message(await render_prompt(server_url, case, not args.without_source_docs), case, build, feed)
             while True:
@@ -263,6 +345,12 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, model: str | 
                 if score.user_turns >= args.max_user_turns:
                     score.ended = f"stopped after {score.user_turns} user turns"
                     break
+                acted = await user_side.act(agent.last_events)
+                if acted:
+                    print("    user: ran what was handed over")
+                    message = acted
+                    score.user_turns += 1
+                    continue
                 decision = await play_user(case, result.get('result') or '', args.user_model, workdir)
                 action = decision['action']
                 print(f"    user: {action}{(' - ' + decision['reply'][:100]) if decision['reply'] else ''}")
@@ -317,6 +405,7 @@ async def run_workflow(workflow, args: argparse.Namespace, model: str | None, se
             with tempfile.TemporaryDirectory(prefix='stroom-eval-') as tmp:
                 workdir = Path(tmp)
                 agent = Agent(model, args.effort, server_url, workdir, transcript, args.turn_timeout)
+                user_side = UserSide(workdir)
                 message = f"{prompt}\n\n{prepared['request']}"
                 while True:
                     result = await agent.send(message)
@@ -327,6 +416,12 @@ async def run_workflow(workflow, args: argparse.Namespace, model: str | None, se
                     if score.user_turns >= args.max_user_turns:
                         score.ended = f"stopped after {score.user_turns} user turns"
                         break
+                    acted = await user_side.act(agent.last_events)
+                    if acted:
+                        print("    user: ran what was handed over")
+                        message = acted
+                        score.user_turns += 1
+                        continue
                     decision = await play_user({}, result.get('result') or '', args.user_model, workdir, role, context)
                     action = decision['action']
                     print(f"    user: {action}{(' - ' + decision['reply'][:100]) if decision['reply'] else ''}")

@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 21 and len({c["id"] for c in cases}) == 21
+    assert len(cases) == 34 and len({c["id"] for c in cases}) == 34
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']
@@ -127,3 +127,82 @@ def test_scoring_fails_unknown_events_and_data_away_from_where_it_belongs():
     gave_up = ev.Score('21', 'reference')
     ev.score_events(gave_up, case, [unknown], [True])
     assert not gave_up.stage1 and "events of type ['Unknown'], which none should be" in gave_up.problems
+
+
+def test_every_reference_passes_what_build_translation_xslt_checks_before_saving():
+    # Offline: the mapping generates, the sample is read as the server's Data Splitter reads it (inferred, or from
+    # the case's spec), every field and time format fits, the extractions match, and the records are counted.
+    import offline
+    for case in ev.load_cases():
+        result = offline.check(case)
+        assert not result['problems'], (case['id'], result['problems'])
+
+
+def test_a_large_source_is_counted_whole_and_values_none_may_hold_are_failed():
+    events = EVENTS.replace('<Id>bob</Id>', '<Id>-</Id>')
+    case = {'expected': {'records': 32000, 'event_types': ['Authenticate'], 'paths': ['EventSource/User/Id'],
+                         'forbidden_values': {'EventSource/User/Id': ['-']}}}
+    score = ev.Score('x', 'test')
+    ev.score_events(score, case, [events], [True], total=32000)   # 2 read of the 32000 the streams hold
+    assert score.events == 32000 and score.problems == ["events have EventSource/User/Id = ['-'], which none should"]
+    assert not score.stage1
+    clean = ev.Score('y', 'test')
+    ev.score_events(clean, case, [EVENTS], [True], total=32000)
+    assert clean.stage1 and not clean.problems
+
+
+def test_a_case_of_files_shows_their_first_lines_and_keeps_their_bytes():
+    hr = ev.load_cases(['33'])[0]
+    [(name, data)] = ev.case_files(hr)
+    assert name == 'hr-changes-2026-10.csv' and 'José Núñez'.encode('cp1252') in data and b'\xc3' not in data
+    assert 'José Núñez' in ev.sample_text(hr) and name in ev.request_text(hr)
+    proxy = ev.load_cases(['29'])[0]
+    files = ev.case_files(proxy)
+    assert [len(d.splitlines()) for _, d in files] == [16001, 16001] and files == ev.case_files(proxy)
+    assert ev.sample_text(proxy).count('\n2026-10-0') == 2 * (ev.EXCERPT - 1)
+
+
+def test_the_user_runs_the_upload_commands_and_applies_the_index_template(tmp_path):
+    import asyncio
+    import json
+    import httpx
+    import respx
+    import run_agent
+    (tmp_path / 'a.csv').write_bytes(b'time,user\n1,alice\n')
+    upload = 'http://127.0.0.1:8765/upload/TICKET'
+    commands = {'commands': [{'file': 'a.csv', 'bash': f'curl -sS --fail-with-body --data-binary "@a.csv" "{upload}"'}]}
+    template = 'PUT _index_template/eval-x\n{"index_patterns": ["eval-x*"]}'
+    events = [{'type': 'user', 'message': {'content': [
+        {'type': 'tool_result', 'content': [{'type': 'text', 'text': json.dumps(commands)}]},
+        {'type': 'tool_result', 'content': json.dumps({'status': 'proposed', 'dev_tools': template})}]}}]
+    with respx.mock:
+        posted = respx.post(upload).mock(return_value=httpx.Response(200, text='{"stream_id": 41}'))
+        put = respx.put(f'{run_agent.ES}/_index_template/eval-x').mock(return_value=httpx.Response(200, json={}))
+        side = run_agent.UserSide(tmp_path)
+        said = asyncio.run(side.act(events))
+        assert posted.calls[0].request.content == b'time,user\n1,alice\n' and put.called
+        assert 'a.csv: {"stream_id": 41}' in said and 'applied PUT _index_template/eval-x: HTTP 200' in said
+        assert asyncio.run(side.act(events)) is None     # each once
+
+
+def test_the_user_knows_what_the_case_says_only_when_asked():
+    import run_agent
+    times = ev.load_cases(['31'])[0]
+    message = run_agent.first_message('PROMPT', times, 'eval-31-x', 'EVAL-31-X')
+    assert '+10:00' not in message and 'Sydney' in message   # the request names the place, not the offset
+    proxy = ev.load_cases(['29'])[0]
+    assert 'proxy-2026-10-01.csv, proxy-2026-10-02.csv' in run_agent.first_message('PROMPT', proxy, 'b', 'F')
+
+
+def test_the_workflows_and_their_comparison_of_events():
+    from lxml import etree
+    import workflows
+    assert {'document_index', 'fix_errors', 'change_event_type', 'records_output'} <= set(workflows.WORKFLOWS)
+    a = etree.fromstring('<Event xmlns="event-logging:3"><EventDetail><TypeId>LOGON</TypeId><Authenticate>'
+                         '<Action>Logon</Action><Data Name="x" Value="1"/></Authenticate></EventDetail></Event>')
+    b = etree.fromstring('<Event xmlns="event-logging:3">\n  <EventDetail>\n    <TypeId>LOGON</TypeId>\n    '
+                         '<Authenticate><Action>Logon</Action>\n<Data Value="1" Name="x" /></Authenticate>\n  '
+                         '</EventDetail>\n</Event>')
+    assert workflows._canonical(a) == workflows._canonical(b)
+    assert workflows._canonical(a) != workflows._canonical(etree.fromstring(
+        etree.tostring(a).decode().replace('Logon', 'Logoff')))

@@ -1,9 +1,9 @@
 """Generate a reference-data XSLT: the translation of a reference feed (a user list, an asset register) into the
 reference-data:2 maps that stroom:lookup() reads from an events pipeline.
 
-A Reference Data pipeline parses the feed as any other (Data Splitter or JSON) and its XSLT writes one
+A reference-data pipeline parses the feed as any other (Data Splitter or JSON) and its XSLT writes one
 <reference> per record and map: the map's name, the key, and the value (text, or elements). The events
-pipeline then names the reference feed and the standard Reference Loader as a pipeline reference, and its
+pipeline then names the reference feed and a loader (a pipeline with a ReferenceDataFilter) as a pipeline reference, and its
 translation looks keys up with stroom:lookup('MAP', key).
 """
 from typing import Literal
