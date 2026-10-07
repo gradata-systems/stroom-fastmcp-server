@@ -267,6 +267,22 @@ async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, 
             'records': sorted(unknown)[:20]}
 
 
+_EVENTS_ROOT = re.compile(r'<(?:[\w.-]+:)?Events[\s>/]')
+
+
+def _no_events(element: str, keys: list[str]) -> dict[str, Any]:
+    """The verdict when a translation wrote Events for every record and an Event for none: its record templates
+    select nothing. Seen: XML fragments read with no namespace, where the wrapper gives them records:2; every record
+    came out as an empty Events, and stepping said clean."""
+    message = (f"None of the {len(keys)} records produced an Event: the XSLT writes Events, but its record templates "
+               f"select nothing in the input. Usually the input's namespace (xpath-default-namespace: records:2 for a Data "
+               f"Splitter, and for XML fragments the wrapper's, records:2, unless they declare their own; the mapping's "
+               f"xml_namespace) or the record element's name (the mapping's record). Every record would be lost.")
+    return {'class': 'blocking', 'reason': 'No record produced an Event', 'severity': 'ERROR', 'element': element,
+            'own_element': True, 'count': len(keys), 'records_affected': len(keys),
+            'examples': [{'message': message, 'location': None}], 'records': keys[:20]}
+
+
 def _block(summary: dict[str, Any], group: dict[str, Any] | None) -> None:
     if group:
         summary['groups'].insert(0, group)
@@ -371,6 +387,7 @@ async def step_sample(
     records: list[dict[str, Any]] = []
     unknown: list[str] = []
     unknown_out: list[str] = []
+    wrote_events, wrote_an_event = 0, 0     # records whose output is event-logging Events; of those, with an Event
     per_stream: dict[int, int] = {}
     first_output = None
     for stream_id in stream_ids:
@@ -387,6 +404,11 @@ async def step_sample(
             found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
             markers += found
             records.append({'record': key, 'errors': len(found)})
+            output = (((result.get('stepData') or {}).get('elementMap') or {})
+                      .get(pipeline.default_outputs()[-1]) or {}).get('output') or ''
+            if _EVENTS_ROOT.search(output):
+                wrote_events += 1
+                wrote_an_event += bool(_EVENT.search(output))
             if _writes_unknown(result, pipeline.default_outputs()[-1]):
                 unknown.append(key)
                 unknown_out.append((((result.get('stepData') or {}).get('elementMap') or {})
@@ -404,6 +426,8 @@ async def step_sample(
                                    if (m['severity'], m['element']) == (group['severity'], group['element'])})[:20]
     _block(summary, await _unagreed_unknown(ctx, pipeline_uuid, pipeline.doc.get('name'), pipeline.default_outputs()[-1],
                                             unknown, len(records), draft_code, _what_unknown_holds(unknown_out)))
+    if records and wrote_events == len(records) and not wrote_an_event:
+        _block(summary, _no_events(pipeline.default_outputs()[-1], [r['record'] for r in records]))
     result: dict[str, Any] = {'pipeline': pipeline.doc.get('name'), 'records_stepped': len(records),
                               'records_with_errors': sum(1 for r in records if r['errors']),
                               'draft_code_used': sorted(draft_code or {}), **summary,

@@ -19,6 +19,7 @@ read the client's files, and refuses a path with that instruction.
 | Regex, a name per group | `{"kind": "regex", "pattern": "^(\\S+) (\\S+) (.*)$", "names": ["time", "user", "message"]}` |
 | key=value pairs | `{"kind": "key_value", "delimiter": " ", "pair_separator": "=", "quote": "\""}` |
 | Syslog, body parsed further | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "key_value"}}` |
+| CEF, alone or after syslog | `{"kind": "cef"}` (a syslog header before it is inferred as `body`) |
 
 `body` parses one field further (syslog's `message`, or a regex group) and adds its fields; the recipes below
 are what it writes.
@@ -47,12 +48,16 @@ are what it writes.
 ```
 
 Change `delimiter` for tab (`\t`), pipe or semicolon data. Quoted fields need
-`<split delimiter="," containerStart="&quot;" containerEnd="&quot;">`.
+`<split delimiter="," containerStart="&quot;" containerEnd="&quot;">`. A doubled quote inside a quoted value
+(`"Said ""bye"" and left"`) stays doubled: Data Splitter has no way to make it one (its `escape` attribute breaks
+the quoting), so the mapping reads such a field with `transform: unescape_quotes`; the draft sets it where the
+sample has them.
 
 ## Without a header
 
-Name the columns: `<data name="time" value="$1"/>` inside a `<split>` per column position, or use a
-`<regex>` with groups.
+Name the columns in the spec: `{"kind": "delimited", "header": ["time", "user", "src_ip", "action"]}`. Give
+the same spec to `draft_translation_mapping` and `build_translation_xslt` as `splitter`, so they use those names
+rather than inferring `col1`, `col2`, ...
 
 ## Syslog and other free text
 
@@ -63,8 +68,30 @@ Name the columns: `<data name="time" value="$1"/>` inside a `<split>` per column
 </regex>
 ```
 
-Split the message further with nested `<regex>` or `<split>`, e.g. key=value pairs with
-`<split delimiter=" "><group value="$1"><split delimiter="=" maxMatch="1">...`.
+Split the message further with a nested `<group value="$6">`. Key=value pairs are one `<regex>` matched
+along the text, its value in one group whether quoted or not:
+
+```xml
+<regex pattern="\s*([^=\s]+)=&quot;?((?&lt;=&quot;)[^&quot;]*(?=&quot;)|(?&lt;!&quot;)[^\s&quot;]*)&quot;?">
+  <data name="$1" value="$2" />
+</regex>
+```
+
+Not `<split delimiter="=">` with `$2`: a split has only `$1`, and Stroom fails with "Group number 2 not found". Nor a
+value made of two groups (`$2$3`) or two alternative regexes: a group that took no part in the match can't be
+named, and a group's regexes aren't tried in turn at each place. `build_data_splitter` writes this for you.
+
+Many syslog and key=value sources write `-` for none (RFC 5424's NILVALUE): the mapping's `nil_values: ["-"]` leaves
+those elements out instead of writing `-` (the draft sets it when the sample has them).
+
+## CEF
+
+`CEF:Version|Device Vendor|Device Product|Device Version|Signature ID|Name|Severity|Extension`, alone or after a
+syslog header. The header's fields are `cef_version`, `cef_vendor`, `cef_product`, `cef_device_version`,
+`cef_signature_id`, `cef_name` and `cef_severity`; the extension's pairs are fields by their own keys (`suser`, `src`,
+`act`, `msg`, `rt`...), a value running to the next ` key=`, spaces and all. A syslog header before `CEF:` gives
+`pri`, `time` and `host`. `profile_sample` names the format and `build_data_splitter` infers the spec
+(`{"kind": "cef"}`); the draft reads `act` for the kind of event, `suser` for the user, `src`/`dst` for addresses.
 
 Step the pipeline after each change: the `dsParser` element's output shows the records produced.
 
@@ -89,8 +116,9 @@ fragments are parsed inside, where the entity `fragment` is the stream (`profile
 Two things follow from the wrapper:
 
 - **Namespace.** A fragment that declares no `xmlns` of its own takes the wrapper's default namespace, so the
-  XSLT reads it in `records:2` (mapping `xml_namespace: "records:2"`); a fragment with its own namespace (Windows
-  event XML, say) keeps it.
+  XSLT reads it in `records:2` (the mapping's default for `xml_fragments`); a fragment with its own namespace
+  (Windows event XML, say) keeps it, and the mapping gives it as `xml_namespace`. Read in the wrong namespace, every
+  record comes out as an empty `Events`: `step_sample` blocks on that.
 - **Records.** The fragments sit under the wrapper's root: mapping `input: xml_fragments, record: Event` matches
   `/` and selects `*/Event`. The split filter still hands the XSLT one fragment at a time.
 

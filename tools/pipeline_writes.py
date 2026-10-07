@@ -41,8 +41,12 @@ def swap_parser(merged: dict[str, Any], new_type: str) -> tuple[dict[str, Any], 
         raise ToolError("The template has no parser element to replace")
     new_id = element_id(new_type)
     outgoing = [{'from': link['from'], 'to': link['to']} for link in merged['links'] if link['from'] == old]
+    # And the link into it (Source -> parser): seen, an XMLFragmentParser added with only its outgoing links, which
+    # nothing fed; the UI didn't show it, and stepping failed.
+    incoming = [{'from': link['from'], 'to': link['to']} for link in merged['links'] if link['to'] == old]
     data = {'elements': {'add': [{'id': new_id, 'type': new_type}], 'remove': [{'id': old, 'type': types[old]}]},
-            'links': {'add': [{'from': new_id, 'to': link['to']} for link in outgoing], 'remove': outgoing}}
+            'links': {'add': [{'from': link['from'], 'to': new_id} for link in incoming]
+                      + [{'from': new_id, 'to': link['to']} for link in outgoing], 'remove': incoming + outgoing}}
     return data, new_id, types[old]
 
 

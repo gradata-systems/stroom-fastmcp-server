@@ -14,6 +14,7 @@ from utils.timefmt import check_time_format, infer_time_pattern
 SYSLOG_5424 = re.compile(r'^<\d{1,3}>1 \S+ \S+ \S+ \S+ \S+')
 SYSLOG_3164 = re.compile(r'^(<\d{1,3}>)?[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \S+ ')
 KEY_VALUE = re.compile(r'(\w[\w.-]*)=("[^"]*"|\S*)')
+CEF = re.compile(r'CEF:\d+\|')
 # Timestamp shapes and the Java (stroom:format-date) pattern for each.
 TIMESTAMPS = [
     (re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'), "yyyy-MM-dd'T'HH:mm:ss.SSSX"),
@@ -276,6 +277,13 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
         return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
                 'suggested_parser': 'JSONParser, one object per line (Event Data (JSON) template)', **JSON_SETUP['lines']}
 
+    if sum(bool(CEF.search(line)) for line in lines) >= 0.8 * len(lines):
+        # CEF, alone or after a syslog header: seen read as key=value, its header fields taken for keys and its
+        # values cut at their first space.
+        return {**result, 'format': 'cef', 'records': len(lines), 'examples': lines[:3],
+                'suggested_parser': "Data Splitter for CEF: the header's fields, then the extension's key=value pairs, "
+                                    "whose values may hold spaces (build_data_splitter infers it; Event Data (Text) "
+                                    "template)"}
     if sum(bool(SYSLOG_5424.match(line)) for line in lines) >= 0.8 * len(lines):
         return {**result, 'format': 'syslog rfc5424', 'records': len(lines), 'examples': lines[:3],
                 'suggested_parser': 'Data Splitter with a regex per RFC 5424 part (Event Data (Text) template)'}

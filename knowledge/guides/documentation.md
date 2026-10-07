@@ -31,8 +31,9 @@ pipeline), and puts the result in place of whatever the markdown has under `## F
 - Pass `stream_ids` to `write_documentation`, for every indexing pipeline and every events pipeline whose XSLT
   keeps a mapping: the tool refuses without them, as the section goes down to the field with the values the sample
   gave. An indexing XSLT written by hand keeps no plan: its section lists the fields of the documents it writes,
-  how often and their values, but not where each comes from (save it with `index_plan=` for that). `build_translation_xslt` with `pipeline_uuid` and `stream_ids`
-  returns the same section as `field_mapping`, to read before writing the rest of the document.
+  how often and their values, but not where each comes from (save it with `index_plan=` for that). `build_translation_xslt` with `field_mapping=true`, `pipeline_uuid` and
+  `stream_ids` returns the same section as a preview, by stepping the sample (slow): once, if at all, when the
+  mapping is settled; never while fixing it.
 - Change the mapping and regenerate rather than editing the XSLT: `build_status` reports an XSLT that is no
   longer what its mapping generates, and a documentation whose Field mapping predates the current mapping or
   XSLT (a digest marks the section).

@@ -172,6 +172,15 @@ The mapping's `style` decides how the XSLT reads. Take it from an XSLT style sec
 Elements that come out the same in several rules (EventTime, EventSource, ...) are written once, in a template of
 the layout's kind, whatever the style.
 
+## Regular expressions in a mapping
+
+An `extract` regex is written once, as XPath reads it: a literal `[` is `\[`. Only the JSON of the call doubles
+each backslash (`"\\["`); the server puts the regex in the XSLT as it is, so nothing escapes it again. Copy the
+separators from the sample text exactly: an en dash (–) is not a hyphen. `build_translation_xslt` runs each regex
+on the sample's text: one that matches none is a problem that says where it stops matching and what the text has
+there (naming characters such as an en dash or a no-break space); one that matches only some is a warning with a
+text it misses. Fix what it names, rather than the escaping.
+
 ## Reuse
 
 Existing pipelines `xsl:import` shared XSLTs by document name (e.g. `IP Lookup`) and keep field

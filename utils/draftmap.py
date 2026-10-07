@@ -18,24 +18,52 @@ from utils.samples import as_named_samples
 
 # Field-name patterns, tried in order; the first field matching a home takes it.
 HOMES = [
-    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node|sensor|appliance|probe)$'),
-    ('EventSource/Client/IPAddress', r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|remote_?addr|remote_?ip|source_?address|ip_?address|ipaddress|clientip)$'),
-    ('EventSource/Client/Port', r'^(src_?port|source_?port|client_?port|sport)$'),
-    ('EventSource/Server/IPAddress', r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address)$'),
-    ('EventSource/Server/Port', r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port)$'),
-    ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name)$'),
-    ('EventSource/Generator', r'^(generator|app|app_?name|application|program|process_?name|logger|service|source)$'),
+    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node|sensor|appliance|probe|dvchost|dvc_?host)$'),
+    ('EventSource/Client/IPAddress', r'^(ip|src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|remote_?addr|remote_?ip|source_?address|ip_?address|ipaddress|clientip|src|source)$'),
+    ('EventSource/Client/Port', r'^(src_?port|source_?port|client_?port|sport|spt)$'),
+    ('EventSource/Server/IPAddress', r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address|dst|dest|destination)$'),
+    ('EventSource/Server/Port', r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port|dpt)$'),
+    ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name|suser|src_?user|source_?user)$'),
+    ('EventSource/Generator', r'^(generator|app|app_?name|application|program|process_?name|logger|service|cef_?product)$'),
     ('EventDetail/Description', r'^(message|msg|description|desc|text|summary|details)$'),
 ]
-TIME = re.compile(r'^(@?timestamp|time|ts|date_?time|datetime|event_?time|eventtime|created|created_?at|logged_?at|time_?created|occurred|when|_time)$', re.I)
-NAMING = re.compile(r'^(event_?type|eventtype|type|event|event_?name|event_?id|eventid|action|activity|category|subtype|sub_?type|operation|op|logid|log_?type|msg_?id|kind|result_?type)$', re.I)
+TIME = re.compile(r'^(@?timestamp|time|ts|date_?time|datetime|event_?time|eventtime|created|created_?at|logged_?at|time_?created|occurred|when|_time|rt|system_?time)$', re.I)
+NAMING = re.compile(r'^(event_?type|eventtype|type|event|event_?name|event_?id|eventid|action|activity|category|subtype|sub_?type|operation|op|logid|log_?type|msg_?id|kind|result_?type|act|device_?action)$', re.I)
 AUTH = re.compile(r'(login|logon|signin|sign_in|authenticat|logoff|logout|signout|sign_out|password)', re.I)
 LOGOFF = re.compile(r'(logoff|logout|signout|sign_out)', re.I)
 MAX_RULES = 12
+NIL = {'-', '', 'null', 'none', 'n/a'}
+# Windows security log event IDs that are logons and logoffs (seen: 4624 and 4634 drafted as Unknown).
+WINDOWS_LOGON = {'4624': ('Logon', True), '4625': ('Logon', False), '4648': ('Logon', True), '4634': ('Logoff', None),
+                 '4647': ('Logoff', None), '4778': ('Logon', True), '4779': ('Logoff', None)}      # values that say a field has nothing (syslog's NILVALUE)
+
+
+def _json_object(text: Any) -> bool:
+    try:
+        import json
+        return isinstance(json.loads(text), dict)
+    except (TypeError, ValueError):
+        return False
+
+
+def _keys(name: str) -> list[str]:
+    """The names a field may be known by: its own (the last part of a JSON key or XML path, without an attribute's
+    @), the last two parts joined (user.name is user_name), and an XML Data element's Name."""
+    named = re.search(r"\[@Name='([^']+)'\]$", name)
+    if named:
+        return [named.group(1).lower()]
+    parts = [p.lstrip('@').lower() for p in re.split(r'[./]', name) if p]
+    return parts[-1:] + ([f'{parts[-2]}_{parts[-1]}'] if len(parts) > 1 else [])
+
+
+def _matches(regex: re.Pattern, name: str) -> bool:
+    return any(regex.match(k) for k in _keys(name))
 
 
 def _key(name: str) -> str:
-    return name.rsplit('.', 1)[-1].lower()
+    """A field's own name: the last part of a JSON key or XML path, without an attribute's @ (seen: an XML source's
+    action="login" attribute not taken for the kind of event)."""
+    return re.split(r'[./]', name)[-1].lstrip('@').lower()
 
 
 def _selector(mapping: dict[str, Any], field: str) -> str:
@@ -47,12 +75,13 @@ def _selector(mapping: dict[str, Any], field: str) -> str:
     return field
 
 
-def _records(named: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]], SplitterSpec | None]:
+def _records(named: dict[str, str], given: SplitterSpec | None = None
+             ) -> tuple[dict[str, Any], list[dict[str, str]], SplitterSpec | None]:
     """The profile (merged across files), the records as flat name -> value dicts, and the splitter spec for text."""
     info = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
     fmt = info['format']
     records: list[dict[str, str]] = []
-    spec = None
+    spec = given
     for text in named.values():
         if fmt in ('json array', 'json lines'):
             import json
@@ -77,7 +106,10 @@ def _records(named: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, str]
                     for attr, value in node.attrib.items():
                         flat[f"{here + '/' if here else ''}@{attr}"] = value
                     if node is not rec and len(node) == 0 and (node.text or '').strip():
-                        flat[here] = node.text.strip()
+                        # Windows EventData: <Data Name="TargetUserName">: each Data by its Name, not the last one
+                        # standing for all of them.
+                        named = node.get('Name')
+                        flat[f"{here}[@Name='{named}']" if named else here] = node.text.strip()
                 records.append(flat)
         else:
             if spec is None:
@@ -105,10 +137,12 @@ def _data_home(element: str, field: str) -> str:
 
 def draft_mapping(samples: Any, source_name: str = '', system_name: str | None = None,
                   environment: str | None = None, source_notes: dict[str, Any] | None = None,
-                  detail_check: Any = None) -> dict[str, Any]:
-    """{'mapping', 'splitter', 'notes', 'unmapped_fields', 'kinds'}: a valid mapping to edit, and what is left to decide."""
+                  detail_check: Any = None, splitter: SplitterSpec | None = None) -> dict[str, Any]:
+    """{'mapping', 'splitter', 'notes', 'unmapped_fields', 'kinds'}: a valid mapping to edit, and what is left to decide.
+    splitter: the Data Splitter the text is read with, when the agent settled on one (named columns for a file with no
+    header, say); otherwise inferred."""
     named = as_named_samples(samples)
-    info, records, spec = _records(named)
+    info, records, spec = _records(named, splitter)
     fmt = info['format']
     notes: list[str] = []
     mapping: dict[str, Any] = {}
@@ -136,7 +170,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     names, values, types = survey()
     # Fields holding JSON text: their keys are fields of their own (<field>.<key>, read through json_fields), and the
     # text itself is never mapped into an element. Seen: a whole JSON line written into TypeId.
-    json_fields = [n for n in names if types[n] == 'embedded json']
+    # An object only: a JSON array in the record (seen: "tags": ["vpn"]) is the record's own, not text holding JSON.
+    json_fields = [n for n in names if types[n] == 'embedded json' and any(_json_object(v) for v in values[n])]
     if json_fields:
         from utils.localcheck import with_json_fields
         with_json_fields(records, json_fields)
@@ -208,10 +243,10 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         notes.append("Set EventSource/System/Name and Environment to what the user confirms (or the standing instructions say).")
     for path, pattern in HOMES:
         regex = re.compile(pattern, re.I)
-        field = next((n for n in names if n not in taken and regex.match(_key(n)) and types[n] != 'empty'), None)
+        field = next((n for n in names if n not in taken and _matches(regex, n) and types[n] != 'empty'), None)
         if field:
             common.append(read_from({'path': path, 'field': field},
-                                    covering(field, lambda n, rx=regex: rx.match(_key(n)) and types[n] != 'empty')))
+                                    covering(field, lambda n, rx=regex: _matches(rx, n) and types[n] != 'empty')))
     if not any(e['path'] == 'EventSource/Generator' for e in common):
         common.append({'path': 'EventSource/Generator', 'value': source_name or 'TODO generator'})
     if not any(e['path'] == 'EventSource/Device/HostName' for e in common):
@@ -220,7 +255,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
 
     # Kinds of event: the first naming field with a handful of values.
     def names_kinds(n: str) -> bool:
-        return bool(NAMING.match(_key(n))) and 1 <= len(set(values[n])) <= MAX_RULES
+        return bool(NAMING.match(_key(n))) and 1 <= len(set(values[n]) - NIL) <= MAX_RULES
+    # Seen: syslog's msgid, always '-', taken over an action field: a field with only nil values names no kind.
     naming = next((n for n in names if n not in taken and names_kinds(n)), None)
     namings = covering(naming, names_kinds) if naming else []
     if naming:
@@ -247,8 +283,12 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         while name in used_names:
             name += '_'
         used_names.add(name)
-        if AUTH.search(kind):
-            fields = [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logoff' if LOGOFF.search(kind) else 'Logon'}]
+        windows = WINDOWS_LOGON.get(kind) if _key(naming) in ('eventid', 'event_id', 'eventcode', 'event_code') else None
+        if AUTH.search(kind) or windows:
+            action, success = windows or ('Logoff' if LOGOFF.search(kind) else 'Logon', None)
+            fields = [{'path': 'EventDetail/Authenticate/Action', 'value': action}]
+            if success is not None:
+                fields.append({'path': 'EventDetail/Authenticate/Outcome/Success', 'value': 'true' if success else 'false'})
             if user:
                 fields.append({'path': 'EventDetail/Authenticate/User/Id', **read(user)})
             fields += data_entries('Authenticate')
@@ -276,8 +316,12 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     if recognised:
         notes.append("Drafted from the sample's values (check them): " + '; '.join(recognised) + ".")
     naming = namings[0] if namings else None
+    # The rest's Unknown carries what the record has left; with every field mapped already, the kind field (seen:
+    # an empty catch-all rule, which has no action element, failing the whole mapping).
+    unknown_data = data_entries('Unknown') or [{'path': 'EventDetail/Unknown/Data', 'data_name': n, 'field': n}
+                                               for n in ([naming] if naming else names[:1])]
     rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
-                  + data_entries('Unknown')})
+                  + unknown_data})
     if len(shapes) > 1 and len(namings) + sum(1 for e in common if e.get('any_of')) > 0 and \
             (len(namings) > 1 or any(e.get('any_of') for e in common)):
         shared = [f"{e['path']} from {' or '.join(e['any_of'])}" for e in common if e.get('any_of')]
@@ -317,6 +361,23 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         if applied['not_in_catalogue']:
             notes.append(f"The catalogue does not list {', '.join(applied['not_in_catalogue'])}: those records fall to the "
                          f"rule for the rest; read the reference documents (find_documents content=the value) or ask the user.")
+    if spec is not None and spec.kind in ('syslog', 'cef', 'key_value'):
+        # Syslog's NILVALUE, and many key=value logs' "none": seen written as a user called '-'.
+        nil = sorted({k for r in records if isinstance(r, dict) for k, v in r.items()
+                      if str(v).strip() == '-' and k not in ('msgid', 'structured')})
+        if nil:
+            mapping['nil_values'] = ['-']
+            notes.append(f"{nil} hold '-' for none: nil_values ['-'] leaves those elements out rather than writing '-'.")
+    if spec is not None and spec.kind == 'delimited' and spec.quote:
+        # Quoted CSV values with a doubled quote keep it doubled in Stroom: read them with unescape_quotes.
+        doubled = {k for r in records if isinstance(r, dict) for k, v in r.items() if spec.quote * 2 in str(v)}
+        entries = mapping['common'] + [f for rule in mapping['events'] for f in rule['fields']]
+        for entry in entries:
+            if entry.get('field') in doubled and not entry.get('transform') and not entry.get('time_format'):
+                entry['transform'] = 'unescape_quotes'
+        if doubled:
+            notes.append(f"{sorted(doubled)} hold doubled quotes inside quoted values, which Data Splitter keeps "
+                         f"doubled: the draft reads them with transform unescape_quotes.")
     return {'mapping': mapping, 'source_notes': applied, 'splitter': spec.model_dump(exclude_none=True, exclude_defaults=True) if spec else None,
             'format': fmt, 'records': len(records), 'kinds': kinds, 'notes': notes,
             'unmapped_fields': rest, 'fields_seen': names}

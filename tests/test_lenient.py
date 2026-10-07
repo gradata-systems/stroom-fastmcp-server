@@ -1,6 +1,8 @@
 """Unknown arguments are dropped with a note, the published schema allows them, and build_data_splitter can save."""
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from fastmcp import Client, FastMCP
 
 from security.lenient import LenientArguments
@@ -29,3 +31,20 @@ async def test_build_data_splitter_can_save_the_converter_it_built():
             patch('tools.translation.create_text_converter', AsyncMock()) as save:
         result = await generation.build_data_splitter(None, sample='a,b\nc,d,e\n', spec={'kind': 'delimited', 'header': ['x', 'y']}, save_as='FW')
     assert 'not_saved' in result and save.await_count == 0
+
+
+async def test_a_choice_with_stray_punctuation_is_read_as_the_choice():
+    # Seen: an agent sent converter_type ",XML_FRAGMENT" again and again, refused each time.
+    from typing import Literal
+    server = FastMCP('t', middleware=[LenientArguments()])
+
+    @server.tool
+    def create_text_converter(converter_type: Literal['DATA_SPLITTER', 'XML_FRAGMENT'],
+                              mode: Literal['a', 'b'] | None = None) -> dict:
+        return {'converter_type': converter_type, 'mode': mode}
+    async with Client(server) as client:
+        result = await client.call_tool('create_text_converter', {'converter_type': ',XML_FRAGMENT', 'mode': ' B'})
+        assert result.structured_content == {'converter_type': 'XML_FRAGMENT', 'mode': 'b'}
+        assert "Read converter_type ',XML_FRAGMENT' as 'XML_FRAGMENT'" in result.content[-1].text
+        with pytest.raises(Exception, match='DATA_SPLITTER'):       # not a choice at all: still refused
+            await client.call_tool('create_text_converter', {'converter_type': 'XML'})

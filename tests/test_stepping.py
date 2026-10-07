@@ -60,9 +60,34 @@ async def test_step_sample_steps_every_record_with_fresh_requests(ctx):
     assert all('sessionUuid' not in r for r in sent)
     assert sent[2]['stepLocation']['recordIndex'] == 1
     assert (result['records_stepped'], result['records_with_errors'], result['verdict']) == (2, 1, 'blocking')
-    assert result['groups'][0]['records'] == ['7:1']
+    # These outputs have no Event: that is blocking too (the record templates select nothing), besides the error.
+    assert [g['reason'] for g in result['groups']][0] == 'No record produced an Event'
+    assert result['groups'][1]['records'] == ['7:1']
     assert result['first_record_output'] == {'translationFilter': '<Events>0</Events>'}
 
+
+
+@respx.mock
+async def test_events_with_no_event_in_any_record_are_blocking_and_one_event_is_enough(ctx):
+    # Seen: XML fragments read with no namespace where the wrapper gives them records:2: every record came out as an
+    # empty Events, and stepping said clean.
+    mock_pipeline()
+
+    def steps(*outputs):
+        responses = []
+        for n, output in enumerate(outputs):
+            step = record(n)
+            step['stepData']['elementMap']['translationFilter']['output'] = output
+            responses.append(httpx.Response(200, json=step))
+        return responses + [httpx.Response(200, json={'complete': True, 'foundRecord': False})]
+    empty = '<Events xmlns="event-logging:3" Version="4.1.0"/>'
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps(empty, empty))
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    assert result['verdict'] == 'blocking' and result['groups'][0]['reason'] == 'No record produced an Event'
+    assert 'xml_namespace' in result['groups'][0]['examples'][0]['message']
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps(empty, '<Events xmlns="event-logging:3"><Event/></Events>'))
+    result = await stepping.step_sample(ctx, 'p-1', [7])
+    assert all(g['reason'] != 'No record produced an Event' for g in result['groups'])   # a dropped record is fine
 
 @respx.mock
 async def test_nothing_stepped_is_never_clean(ctx):

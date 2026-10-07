@@ -28,7 +28,7 @@ def test_json_values_are_written_as_the_parser_does():
 def test_an_xpath_selecting_nothing_in_any_record_is_reported():
     assert check_xpaths(mapping("json-to-xml(*[@key='event'])/*/*[@key='timestamp']"), EMBEDDED) == []
     [warning] = check_xpaths(mapping('json-to-xml(event)/timestamp'), EMBEDDED)
-    assert warning.startswith("xpath 'json-to-xml(event)/timestamp' (used for EventTime/TimeCreated) selects nothing "
+    assert warning.startswith("xpath `json-to-xml(event)/timestamp` (used for EventTime/TimeCreated) selects nothing "
                               "in any of the 2 sample records")
     assert "json-to-xml(*[@key='field'])/*/*[@key='name']" in warning
 
@@ -38,7 +38,7 @@ def test_a_value_in_only_some_records_is_fine_and_conditions_are_checked():
                 more=[{'path': 'EventSource/User/Id', 'xpath': "json-to-xml(*[@key='event'])/*/*[@key='user']"}],
                 when=[{'xpath': "*[@key='kind']", 'equals': 'x'}])
     [warning] = check_xpaths(m, EMBEDDED)   # user is in one record: fine; there is no kind key at all
-    assert warning.startswith("xpath \"*[@key='kind']\" (used for [any] when)")
+    assert warning.startswith("xpath `*[@key='kind']` (used for [any] when)")
 
 
 def test_data_splitter_records_and_what_is_not_evaluated():

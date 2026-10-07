@@ -21,7 +21,7 @@ from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
 from utils.samples import SampleTexts, check_sample
 from utils.localcheck import check_mapping, sample_records
-from utils.xpathcheck import check_xpaths
+from utils.xpathcheck import check_extractions, check_xpaths
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
 from utils.fielddoc import field_mapping_markdown, sampled_events
@@ -52,6 +52,28 @@ def _kinds(held: str) -> str:
     return '; '.join(named or parts[:2])
 
 
+# How a regex or xpath travels: written once, as XPath reads it; the call's JSON doubles each backslash; the server
+# writes it into the XSLT as it is. Seen: agents escaping again for XSLT and for JSON, a hundred times over.
+ESCAPING = ("Regexes and xpaths are written once, as XPath reads them (a literal [ in a regex is \\[). Only the JSON "
+            "of your call doubles each backslash (\\[ is \"\\\\[\" in JSON); the server puts them in the XSLT as "
+            "they are, so nothing escapes them again.")
+
+
+def mapping_problems(e: ValidationError, unknown_keys: list[str]) -> list[str]:
+    """A mapping's validation errors, each where it is (events[2].fields[0].path) with the value given."""
+    out = []
+    for x in e.errors()[:8]:
+        where = ''.join(f'[{p}]' if isinstance(p, int) else (f'.{p}' if n else str(p)) for n, p in enumerate(x['loc']))
+        given = x.get('input')
+        shown = '' if given is None or isinstance(given, (dict, list)) else f" (given {json.dumps(given, default=str)[:80]})"
+        out.append(f"{where or 'mapping'}: {x['msg']}{shown}")
+    if len(e.errors()) > 8:
+        out.append(f"and {len(e.errors()) - 8} more")
+    if unknown_keys:
+        out.append(f"keys that are not part of a mapping: {unknown_keys} (it has {sorted(TranslationMapping.model_fields)})")
+    return out
+
+
 async def build_translation_xslt(
         ctx: Context,
         mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str, Field(
@@ -62,13 +84,16 @@ async def build_translation_xslt(
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
                                                       "instructions for their folders are included.")] = [],
         pipeline_uuid: Annotated[str | None, Field(
-            description="With stream_ids: step this pipeline with the generated XSLT over the sample (nothing is "
-                        "saved), so field_mapping gives the TypeId and Description values the events actually get. "
-                        "Do this before write_documentation.")] = None,
+            description="Only with field_mapping=true: the pipeline to step the generated XSLT through (nothing is "
+                        "saved). Without field_mapping it is not stepped.")] = None,
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="The sample streams: the mapping is checked against them (when no sample text is given, so "
                         "the text need not be sent again), and with pipeline_uuid stepped for field_mapping.")] = [],
-        max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 200,
+        max_records: Annotated[int, Field(ge=1, le=1000, description="Records to step for field_mapping.")] = 50,
+        field_mapping: Annotated[bool, Field(
+            description="Step pipeline_uuid over stream_ids for a preview of the Field mapping section (the values "
+                        "the events get). Slow: a Stroom step per record. Once at most, when the mapping is settled; "
+                        "never while fixing it. write_documentation makes the section itself.")] = False,
         sample: Annotated[str | list[str] | None, Field(
             description="The raw sample, or a list of sample files, to check the mapping against before stepping: "
                         "fields no record has, and time formats the values do not fit. For data_splitter input "
@@ -107,15 +132,22 @@ async def build_translation_xslt(
     if isinstance(mapping, str):
         try:
             mapping = json.loads(mapping)
-        except ValueError:
-            raise ToolError("mapping is text that is not JSON: pass the mapping object (draft_translation_mapping gives one)")
+        except json.JSONDecodeError as e:
+            around = mapping[max(0, e.pos - 30):e.pos + 30]
+            raise ToolError(f"mapping is text that is not JSON ({e.msg} at character {e.pos}, around `{around}`): pass "
+                            f"the mapping as an object, not a string. " + ESCAPING)
+    unknown_keys = sorted(set(mapping) - set(TranslationMapping.model_fields)) if isinstance(mapping, dict) else []
+    if isinstance(splitter, dict):
+        splitter = SplitterSpec.model_validate(splitter)     # as build_data_splitter gave it (its spec)
     if not isinstance(mapping, TranslationMapping):
         try:
             mapping = TranslationMapping.model_validate(mapping)
         except ValidationError as e:
-            problems = [f"{'.'.join(str(p) for p in x['loc'])}: {x['msg']}" for x in e.errors()[:4]]
+            problems = mapping_problems(e, unknown_keys)
             looks_like_inventory = isinstance(mapping, list) and mapping and all(isinstance(x, dict) and 'field' in x for x in mapping)
-            if sample is not None:
+            # The draft is made only for a list of fields given as the mapping (small models do), not for every
+            # mistake: drafting a large sample took long, to answer what a precise error answers at once.
+            if sample is not None and looks_like_inventory:
                 draft = draft_mapping(sample if isinstance(sample, list) else [sample])
                 return {'status': 'needs_mapping', 'ok': False,
                         'problems': ["mapping is a list of fields, not a translation mapping" if looks_like_inventory else
@@ -123,11 +155,22 @@ async def build_translation_xslt(
                         'draft_mapping': draft['mapping'], 'splitter': draft['splitter'], 'notes': draft['notes'],
                         'hint': "Edit draft_mapping (the notes say what to decide) and call build_translation_xslt again "
                                 "with it as mapping, the same sample, and the splitter if there is one."}
-            raise ToolError("mapping is not a translation mapping: " + '; '.join(problems) + ". Get a starting one from "
-                            "draft_translation_mapping(samples=the file texts) and edit it.") from e
+            raise ToolError("mapping is not a translation mapping: " + '; '.join(problems) + ". Fix these in the "
+                            "mapping you have; to start again, draft_translation_mapping (stream_ids=the sample streams) "
+                            "gives one.") from e
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
+    if unknown_keys:
+        result['warnings'].append(f"mapping keys ignored, as a mapping has no such key: {unknown_keys} (it has "
+                                  f"{sorted(TranslationMapping.model_fields)})")
+    if result['problems']:
+        # Fast: what the schema says is wrong comes back before the sample is read and checked (seen: minutes a call
+        # on a large sample, for a mapping that could not have generated anyway).
+        result.update(warnings=grouped(result.get('warnings') or []), sample_check='not run: fix the problems first',
+                      hint="Fix the problems in the mapping (not the XSLT) and call again; the sample is checked "
+                           "once they are fixed.")
+        return result
     if sample is None and stream_ids:
         texts, read_notes = await read_sample_streams(ctx, stream_ids)
         sample = list(texts.values())
@@ -148,6 +191,9 @@ async def build_translation_xslt(
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
         check['warnings'] += check_xpaths(mapping, sample, splitter)
+        extraction_problems, extraction_warnings = check_extractions(mapping, sample, splitter, records)
+        check['problems'] += extraction_problems
+        check['warnings'] += extraction_warnings
         result['sample_check'] = {**check, **({'note': note} if note else {})}
         result['warnings'] += [f"sample: {w}" for w in check['warnings']]
         if check['problems']:
@@ -169,7 +215,7 @@ async def build_translation_xslt(
                      "matches as /map/map." if mapping.json_layout == 'lines' else
                      "A JSON array is matched with or without the parser's root map; set addRootObject false on "
                      "create_pipeline to keep the output simple, as sibling pipelines do.") + " No text converter."}
-    if result['ok'] and pipeline_uuid and stream_ids:
+    if result['ok'] and field_mapping and pipeline_uuid and stream_ids:
         stroom = gateway_from(ctx)
         pipeline = await _Pipeline.load(stroom, pipeline_uuid)
         element = pipeline.default_outputs()[0]
@@ -186,8 +232,9 @@ async def build_translation_xslt(
         # A table from the mapping alone would show how values are computed, not what they are; it was being
         # copied into documentation as it was. Only a sampled run gives one.
         result['field_mapping'] = None
-        result['field_mapping_needs'] = ("pipeline_uuid and stream_ids: call again with the pipeline and its sample "
-                                         "streams before write_documentation, for the values the events get.")
+        result['field_mapping_needs'] = ("Not needed while fixing the mapping: write_documentation makes the section. "
+                                         "For a preview once the mapping is settled: field_mapping=true with "
+                                         "pipeline_uuid and stream_ids (it steps the sample: slow).")
     saved = None
     if result['ok'] and (build or uuid):
         kept = kept_unknown(mapping)
@@ -376,6 +423,10 @@ async def draft_translation_mapping(
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,
         environment: Annotated[str | None, Field(description="EventSource/System/Environment, if the user has said, e.g. Prod.")] = None,
         stream_ids: SampleStreams = [],
+        splitter: Annotated[SplitterSpec | None, Field(
+            description="The Data Splitter spec the text is read with (build_data_splitter's spec), when you "
+                        "settled on one, e.g. named columns for a file with no header: the draft then uses its "
+                        "field names. Inferred from the sample when left out.")] = None,
         build: Annotated[str | None, Field(description="The build holding the source notes (record_source_notes): the draft "
                                                        "then follows the user's documentation.")] = None,
 ) -> dict[str, Any]:
@@ -406,7 +457,9 @@ async def draft_translation_mapping(
             detail_check = lambda detail: detail_problem(schema, detail)   # noqa: E731
         except Exception:   # the notes are followed unchecked rather than not at all
             pass
-    result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check)
+    if isinstance(splitter, dict):
+        splitter = SplitterSpec.model_validate(splitter)
+    result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check, splitter)
     result['mapping'] = compact_rules(result['mapping'])
     try:
         checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)

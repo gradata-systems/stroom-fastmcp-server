@@ -31,10 +31,10 @@ SEVERITIES = {'Info': r'^(info(rmational)?|notice|debug|low)$', 'Minor': r'^(war
 
 SPLITTER = re.compile(r'^(action|act|result|outcome|operation|op|activity|subtype|sub_?type|status|event_?action|verdict|disposition)$', re.I)
 FIELDS = {
-    'src_ip': r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|source_?address|clientip)$',
-    'src_port': r'^(src_?port|source_?port|client_?port|sport)$',
-    'dst_ip': r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address)$',
-    'dst_port': r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port)$',
+    'src_ip': r'^(src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|source_?address|clientip|src|source)$',
+    'src_port': r'^(src_?port|source_?port|client_?port|sport|spt)$',
+    'dst_ip': r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address|dst|dest|destination)$',
+    'dst_port': r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port|dpt)$',
     'protocol': r'^(proto|protocol|transport|ip_?proto|l4_?proto)$',
 }
 TRANSPORT = ('TCP', 'UDP', 'ICMP', 'IGMP')

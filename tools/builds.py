@@ -273,8 +273,9 @@ async def write_documentation(
         pipeline_uuid: Annotated[str | None, Field(description="The pipeline documented (or index_uuid).")] = None,
         markdown: Annotated[str, Field(description="The full documentation, with the sections in "
                                                    "stroom://guide/documentation (Purpose and data, Processing, Field "
-                                                   "mapping, Output, Conformance, Open items). For Field mapping use "
-                                                   "field_mapping from build_translation_xslt as it is. The change log "
+                                                   "mapping, Output, Conformance, Open items). The Field mapping section "
+                                                   "is generated here from the mapping kept with the XSLT (or the index "
+                                                   "plan); only an XSLT written by hand needs it written. The change log "
                                                    "is added by the tool.")] = '',
         change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")] = '',
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(

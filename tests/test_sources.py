@@ -56,7 +56,8 @@ def test_splitter_specs_generate_converters_and_run_on_the_sample():
     syslog = SplitterSpec(kind='syslog', rfc='rfc3164', body=SplitterSpec(kind='key_value', quote='"'))
     xml = generate_splitter(syslog)
     assert etree.fromstring(xml.encode()).tag == '{data-splitter:3}dataSplitter'
-    assert '<group value="$6">' in xml and 'containerStart="&quot;"' in xml
+    # Pairs by a regex matched along the body, a quoted value without its quotes (a split on '=' has no $2).
+    assert '<group value="$6">' in xml and '<data name="$1" value="$2" />' in xml and 'split delimiter="="' not in xml
     run = dry_run(syslog, '<34>Sep 28 10:00:00 host sshd[1]: user=alice action="log in" src=10.0.0.1\nnoise line\n')
     assert run['records'] == [{'pri': '34', 'time': 'Sep 28 10:00:00', 'host': 'host', 'app': 'sshd', 'pid': '1',
                                'message': 'user=alice action="log in" src=10.0.0.1', 'user': 'alice', 'action': 'log in',

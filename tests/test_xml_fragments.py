@@ -89,18 +89,23 @@ def test_the_wrapper_is_checked_and_the_parser_can_be_swapped():
     with pytest.raises(ToolError, match='&fragment;'):
         translation._check_converter('XML_FRAGMENT', '<records xmlns="records:2"/>')
     layers = [{'pipelineData': {
-        'elements': {'add': [{'id': 'xmlParser', 'type': 'XMLParser'}, {'id': 'splitFilter', 'type': 'SplitFilter'},
-                             {'id': 'translationFilter', 'type': 'XSLTFilter'}]},
-        'links': {'add': [{'from': 'xmlParser', 'to': 'splitFilter'}, {'from': 'splitFilter', 'to': 'translationFilter'}]}}}]
+        'elements': {'add': [{'id': 'Source', 'type': 'Source'}, {'id': 'xmlParser', 'type': 'XMLParser'},
+                             {'id': 'splitFilter', 'type': 'SplitFilter'}, {'id': 'translationFilter', 'type': 'XSLTFilter'}]},
+        'links': {'add': [{'from': 'Source', 'to': 'xmlParser'}, {'from': 'xmlParser', 'to': 'splitFilter'},
+                          {'from': 'splitFilter', 'to': 'translationFilter'}]}}}]
     data, new_id, old_type = swap_parser(merge_layers(layers), 'XMLFragmentParser')
     assert (new_id, old_type) == ('xmlFragmentParser', 'XMLParser')
     assert data == {'elements': {'add': [{'id': 'xmlFragmentParser', 'type': 'XMLFragmentParser'}],
                                  'remove': [{'id': 'xmlParser', 'type': 'XMLParser'}]},
-                    'links': {'add': [{'from': 'xmlFragmentParser', 'to': 'splitFilter'}],
-                              'remove': [{'from': 'xmlParser', 'to': 'splitFilter'}]}}
-    # The child's layer applied over the template gives the swapped chain.
+                    'links': {'add': [{'from': 'Source', 'to': 'xmlFragmentParser'},
+                                      {'from': 'xmlFragmentParser', 'to': 'splitFilter'}],
+                              'remove': [{'from': 'Source', 'to': 'xmlParser'}, {'from': 'xmlParser', 'to': 'splitFilter'}]}}
+    # The child's layer applied over the template gives the swapped chain, fed from Source (seen: the new parser was
+    # linked onwards only, so nothing fed it, the UI didn't show it and stepping failed).
     merged = merge_layers(layers + [{'pipelineData': data}])
-    assert {e['id'] for e in merged['elements']} == {'xmlFragmentParser', 'splitFilter', 'translationFilter'}
+    assert {e['id'] for e in merged['elements']} == {'Source', 'xmlFragmentParser', 'splitFilter', 'translationFilter'}
+    from tools.pipelines import chain_order
+    assert chain_order(merged['elements'], merged['links'])[:2] == ['Source', 'xmlFragmentParser']
     with pytest.raises(ToolError, match='replace_parser must be one of'):
         swap_parser(merge_layers(layers), 'XSLTFilter')
     assert etree.fromstring(XML_FRAGMENT_WRAPPER.replace('&fragment;', '<Event/>').encode()) is not None

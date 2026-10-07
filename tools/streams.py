@@ -1,5 +1,6 @@
 """Tools for finding and reading streams, and triaging their errors."""
 import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
@@ -190,6 +191,27 @@ async def refuse_older_than_feed(ctx: Context, stream_ids: list[int]) -> None:
         raise ToolError("Only a feed's own streams are used to build and validate pipelines: " + '; '.join(said))
 
 
+_SAMPLE_TTL = 900                 # seconds a sample stream's text is kept between calls
+_SAMPLE_CACHE_CHARS = 64_000_000   # and at most this much text in all
+
+
+async def _cached_raw_text(ctx: Context, stroom: StroomGateway, stream_id: int) -> tuple[str, bool]:
+    """A raw stream's text, kept a while: a stream never changes, and the same sample is read on every attempt at a
+    mapping (seen: a hundred attempts, each reading it from Stroom again)."""
+    cache = ctx.lifespan_context.setdefault('sample_texts', {}) if isinstance(getattr(ctx, 'lifespan_context', None), dict) else {}
+    key = (stroom.settings.stroom_url, stream_id, stroom.settings.max_sample_chars)
+    now = time.monotonic()
+    for k in [k for k, (at, _, _) in cache.items() if now - at > _SAMPLE_TTL]:
+        cache.pop(k, None)
+    if key in cache:
+        return cache[key][1], cache[key][2]
+    text, truncated = await raw_text(stroom, stream_id, stroom.settings.max_sample_chars)
+    while cache and sum(len(t) for _, t, _ in cache.values()) + len(text) > _SAMPLE_CACHE_CHARS:
+        cache.pop(min(cache, key=lambda k: cache[k][0]))
+    cache[key] = (now, text, truncated)
+    return text, truncated
+
+
 async def read_sample_streams(ctx: Context, stream_ids: list[int]) -> tuple[dict[str, str], list[str]]:
     """({name: text}, notes): sample streams' raw text, read by the server in place of text sent by the client,
     so a sample passes through the model once (upload_sample) however many tools then read it."""
@@ -197,7 +219,7 @@ async def read_sample_streams(ctx: Context, stream_ids: list[int]) -> tuple[dict
     await refuse_older_than_feed(ctx, stream_ids)
     texts, notes = {}, []
     for stream_id in stream_ids:
-        text, truncated = await raw_text(stroom, stream_id, stroom.settings.max_sample_chars)
+        text, truncated = await _cached_raw_text(ctx, stroom, stream_id)
         texts[f'stream {stream_id}'] = text
         if truncated:
             notes.append(f"stream {stream_id} is read up to its first {len(text):,} characters (max_sample_chars)")

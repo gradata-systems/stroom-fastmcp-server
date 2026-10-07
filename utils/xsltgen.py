@@ -74,7 +74,7 @@ class Lookup(BaseModel):
         return self
 
 
-Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits']
+Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits', 'unescape_quotes']
 
 
 class FieldMapping(BaseModel):
@@ -94,7 +94,9 @@ class FieldMapping(BaseModel):
                                                      "the dictionary lacks give no value, or `default`.")
     transform: Transform | None = Field(None, description="Applied to the input value first: lower, upper, trim, "
                                                           "strip_domain (DOMAIN\\user or user@domain -> user), domain "
-                                                          "(the DOMAIN or domain part), digits (digits only).")
+                                                          "(the DOMAIN or domain part), digits (digits only), "
+                                                          "unescape_quotes (a quoted CSV value's doubled quotes as one: "
+                                                          "Data Splitter keeps them doubled).")
     repeat: bool = Field(False, description="Write one element per value of the input (a JSON array, an element the "
                                             "record has several of) instead of the first value: the nearest element on "
                                             "the path the schema lets repeat is written once per value, e.g. Group for "
@@ -324,7 +326,10 @@ class Extraction(BaseModel):
     xpath: str | None = Field(None, description="Or an XPath expression giving the text.")
     regex: str = Field(description="XPath regular expression with one capture group per field, e.g. "
                                    "'^(\\S+ \\S+) (\\S+) (\\S+) (.*)$'. Anchor it, and use (?:...) for groups that are "
-                                   "not fields. XPath regexes have no lookaround and no named groups.")
+                                   "not fields. XPath regexes have no lookaround and no named groups. Written once, as "
+                                   "XPath reads it (a literal [ is \\[): only your call's JSON doubles the backslash; "
+                                   "nothing escapes it again. Copy separators from the sample text exactly (an en dash "
+                                   "is not '-'): the sample check says where a regex stops matching.")
     names: list[str] = Field(min_length=1, description="A field name per capture group, in order; '' skips a group.")
     flags: str = Field('', description="XPath regex flags: i (ignore case), m (multi-line), s (dot matches newline), "
                                        "x (ignore whitespace in the pattern).")
@@ -435,6 +440,9 @@ class TranslationMapping(BaseModel):
         "When one record holds several events: the field (JSON key such as 'events', dotted for nested keys) or "
         "XPath selecting the items, each of which becomes an Event. Fields, conditions and extractions then read the "
         "item; mark those that read the record itself (the batch's host, say) with scope: record."))
+    nil_values: list[str] = Field(default_factory=list, description=(
+        "Values the source writes for 'none', e.g. ['-'] (syslog's NILVALUE, and many key=value logs): an input "
+        "holding one counts as empty, so its elements are left out rather than written as '-'."))
     drop_when: list[DropRule] = Field(default_factory=list, description=(
         "Records (items, with for_each) to leave untranslated, tried before the event rules: heartbeats, test "
         "traffic, service accounts. Each entry's conditions must all hold; any entry drops."))
@@ -513,6 +521,8 @@ def transform_expr(t: str | None, one: str) -> str:
         return f"replace({one}, '^(?:([^\\\\]*)\\\\.*|[^@]*@(.*))$', '$1$2')"
     if t == 'digits':
         return f"replace({one}, '[^0-9]', '')"
+    if t == 'unescape_quotes':
+        return f"replace({one}, '\"\"', '\"')"
     return one
 
 
@@ -523,6 +533,14 @@ def time_expr(fmt: str, tz: str | None, one: str) -> str:
     if fmt == 'epoch_s':
         return f"stroom:format-date(string(xs:integer(xs:decimal({one}) * 1000)))"
     return f"stroom:format-date({one}, {literal(fmt)}{', ' + literal(tz) if tz else ''})"
+
+
+def input_namespace(m: 'TranslationMapping') -> str:
+    """The namespace the XSLT reads its input in. XML fragments that declare none take the wrapper's default, records:2
+    (seen: fragments read with no namespace selected nothing, and every record came out empty)."""
+    if m.input == 'xml_fragments':
+        return m.xml_namespace or 'records:2'
+    return INPUT_NAMESPACE.get(m.input, m.xml_namespace)
 
 
 def literal(text: str) -> str:
@@ -806,7 +824,10 @@ class _Generator:
         if field_name in self.derived:
             self.declare_parts(self.derived[field_name][0])
         wrap = (xpath is not None and not is_call(raw)) or self.m.input in ('xml', 'xml_fragments')
-        self._scope.setdefault(name, f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]")
+        # A value the source writes for "none" (syslog's -) counts as empty, as a blank one does.
+        nil = (f"[not(normalize-space(.) = ({', '.join(literal(v) for v in self.m.nil_values)}))]"
+               if self.m.nil_values else '')
+        self._scope.setdefault(name, (f"({raw})[normalize-space(.)]" if wrap else f"{raw}[normalize-space(.)]") + nil)
         return '$' + name
 
     def has(self, field_name: str | None, xpath: str | None, label: str, scope: str | None = None) -> str:
@@ -1103,7 +1124,7 @@ class _Generator:
                 continue
             entry = leaf.leaf
             source = (f"field '{entry.field}'" if entry.field else f"any_of {entry.any_of}" if entry.any_of else
-                      f"xpath {entry.xpath!r}" if entry.xpath else f"value {entry.value!r}" if entry.value is not None
+                      f"xpath `{entry.xpath}`" if entry.xpath else f"value {entry.value!r}" if entry.value is not None
                       else 'a lookup')
             mapped.append(f"{leaf.path.removeprefix('Event/')} ({source})")
             candidates.append(candidate)
@@ -1265,7 +1286,8 @@ class _Generator:
                 # A Data Splitter or JSON field has one value per record, so its test reads naturally as
                 # normalize-space(field); an XML path or an xpath may give several, which normalize-space()
                 # would refuse, so those keep the predicate.
-                single = name not in self._xpath_names and self.m.input in ('data_splitter', 'json')
+                single = (name not in self._xpath_names and self.m.input in ('data_splitter', 'json')
+                          and not self.m.nil_values)
                 has_value = f'normalize-space({raw[name]})' if single else select
 
                 def inline(m: re.Match) -> str:
@@ -1400,7 +1422,7 @@ class _Generator:
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
                  **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {}), **bound}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
-        sheet.set('xpath-default-namespace', INPUT_NAMESPACE.get(m.input, m.xml_namespace))
+        sheet.set('xpath-default-namespace', input_namespace(m))
         # Imports come first in a stylesheet: one per document, for its named templates or its functions.
         for href in dict.fromkeys([u.href for u in m.shared] + [f.href for f in m.functions]):
             etree.SubElement(sheet, f'{{{XSL}}}import', href=href)

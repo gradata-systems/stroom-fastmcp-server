@@ -39,7 +39,8 @@ async def test_a_single_stream_id_is_taken_as_a_list_of_one():
             patch.object(generation, '_outputs', stepped):
         async with Client(server) as client:
             result = await client.call_tool('build_translation_xslt', {
-                'mapping': mapping().model_dump(exclude_none=True), 'pipeline_uuid': 'p-1', 'stream_ids': 15783601})
+                'mapping': mapping().model_dump(exclude_none=True), 'pipeline_uuid': 'p-1', 'stream_ids': 15783601,
+                'field_mapping': True})
     assert not result.is_error
     assert stepped.await_args.args[2] == [15783601]
 
