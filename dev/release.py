@@ -84,7 +84,7 @@ def check_docs(last_tag: str, unchanged_reason: str | None) -> list[str]:
 
 
 def run_tests() -> None:
-    for name, command in (('unit tests', [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider']),
+    for name, command in (('unit tests', [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '--color=no']),
                           ('evaluation references, offline', [sys.executable, 'dev/eval/offline.py'])):
         print(f"  {name} ...", flush=True)
         done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')

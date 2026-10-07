@@ -74,7 +74,8 @@ def check(case: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == '__main__':
     failed = 0
-    for case in ev.load_cases(sys.argv[1:]):
+    cases = ev.load_cases(sys.argv[1:])
+    for case in cases:
         result = check(case)
         failed += bool(result['problems'])
         print(f"{'FAIL' if result['problems'] else 'ok  '} {case['id']}: {result['records']} records")
@@ -82,4 +83,5 @@ if __name__ == '__main__':
             print(f"    - {p}")
         for w in result['warnings']:
             print(f"    . {w}")
+    print(f"{len(cases) - failed} of {len(cases)} cases pass offline")
     raise SystemExit(1 if failed else 0)
