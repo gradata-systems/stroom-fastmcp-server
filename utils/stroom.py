@@ -208,6 +208,18 @@ class StroomGateway:
                 return values
         return values
 
+    async def property_types(self) -> dict[tuple[str, str], str]:
+        """{(element type, property name): the type Stroom declares ('boolean', 'int', 'long', 'String', a document
+        type ...)}, read once: {} where Stroom has no such resource."""
+        if getattr(self, '_property_types', None) is None:
+            try:
+                rows = await self.get('/pipeline/v1/propertyTypes')
+            except ToolError:
+                rows = []
+            self._property_types = {((row.get('pipelineElementType') or {}).get('type'), name): (spec or {}).get('type')
+                                    for row in rows or [] for name, spec in (row.get('propertyTypes') or {}).items()}
+        return self._property_types
+
     async def pipeline_layers(self, uuid: str) -> list[dict[str, Any]]:
         return await self.post('/pipeline/v1/fetchPipelineLayers', {'type': 'Pipeline', 'uuid': uuid})
 
@@ -302,13 +314,14 @@ class StroomGateway:
             except ToolError as e:
                 if 'No stepping session found' not in str(e):
                     raise
-                # The session lives on the Stroom node that started the step; the follow-up reached another one.
+                # Either the session's node dropped it (the step failed inside Stroom: seen, a pipeline property of
+                # the wrong type, on one node as on several) or the follow-up reached another node.
                 raise ToolError(
-                    "A step outlasted Stroom's wait, and the follow-up for it reached a Stroom node other than the one "
-                    "stepping it (seen with several UI nodes behind a load balancer). Each record is likely too "
-                    "large: a JSON array whose pipeline has jsonParser.addRootObject true steps as one record, so "
-                    "set it false (update_pipeline). Otherwise this server's STROOM_URL must reach Stroom through "
-                    "something that keeps a client on one node: an ingress with cookie affinity (the follow-up "
-                    "carries its cookie), or a Service with sessionAffinity: ClientIP; or raise "
-                    "STROOM_STEPPING_WAIT_MS.") from e
+                    "A step outlasted Stroom's wait, and Stroom then had no session for it. Most often the pipeline "
+                    "is at fault, not the network: a property Stroom can't use (describe_document shows them; set "
+                    "it again with update_pipeline), or records too large to step (a JSON array whose pipeline has "
+                    "jsonParser.addRootObject true steps as one record: set it false). Only when the pipeline steps "
+                    "elsewhere: with several Stroom nodes, this server's STROOM_URL must reach Stroom through "
+                    "something that keeps a client on one node (an ingress with cookie affinity, or a Service with "
+                    "sessionAffinity: ClientIP), or raise STROOM_STEPPING_WAIT_MS.") from e
         return result

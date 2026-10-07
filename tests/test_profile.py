@@ -64,3 +64,15 @@ def test_a_json_array_read_only_in_part_is_still_a_json_array():
     assert profile(text)['records'] == 400 and 'note' not in profile(text)
     lines = '\n'.join(json.dumps(r) for r in records[:5])
     assert profile(lines[:-10])['format'] == 'json lines'      # the last line cut short
+
+
+def test_text_that_starts_as_json_and_does_not_parse_is_said_so():
+    # Seen: a FortiOS JSON file retyped by the agent with \+ in it, profiled as key=value from its records' body.
+    import pytest
+    from fastmcp.exceptions import ToolError
+    retyped = r'[{"host": "gs-fw01", "body": "eventtime=1 tz=\"\+1000\" srcip=10.0.0.1"}]'
+    with pytest.raises(ToolError, match=r"starts as JSON but isn't valid JSON: Invalid \\escape"):
+        profile(retyped)
+    assert profile(retyped.replace('\\+', '+'))['format'] == 'json array'
+    # Text that only starts with a bracket is not taken for JSON.
+    assert profile('[2026-10-01 08:00:00] INFO started\n[2026-10-01 08:00:01] INFO ok\n')['format'] != 'json array'

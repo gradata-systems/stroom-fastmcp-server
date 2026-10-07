@@ -627,3 +627,11 @@ def test_a_time_format_several_elements_use_is_one_function():
     assert result['xslt'].count('mcp:parseTime(') == 2 and 'mcp' in sheet.get('exclude-result-prefixes').split()
     # Used once, epoch_ms stays inline.
     assert 'stroom:format-date(string(' in result['xslt']
+
+
+def test_an_empty_constant_is_refused():
+    # Seen: IPAddress given value '' for want of the address, and every event invalid for its empty element.
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="value '' writes an empty element"):
+        mapping(common=BASE + [{'path': 'EventSource/Client/IPAddress', 'value': ''}])

@@ -37,9 +37,16 @@ async def ctx():
     await gw.close()
 
 
+# As Stroom declares them (GET /pipeline/v1/propertyTypes), for the properties these tests' pipelines set.
+PROPERTY_TYPES = [{'pipelineElementType': {'type': 'JSONParser'}, 'propertyTypes': {
+    'addRootObject': {'name': 'addRootObject', 'type': 'boolean'}}},
+    {'pipelineElementType': {'type': 'XSLTFilter'}, 'propertyTypes': {'xslt': {'name': 'xslt', 'type': 'XSLT'}}}]
+
+
 def mock_pipeline():
     respx.get(f'{API}/pipeline/v1/p-1').mock(return_value=httpx.Response(200, json={'name': 'ACME', 'uuid': 'p-1'}))
     respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=LAYERS))
+    respx.get(f'{API}/pipeline/v1/propertyTypes').mock(return_value=httpx.Response(200, json=PROPERTY_TYPES))
     # The sample stream's feed: none here, so no stream is older than its feed.
     respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
 
@@ -220,12 +227,14 @@ async def test_a_slow_steps_follow_up_carries_its_own_cookies_and_none_are_share
 
 
 @respx.mock
-async def test_a_follow_up_on_another_node_says_why(ctx):
+async def test_a_lost_stepping_session_says_the_pipeline_first_then_the_network(ctx):
+    # Seen: a property of the wrong type lost the session on one node as on several, and the agent blamed the load
+    # balancer, as the message did.
     stroom = ctx.lifespan_context['stroom']
     respx.post(f'{API}/stepping/v1/step').mock(side_effect=[
         httpx.Response(200, json={'complete': False, 'sessionUuid': 's1'}),
         httpx.Response(500, json={'message': 'No stepping session found for key: s1'})])
-    with pytest.raises(Exception, match='reached a Stroom node other than the one stepping it') as e:
+    with pytest.raises(Exception, match='Most often the pipeline is at fault, not the network') as e:
         await stroom.step({'stepType': 'FIRST'}, poll_seconds=0)
     assert 'addRootObject' in str(e.value) and 'sessionAffinity' in str(e.value)
 

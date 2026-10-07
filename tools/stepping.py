@@ -47,6 +47,8 @@ class _Pipeline:
     def __init__(self, doc: dict[str, Any], layers: list[dict[str, Any]]):
         self.doc = doc
         merged = merge_layers(layers)
+        self.merged = merged
+        self.mistyped: list[str] = []
         self.types = {e['id']: e['type'] for e in merged['elements']}
         self.own = own_elements(layers)
         # A JSON parser that wraps everything in one root map makes a JSON array a single record.
@@ -56,7 +58,24 @@ class _Pipeline:
 
     @classmethod
     async def load(cls, stroom: StroomGateway, uuid: str) -> '_Pipeline':
-        return cls(await stroom.get(f'/pipeline/v1/{uuid}'), await stroom.pipeline_layers(uuid))
+        pipeline = cls(await stroom.get(f'/pipeline/v1/{uuid}'), await stroom.pipeline_layers(uuid))
+        declared = await stroom.property_types()
+        for prop in pipeline.merged.get('properties') or []:
+            kind = declared.get((pipeline.types.get(prop.get('element')), prop.get('name')))
+            if (kind == 'boolean' and not isinstance(prop.get('value'), bool)) or \
+                    (kind in ('int', 'long') and not isinstance(prop.get('value'), int)):
+                pipeline.mistyped.append(f"{prop['element']}.{prop['name']} is {prop.get('value')!r}, where Stroom "
+                                         f"takes {'true or false' if kind == 'boolean' else 'a whole number'}")
+        return pipeline
+
+    def refuse_mistyped(self) -> None:
+        """Seen: jsonParser.addRootObject written as the string 'false', and every step, of any stream, outlasted
+        Stroom's wait; with several Stroom nodes that read as a load-balancing failure."""
+        if self.mistyped:
+            raise ToolError(f"Pipeline '{self.doc.get('name')}' has a property Stroom can't take as written, and it "
+                            f"steps nothing until it is fixed (each step outlasts Stroom's wait): "
+                            f"{'; '.join(self.mistyped)}. Set it again with update_pipeline (set_properties), which "
+                            f"writes the value as Stroom's type.")
 
     def default_outputs(self) -> list[str]:
         """The pipeline's own XSLT steps, which is where its translation happens; with no XSLT at all (a pipeline
@@ -350,6 +369,7 @@ async def step_pipeline(
     await _check_drafts(ctx, draft_code)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    pipeline.refuse_mistyped()
     if isinstance(record, int):
         result = await _step(stroom, pipeline, stream_id, 'REFRESH',
                              {'metaId': stream_id, 'partIndex': part, 'recordIndex': record}, draft_code)
@@ -395,6 +415,7 @@ async def step_sample(
     await refuse_older_than_feed(ctx, stream_ids)
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    pipeline.refuse_mistyped()
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
     # Large sample files (985 records each) were stepped a record per request on a remote Stroom: the head of each
     # stream says whether the translation is right, and processing then reads every record.
@@ -519,6 +540,7 @@ async def step_records(
     await refuse_older_than_feed(ctx, sorted({loc.stream for loc in locations}))
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    pipeline.refuse_mistyped()
     output_element = pipeline.default_outputs()[-1]
     markers: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []

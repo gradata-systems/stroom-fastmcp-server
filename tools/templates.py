@@ -145,16 +145,24 @@ async def find_pipeline_templates(
         if why:
             ranked.append((why, p))
     order = {'configured': 0, 'inherited_by_others': 1, 'standard': 2, 'template_like': 3}
-    candidates = []
+    candidates, unreadable = [], []
     for why, p in sorted(ranked, key=lambda x: (order[x[0]], -children.get(x[1]['uuid'], 0))):
         if len(candidates) >= 10:
             break
-        shape = await _shape(stroom, p['uuid'], policy.markers())
+        try:
+            shape = await _shape(stroom, p['uuid'], policy.markers())
+        except ToolError as e:
+            # One pipeline Stroom can't build (seen: an element type this Stroom doesn't have, StateFilter) must
+            # not hide the others: the whole search failed, and the agent fell back to a template by its name.
+            unreadable.append(f"{p['path']}/{p['name']}: {str(e)[:160]}")
+            continue
         if shape['stage'] != stage or (why == 'template_like' and not shape['child_must_supply']):
             continue
         candidates.append({'uuid': p['uuid'], 'name': p['name'], 'path': p['path'], 'source': why,
                            'children': children.get(p['uuid'], 0), **{k: v for k, v in shape.items() if k != 'properties'}})
     result: dict[str, Any] = {'stage': stage, 'candidates': candidates[:10]}
+    if unreadable:
+        result['unreadable'] = unreadable[:5]   # left out: Stroom can't build them
     if not candidates:
         result['hint'] = "No template found for this stage; ask the user which pipeline to base it on."
     elif stage == 'translation' and not any(c['parser'] in ('XMLFragmentParser', 'CombinedParser') for c in candidates):
@@ -185,7 +193,10 @@ async def template_reason(ctx: Context, uuid: str) -> str | None:
     if children:
         return f"{len(children)} pipeline(s) inherit from it ({', '.join(children[:3])}{'...' if len(children) > 3 else ''})"
     if not entry['parent_uuid']:
-        open_slots = (await _shape(gateway_from(ctx), uuid))['child_must_supply']
+        try:
+            open_slots = (await _shape(gateway_from(ctx), uuid))['child_must_supply']
+        except ToolError:
+            return None     # Stroom can't build it: no template anyone uses
         if open_slots:
             return f"it leaves {', '.join(f'{s}' for s in open_slots[:3])} for a child to set"
     return None

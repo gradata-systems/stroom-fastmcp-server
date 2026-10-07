@@ -160,7 +160,10 @@ async def loader_pipelines(stroom) -> list[dict[str, Any]]:
         ref = (value.get('docContentMatch') or {}).get('docRef') or {}
         if ref.get('type') != 'Pipeline' or ref.get('uuid') in {o['uuid'] for o in out}:
             continue
-        shape = await _shape(stroom, ref['uuid'])
+        try:
+            shape = await _shape(stroom, ref['uuid'])
+        except ToolError:
+            continue    # Stroom can't build it (seen: a StateFilter this Stroom lacks): no loader to use
         # A loader reads Reference streams as they are: no XSLT left for a child (a parser's text converter may be
         # unset; Stroom's own loader leaves its CombinedParser's empty).
         if shape['stage'] == 'loader' and not any(s['property'] == 'xslt' for s in shape['child_must_supply']):

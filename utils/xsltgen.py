@@ -120,6 +120,12 @@ class FieldMapping(BaseModel):
             raise ValueError(f"'{self.path}': dictionary needs field (or any_of) as the key")
         if self.transform and self.value is not None:
             raise ValueError(f"'{self.path}': transform applies to an input, not a constant")
+        if self.value is not None and not self.value.strip():
+            # Seen: Network/Permit/Source/Device/IPAddress given value '' for want of the address (inside a string
+            # field, unextracted): an empty element in every event, which the schema refuses.
+            raise ValueError(f"'{self.path}': value '' writes an empty element, which the schema refuses: map the "
+                             f"field that holds it (extract it first if it is inside another field's text), or leave "
+                             f"the entry out")
         if self.repeat and (self.value is not None or self.map or self.time_format or self.lookup or self.dictionary):
             raise ValueError(f"'{self.path}': repeat takes an input field, any_of or xpath, with transform at most")
         return self

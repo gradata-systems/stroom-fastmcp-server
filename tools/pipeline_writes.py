@@ -141,18 +141,58 @@ async def _sample_is_array(ctx: Context, build: str | None) -> bool:
     return bool(found) and found['format'] == 'json array'
 
 
-async def _value(stroom: StroomGateway, prop: PropertyValue) -> dict[str, Any]:
+_PLAIN = {'boolean': 'boolean', 'int': 'integer', 'long': 'long', 'String': 'string'}
+
+
+async def typed_properties(stroom: StroomGateway, types: dict[str, str], props: list[PropertyValue]) -> dict[tuple[str, str], str]:
+    """Each plain value as the type Stroom declares for its element's property, before anything is written: a
+    string "false" for a boolean is false. Seen: jsonParser.addRootObject written as {'string': 'false'}, and every
+    step of that pipeline, on any stream, outlasted Stroom's wait. A property the element doesn't have, or a value
+    that isn't of its type, is refused. {(element, name): Stroom's value key} for _value."""
+    declared = await stroom.property_types()
+    keys = {}
+    for prop in props:
+        etype = types.get(prop.element)
+        if not declared or not etype or prop.doc_uuid:
+            continue
+        kind = declared.get((etype, prop.name))
+        if kind is None:
+            names = sorted(n for (t, n) in declared if t == etype)
+            raise ToolError(f"{prop.element} ({etype}) has no property '{prop.name}'; its properties are {names}")
+        if kind not in _PLAIN:
+            continue        # a document: doc_uuid and doc_type, refused by _value without them
+        value = prop.value
+        if kind == 'boolean':
+            if isinstance(value, str) and value.strip().lower() in ('true', 'false'):
+                value = value.strip().lower() == 'true'
+            if not isinstance(value, bool):
+                raise ToolError(f"{prop.element}.{prop.name} is true or false, not {prop.value!r}")
+        elif kind in ('int', 'long'):
+            if isinstance(value, str) and value.strip().lstrip('-').isdigit():
+                value = int(value.strip())
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ToolError(f"{prop.element}.{prop.name} is a whole number, not {prop.value!r}")
+        elif value is not None and not isinstance(value, str):
+            value = str(value).lower() if isinstance(value, bool) else str(value)
+        prop.value = value
+        keys[(prop.element, prop.name)] = _PLAIN[kind]
+    return keys
+
+
+async def _value(stroom: StroomGateway, prop: PropertyValue, key: str | None = None) -> dict[str, Any]:
     if prop.doc_uuid:
         if not prop.doc_type:
             raise ToolError(f"{prop.element}.{prop.name}: give doc_type with doc_uuid")
         doc = await stroom.get_doc(prop.doc_type, prop.doc_uuid)
         return {'entity': {'type': prop.doc_type, 'uuid': prop.doc_uuid, 'name': doc.get('name')}}
+    if prop.value is None:
+        raise ToolError(f"{prop.element}.{prop.name}: give value or doc_uuid")
+    if key:     # as Stroom declares the property (typed_properties)
+        return {key: prop.value}
     if isinstance(prop.value, bool):
         return {'boolean': prop.value}
     if isinstance(prop.value, int):
         return {'integer': prop.value}
-    if prop.value is None:
-        raise ToolError(f"{prop.element}.{prop.name}: give value or doc_uuid")
     return {'string': prop.value}
 
 
@@ -333,6 +373,10 @@ async def create_pipeline(
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
     _keep_validation({e['id']: e['type'] for e in merged['elements']}, set_properties)
+    element_types = {e['id']: e['type'] for e in merged['elements']}
+    if replace_parser:
+        element_types[new_id] = replace_parser
+    keys = await typed_properties(stroom, element_types, set_properties)
     # The parser first: a template whose parser can't read the sample is the wrong one, whatever else it lacks (seen:
     # an XML source refused the Data Splitter template for want of a text converter, not for its parser).
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
@@ -362,8 +406,9 @@ async def create_pipeline(
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
     if description:
         doc['description'] = description
+    keys.update(await typed_properties(stroom, element_types, [p for p in properties if p not in set_properties]))
     for prop in properties:
-        _set_property(data, prop.element, prop.name, await _value(stroom, prop))
+        _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
     if refs:
         data.setdefault('pipelineReferences', {})['add'] = refs
     doc['pipelineData'] = data
@@ -424,6 +469,9 @@ async def copy_pipeline(
         for old, new in (rename or {}).items():
             name = name.replace(old, new)
         names[entity['uuid']] = name
+    keys = await typed_properties(stroom, {e['id']: e['type'] for e in merge_layers(
+        await stroom.pipeline_layers(source_uuid))['elements']}, set_properties) \
+        if any(not p.doc_uuid for p in set_properties) else {}
     details = {'build': build, 'copy of': source.get('name'), 'pipeline name': new_name,
                'copied documents': sorted(set(names.values())), 'working copy': working_copy,
                'changes': [f'{p.element}.{p.name}' for p in set_properties]}
@@ -450,7 +498,7 @@ async def copy_pipeline(
         if entity and entity.get('uuid') in copies:
             prop['value'] = {'entity': copies[entity['uuid']]}
     for prop in set_properties:
-        _set_property(data, prop.element, prop.name, await _value(stroom, prop))
+        _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
 
     ref = await guard.create('Pipeline', new_name, build, [copy_of_tag(source_uuid)] if working_copy else [])
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
@@ -492,8 +540,9 @@ async def set_pipeline_property(
     if prop.element not in elements:
         raise ToolError(f"No element '{prop.element}' in this pipeline; elements are {sorted(elements)}")
     _keep_validation(types, [prop])
+    keys = await typed_properties(stroom, types, [prop])
     data = doc.get('pipelineData') or {}
-    _set_property(data, prop.element, prop.name, await _value(stroom, prop))
+    _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
     doc['pipelineData'] = data
     doc = await stroom.put_doc(doc)
     return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'set': f'{prop.element}.{prop.name}'}

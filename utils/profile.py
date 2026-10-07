@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from fastmcp.exceptions import ToolError
 from lxml import etree
 
 from utils.timefmt import check_time_format, infer_time_pattern
@@ -242,6 +243,25 @@ def _names_a_header(rows: list[list[str]]) -> bool:
     return differing >= max(1, len(first) // 2)
 
 
+JSON_START = re.compile(r'(\[\s*)?\{\s*"')
+
+
+def _not_json(text: str) -> ToolError:
+    r"""Text that starts as JSON and doesn't parse, with where and why. Seen: a FortiOS file's text retyped by the
+    agent with tz=\"\+1000\" (\+ is no JSON escape), profiled as key=value from its records' body field, with a
+    key=value template proposed for a JSON file."""
+    first = text if text.lstrip().startswith('[') else text.splitlines()[0]
+    try:
+        json.loads(first)
+        return ToolError('not JSON')     # not reached: called only when it fails
+    except json.JSONDecodeError as e:
+        near = first[max(0, e.pos - 40):e.pos + 40]
+        return ToolError(f"This starts as JSON but isn't valid JSON: {e.msg} at character {e.pos}, near {near!r}. "
+                         "Pass the source's text exactly as it is, not retyped (an escape such as \\+ isn't JSON). "
+                         f"A file on the user's disk isn't passed through you: upload_sample files= sends it whole, "
+                         f"and the server reads it from the stream.")
+
+
 def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     text = sample.strip('﻿\r\n ')
     lines = [line for line in text.splitlines() if line.strip()]
@@ -296,6 +316,8 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
         return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
                 'suggested_parser': 'JSONParser, one object per line (a translation template with one: find_pipeline_templates)', **JSON_SETUP['lines']}
 
+    if not json_lines and JSON_START.match(text):
+        raise _not_json(text)
     if sum(bool(CEF.search(line)) for line in lines) >= 0.8 * len(lines):
         # CEF, alone or after a syslog header: seen read as key=value, its header fields taken for keys and its
         # values cut at their first space.
