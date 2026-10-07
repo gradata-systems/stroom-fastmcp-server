@@ -60,8 +60,9 @@ mapping's `extract`, a regular expression whose groups become fields, not with `
  "events": [{"name": "logon", "when": [{"field": "action", "equals": "LOGIN"}], "fields": ["..."]}]}
 ```
 
-The XSLT it writes holds `analyze-string(message, regex)` in a variable and reads each group from it; a record the
-pattern does not match gets no values, so its elements are left out and a rule can test `present: false`.
+The XSLT it writes holds `analyze-string(message, regex)` in a variable (named for what it extracts, `ts_parts`)
+and reads each group from it; several extractions of one field read it once, as `$message`. A record the pattern
+does not match gets no values, so its elements are left out and a rule can test `present: false`.
 
 **JSON** (the field holds a JSON document): name the field in the mapping's `json_fields`, and read a key inside
 it as `<field>.<key>` (nested: `<field>.<a>.<b>`) wherever a field goes: in common, events, `when` and `any_of`.

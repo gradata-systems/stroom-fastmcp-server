@@ -135,8 +135,9 @@ any input field. An extraction can read a field an earlier one produced. Not `su
                          "map": {"Successful": "true", "Failed": "false"}}]}]}
 ```
 
-The generated XSLT holds `analyze-string(message, regex)` in a variable per template and reads each group from
-it. XPath regular expressions have no lookaround and no named groups; use `(?:...)` for groups that are not
+The generated XSLT holds `analyze-string(message, regex)` in a variable per template, named for the first field it
+extracts (`ts_parts`), and reads each group from it; text two or more extractions read is the field's own variable
+(`$message`), read once. XPath regular expressions have no lookaround and no named groups; use `(?:...)` for groups that are not
 fields, and anchor the pattern. A record the pattern does not match gets no values from it, so its elements are
 left out; a rule can test that with `{"field": "ts", "present": false}` (and `drop` it, or map it to `Unknown`
 with `allow_unknown` set to the reason, in the user's words: a rule that writes `Unknown` for sample records is
@@ -164,13 +165,18 @@ The mapping's `style` decides how the XSLT reads. Take it from an XSLT style sec
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `naming` | `snake_case` | Variables, templates, modes and the XSLT's own functions: `client_ip`, `event_source`, `action_to_success`. Also `camelCase`, `PascalCase`, `kebab-case`. |
-| `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable, declared in the one rule that uses it, or at the top when several do. Fewer reads stay inline. 1: always variables. |
+| `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable, declared in the one rule that uses it, or at the top when several do. Fewer reads stay inline; text two extractions read is always a variable. 1: always variables. |
 | `inline_map_max_keys` | 3 | A value map used by one element with at most this many keys is written inline as an `if`; longer or shared ones become one `xsl:map`. 0: always `xsl:map`. |
 | `function_min_uses` | 2 | A conversion this many elements use (a time format, or a `strip_domain`, `domain` or `digits` transform) is declared once as an `xsl:function` (`mcp:parse_time`, `mcp:strip_domain`) and called; fewer stay inline. 0: always inline. |
 | `layout` | `modes` | `modes`: each event kind is a template rule with its own mode (`match="node()" mode="eventTypeLogon"` with `camelCase` naming), applied to the record with `select="."` from the record template's `xsl:choose`; parts several kinds share are mode templates too. `named`: the same with named templates and `xsl:call-template`. `inline`: every kind written in the `xsl:choose`. |
 
 Elements that come out the same in several rules (EventTime, EventSource, ...) are written once, in a template of
 the layout's kind, whatever the style.
+
+Each rule's template is headed by a comment saying what it does: the records it handles (its conditions, or
+"records no other rule matches"), the event it writes (action element and TypeId), the fields it reads (which are
+extracted, and from what), and, for a rule kept `Unknown`, why. A shared template's comment names the rules that use
+it. Nothing to write by hand: they come from the mapping.
 
 ## Regular expressions in a mapping
 

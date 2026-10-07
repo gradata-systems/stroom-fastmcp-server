@@ -96,7 +96,7 @@ async def read_stream(
 ) -> dict[str, Any]:
     """
     Read records from a stream: raw input, Events XML, or a child part such as the receipt headers.
-    Output is trimmed to a size limit; page with first_record.
+    Whole records within a size limit: when fewer fit than asked, next_first_record says where to read on.
     """
     stroom = gateway_from(ctx)
     limit = stroom.settings.max_stream_chars

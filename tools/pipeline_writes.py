@@ -101,7 +101,8 @@ class PropertyValue(BaseModel):
     name: str = Field(description="Property name, e.g. 'xslt', 'textConverter', 'index', 'indexName'.")
     doc_uuid: str | None = Field(None, description="For document properties: the document's UUID.")
     doc_type: str | None = Field(None, description="For document properties: e.g. 'XSLT', 'TextConverter', 'Index'.")
-    value: str | int | bool | None = Field(None, description="For plain properties: the value.")
+    value: str | int | bool | None = Field(None, description="For plain properties: the value, written as the type "
+                                                             "Stroom declares for it (true/false, a number, text).")
 
 
 async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any], properties: list[PropertyValue],
