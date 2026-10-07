@@ -10,6 +10,15 @@ from tools import indexing
 from utils.fieldplan import FieldPlan, PlannedField
 from utils.templatecheck import read_mapping
 
+
+@pytest.fixture(autouse=True)
+def _events_streams():
+    """The streams these tests index are Events: the stream-type check has its own test (tests/test_formats.py)."""
+    from unittest.mock import AsyncMock, patch as _patch
+    with _patch('tools.indexing.require_events', AsyncMock()):
+        yield
+
+
 EVENTS = """<Events xmlns="event-logging:3"><Event StreamId="7" EventId="2">
 <EventTime><TimeCreated>2026-09-28T10:00:00.000Z</TimeCreated></EventTime>
 <EventSource><Device><HostName>ws01</HostName></Device><User><Id>alice</Id></User></EventSource>

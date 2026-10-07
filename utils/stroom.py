@@ -82,6 +82,7 @@ def _reason(response: httpx.Response) -> str:
 
 
 # Writes that change pipelines or where documents sit: a pipeline doc itself, or the explorer tree.
+_PIPELINE_DOC = re.compile(r'^/pipeline/v1/([0-9a-fA-F-]{36})$')
 _CHANGES_PIPELINES = re.compile(r'^/(pipeline/v1/|explorer/v2/(create|copy|move|delete))')
 
 
@@ -96,6 +97,7 @@ class StroomGateway:
                  authorization: dict[str, str] | None = None):
         self.settings = settings
         self.pipelines_changed = 0.0      # when this server last changed a pipeline or the explorer tree
+        self.pipelines_written: set[str] = set()   # pipelines this server wrote, which the search may not list yet
         # Outside a tool call (an upload with a ticket), the caller's token comes with the request, not the context.
         self._fixed_authorization = authorization
         self._client = httpx.AsyncClient(
@@ -167,6 +169,10 @@ class StroomGateway:
         if method != 'GET' and _CHANGES_PIPELINES.match(path):
             # A pipeline made, copied, moved, changed or deleted: what was cached about them is out of date.
             self.pipelines_changed = time.monotonic()
+            written = _PIPELINE_DOC.match(path)
+            if written and method == 'PUT':
+                # And the explorer's search lists a new pipeline only a while later: it is remembered here.
+                self.pipelines_written.add(written.group(1))
         data = response.json() if response.content else None
         if with_cookies:
             pairs = [c.split(';', 1)[0].strip() for c in response.headers.get_list('set-cookie')]

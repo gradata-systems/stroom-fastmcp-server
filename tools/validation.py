@@ -15,6 +15,9 @@ from utils.stroom import gateway_from
 XSL = 'http://www.w3.org/1999/XSL/Transform'
 EVT = 'event-logging:3'
 JSON_NS = 'http://www.w3.org/2013/XSL/json'
+EVENT_LOGGING_NS = 'event-logging:3'
+RECORDS_NS = 'records:2'
+RECORDS_SYSTEM_ID = 'file://records-v2.0.xsd'
 FN_NS = 'http://www.w3.org/2005/xpath-functions'
 # Stroom's XSLT extension functions (namespace 'stroom'), as its function library registers them. Anything else
 # fails to compile when the pipeline runs, so an unknown name is refused here with the nearest real one.
@@ -86,7 +89,10 @@ def _default_namespace(node: etree._Element) -> str | None:
     return None
 
 
-def _namespace_problems(root: etree._Element) -> list[str]:
+def _namespace_problems(root: etree._Element, input_namespace: str | None = None) -> list[str]:
+    """Bare element names of a parser's output read with no xpath-default-namespace. input_namespace '' (the
+    build's sample is XML in no namespace): its own records, record or data elements are what they say, not a Data
+    Splitter's records:2."""
     found: dict[str, list[str]] = {}
     for node in root.iter(f'{{{XSL}}}*'):
         if _default_namespace(node) is not None:
@@ -101,11 +107,14 @@ def _namespace_problems(root: etree._Element) -> list[str]:
                     continue
                 if names & known:
                     found.setdefault(namespace, []).append(f'{attr}="{expr}"')
+    if input_namespace == '':
+        found.pop(RECORDS_NS, None)
     problems = []
     for namespace, where in found.items():
         shown = ', '.join(where[:3]) + (f" and {len(where) - 3} more" if len(where) > 3 else '')
         note = (f" (the JSONParser's output; json-to-xml() output is in {FN_NS})" if namespace == JSON_NS else
-                " (a Data Splitter's output)" if namespace == 'records:2' else " (an Events stream)")
+                " (a Data Splitter's output, or XML that declares records:2)" if namespace == 'records:2'
+                else " (an Events stream)")
         problems.append(f"{shown} select nothing: those elements are in namespace {namespace}{note}, and no "
                         f"xpath-default-namespace is declared. Set xpath-default-namespace=\"{namespace}\" on "
                         f"xsl:stylesheet, or bind a prefix to it. If the input really has no namespace, declare "
@@ -203,6 +212,9 @@ async def check_xslt(
         schema_version: Annotated[str | None, Field(
             description="Event-logging version the output must follow, e.g. '3.5.2'. Defaults to the Version the "
                         "XSLT writes on Events, else the configured version.")] = None,
+        input_namespace: Annotated[str | None, Field(
+            description="The namespace of the XSLT's input when known ('' for a source's XML in no namespace, whose "
+                        "own records/record elements are then not taken for a Data Splitter's records:2).")] = None,
 ) -> dict[str, Any]:
     """
     Check an XSLT before saving or stepping it: well-formed, an xsl:stylesheet with a version, the stroom
@@ -223,7 +235,7 @@ async def check_xslt(
         errors.append("xsl:stylesheet needs a version attribute (Stroom supports 2.0 and 3.0)")
     function_errors, calls = _function_problems(xslt, root)
     errors += function_errors
-    errors += _namespace_problems(root)
+    errors += _namespace_problems(root, input_namespace)
     warnings += _unguarded_json(root)
     if root.find(f'.//{{{EVT}}}*') is not None:
         from tools.generation import event_schema
@@ -257,14 +269,29 @@ async def validate_events(
 ) -> dict[str, Any]:
     """
     Validate event XML against the event-logging XSD held in this Stroom instance, returning each error
-    with its line, element path and message.
+    with its line, element path and message. A records:2 document (a Data Splitter's output, a Lucene indexing
+    XSLT's) is validated against the records schema instead; any other XML (a source's own, say <records> with no
+    namespace) is not Events, and is said to be so rather than failing every element.
     """
     stroom = gateway_from(ctx)
-    system_id = (event_logging_system_id(schema_version) if schema_version
-                 else declared_system_id(events_xml) or event_logging_system_id(stroom.settings.event_logging_version))
+    root = _parse(events_xml, 'Events XML')
+    namespace, name = etree.QName(root).namespace, etree.QName(root).localname
+    if namespace not in (EVENT_LOGGING_NS, RECORDS_NS):
+        return {'valid': False, 'schema': None, 'error_count': 1, 'errors': [{
+            'line': None, 'path': f'/{name}', 'message': (
+                f"Not an Events document: its root is <{name}> in {f'namespace {namespace}' if namespace else 'no namespace'}, "
+                f"neither event-logging:3 Events nor records:2 records. A source's own XML (records of its own, say) is "
+                f"the input to a translation: validate what the translation writes (step_pipeline's output).")}]}
+    declared = declared_system_id(events_xml)
+    if namespace == RECORDS_NS:
+        # Records are records: their own schema, whatever version they declare, else the one Stroom ships.
+        system_id = declared if declared and 'records' in declared else RECORDS_SYSTEM_ID
+    else:
+        system_id = (event_logging_system_id(schema_version) if schema_version
+                     else declared or event_logging_system_id(stroom.settings.event_logging_version))
     cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(stroom))
     schema = await cache.get(system_id)
-    errors = errors_for(schema, _parse(events_xml, 'Events XML'))
+    errors = errors_for(schema, root)
     return {'valid': not errors, 'schema': system_id, 'error_count': len(errors), 'errors': errors[:50]}
 
 
@@ -411,6 +438,11 @@ async def check_events(
     EventDetail; no empty elements), per rule with the events failing it and examples.
     """
     schema = await validate_events(ctx, events_xml, schema_version)
+    which = schema.get('schema', '')
+    if which is None or 'records' in which:
+        # Not Events (records:2 records, or a source's own XML): the event quality rules don't apply.
+        return {'ok': schema['valid'], 'schema': schema,
+                'quality': {'ok': schema['valid'], 'note': "not event-logging Events: the event quality rules don't apply"}}
     quality = await check_event_quality(ctx, events_xml)
     return {'ok': schema['valid'] and quality['ok'], 'schema': schema, 'quality': quality}
 

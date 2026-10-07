@@ -234,7 +234,9 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     sibling_tc = await translation.create_text_converter(ctx, src, f'STYLE-OTHER-{stamp}', *FIREWALL['converter'])
     await pipeline_for(ctx, src, f'STYLE-OTHER-{stamp}-Events', text_template['uuid'], sibling_tc['uuid'], sibling['uuid'])
     described = await templates.describe_template(ctx, text_template['uuid'])
-    rows = [r for r in described.get('shared_xslt') or [] if f'STYLE-OTHER-{stamp}-Events' in (r.get('used_by') or [])]
+    # Any of the house-style siblings (this run's or an earlier one's: the survey reads a template's first children).
+    rows = [r for r in described.get('shared_xslt') or []
+            if any(u.startswith('STYLE-OTHER-') for u in (r.get('used_by') or []))]
     function = next((r for r in rows if r.get('function') == 'e2e:severityLevel'), {})
     e2e.check(function.get('namespace') == FUNCTIONS_NS and function.get('href') == COMMON_FUNCTIONS
               and function.get('params') == ['severity as xs:string?'] and function.get('returns') == 'xs:string'

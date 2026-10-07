@@ -21,6 +21,10 @@ SAMPLES = {
         '2026-10-01T08:00:00Z,alice,10.0.0.5,login\n'
         '2026-10-01T08:05:00Z,bob,10.0.0.6,logout\n'
         '2026-10-01T08:07:00Z,carol,10.0.0.7,login\n'),
+    'csv_noheader_quoted': (
+        '2026-10-01T08:00:00Z,alice,10.0.0.5,login,"Logged in, from the VPN"\n'
+        '2026-10-01T08:05:00Z,"o\'brien, pat",10.0.0.6,logout,"Said ""bye"" and left"\n'
+        '2026-10-01T08:07:00Z,carol,10.0.0.7,login,\n'),
     # Syslog
     'syslog3164_freeform': (
         '<38>Oct  1 08:00:00 bastion01 sshd[2211]: Accepted password for alice from 10.0.0.5 port 52211 ssh2\n'

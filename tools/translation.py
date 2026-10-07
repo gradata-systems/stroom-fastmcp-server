@@ -57,8 +57,18 @@ async def _generated(index_plan: FieldPlan | None) -> str:
     return index_plan.xslt()
 
 
-async def _checked(ctx: Context, xslt: str) -> None:
-    result = await check_xslt(ctx, xslt)
+async def _checked(ctx: Context, xslt: str, build: str | None = None) -> None:
+    input_namespace = None
+    if build:
+        # A source's own XML in no namespace: its <records><record> are not a Data Splitter's records:2.
+        from tools.plan import sample_format
+        try:
+            sample = await sample_format(ctx, build)
+        except Exception:
+            sample = None
+        if sample and sample.get('format') == 'xml':
+            input_namespace = sample.get('namespace') or ''
+    result = await check_xslt(ctx, xslt, input_namespace=input_namespace)
     if not result['ok']:
         raise ToolError(f"XSLT not saved: {'; '.join(result['errors'])}")
 
@@ -148,7 +158,7 @@ async def create_xslt(
     mapping (or index plan) it was generated from: it is kept with the XSLT, and the pipeline's documentation
     is generated from it.
     """
-    await _checked(ctx, code)
+    await _checked(ctx, code, build)
     stroom = gateway_from(ctx)
     ref = await guard_from(ctx).create('XSLT', name, build)
     doc = await stroom.get_doc('XSLT', ref['uuid'])

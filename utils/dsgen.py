@@ -74,6 +74,19 @@ class SplitterSpec(BaseModel):
         return self
 
 
+def named_columns_pattern(spec: SplitterSpec) -> str:
+    """The regex for a record of named columns (no header line): one group per column, quoted or not. A quoted
+    cell's group is its text without the quotes, a doubled quote inside kept doubled (as Data Splitter's containers
+    leave it). Seen: a value written as $1$2 from two groups, which Stroom refuses when one took no part."""
+    d = re.escape(spec.delimiter)
+    if spec.quote:
+        q = re.escape(spec.quote)
+        cell = f'{q}?((?<={q})(?:[^{q}]|{q}{q})*(?={q})|(?<!{q})[^{d}{q}]*){q}?'
+    else:
+        cell = f'([^{d}]*)'
+    return '^' + d.join(cell for _ in spec.header) + '$'
+
+
 def kv_patterns(spec: SplitterSpec) -> list[str]:
     """The regexes for one key=value pair, tried in turn as Data Splitter and the dry run both match them along the
     text: with a quote character, a quoted value first (without its quotes), then a bare one."""
@@ -140,15 +153,9 @@ def _record_xml(spec: SplitterSpec, indent: str) -> str:
     if spec.header is True:
         return f'{indent}<split delimiter="{_attr(spec.delimiter)}"{_container(spec)}>\n' \
                f'{indent}  <data name="$heading$1" value="$1" />\n{indent}</split>\n'
-    # Named columns without a header line: one regex over the record, a group per column.
-    d = re.escape(spec.delimiter)
-    cell = f'"([^"]*)"|([^{d}]*)' if spec.quote == '"' else f'([^{d}]*)'
-    pattern = '^' + d.join(cell for _ in spec.header) + '$'
-    lines = [f'{indent}<regex pattern="{_attr(pattern)}">']
-    per = 2 if spec.quote == '"' else 1
-    for n, name in enumerate(spec.header):
-        value = f'${n * per + 1}${n * per + 2}' if per == 2 else f'${n + 1}'
-        lines.append(f'{indent}  <data name="{_attr(name)}" value="{value}" />')
+    # Named columns without a header line: one regex over the record, one group per column.
+    lines = [f'{indent}<regex pattern="{_attr(named_columns_pattern(spec))}">']
+    lines += [f'{indent}  <data name="{_attr(name)}" value="${n}" />' for n, name in enumerate(spec.header, 1)]
     lines.append(f'{indent}</regex>')
     return '\n'.join(lines) + '\n'
 
@@ -226,10 +233,11 @@ def _apply_record(spec: SplitterSpec, text: str, heading: list[str] | None) -> d
         cells = _split_quoted(text, spec.delimiter, spec.quote)
         fields = {heading[n]: cell for n, cell in enumerate(cells) if heading and n < len(heading)}
     else:
-        cells = _split_quoted(text, spec.delimiter, spec.quote)
-        if len(cells) != len(spec.header):
+        # The same regex the converter runs.
+        m = re.match(named_columns_pattern(spec), text)
+        if not m:
             return None
-        fields = dict(zip(spec.header, cells))
+        fields = dict(zip(spec.header, m.groups()))
     if spec.body and spec.body_field in fields:
         inner = _apply_record(spec.body, fields[spec.body_field], None)
         if inner:

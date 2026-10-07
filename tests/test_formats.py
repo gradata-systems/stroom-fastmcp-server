@@ -85,3 +85,67 @@ def test_the_rule_for_the_rest_always_has_an_action_element():
     for name in ('csv_quoted', 'json_lines', 'xml_records'):
         other = rules(name)['other']
         assert any(f['path'].startswith('EventDetail/Unknown/') for f in other['fields'])
+
+
+def test_headerless_quoted_csv_is_one_group_per_column():
+    # $1$2 per column (a quoted group or a bare one) is refused by Stroom when one took no part.
+    spec = SplitterSpec(kind='delimited', header=['time', 'user', 'message'], quote='"')
+    run = dry_run(spec, '2026-10-01T08:00:00Z,"o\'brien, pat","Said ""bye"" and left"\n2026-10-01T08:05:00Z,bob,\n')
+    assert run['records'] == [{'time': '2026-10-01T08:00:00Z', 'user': "o'brien, pat", 'message': 'Said ""bye"" and left'},
+                              {'time': '2026-10-01T08:05:00Z', 'user': 'bob', 'message': ''}]
+    xml = generate_splitter(spec)
+    assert '<data name="message" value="$3" />' in xml and '$1$2' not in xml
+
+
+async def test_a_records_source_is_validated_as_what_it_is_and_never_indexed_as_events():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import indexing, validation
+    ctx = SimpleNamespace(lifespan_context={})
+    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))
+    cache = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(validate=lambda doc: True, error_log=[])))
+    with patch.object(validation, 'gateway_from', lambda ctx: stroom), patch.object(validation, 'SchemaCache', lambda s: cache):
+        own = await validation.validate_events(ctx, '<records><record><user>alice</user></record></records>')
+        assert own['schema'] is None and own['errors'][0]['message'].startswith('Not an Events document: its root is '
+                                                                                '<records> in no namespace')
+        records = await validation.validate_events(ctx, '<records xmlns="records:2"><record/></records>')
+        assert records['schema'] == 'file://records-v2.0.xsd' and cache.get.await_args.args[0] == 'file://records-v2.0.xsd'
+        checked = await validation.check_events(ctx, '<records xmlns="records:2"><record/></records>')
+        assert 'quality rules' in checked['quality']['note']
+    raw = SimpleNamespace(find_meta=AsyncMock())
+    with patch.object(indexing, '_meta', AsyncMock(return_value={'typeName': 'Raw Events'})), \
+            pytest.raises(ToolError, match="is 'Raw Events', not Events: the source's own data"):
+        await indexing.require_events(raw, [7])
+
+
+async def test_a_hand_written_xslt_reading_its_own_records_bare_is_fine_for_xml_in_no_namespace():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tools import validation
+    hand = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="2.0">'
+            '<xsl:template match="records"><xsl:apply-templates select="record"/></xsl:template></xsl:stylesheet>')
+    with patch.object(validation, '_import_problems', AsyncMock(return_value=[]), create=True):
+        flagged = await validation.check_xslt(SimpleNamespace(lifespan_context={}), hand)
+        fine = await validation.check_xslt(SimpleNamespace(lifespan_context={}), hand, input_namespace='')
+    assert any('namespace records:2' in e for e in flagged['errors'])
+    assert not any('namespace records:2' in e for e in fine['errors'])
+
+
+async def test_a_discovery_pipeline_may_be_checked_over_raw_data_any_other_only_over_events():
+    # Seen in e2e: a discovery index (raw JSON indexed as it is) refused its template check for its raw sample.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import indexing
+    ctx = SimpleNamespace(lifespan_context={})
+    raw = AsyncMock(side_effect=ToolError("Stream 7 is 'Raw Events', not Events"))
+    with patch.object(indexing, 'require_events', raw), patch.object(indexing, 'gateway_from', lambda ctx: None):
+        with patch.object(indexing, '_shape', AsyncMock(return_value={'stage': 'discovery'})):
+            await indexing._require_input(ctx, 'p', [7])
+        # An XML discovery pipeline's parser is an indexing pipeline's too: its plan says what it is.
+        await indexing._require_input(ctx, 'p', [7], SimpleNamespace(discovery={'input': 'xml'}))
+        with pytest.raises(ToolError, match='not Events'):
+            await indexing._require_input(ctx, 'p', [7], SimpleNamespace(discovery=None))

@@ -329,6 +329,9 @@ async def create_pipeline(
     if unknown:
         raise ToolError(f"The pipeline has no element(s) {unknown}; its elements are {sorted(elements)}")
     _keep_validation({e['id']: e['type'] for e in merged['elements']}, set_properties)
+    # The parser first: a template whose parser can't read the sample is the wrong one, whatever else it lacks (seen:
+    # an XML source refused the Data Splitter template for want of a text converter, not for its parser).
+    await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
     array = await _json_array_parser(stroom, merged, properties, await _sample_is_array(ctx, build))
     if array:
@@ -336,7 +339,6 @@ async def create_pipeline(
         filled = list(filled or []) + [f"{array.element}.addRootObject = false (the sample is a JSON array: "
                                        f"each item is a record)"]
     await _own_documents(ctx, build, properties, reuse_existing_docs)
-    await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
     refs = await reference_entries(stroom, merged, references)
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
                'sets': [f'{p.element}.{p.name}' for p in properties],

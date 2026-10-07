@@ -10,6 +10,15 @@ from tools import indexing
 from utils.fieldplan import FieldPlan, PlannedField
 from utils.templatecheck import compare, json_xml_documents, parse_template
 
+
+@pytest.fixture(autouse=True)
+def _events_streams():
+    """The streams these tests index are Events: the stream-type check has its own test (tests/test_formats.py)."""
+    from unittest.mock import AsyncMock, patch as _patch
+    with _patch('tools.indexing.require_events', AsyncMock()):
+        yield
+
+
 OUTPUT = """<?xml version="1.1"?><array xmlns="http://www.w3.org/2005/xpath-functions">
 <map><number key="StreamId">7</number><number key="EventId">1</number><string key="@timestamp">2026-09-28T10:00:00.000Z</string>
 <string key="user.name">alice</string><string key="source.ip">10.0.0.1</string><boolean key="event.outcome">false</boolean>

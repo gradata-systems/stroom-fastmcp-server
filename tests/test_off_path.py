@@ -17,6 +17,15 @@ from utils.fieldplan import FieldPlan, PlannedField
 
 # Part A: the plan's states ---------------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _events_streams():
+    """The streams these tests index are Events: the stream-type check has its own test (tests/test_formats.py)."""
+    from unittest.mock import AsyncMock, patch as _patch
+    with _patch('tools.indexing.require_events', AsyncMock()):
+        yield
+
+
 DONE = {
     'feed': True, 'samples': True, 'converter': True, 'translation': True, 'pipeline': True, 'ev_stepped': True,
     'events': True, 'ev_documented': True, 'index_doc': True, 'ix_pipeline': True, 'ix_stepped': True,

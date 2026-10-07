@@ -382,6 +382,7 @@ async def draft_index_mapping(
             return gate
     if not events_stream_ids:
         raise ToolError("Give events_stream_ids: the Events streams the index will hold, to see which paths they populate")
+    await require_events(gateway_from(ctx), events_stream_ids)
     profiles = _conventions(ctx)
     pasted = example_template
     like_note = None
@@ -665,6 +666,47 @@ async def create_index_doc(
     return await with_next(ctx, build, {'type': doc_type, 'uuid': doc['uuid'], 'name': doc['name'], **target, **extra})
 
 
+async def require_events(stroom, stream_ids: list[int]) -> None:
+    """Each stream is an Events stream: never a source's own data, whatever its content looks like (seen: a raw
+    <records> stream taken as the Events to plan an index from, and a plan drafted from nothing)."""
+    for stream_id in stream_ids:
+        meta = await _meta(stroom, stream_id)
+        if meta.get('typeName') != 'Events':
+            raise ToolError(f"Stream {stream_id} is {meta.get('typeName')!r}, not Events: the source's own data, "
+                            f"whatever its XML or records look like. An index holds the Events an events pipeline "
+                            f"writes: process the sample through it (create_processor_filter, wait_for_processing) "
+                            f"and give those Events streams (stage 1 first).")
+
+
+async def _require_input(ctx: Context, pipeline_uuid: str, stream_ids: list[int], plan: FieldPlan | None = None) -> None:
+    """The streams an indexing pipeline is checked over: Events, unless it is a discovery pipeline, which indexes a
+    source's own data as it is (seen in e2e: a discovery index's template refused for its raw sample)."""
+    try:
+        await require_events(gateway_from(ctx), stream_ids)
+    except ToolError:
+        if await _is_discovery(ctx, pipeline_uuid, plan):
+            return
+        raise
+
+
+async def _is_discovery(ctx: Context, pipeline_uuid: str, plan: FieldPlan | None) -> bool:
+    """Whether the pipeline indexes raw data as it is: its plan says so (the one given, else the one kept with its
+    XSLT), or its parser is a raw one. An XML discovery pipeline's XMLParser is also an indexing pipeline's."""
+    if plan is not None:
+        return bool(plan.discovery)
+    stroom = gateway_from(ctx)
+    if (await _shape(stroom, pipeline_uuid)).get('stage') == 'discovery':
+        return True
+    from tools.pipelines import merge_layers
+    for prop in merge_layers(await stroom.pipeline_layers(pipeline_uuid))['properties']:
+        value = prop.get('value')
+        if prop['name'] == 'xslt' and isinstance(value, dict) and value.get('uuid'):
+            kept = read_mapping((await stroom.get_doc('XSLT', value['uuid'])).get('description'))
+            if kept and kept[0] == 'index' and (kept[1] or {}).get('discovery'):
+                return True
+    return False
+
+
 async def _events_available(ctx: Context, build: str, events_stream_ids: list[int]) -> None:
     """An indexing pipeline reads Events, which raw data only has once an events pipeline has translated it.
     The build's own events pipeline counts; otherwise the Events streams it will index must already exist."""
@@ -679,10 +721,7 @@ async def _events_available(ctx: Context, build: str, events_stream_ids: list[in
                         f"index Events an existing pipeline already produces, pass their stream ids as "
                         f"events_stream_ids. Raw structured data indexed as it is, with no translation, is a "
                         f"discovery template (find_pipeline_templates stage=discovery).")
-    meta = await _meta(stroom, events_stream_ids[0])
-    if meta.get('typeName') != 'Events':
-        raise ToolError(f"Stream {events_stream_ids[0]} is {meta.get('typeName')!r}, not Events. An indexing pipeline "
-                        f"reads the Events streams an events pipeline produces; build that first (stage 1).")
+    await require_events(stroom, events_stream_ids)
 
 
 async def _missing_index_fields(stroom, index_uuid: str, xslt_uuid: str) -> tuple[list[str], FieldPlan | None]:
@@ -1404,6 +1443,7 @@ async def propose_index_template(
                         "it is not in this conversation, ask the user to paste it and end your turn. Only if they say "
                         "they have none: without_example=true, and they confirm the template built from the plan."}
     composed, _ = compose(body, components)
+    await _require_input(ctx, pipeline_uuid, events_stream_ids, plan)
     check = compare(composed, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
     text = json.dumps(body, indent=2)
     if not example_template:
@@ -1460,6 +1500,7 @@ async def check_index_template(
         raise ToolError(str(e)) from e
     body, missing = compose(body, components)
     destination = await _destination(ctx, pipeline_uuid)
+    await _require_input(ctx, pipeline_uuid, events_stream_ids)
     result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
                      destination['index name'])
     result['notes'] = _component_notes(missing) + result['notes']

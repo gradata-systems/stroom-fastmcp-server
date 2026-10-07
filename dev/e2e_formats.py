@@ -9,7 +9,7 @@ recognised, a regex for a free-form message, names for headerless columns); buil
 against the sample and saves it; the pipeline is a child of the template the profile names; Stroom steps every
 record clean, each Event valid, with the record's user and time.
 
-Delimited (quoted CSV with "" inside quotes, TSV, pipe, no header), syslog (RFC 3164 free-form, RFC 5424 with a
+Delimited (quoted CSV with "" inside quotes, TSV, pipe, no header, no header and quoted), syslog (RFC 3164 free-form, RFC 5424 with a
 key=value body), CEF (alone, and after a syslog header), key=value with quoted values, JSON lines and a nested
 JSON array, XML documents (records/record, attributes, a prefixed namespace) and XML fragments with their own
 namespace.
@@ -66,6 +66,10 @@ CASES = {
     'csv_noheader': {'format': 'delimited', 'template': TEXT, 'user': 'user', 'users': USERS,
                      'spec': {'kind': 'delimited', 'delimiter': ',', 'header': ['time', 'user', 'src_ip', 'action']},
                      'rules': logon_rules('action', 'login', 'logout', 'user')},
+    'csv_noheader_quoted': {'format': 'delimited', 'template': TEXT, 'user': 'user', 'users': ['alice', "o'brien, pat", 'carol'],
+                            'spec': {'kind': 'delimited', 'delimiter': ',', 'quote': '"',
+                                     'header': ['time', 'user', 'src_ip', 'action', 'message']},
+                            'values': {'Description': ['Logged in, from the VPN', 'Said "bye" and left', None]}},
     # A free-form message: the agent writes the regex.
     'syslog3164_freeform': {'format': 'syslog rfc3164', 'template': TEXT, 'user': 'user', 'users': USERS,
                             'extract': [SSH], 'rules': logon_rules('outcome', ['Accepted', 'Failed'], None, 'user')},

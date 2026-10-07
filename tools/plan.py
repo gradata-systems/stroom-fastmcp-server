@@ -134,6 +134,7 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
     text, _, _ = await read_head(gateway_from(ctx), newest['id'], 0, 20_000)
     profiled = profile(text)
     return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': profiled['format'],
+            'namespace': profiled.get('namespace'), 'root': profiled.get('root'),
             'suggested_parser': profiled.get('suggested_parser'), 'needs_text_converter': profiled['format'] in TEXT_FORMATS
             or profiled['format'] == 'xml fragments'}
 

@@ -40,15 +40,23 @@ async def _pipeline_index(ctx: Context) -> dict[str, dict[str, Any]]:
         return cached[1]
     found = await stroom.find_all_documents('type:Pipeline', ['Pipeline'])
     refs = [v for v in found if v['docRef'].get('type') == 'Pipeline']
+    # The search lists a pipeline only a while after it is made: those this server wrote are added (seen in e2e: a
+    # sibling made seconds before missing from its template's children, with the shared XSLTs it calls).
+    listed = {v['docRef']['uuid'] for v in refs}
+    refs += [{'docRef': {'type': 'Pipeline', 'uuid': u}, 'path': ''}
+             for u in sorted(getattr(stroom, 'pipelines_written', set()) - listed)]
     semaphore = asyncio.Semaphore(8)
 
     async def load(value):
         async with semaphore:
-            doc = await stroom.get(f"/pipeline/v1/{value['docRef']['uuid']}")
+            try:
+                doc = await stroom.get(f"/pipeline/v1/{value['docRef']['uuid']}")
+            except ToolError:
+                return None     # written here, and deleted since
         parent = doc.get('parentPipeline') or {}
         return value['docRef']['uuid'], {'uuid': value['docRef']['uuid'], 'name': doc.get('name'),
                                          'path': _path(value.get('path')), 'parent_uuid': parent.get('uuid')}
-    index = dict(await asyncio.gather(*(load(v) for v in refs)))
+    index = dict(entry for entry in await asyncio.gather(*(load(v) for v in refs)) if entry)
     ctx.lifespan_context['pipeline_index'] = (time.monotonic(), index)
     return index
 
