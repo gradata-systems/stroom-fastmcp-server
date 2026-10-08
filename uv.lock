@@ -1379,7 +1379,7 @@ wheels = [
 
 [[package]]
 name = "stroom-fastmcp-server"
-version = "0.16.33"
+version = "0.16.34"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },
