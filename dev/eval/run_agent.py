@@ -66,14 +66,18 @@ MCP server. You know only the request below. Read the agent's latest message and
 
 - agree: it asks you to confirm or approve something within the request: a feed or index name, a pending
   confirmation or approval, a proposed template, backend, volume group, convention, mapping or plan. Reply with a
-  short agreement ("Yes, go ahead.").
+  short agreement ("Yes, go ahead."). Promotion is never within the request: if the message also offers or waits on
+  promotion, choose promote instead.
 - answer: it asks a question the request or sample answers (there are no more sample files than those given; the
-  index is Lucene, with the stroom-flat convention). Reply briefly, using only the request and sample.
+  index is Lucene, with the stroom-flat convention). Reply briefly, using only the request and sample. When it asks
+  for something about your organisation the request doesn't say (the Environment, a system name), say you don't
+  know it, and to use a placeholder such as Unknown, note it as open, and carry on.
 - help: it is stuck, reports a problem it cannot solve, or asks how to do something technical the request does not
   say (which element, regex, XSLT or tool to use, how to fix an error). Leave reply empty.
 - continue: it stopped without asking anything before the work is finished (events processed and validated, then
   indexed, the index verified and both pipelines documented), or it asks whether to carry on. Leave reply empty.
-- promote: it asks whether or where to promote the build. Leave reply empty.
+- promote: it asks whether or where to promote the build, or says it will wait for a go-ahead to promote. Leave
+  reply empty.
 - done: it says the work is finished, or that it gives up. Leave reply empty.
 
 Never give technical guidance of your own."""
@@ -212,7 +216,8 @@ class Agent:
                                    if (c.get('input') or {}).get(key) in issued)
         result = next((e for e in reversed(events) if e.get('type') == 'result'), None) or {
             'is_error': True, 'result': 'no result from claude'}
-        self.cost += result.get('total_cost_usd') or 0.0
+        # The session's running total: a resumed turn reports the whole session's cost so far, not its own.
+        self.cost = max(self.cost, result.get('total_cost_usd') or 0.0)
         return result
 
 

@@ -57,6 +57,9 @@ _PATTERN_LETTERS = set('GuyDMLdQqYwWEecFaHkKhmsSAnNVzOXxZp')
 Scope = Literal['record', 'item']
 
 
+# A directory's attributes of a person, which belong in User/UserDetails.
+_PERSON_DETAIL = re.compile(r'(department|dept|organi[sz]ation|org|unit|team|division|business_?group|job_?title|title|staff_?number)', re.I)
+
 class Lookup(BaseModel):
     """Reference data: what stroom:lookup() finds for a key in a map a reference loader provides (find_reference_data
     lists the maps). The pipeline must name the loader as a pipeline reference (create_pipeline references, or
@@ -839,6 +842,15 @@ class _Generator:
         scope = entry.scope
         if entry.lookup:
             self.reference_maps.add(entry.lookup.map)
+            looked_up = (entry.lookup.path or '').strip('/').rsplit('/', 1)[-1]
+            if '/User/Groups/' in f'/{entry.path}' or (_PERSON_DETAIL.fullmatch(looked_up)
+                                                       and '/UserDetails/' not in f'/{entry.path}'):
+                # Seen (eval case 15, Haiku): a directory's department written as a security group, then as Data.
+                self._note(self.warnings, f"{entry.path} is looked up from {entry.lookup.map} ({looked_up or 'its value'}): "
+                                          f"a person's department, organisation or business group from a directory "
+                                          f"goes in User/UserDetails (Unit, Organisation, Group, Title), on the user "
+                                          f"it describes; User/Groups is for the security groups an account belongs "
+                                          f"to.")
             key = self.key_expr(entry.lookup.field, entry.lookup.xpath, scope)
             found = f"stroom:lookup({literal(entry.lookup.map)}, {key})"
             if not entry.lookup.path:
@@ -1235,7 +1247,10 @@ class _Generator:
         present = set(node.kids) | ({'Data'} if node.data else set())
         for c in allowed:
             if c.required and c.name not in present:
-                self._note(self.problems, f"[{rule}] {node.path}/{c.name} is required by the schema; map it")
+                # Seen: Haiku left Environment out when the user didn't know it, then stopped for good on this problem.
+                unknown = (" (a value only the user knows: if they don't, a placeholder they agree to, such as "
+                           "Unknown, recorded as an open item)") if node.path == 'Event/EventSource/System' else ''
+                self._note(self.problems, f"[{rule}] {node.path}/{c.name} is required by the schema; map it{unknown}")
             elif c.required and c.name in node.kids and self.test_of(node.kids[c.name]) not in (None, self.test_of(node)):
                 self._conditional.append(f"{node.path}/{c.name}".removeprefix('Event/'))
         for cid, members in self.schema.required_choices.items():

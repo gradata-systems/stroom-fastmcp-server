@@ -1570,11 +1570,15 @@ def _cidr(value: str) -> str:
     return f"{'.'.join(known + ['0'] * (4 - len(known)))}/{8 * len(known)}" if known else '10.0.0.0/8'
 
 
+_RANGES = ('BETWEEN', 'GREATER_THAN', 'GREATER_THAN_OR_EQUAL_TO', 'LESS_THAN', 'LESS_THAN_OR_EQUAL_TO')
+
+
 def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] = frozenset(),
-                exact: list[dict[str, str]] = ()) -> None:
+                exact: list[dict[str, str]] = (), lucene_text: dict[str, str] | None = None) -> None:
     """Searches whose answer would mislead: on Elasticsearch, Stroom (7.13) finds nothing for STARTS_WITH and
     CONTAINS, nor for a wildcard on an ip field, and matches every document for IS_NULL and IS_NOT_NULL, without an
-    error; IN takes values separated by commas."""
+    error; on Lucene it finds nothing for STARTS_WITH and ENDS_WITH, for CONTAINS on a keyword field, nor for a range
+    on a text field (lucene_text: the index's TEXT fields and their analyzers); IN takes values separated by commas."""
     problems = []
     for e in exact:
         if backend == 'elasticsearch' and e.get('field') in ip_fields and '*' in str(e.get('value')):
@@ -1586,11 +1590,32 @@ def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] =
             problems.append(f"{s.field} EQUALS '{s.value}': {s.field} is an ip field, where a wildcard finds nothing; "
                             f"use EQUALS '{_cidr(s.value)}' (a CIDR range)")
         if s.condition == 'IN' and ',' not in s.value and ' ' in s.value.strip():
-            problems.append(f"{s.field} IN '{s.value}': separate the values with commas")
+            problems.append(f"{s.field} IN '{s.value}': separate the values with commas (one value holding a space is "
+                            f"EQUALS '{s.value}')")
+        elif backend == 'lucene' and s.condition == 'IN' and any(' ' in v.strip() for v in s.value.split(',')):
+            # Seen (eval case 15): IN 'Main entrance,Server room' found 0 where EQUALS 'Server room' found 2.
+            problems.append(f"{s.field} IN '{s.value}': Stroom finds nothing with IN on a Lucene index when a value "
+                            f"holds a space; search each such value with EQUALS")
         if backend == 'elasticsearch' and s.condition in ('STARTS_WITH', 'CONTAINS'):
-            pattern = f"{s.value}*" if s.condition == 'STARTS_WITH' else f"*{s.value}*"
+            bare = s.value.strip('*')
+            pattern = f"{bare}*" if s.condition == 'STARTS_WITH' else f"*{bare}*"
             problems.append(f"{s.field} {s.condition} '{s.value}': Stroom finds nothing with {s.condition} on "
                             f"Elasticsearch; use EQUALS '{pattern}' (a wildcard) or MATCHES_REGEX")
+        # Seen on the local Stroom (eval case 22, Haiku): each of these found 0 where EQUALS with a wildcard found
+        # them all, and the agent spent twenty turns on checks that could never pass.
+        if backend == 'lucene' and s.condition in ('STARTS_WITH', 'ENDS_WITH'):
+            bare = s.value.strip('*')      # seen: STARTS_WITH 'A*', given back as EQUALS 'A**'
+            pattern = f"{bare}*" if s.condition == 'STARTS_WITH' else f"*{bare}"
+            problems.append(f"{s.field} {s.condition} '{s.value}': Stroom finds nothing with {s.condition} on a Lucene "
+                            f"index; use EQUALS '{pattern}' (a wildcard)")
+        analyzer = (lucene_text or {}).get(s.field)
+        if backend == 'lucene' and s.condition == 'CONTAINS' and analyzer == 'KEYWORD':
+            problems.append(f"{s.field} CONTAINS '{s.value}': {s.field} is a keyword field, where Stroom finds nothing "
+                            f"with CONTAINS; use EQUALS '*{s.value.strip('*')}*' (a wildcard)")
+        if backend == 'lucene' and s.condition in _RANGES and analyzer:
+            problems.append(f"{s.field} {s.condition} '{s.value}': {s.field} is a text field in Lucene, where Stroom "
+                            f"finds nothing with a range; use EQUALS with a wildcard (an address range as '10.1.*') "
+                            f"or IN with the values")
         if backend == 'elasticsearch' and s.condition == 'IS_NOT_NULL':
             problems.append(f"{s.field} IS_NOT_NULL: Stroom matches every document with IS_NOT_NULL on Elasticsearch; "
                             f"use EQUALS '*' (any value) instead")
@@ -1652,6 +1677,15 @@ async def verify_index(
                 typed = {}
         _searchable(backend, searches, {n for n, t in typed.items() if t in ('ip', 'ipv4_address')},
                     [e for e in exact if isinstance(e, dict)])
+    elif any(s.condition == 'CONTAINS' or s.condition in _RANGES for s in searches):
+        try:
+            found = await stroom.post('/index/v2/findFields', {'dataSourceRef': {'type': 'Index', 'uuid': index_uuid},
+                                                               'pageRequest': {'offset': 0, 'length': 2000}})
+            text = {f['fldName']: f.get('analyzerType') or '' for f in found.get('values') or []
+                    if f.get('fldName') and f.get('fldType') == 'TEXT'}
+        except Exception:    # a check on the searches, not a reason for verification to fail
+            text = {}
+        _searchable(backend, searches, lucene_text=text)
     name = dashboard_name or f"{index.get('name')}-VERIFY"
     fields = [f for f in fields if f not in _IDS]
     time_field = index.get('timeField') or index.get('timeFieldName')

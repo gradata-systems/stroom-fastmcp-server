@@ -11,8 +11,9 @@ expected:
   # UserDetails Unit or Group as an Organisation: any of them passes, as long as the lookup filled it.
   event_types: ['Authenticate|Authorise']
   paths: [EventTime/TimeCreated, EventSource/User/Id, EventSource/User/Name,
-          'EventSource/User/UserDetails/Organisation|EventSource/User/UserDetails/Unit|EventSource/User/UserDetails/Group',
-          'EventDetail/Authenticate/Action|EventDetail/Authorise/Action']
+          'EventSource/User/UserDetails/Organisation|EventSource/User/UserDetails/Unit|EventSource/User/UserDetails/Group']
+  # No Action required: the source says only granted or denied, and Authorise's Action is optional (Authenticate's
+  # is required, which validation already checks).
 sample: |
   time,badge_user,door,result
   2026-10-01T07:58:00Z,ALICE,Main entrance,granted

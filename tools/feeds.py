@@ -109,6 +109,9 @@ async def create_feed(
     return await with_next(ctx, build, result)
 
 
+ALWAYS_EFFECTIVE = '2000-01-01T00:00:00.000Z'      # a reference sample's default effective time
+
+
 async def upload_sample(
         ctx: Context,
         feed: Annotated[str, Field(description="Feed name, e.g. one created with create_feed.")],
@@ -123,9 +126,8 @@ async def upload_sample(
         stream_type: Annotated[str, Field(description="'Raw Events', or 'Raw Reference' for a reference feed.")] = 'Raw Events',
         effective_time: Annotated[str | None, Field(
             description="Reference data only: from when it applies (ISO 8601 UTC). A lookup uses the reference data in "
-                        "effect at the event stream's time, so give a time before the events, e.g. "
-                        "'2000-01-01T00:00:00.000Z' for a table that always applied. Default: now, which is after "
-                        "any sample already uploaded.")] = None,
+                        "effect at the event stream's time. Default: 2000-01-01T00:00:00.000Z, a table that always "
+                        "applied, so it covers sample events uploaded before it.")] = None,
 ) -> dict[str, Any]:
     """
     Send sample data to a feed through Stroom's datafeed receiver, as the real source would, and return
@@ -135,8 +137,13 @@ async def upload_sample(
     a command per file for the user's terminal sends each from their disk, whole, not through you. sample= is only
     for text the user pasted into the chat.
     """
+    if stream_type == 'Raw Reference' and not effective_time:
+        # Seen (eval case 15, Haiku): a directory uploaded without one took effect when it arrived, after the event
+        # samples, whose lookups then found no reference data.
+        effective_time = ALWAYS_EFFECTIVE
     if files and not sample:
-        return await upload_ticket(ctx, feed, files, stream_type, headers)
+        return await upload_ticket(ctx, feed, files, stream_type,
+                                   {'EffectiveTime': effective_time, **(headers or {})} if effective_time else headers)
     if not sample:
         raise ToolError("Give files (the sample files' paths on the user's disk) or sample (only text the user pasted "
                         "into the chat)")

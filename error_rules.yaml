@@ -26,7 +26,7 @@ rules:
   - {message: 'Attempt to index unknown field', class: blocking,
      reason: "The index has no such field, so the value is dropped: save the indexing XSLT from its plan (save_xslt index_plan=...), and create_indexing_pipeline adds the plan's fields to the index"}
   - {message: 'No effective stream', class: blocking,
-     reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time)"}
+     reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time), or the feed was looked up before its reference data was processed: Stroom keeps that empty answer for 10 minutes (its Reference Data - Effective Stream Cache), so step again once 10 minutes have passed since the first lookup, or ask an administrator to clear that cache (Caches screen)"}
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}
   - {own: true, severity: [ERROR], class: blocking, reason: "Error in this pipeline's own element"}
   - {own: false, severity: [ERROR], class: review, reason: 'Error in an inherited element; check whether our output causes it'}

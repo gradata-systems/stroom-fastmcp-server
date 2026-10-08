@@ -46,7 +46,8 @@ case), not a margin to spend.
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
 count, event types, paths every event must have (`*` for one element any of several may fill, such as
-`Network/*/Source` for Open, Permit or Deny; `a|b` for alternatives, in types as in paths), and optionally `values` some event must hold exactly, such as a
+`Network/*/Source` for Open, Permit or Deny; `a|b` for alternatives, in types as in paths; an element the schema
+makes optional is required only when the source data holds its value), and optionally `values` some event must hold exactly, such as a
 free-text message carried whole or a time read from the right field), optionally `forbidden_types` no event may have
 (Unknown, for a source whose every record has an action element) and `data`: a Data element of a given Name (and
 value) that every event, or with `every: false` some event, must have directly under a given element, and

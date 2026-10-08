@@ -132,6 +132,7 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
         raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
     total = (body.get('totalCharacterCount') or {}).get('count') or 0
     parts, have = [body.get('data') or ''], len(body.get('data') or '')
+    ended = False
     while have < min(total, max_chars):
         # Stroom's ranges end one past the length asked for, so the next page starts after what came back.
         page = await stroom.post('/data/v1/fetch', {
@@ -140,13 +141,16 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
             'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
         data = page.get('data') or ''
         if not data or data.strip() == NO_DATA:
-            break       # past the end: Stroom answers a range beyond the data with its placeholder, not nothing
+            ended = True    # past the end: Stroom answers a range beyond the data with its placeholder, not nothing
+            break
         parts.append(data)
         have += len(data)
     text = ''.join(parts)
     if text.rstrip().endswith(NO_DATA):
         text = text.rstrip()[:-len(NO_DATA)]
-    truncated = len(text) > max_chars or len(text) < total
+    # Stroom's count can be one more than the text it returns: once past the end, the whole text is read (seen: a
+    # JSON array uploaded without a final newline cut back to its last line end, which no longer parsed).
+    truncated = len(text) > max_chars or (len(text) < total and not ended)
     if truncated:
         text = text[:max_chars]
         text = text[:text.rfind('\n') + 1] or text

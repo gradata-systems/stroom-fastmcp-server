@@ -270,9 +270,38 @@ is given: no suite read `next`. These follow it, and try the wrong moves agents 
 | Twin build folders (`dev/e2e_translation.py`, intermittently) | `copy_pipeline` creates a pipeline and its XSLT one after the other in a new build. Each looked for the build folder in the search index, which doesn't list a new folder yet, so the second created another folder of the same name. The build was split across two folders; promotion removed one and reported the build folder removed, and the other stayed. | A build's folder is found first among the folders the server process already found or made, then in the explorer tree, and only then in the search index; a folder from the tree or the search must still resolve, as both list a deleted one for a moment. (0.16.6 took the tree's word for it, so an emptied build folder seemed to survive its removal; fixed in 0.16.7.) Removing a folder waits until the tree shows it empty, and is confirmed a moment after the delete, and retried, before promotion reports it. |
 | Following another index | `like_index` read the index's fields before asking the user, so an index whose cluster was unreachable gave the agent an error instead of the user a form. | The user is asked first, with the index named; its fields are read only once they agree. |
 
+## The evaluation set on Haiku (`dev/eval/run_agent.py`, 8 and 9 October)
+
+All 34 onboarding cases, once each, with Claude Haiku as the agent and as the scripted user: 28 passed (8 of 19 on
+4 October). The failures and the help loops traced to the server, its guidance and the harness; the fixed cases
+were run again: 07, 16, 22 and 27 then passed with no help asked; 15's lookups worked, with the department still
+put outside `UserDetails` (the warning for that came after); `fix_errors`
+finished in one turn where it had taken twenty. The run cost $12.56 at API prices, the reruns about $5.
+
+| Area | Result | Consequence |
+| --- | --- | --- |
+| A sample's last line dropped (cases 16, 28) | Stroom counts one character more than a raw stream's text. A stream with no final newline read as cut short, and was cut back to its last line end: a JSON array lost its closing line, an XML document its root's end tag, and the draft failed to parse them ("Expecting value", "format could not be inferred"). | Once a read has gone past the end, the text is whole. |
+| sudo as Authorise (case 07) | With no field naming kinds, the draft gave every record Unknown/Data, and the agent chose Authorise. | A record with a command field is drafted as Process (Execute, its Command), a run-as field as `EventSource/RunAs/Id`; the guide says when Authorise applies. The draft's note for one kind of record says to replace Unknown with its action element. |
+| Environment unknown (cases 16, 22, 27) | The user didn't know the Environment, and Haiku would neither leave it out (the schema requires it) nor choose a value: up to 30 turns stopped on it. | The schema problem and the draft's note say a placeholder the user agrees to (Unknown) keeps the build going, recorded as an open item. |
+| Searches that can't pass on Lucene (case 22) | Twenty turns on verification searches that Stroom's Lucene search answers with nothing and no error: STARTS_WITH and ENDS_WITH, CONTAINS on a keyword field (and on part of a word), a range on an address; and (case 15) IN when a value holds a space. EQUALS with wildcards found the same documents. | `verify_index` refuses those searches on Lucene, naming the wildcard to use; the indexing guide has a Lucene section. |
+| Reference data looked up too early (case 15) | The events pipeline was stepped before the directory was processed. Stroom remembers "no effective streams" for a feed for 10 minutes (Reference Data - Effective Stream Cache, ExpireAfterWrite), so every step in the next seven minutes failed, and the agent replaced the reference data with dictionaries. | `step_sample` refuses a pipeline whose reference feed has no stream of the referenced type yet, saying to process it first and why. The triage reason names the cache. In a rerun the directory was uploaded with no effective time, so it took effect after the event sample it was to enrich: a reference sample now applies from 2000-01-01 unless told otherwise (and `files=` passes the effective time on, which it never did). |
+| A directory's department as a security group (case 15) | The department looked up from the directory went to `User/Groups/Group/Name`, and in a rerun to the action's `Data`. | A lookup into `User/Groups`, or of a person's detail (department, organisation, unit, title) anywhere but `User/UserDetails`, is warned about; the reference-data guide says where they go. |
+| A test feed with nowhere to go (workflow `fix_errors`) | The agent made a test feed in the build; promotion would have moved it to production, and with no way to leave it out the agent never promoted the fix. | `promote_build` takes `keep` as a document's destination: it stays in the workspace. |
+| Harness | The scripted user agreed ("Yes, go ahead") to a message that also waited on promotion, and the build was promoted; it refused to choose a placeholder Environment; `total_cost_usd`, a session's running total, was added up on every resumed turn ($77.82 reported for $12.56). | The scripted user chooses promote for any message waiting on promotion, and tells the agent to use a placeholder for what it doesn't know; a case's cost is its session's last total. |
+
+Cases 28 and 34 failed on where the agent put things (a door controller's door as the Authorise resource only,
+not `EventSource/Device/Name`; a NAC's joining device as `EventSource/Client` with Network Permit/Deny, not
+Authenticate and `EventSource/Device`): the cases stay as they are, those choices not being accepted. The draft now maps a field naming the device the event happened at (a door or reader to `Device/Name`, a switch to `HostName`, a MAC address to `MACAddress`), and its note for a record naming no device puts the sender's address (`stroom:meta('RemoteAddress')`) last. Case 15 no
+longer requires Authorise's Action: an element the schema makes optional is required only when the source data
+holds its value, and the badge export says only granted or denied.
+
+The four workflows' outcomes were right by their scorers, but each failed on confirmations the agent gave itself
+(the harness hands pending ids rather than forms): copy_pipeline twice, promote_build once, and six in
+`records_output`.
+
 ## Not yet tested
 
 - Writing to Elasticsearch (index templates, Elasticsearch indexing pipelines processing into a live index): the live instance's Elasticsearch is never written to. Covered by mocked tests, the XSLT/XSD check and the hand-over suite without Elasticsearch.
-- An agent working through the evaluation set with a real model: the cases and their reference solutions pass (`dev/eval`); measuring an agent needs one.
+- The evaluation set on the default (larger) model: Haiku's run is above; a larger model hasn't been measured.
 - The live instance with a real user's token through a client: proven locally with the dev Keycloak, and the live receipt settings accept tokens carrying `stroom` in `aud`; the live e2e runs used an API key.
 - The standing-instructions and Elasticsearch hand-over suites on the live instance: the first puts a System-wide AGENTS doc in front of every user while it runs, the second needs Elasticsearch writes.

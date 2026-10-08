@@ -290,7 +290,29 @@ def test_searches_that_would_mislead_on_elasticsearch_are_refused_with_what_to_u
     text = str(e.value)
     assert "use EQUALS 'al*'" in text and "use EQUALS '*err*'" in text and 'commas' in text
     assert "tags IS_NULL" in text and "tags IS_NOT_NULL: Stroom matches every document" in text and "EQUALS '*'" in text
-    indexing._searchable('lucene', [S(field='user', condition='STARTS_WITH', value='al')])     # not known to mislead
+    # On Lucene (eval case 22): STARTS_WITH and ENDS_WITH, CONTAINS on a keyword field, a range on a text field.
+    text = {'UserId': 'KEYWORD', 'ClientIPAddress': 'KEYWORD', 'Description': 'ALPHA_NUMERIC'}
+    with pytest.raises(ToolError) as e:
+        indexing._searchable('lucene', [S(field='UserId', condition='STARTS_WITH', value='ca'),
+                                        S(field='HostName', condition='STARTS_WITH', value='sw*'),
+                                        S(field='UserId', condition='ENDS_WITH', value='ol'),
+                                        S(field='UserId', condition='CONTAINS', value='aro'),
+                                        S(field='ClientIPAddress', condition='BETWEEN', value='10.1.0.0,10.1.255.255')],
+                             lucene_text=text)
+    said = str(e.value)
+    assert "use EQUALS 'ca*'" in said and "use EQUALS '*ol'" in said and "use EQUALS '*aro*'" in said
+    assert "HostName STARTS_WITH 'sw*': Stroom finds nothing with STARTS_WITH on a Lucene index; use EQUALS 'sw*'" in said
+    assert "ClientIPAddress BETWEEN '10.1.0.0,10.1.255.255': ClientIPAddress is a text field in Lucene" in said
+    with pytest.raises(ToolError) as e:
+        indexing._searchable('lucene', [S(field='Door', condition='IN', value='Main entrance,Server room'),
+                                        S(field='Door', condition='IN', value='Main entrance')])
+    said = str(e.value)
+    assert "Door IN 'Main entrance,Server room': Stroom finds nothing with IN on a Lucene index" in said
+    assert "Door IN 'Main entrance': separate the values with commas (one value holding a space is EQUALS 'Main entrance')" in said
+    # Whole words in an analysed text field, and ranges on numbers and dates, work.
+    indexing._searchable('lucene', [S(field='Description', condition='CONTAINS', value='Session'),
+                                    S(field='EventTime', condition='BETWEEN', value='2026-10-01,2026-10-02'),
+                                    S(field='UserId', condition='EQUALS', value='ca*')], lucene_text=text)
     indexing._searchable('elasticsearch', [S(field='user', condition='EQUALS', value='al*'),
                                            S(field='status', condition='BETWEEN', value='100,300')])
 

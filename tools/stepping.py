@@ -393,6 +393,28 @@ async def step_pipeline(
                                           accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))}
 
 
+async def _refuse_unloaded_references(stroom: StroomGateway, pipeline: _Pipeline) -> None:
+    """A pipeline reference to a feed with no processed reference stream yet: a step now finds no reference data, and
+    Stroom keeps that answer for 10 minutes (its effective stream cache), so steps after the reference data is
+    processed still find none (seen: eval case 15, Haiku, which then gave up on reference data for dictionaries)."""
+    missing = []
+    for ref in pipeline.merged.get('references') or []:
+        feed = (ref.get('feed') or {}).get('name')
+        if not feed:
+            continue
+        kind = ref.get('stream_type') or 'Reference'
+        rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed},
+                                        {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': kind}],
+                                       5)).get('values') or []
+        if not any((r.get('meta') or {}).get('status') != 'DELETED' for r in rows):
+            missing.append(f"{feed} ({kind})")
+    if missing:
+        raise ToolError(f"Pipeline '{pipeline.doc.get('name')}' looks up reference data from {', '.join(missing)}, which "
+                        f"has no stream of that type yet. Process the reference data first (create_processor_filter on "
+                        f"its reference pipeline, then wait_for_processing), then step: a step now would find none, "
+                        f"and Stroom keeps that answer for 10 minutes, so steps after it is loaded would still fail.")
+
+
 async def step_sample(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
@@ -416,6 +438,7 @@ async def step_sample(
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     pipeline.refuse_mistyped()
+    await _refuse_unloaded_references(stroom, pipeline)
     cap = min(max_records or stroom.settings.max_sample_records, stroom.settings.max_sample_records)
     # Large sample files (985 records each) were stepped a record per request on a remote Stroom: the head of each
     # stream says whether the translation is right, and processing then reads every record.

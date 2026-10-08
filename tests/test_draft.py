@@ -215,3 +215,47 @@ def test_the_user_can_keep_unknown_after_seeing_what_the_values_suggest():
     problems, kept = unknown_coverage(TranslationMapping.model_validate(traffic(keep_unknown=True)), records)
     assert problems == [] and kept[0]['rule'] == 'traffic' and kept[0]['against_suggestion']
     assert kept[0]['suggested'].startswith('Network/Permit for action ALLOW')
+
+
+def test_records_that_each_run_a_command_are_drafted_as_process_with_the_account_run_as():
+    # Eval case 07 on Haiku: sudo lines, with no field naming kinds, were drafted as Unknown and made Authorise.
+    from utils.dsgen import SplitterSpec
+    sudo = ('<85>Sep 28 14:00:01 web02 sudo:    grace : TTY=pts/0 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx\n'
+            '<85>Sep 28 14:10:44 web02 sudo:    henry : TTY=pts/1 ; PWD=/var/www ; USER=www-data ; COMMAND=/usr/bin/git pull\n')
+    splitter = SplitterSpec.model_validate({'kind': 'syslog', 'body': {
+        'kind': 'regex', 'pattern': r'^\s*(\S+) : TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(.*)$',
+        'names': ['user', 'tty', 'pwd', 'run_as', 'command']}})
+    draft = draft_mapping([sudo], 'sudo', 'Web', 'Prod', splitter=splitter)
+    m = draft['mapping']
+    assert {'path': 'EventSource/RunAs/Id', 'field': 'run_as'} in m['common']
+    assert [r['name'] for r in m['events']] == ['command'] and 'when' not in m['events'][0]
+    fields = {f['path']: f for f in m['events'][0]['fields']}
+    assert fields['EventDetail/Process/Command'] == {'path': 'EventDetail/Process/Command', 'field': 'command'}
+    assert fields['EventDetail/Process/Action']['value'] == 'Execute'
+    assert any(n.startswith("Every record runs a command ('command')") and 'RunAs' in n for n in draft['notes'])
+    assert not any(n.startswith('No field names the kind') for n in draft['notes'])
+    assert generate(TranslationMapping.model_validate(m), SCHEMA, '4.1.0')['problems'] == []
+    assert generate(TranslationMapping.model_validate(m), SCHEMA_352, '3.5.2')['problems'] == []
+
+
+def test_the_device_an_event_happened_at_is_drafted_from_the_field_naming_it():
+    # Eval cases 28 and 34 on Haiku: a door controller's door left as Data, with the sender's address
+    # (stroom:meta('RemoteAddress')) as the device; a NAC's switch and the joining device's MAC put elsewhere.
+    badges = ('<?xml version="1.0" encoding="UTF-8"?>\n<records>\n<record><when>2026-10-02T07:58:00Z</when><holder>alice</holder>'
+              '<door>Main entrance</door><granted>true</granted></record>\n</records>\n')
+    draft = draft_mapping([badges], 'Doors', 'Doors', 'Prod')
+    common = {e['path']: e for e in draft['mapping']['common']}
+    assert common['EventSource/Device/Name']['field'] == 'door' and common['EventSource/User/Id']['field'] == 'holder'
+    assert not any(n.startswith('No host field') for n in draft['notes'])
+    nac = ('{"time": "2026-10-02T12:00:00Z", "switch": "sw-core-01", "mac": "00:1A:2B:3C:4D:5E", "ip": "10.4.0.21", "user": "alice"}\n'
+           '{"time": "2026-10-02T12:00:30Z", "switch": "sw-core-01", "mac": "00:1A:2B:3C:4D:5F", "ip": "10.4.0.22", "user": "bob"}\n')
+    common = {e['path']: e for e in draft_mapping([nac], 'NAC', 'NAC', 'Prod')['mapping']['common']}
+    assert common['EventSource/Device/HostName']['field'] == 'switch'
+    assert common['EventSource/Device/MACAddress']['field'] == 'mac'
+    for sample in (badges, nac):
+        assert generate(TranslationMapping.model_validate(draft_mapping([sample], 'S', 'S', 'Prod')['mapping']),
+                        SCHEMA, '4.1.0')['problems'] == []
+    # With nothing naming the device, the note says what the device is, and the sender's address comes last.
+    plain = draft_mapping(['{"time": "2026-10-02T12:00:00Z", "user": "alice"}\n'], 'S', 'S', 'Prod')
+    assert any(n.startswith('No host field was recognised: EventSource/Device is the device where the event happened')
+               for n in plain['notes'])

@@ -14,10 +14,11 @@ meaning. Stroom has two mechanisms, and the mapping (`build_translation_xslt`) w
 How it fits together:
 
 1. **A reference feed** holds the table as raw data (stream type `Raw Reference`): `create_feed` with
-   `stream_type='Raw Reference'`, `upload_sample` with `stream_type='Raw Reference'` and an `effective_time`.
+   `stream_type='Raw Reference'`, `upload_sample` with `stream_type='Raw Reference'`.
    Reference data is versioned by time: a lookup uses the version in effect at the event stream's time, so a
-   table uploaded after the sample streams is invisible to them. Give `effective_time` before the events
-   (`2000-01-01T00:00:00.000Z` for a table that always applied); real feeds carry it in their receipt headers.
+   table in effect only from its upload is invisible to sample streams uploaded before it. A reference sample
+   applies from `2000-01-01T00:00:00.000Z` unless `effective_time` says otherwise; real feeds carry it in their
+   receipt headers.
 2. **A reference-data pipeline**, a child of the `Reference Data` template (`find_pipeline_templates
    stage=reference`), parses it like any feed (a Data Splitter on `combinedParser.textConverter` for text) and its
    XSLT writes `reference-data:2`: one `<reference>` per record and map, with the map name, the key and the
@@ -33,7 +34,9 @@ How it fits together:
    Records the table should not contribute (disabled accounts, say) are left out with `drop_when`, conditions with
    a reason, as in a translation mapping. Process the reference stream (`create_processor_filter`, then
    `wait_for_processing`, which takes the output type, `Reference`, from the pipeline): the pipeline writes
-   `Reference` streams. A whole-feed filter takes the feed's own stream type, `Raw Reference`.
+   `Reference` streams. A whole-feed filter takes the feed's own stream type, `Raw Reference`. Do this before the
+   events pipeline is first stepped: a lookup made before the feed has a `Reference` stream is remembered by Stroom
+   for 10 minutes (its effective stream cache), and every step in that time finds no reference data.
 3. **The events pipeline names the feed** as a pipeline reference on its translation step:
    `create_pipeline references=[{"feed": "ACME-USERS"}]`, or `update_pipeline (references=...)` on a pipeline that
    exists. The loader is found, not assumed: the one other pipelines already load that feed with, else the
@@ -45,6 +48,9 @@ How it fits together:
    (omit it for a text value). A key the map lacks gives no value, so the element is left out, or `default` is
    written. Keys are compared as written: normalise them the same way on both sides (`transform: lower` or
    `strip_domain` on the events side, `key_xpath` with `lower-case()` on the reference side).
+   A person's details from a directory go in `EventSource/User`: `Name`, and `UserDetails` for the rest
+   (`Organisation`, `Unit` for a department, `Group` for a business group, `Title`, `StaffNumber`). `User/Groups`
+   is for the security groups an account belongs to, not the person's department.
 
 `find_reference_data` lists what the environment already loads: each map, its key and value shape, the feeds
 and pipeline that load it, the loader to name, and which pipelines use it. Reuse those before creating new

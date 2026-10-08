@@ -220,6 +220,12 @@ def test_missing_required_elements_and_choices_are_problems():
     problems = generate(mapping(events=[no_type]), SCHEMA, '4.1.0')['problems']
     assert '[bare] Event/EventDetail/TypeId is required by the schema; map it' in problems
     assert any(p.startswith("[bare] Event/EventDetail needs one of ['Authenticate'") for p in problems)
+    # Environment is the user's to say; when they don't know it, a placeholder keeps the build going (seen: Haiku
+    # stopped for good on this problem).
+    no_env = [f for f in BASE if f['path'] != 'EventSource/System/Environment']
+    problems = generate(mapping(common=no_env), SCHEMA, '4.1.0')['problems']
+    assert any(p.startswith('[logon] Event/EventSource/System/Environment is required by the schema; map it (a value only '
+                            'the user knows') and 'such as Unknown' in p for p in problems), problems
 
 
 def test_a_missing_choice_points_to_the_same_member_mapped_elsewhere():

@@ -122,3 +122,27 @@ async def test_once_a_feed_has_had_commands_text_samples_are_refused():
         with pytest.raises(ToolError, match="samples are files on the user's disk .* exactly as given"):
             await feeds.upload_sample(SimpleNamespace(lifespan_context={}), 'FORTIOS-FIREWALL-V1.0',
                                       sample='[{"a": 1}]')
+
+
+async def test_a_reference_sample_applies_from_long_ago_unless_told_otherwise():
+    # Eval case 15 on Haiku: a directory uploaded without an effective time took effect when it arrived, after the
+    # event samples, whose lookups then found nothing.
+    from unittest.mock import AsyncMock, patch
+    from tools import feeds
+    feed = {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-USERS'}
+    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed']))
+    send = AsyncMock(return_value={'receipt_id': 'r', 'stream_id': None})
+    ticket = AsyncMock(return_value={})
+    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)), patch.object(feeds, 'send_to_feed', send), \
+            patch.object(feeds, 'guard_from', lambda ctx: guard), patch.object(feeds, 'gateway_from', lambda ctx: None), \
+            patch.object(feeds, 'upload_ticket', ticket):
+        ctx = SimpleNamespace(lifespan_context={})
+        await feeds.upload_sample(ctx, 'ACME-USERS', sample='user,name\nalice,Alice\n', stream_type='Raw Reference')
+        assert send.await_args.args[3]['EffectiveTime'] == '2000-01-01T00:00:00.000Z'
+        await feeds.upload_sample(ctx, 'ACME-USERS', sample='user,name\nalice,Alice\n', stream_type='Raw Reference',
+                                  effective_time='2026-01-01T00:00:00.000Z')
+        assert send.await_args.args[3]['EffectiveTime'] == '2026-01-01T00:00:00.000Z'
+        await feeds.upload_sample(ctx, 'ACME-USERS', files=['users.csv'], stream_type='Raw Reference')
+        assert ticket.await_args.args[4] == {'EffectiveTime': '2000-01-01T00:00:00.000Z'}
+        await feeds.upload_sample(ctx, 'ACME', sample='a,b\n1,2\n')
+        assert 'EffectiveTime' not in send.await_args.args[3]

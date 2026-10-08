@@ -599,7 +599,9 @@ async def promote_build(
         destinations: Annotated[dict[str, str], Field(
             description="Destination folder per document type or per document UUID, e.g. {'Feed': "
                         "'System/Feeds/Events/Acme', 'Pipeline': 'System/Feeds/Events/Acme', 'XSLT': ...}. "
-                        "Working copies ignore this: they are written back over their originals.")],
+                        "Working copies ignore this: they are written back over their originals. 'keep' for a "
+                        "document UUID leaves it in the build's workspace folder, not promoted (a test feed made "
+                        "while fixing, say).")],
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -627,6 +629,10 @@ async def promote_build(
             plan.append({'doc': doc, 'action': 'discard', 'target': 'deleted after write-back'})
         elif doc['working_copy_of']:
             plan.append({'doc': doc, 'action': 'write back', 'target': doc['working_copy_of']})
+        elif destinations.get(doc['uuid'], '').strip().lower() == 'keep':
+            # Seen (fix_errors, Haiku): a test feed the agent made had nowhere to go but production, and with no way
+            # to leave it out the agent never promoted the fix.
+            plan.append({'doc': doc, 'action': 'keep', 'target': 'left in the workspace'})
         else:
             target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
             if not target and doc['type'] == 'Documentation' and (
@@ -701,10 +707,12 @@ async def promote_build(
         if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(
                 ctx, step['doc']['uuid'], False):
             done.append(f"restored the default batch size on '{step['doc']['name']}'")
-    order = {'write back': 0, 'move': 1, 'discard': 2}
+    order = {'write back': 0, 'move': 1, 'discard': 2, 'keep': 3}
     for step in sorted(plan, key=lambda p: order[p['action']]):
         doc = step['doc']
-        if step['action'] == 'discard':
+        if step['action'] == 'keep':
+            done.append(f"left {doc['type']} '{doc['name']}' in the workspace")
+        elif step['action'] == 'discard':
             await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
             done.append(f"deleted working-copy pipeline '{doc['name']}'")
         elif step['action'] == 'move':

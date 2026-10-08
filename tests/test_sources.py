@@ -176,6 +176,21 @@ def test_lookups_dictionaries_any_of_and_transforms():
     assert bob.findtext('e:EventDetail/e:TypeId', namespaces=NS) == 'x'
 
 
+def test_a_directorys_department_looked_up_into_security_groups_is_warned():
+    # Eval case 15 on Haiku: the department from a user directory written as EventSource/User/Groups/Group/Name.
+    groups = {'path': 'EventSource/User/Groups/Group/Name', 'lookup': {'map': 'USERS', 'field': 'user', 'path': 'department'}}
+    result = generate(TranslationMapping.model_validate({**MAPPING, 'common': [*MAPPING['common'], groups]}), SCHEMA, '4.1.0')
+    assert result['ok'] and any(w.startswith('EventSource/User/Groups/Group/Name is looked up from USERS (department)')
+                                and 'User/UserDetails' in w for w in result['warnings'])
+    # And then as the action's Data, in a later run.
+    data = {'path': 'EventDetail/Unknown/Data', 'data_name': 'department',
+            'lookup': {'map': 'USERS', 'field': 'user', 'path': 'details/department'}}
+    other = {**MAPPING['events'][1], 'fields': [*MAPPING['events'][1]['fields'], data]}
+    result = generate(TranslationMapping.model_validate({**MAPPING, 'events': [MAPPING['events'][0], other]}), SCHEMA, '4.1.0')
+    assert any(w.startswith('EventDetail/Unknown/Data is looked up from USERS (department)') for w in result['warnings'])
+    plain = generate(TranslationMapping.model_validate(MAPPING), SCHEMA, '4.1.0')
+    assert not any('security groups' in w for w in plain['warnings'])
+
 def test_source_rules_are_enforced_by_the_model():
     with pytest.raises(ValueError, match='dictionary needs field'):
         TranslationMapping.model_validate({**MAPPING, 'common': [{'path': 'EventSource/User/Name', 'value': 'x', 'dictionary': 'd'}]})

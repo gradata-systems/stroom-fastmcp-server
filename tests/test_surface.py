@@ -191,6 +191,27 @@ async def test_a_pipelines_documentation_follows_the_pipeline_promoted_with_it()
 
 
 
+async def test_a_document_can_be_kept_in_the_workspace_rather_than_promoted():
+    # Eval workflow fix_errors (Haiku): a test feed made while fixing had nowhere to go but production, so the agent
+    # never promoted the fix.
+    from tools import builds
+    docs = [{'type': 'Pipeline', 'uuid': 'p', 'name': 'ACME-Events', 'path': 'x', 'working_copy_of': None},
+            {'type': 'Feed', 'uuid': 'f', 'name': 'ACME-TEST', 'path': 'x', 'working_copy_of': None}]
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}))
+    guard = SimpleNamespace(resolve_folder=AsyncMock(return_value=({'_path': 'System/Feeds/Acme'}, [])))
+    asked = {}
+
+    async def require(ctx, kind, tool, summary, details, approval_id):
+        asked.update(details)
+        return {'status': 'needs_approval'}
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)),             patch.object(builds, 'guard_from', lambda c: guard),             patch.object(builds, 'promotion_processing', AsyncMock(return_value=[])),             patch.object(builds, 'build_checks', AsyncMock(return_value=[])),             patch.object(builds, 'consent_from', lambda c: SimpleNamespace(require=require)):
+        gate = await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                          destinations={'Pipeline': 'System/Feeds/Acme', 'f': 'keep'})
+    assert gate['status'] == 'needs_approval'
+    assert asked['plan'] == ["move Pipeline 'ACME-Events' -> System/Feeds/Acme",
+                             "keep Feed 'ACME-TEST' -> left in the workspace"]
+
+
 async def test_schema_validation_is_never_changed_only_the_output():
     from tools import pipeline_writes
     stroom = SimpleNamespace(

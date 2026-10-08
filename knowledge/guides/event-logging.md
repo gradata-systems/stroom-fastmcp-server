@@ -74,6 +74,12 @@ In a mapping: `EventDetail/Network/Deny/Source/Device/IPAddress`, `.../Source/Po
 A configuration change is `Update`, the new state under `After` (`Before` for the old):
 `EventDetail/Update/After/Configuration/Type` and `.../Configuration/Description`.
 
+A command or program run (sudo, a shell's history, a scheduled job) is `Process`:
+`EventDetail/Process/Action` (`Execute`), `.../Process/Type` (`OS`, `Service`, `Application`), `.../Process/Command`
+and `.../Process/Arguments`. The account it ran as (sudo's `USER=`) is `EventSource/RunAs/Id`, beside the user who
+ran it in `EventSource/User/Id`. `Authorise` is for a permission granted or refused on an object (a role, a file's
+access), not for a command a user was allowed to run.
+
 A health or status message is `Alert`: `EventDetail/Alert/Type` (Vulnerability, IDS, Malware, Network, Change,
 Error, Other) and `EventDetail/Alert/Severity` (Info, Minor, Major, Critical).
 

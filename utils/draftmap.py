@@ -18,12 +18,17 @@ from utils.samples import as_named_samples
 
 # Field-name patterns, tried in order; the first field matching a home takes it.
 HOMES = [
-    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node|sensor|appliance|probe|dvchost|dvc_?host)$'),
+    ('EventSource/Device/HostName', r'^(host|hostname|host_?name|devname|device|device_?name|device_?id|computer|server|node|sensor|appliance|probe|dvchost|dvc_?host|switch|switch_?name)$'),
+    # The device where the event happened, named rather than addressed: a door controller's door or reader (seen:
+    # eval case 28, where the agent took the sender's address from stroom:meta instead).
+    ('EventSource/Device/Name', r'^(door|door_?name|reader|reader_?name)$'),
+    ('EventSource/Device/MACAddress', r'^(mac|mac_?address|src_?mac|client_?mac)$'),
     ('EventSource/Client/IPAddress', r'^(ip|src_?ip|source_?ip|srcaddr|src_?addr|client_?ip|client_?addr(ess)?|remote_?addr|remote_?ip|source_?address|ip_?address|ipaddress|clientip|src|source)$'),
     ('EventSource/Client/Port', r'^(src_?port|source_?port|client_?port|sport|spt)$'),
     ('EventSource/Server/IPAddress', r'^(dst_?ip|dest_?ip|destination_?ip|dstaddr|dst_?addr|server_?ip|server_?addr(ess)?|target_?ip|destination_?address|dst|dest|destination)$'),
     ('EventSource/Server/Port', r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port|dpt)$'),
-    ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name|suser|src_?user|source_?user)$'),
+    ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name|suser|src_?user|source_?user|holder|card_?holder|badge_?holder|badge_?user)$'),
+    ('EventSource/RunAs/Id', r'^(run_?as|run_?as_?user|effective_?user|euser|as_?user)$'),
     ('EventSource/Generator', r'^(generator|app|app_?name|application|program|process_?name|logger|service|cef_?product)$'),
     ('EventDetail/Description', r'^(message|msg|description|desc|text|summary|details)$'),
 ]
@@ -31,6 +36,7 @@ TIME = re.compile(r'^(@?timestamp|time|ts|date_?time|datetime|event_?time|eventt
 NAMING = re.compile(r'^(event_?type|eventtype|type|event|event_?name|event_?id|eventid|action|activity|category|subtype|sub_?type|operation|op|logid|log_?type|msg_?id|kind|result_?type|act|device_?action)$', re.I)
 AUTH = re.compile(r'(login|logon|signin|sign_in|authenticat|logoff|logout|signout|sign_out|password)', re.I)
 LOGOFF = re.compile(r'(logoff|logout|signout|sign_out)', re.I)
+COMMAND = re.compile(r'^(command|cmd|cmd_?line|command_?line|process_?command)$', re.I)
 MAX_RULES = 12
 NIL = {'-', '', 'null', 'none', 'n/a'}
 # Windows security log event IDs that are logons and logoffs (seen: 4624 and 4634 drafted as Unknown).
@@ -240,7 +246,9 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     common.append({'path': 'EventSource/System/Name', 'value': system_name or source_name or 'TODO system name'})
     common.append({'path': 'EventSource/System/Environment', 'value': environment or 'TODO e.g. Prod'})
     if not system_name or not environment:
-        notes.append("Set EventSource/System/Name and Environment to what the user confirms (or the standing instructions say).")
+        notes.append("Set EventSource/System/Name and Environment to what the user confirms (or the standing instructions say). "
+                     "Both are required: if the user doesn't know one, use a placeholder they agree to (such as Unknown) "
+                     "and record it as an open item, rather than stopping.")
     for path, pattern in HOMES:
         regex = re.compile(pattern, re.I)
         field = next((n for n in names if n not in taken and _matches(regex, n) and types[n] != 'empty'), None)
@@ -249,9 +257,10 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                                     covering(field, lambda n, rx=regex: _matches(rx, n) and types[n] != 'empty')))
     if not any(e['path'] == 'EventSource/Generator' for e in common):
         common.append({'path': 'EventSource/Generator', 'value': source_name or 'TODO generator'})
-    if not any(e['path'] == 'EventSource/Device/HostName' for e in common):
-        notes.append("No host field was recognised: EventSource/Device needs HostName or IPAddress; map one, or a constant, "
-                     "or stroom:meta('RemoteAddress') through xpath.")
+    if not any(e['path'].startswith('EventSource/Device/') for e in common):
+        notes.append("No host field was recognised: EventSource/Device is the device where the event happened. Map the "
+                     "field that names it (a door, a reader, a switch, a host) to Device/Name, HostName or IPAddress, or "
+                     "a constant; stroom:meta('RemoteAddress'), the sender's address, only when the record names none.")
 
     # Kinds of event: the first naming field with a handful of values.
     def names_kinds(n: str) -> bool:
@@ -316,12 +325,27 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     if recognised:
         notes.append("Drafted from the sample's values (check them): " + '; '.join(recognised) + ".")
     naming = namings[0] if namings else None
-    # The rest's Unknown carries what the record has left; with every field mapped already, the kind field (seen:
-    # an empty catch-all rule, which has no action element, failing the whole mapping).
-    unknown_data = data_entries('Unknown') or [{'path': 'EventDetail/Unknown/Data', 'data_name': n, 'field': n}
-                                               for n in ([naming] if naming else names[:1])]
-    rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
-                  + unknown_data})
+    # No field names kinds, but every record runs a command (sudo, a job scheduler): Process, not an Unknown
+    # placeholder (seen: sudo drafted as Unknown, then made Authorise by the agent).
+    command = None if pairs else next((n for n in rest if COMMAND.match(_key(n))), None)
+    if command:
+        rules.append({'name': 'command', 'fields': [
+            {'path': 'EventDetail/TypeId', 'value': 'Command'},
+            {'path': 'EventDetail/Process/Action', 'value': 'Execute'},
+            {'path': 'EventDetail/Process/Type', 'value': 'Application'},
+            {'path': 'EventDetail/Process/Command', 'field': command},
+            *({'path': 'EventDetail/Process/Data', 'data_name': n, 'field': n} for n in rest if n != command)]})
+        runs_as = any(e['path'] == 'EventSource/RunAs/Id' for e in common)
+        notes.append(f"Every record runs a command ('{command}'): drafted as Process (Action Execute, Type Application)"
+                     + (", the account it runs as in EventSource/RunAs" if runs_as else "")
+                     + ". Check it, and split the program from its arguments (Process/Arguments) if you want them apart.")
+    else:
+        # The rest's Unknown carries what the record has left; with every field mapped already, the kind field (seen:
+        # an empty catch-all rule, which has no action element, failing the whole mapping).
+        unknown_data = data_entries('Unknown') or [{'path': 'EventDetail/Unknown/Data', 'data_name': n, 'field': n}
+                                                   for n in ([naming] if naming else names[:1])]
+        rules.append({'name': 'other', 'fields': ([{'path': 'EventDetail/TypeId', 'value': 'Other'}] if not naming else [])
+                      + unknown_data})
     if len(shapes) > 1 and len(namings) + sum(1 for e in common if e.get('any_of')) > 0 and \
             (len(namings) > 1 or any(e.get('any_of') for e in common)):
         shared = [f"{e['path']} from {' or '.join(e['any_of'])}" for e in common if e.get('any_of')]
@@ -341,9 +365,12 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                      f"'other' catches the rest. Work through the schema problems build_translation_xslt reports: each "
                      f"names what the element takes. Unknown is for records no action element describes, not a way "
                      f"round a schema error; build_translation_xslt refuses it where the values show an action.")
-    else:
-        notes.append("No field names the kind of event: every record is one 'other' event with Unknown/Data. Add rules "
-                     "with conditions once you know how kinds are told apart.")
+    elif not command:
+        notes.append("No field names the kind of event: every record is one 'other' event with Unknown/Data. If the "
+                     "records are all one kind of event (the request or the sample says what), replace Unknown with the "
+                     "action element that describes it (a command run is Process, a logon Authenticate, a file read "
+                     "View...) and move its Data entries into that element; otherwise add rules with conditions once "
+                     "you know how kinds are told apart.")
     mapping.update(common=common, events=rules)
     applied = None
     if source_notes and (source_notes.get('fields') or source_notes.get('events')):

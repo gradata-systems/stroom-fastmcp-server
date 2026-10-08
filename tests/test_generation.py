@@ -140,6 +140,11 @@ async def test_stroom_s_placeholder_past_the_end_is_not_read_as_data():
                              post=AsyncMock(return_value={'data': '## No Data ##'}))
     text, truncated = await streams.raw_text(stroom, 7, 10_000)
     assert '## No Data ##' not in text and text.startswith(csv.rstrip())
+    # Nor is the count's extra character a sign the text was cut: a sample with no final newline keeps its last line
+    # (seen: eval case 16's JSON array, cut back to its last line end, failed to parse).
+    array = '[{"a": 1},\n {"a": 2}]'
+    stroom.fetch_data = AsyncMock(return_value={'data': array, 'totalCharacterCount': {'count': len(array) + 1}})
+    assert await streams.raw_text(stroom, 7, 10_000) == (array, False)
 
 
 async def test_keeping_unknown_needs_the_users_confirmation_before_saving():

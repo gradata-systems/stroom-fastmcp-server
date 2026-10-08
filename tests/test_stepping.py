@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 import respx
+from fastmcp.exceptions import ToolError
 
 from tests.test_gateway import API, SETTINGS
 from tests.test_triage import RULES
@@ -274,3 +276,19 @@ async def test_a_json_array_mapping_sets_the_parser_to_read_each_item_as_a_recor
     layers[0]['pipelineData']['properties'] = {'add': [{'element': 'jsonParser', 'name': 'addRootObject',
                                                         'value': {'boolean': False}}]}
     assert not stepping._Pipeline({'name': 'p'}, layers).json_root_map
+
+
+async def test_stepping_waits_for_the_reference_data_a_pipeline_looks_up():
+    # Eval case 15 on Haiku: stepped before the directory was processed; Stroom kept "no reference data" for 10
+    # minutes, and every later step failed until the agent gave up on reference data.
+    from tools.stepping import _refuse_unloaded_references
+    pipeline = SimpleNamespace(doc={'name': 'ACME-Events'}, merged={'references': [
+        {'element': 'translationFilter', 'name': 'pipelineReference', 'pipeline': {'name': 'Reference Loader'},
+         'feed': {'type': 'Feed', 'uuid': 'f', 'name': 'ACME-USERS'}, 'stream_type': 'Reference'}]})
+    stroom = SimpleNamespace(find_meta=AsyncMock(return_value={'values': [{'meta': {'id': 9, 'status': 'DELETED'}}]}))
+    with pytest.raises(ToolError, match=r"ACME-USERS \(Reference\), which has no stream of that type yet"):
+        await _refuse_unloaded_references(stroom, pipeline)
+    terms = stroom.find_meta.await_args.args[0]
+    assert {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Reference'} in terms
+    stroom.find_meta.return_value = {'values': [{'meta': {'id': 10, 'status': 'UNLOCKED'}}]}
+    await _refuse_unloaded_references(stroom, pipeline)

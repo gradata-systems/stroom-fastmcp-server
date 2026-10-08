@@ -119,3 +119,11 @@ EQUALS with wildcards), IS_NULL and IS_NOT_NULL match every document (use EQUALS
 with spaces
 between the values finds nothing. `verify_index` refuses those searches.
 
+## Searching a Lucene index through Stroom
+
+EQUALS with `*` wildcards works on every field (`ca*`, `*aro*`, `10.1.*` for an address range), as do IN, ranges on
+numbers and dates, and CONTAINS on an analysed text field (`Description`) for a whole word. Found against Stroom 7.13,
+without an error: STARTS_WITH and ENDS_WITH find nothing, CONTAINS finds nothing on a keyword field (user, host, address)
+and only whole words on a text field, a range (BETWEEN, GREATER_THAN, ...) finds nothing on a text field, addresses
+included, and IN finds nothing when a value holds a space (search it with EQUALS). `verify_index` refuses those searches, naming the wildcard to use.
+
