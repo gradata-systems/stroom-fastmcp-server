@@ -59,6 +59,43 @@ ESCAPING = ("Regexes and xpaths are written once, as XPath reads them (a literal
             "they are, so nothing escapes them again.")
 
 
+# The shape of a mapping, whole, for a reply that refuses one: seen, a mapping sent without input and a rule without
+# name, after the agent guessed the structure from the description. Checked to generate by the tests.
+MAPPING_EXAMPLE = {
+    'input': 'xml_fragments', 'record': 'Event', 'xml_namespace': 'records:2',
+    'common': [{'path': 'EventTime/TimeCreated', 'xpath': 'System/TimeCreated/@SystemTime',
+                'time_format': "yyyy-MM-dd'T'HH:mm:ss.SSSX"},
+               {'path': 'EventSource/System/Name', 'value': 'AppAudit'},
+               {'path': 'EventSource/System/Environment', 'value': 'Prod'},
+               {'path': 'EventSource/Generator', 'value': 'AppAudit'},
+               {'path': 'EventSource/Device/HostName', 'field': 'Computer'}],
+    'events': [{'name': 'view', 'when': [{'field': 'EventID', 'equals': '4663'}],
+                'fields': [{'path': 'EventDetail/TypeId', 'field': 'EventID'},
+                           {'path': 'EventDetail/View/Document/Id', 'xpath': 'EventData/Data[@Name="ObjectName"]'}]}]}
+
+
+def _described(loc: tuple) -> str | None:
+    """The description of the mapping key at loc (('events', 1, 'name')), for one that is missing."""
+    from typing import get_args
+    from pydantic import BaseModel
+    model, info = TranslationMapping, None
+    for part in loc:
+        if isinstance(part, int):
+            continue
+        if model is None or part not in model.model_fields:
+            return None
+        info = model.model_fields[part]
+        found, todo = None, [info.annotation]
+        while todo and found is None:
+            t = todo.pop()
+            if isinstance(t, type) and issubclass(t, BaseModel):
+                found = t
+            todo += list(get_args(t))
+        model = found
+    text = info.description if info and info.description else None
+    return text if not text or len(text) <= 160 else text[:150].rsplit(' ', 1)[0] + ' …'
+
+
 def mapping_problems(e: ValidationError, unknown_keys: list[str]) -> list[str]:
     """A mapping's validation errors, each where it is (events[2].fields[0].path) with the value given."""
     out = []
@@ -66,6 +103,10 @@ def mapping_problems(e: ValidationError, unknown_keys: list[str]) -> list[str]:
         where = ''.join(f'[{p}]' if isinstance(p, int) else (f'.{p}' if n else str(p)) for n, p in enumerate(x['loc']))
         given = x.get('input')
         shown = '' if given is None or isinstance(given, (dict, list)) else f" (given {json.dumps(given, default=str)[:80]})"
+        if x['type'] == 'missing':
+            # "input: Field required" said nothing of what input is
+            about = _described(tuple(x['loc']))
+            shown = f" ({about})" if about else ''
         out.append(f"{where or 'mapping'}: {x['msg']}{shown}")
     if len(e.errors()) > 8:
         out.append(f"and {len(e.errors()) - 8} more")
@@ -155,9 +196,12 @@ async def build_translation_xslt(
                         'draft_mapping': draft['mapping'], 'splitter': draft['splitter'], 'notes': draft['notes'],
                         'hint': "Edit draft_mapping (the notes say what to decide) and call build_translation_xslt again "
                                 "with it as mapping, the same sample, and the splitter if there is one."}
+            # The whole shape, where the mapping's shape is what's wrong (a key missing or misplaced), not a value.
+            structural = any(x['type'] in ('missing', 'model_type', 'model_attributes_type', 'list_type', 'dict_type')
+                             or 'holds more than a path' in x['msg'] for x in e.errors())
             raise ToolError("mapping is not a translation mapping: " + '; '.join(problems) + ". Fix these in the "
                             "mapping you have; to start again, draft_translation_mapping (stream_ids=the sample streams) "
-                            "gives one.") from e
+                            "gives one." + (" A whole mapping looks like: " + json.dumps(MAPPING_EXAMPLE) if structural else '')) from e
     schema = await event_schema(ctx, version)
     result = generate(mapping, schema, version)
     result['schema_version'] = version
@@ -345,7 +389,11 @@ async def build_data_splitter(
         inferred, profiled = infer_spec(sample)
         if inferred is None:
             fmt = profiled['format']
-            if fmt in ('json array', 'json lines', 'xml', 'xml fragments'):
+            if fmt == 'xml fragments':
+                # Fragments do take a converter: the wrapper the XMLFragmentParser puts round them. Seen: the plan's
+                # converter step sent here, told "no Data Splitter", went on without one.
+                return await _fragment_wrapper(ctx, profiled, save_as, build)
+            if fmt in ('json array', 'json lines', 'xml'):
                 raise ToolError(f"The sample is {fmt}: it needs no Data Splitter. {profiled.get('suggested_parser')}. "
                                 f"Go on to build_translation_xslt (input {'json' if fmt.startswith('json') else fmt.replace(' ', '_')}).")
             raise ToolError(f"The sample's format could not be inferred ({fmt}): give spec, a regex with a name per group, e.g. "
@@ -388,6 +436,26 @@ async def build_data_splitter(
             saved = await create_text_converter(ctx, resolve_build(ctx, build, 'build_data_splitter save_as'), save_as,
                                                 'DATA_SPLITTER', result['converter'])
             result['saved'] = saved
+    return result
+
+
+async def _fragment_wrapper(ctx: Context, profiled: dict[str, Any], save_as: str | None,
+                            build: str | None) -> dict[str, Any]:
+    """build_data_splitter for XML fragments: the wrapper converter (the environment's own when it has one), saved
+    with save_as, and the namespace the mapping then reads the fragments in."""
+    from tools.translation import create_text_converter, with_fragment_setup
+    setup = await with_fragment_setup(ctx, profiled)
+    converter = setup['text_converter']
+    result = {'format': 'xml fragments', 'converter_type': 'XML_FRAGMENT', 'converter': converter['code'],
+              **{k: converter[k] for k in ('environment', 'other_wrappers') if k in converter},
+              'records': profiled.get('records'), 'xslt_input': setup['xslt_input'],
+              'hint': (f"The wrapper the XMLFragmentParser puts round the fragments: {converter['note']} In the mapping "
+                       f"set input 'xml_fragments', record '{profiled['record_element']}' and xml_namespace "
+                       f"'{setup['xslt_input']['namespace']}', the namespace the fragments are read in.")}
+    if save_as:
+        from tools.plan import resolve_build
+        result['saved'] = await create_text_converter(ctx, resolve_build(ctx, build, 'build_data_splitter save_as'),
+                                                      save_as, 'XML_FRAGMENT', converter['code'])
     return result
 
 
@@ -470,6 +538,14 @@ async def draft_translation_mapping(
         splitter = SplitterSpec.model_validate(splitter)
     result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check, splitter)
     result['mapping'] = compact_rules(result['mapping'])
+    if result['mapping'].get('input') == 'xml_fragments':
+        # Read in the namespace of the wrapper the environment uses, which need not be records:2.
+        from tools.translation import with_fragment_setup
+        from utils.profile import profile
+        from utils.samples import as_named_samples
+        setup = await with_fragment_setup(ctx, profile(next(iter(as_named_samples(samples).values()))))
+        if setup.get('xslt_input'):
+            result['mapping']['xml_namespace'] = setup['xslt_input']['namespace']
     try:
         checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)
         # Each problem's first sentence: build_translation_xslt gives them whole, and the draft's notes say the rest.

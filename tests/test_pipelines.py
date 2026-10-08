@@ -1,3 +1,7 @@
+import re
+
+import pytest
+
 from tools.pipelines import chain_order, merge_layers
 
 TEMPLATE = {'type': 'Pipeline', 'uuid': 't-1', 'name': 'Event Data (JSON)'}
@@ -78,3 +82,17 @@ def test_references_and_own_removals_are_reported():
         'elements': [el('decorationFilter')],
         'links': [link('translationFilter', 'decorationFilter')],
     }
+
+
+def test_a_property_named_as_the_descriptions_name_it_is_read_as_that_property():
+    # Seen ("schema guessing"): agents wrote properties as the descriptions named them, translationFilter.xslt.
+    from pydantic import ValidationError
+    from tools.pipeline_writes import PROPERTY_EXAMPLE, PropertyValue
+    uuid = '0443f53b-a694-4d3d-90a4-e3310716cf0c'
+    expected = PropertyValue(element='translationFilter', name='xslt', doc_uuid=uuid, doc_type='XSLT')
+    assert PropertyValue.model_validate(f'translationFilter.xslt={uuid}') == expected
+    assert PropertyValue.model_validate({'translationFilter.xslt': uuid}) == expected
+    assert PropertyValue.model_validate({'element': 'translationFilter.xslt', 'doc_uuid': uuid, 'doc_type': 'XSLT'}) == expected
+    assert PropertyValue.model_validate({'jsonParser.addRootObject': False}).value is False
+    with pytest.raises(ValidationError, match='e.g. ' + re.escape(PROPERTY_EXAMPLE)):
+        PropertyValue.model_validate({'xslt': uuid})

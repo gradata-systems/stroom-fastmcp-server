@@ -41,9 +41,12 @@ DASHED = (r'^(\S+ \d+ \d+ \S+) - User: (.+?) - \[\[(\w+)\]\] Event: \[(\w+)\] Ac
           r'By User: (\S+) \(Item Id: (\d+)\)$')
 
 
+NAMESPACE = 'records:2'   # the wrapper's, as profile_sample gives it: the environment's own wrapper may differ
+
+
 def mapping(regex: str) -> dict:
     return {
-        'input': 'xml_fragments', 'record': 'Event',
+        'input': 'xml_fragments', 'record': 'Event', 'xml_namespace': NAMESPACE,
         'extract': [{'xpath': 'EventData/Data', 'regex': regex,
                      'names': ['when', 'subject', 'server', 'kind', 'action', 'user', 'item']}],
         'common': [{'path': 'EventTime/TimeCreated', 'field': 'when', 'time_format': 'MMM dd yyyy HH:mm:ss'},
@@ -89,6 +92,8 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
               f"profiled as {profile['format']}, with the XMLFragmentParser's wrapper: {profile.get('suggested_parser', '')[:80]}")
     await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
     raw = (await feeds.upload_sample(ctx, feed, SAMPLE))['stream_id']
+    global NAMESPACE
+    NAMESPACE = setup['xslt_input']['namespace']
     tc = await translation.create_text_converter(ctx, build, feed, 'XML_FRAGMENT', setup['text_converter']['code'])
 
     print('\n### 3. the regex, tried on the sample (before the pipeline, as an agent drafting would)')

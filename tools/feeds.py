@@ -57,6 +57,8 @@ async def profile_sample(
     if not named:
         raise ToolError("Give sample (the file's text), samples (several files' texts), or stream_ids")
     result = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
+    from tools.translation import with_fragment_setup
+    result = await with_fragment_setup(ctx, result)      # the environment's own wrapper for XML fragments
     return {**result, 'read': notes} if notes else result
 
 

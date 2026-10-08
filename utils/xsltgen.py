@@ -114,8 +114,21 @@ class FieldMapping(BaseModel):
 
     @model_validator(mode='after')
     def one_source(self):
-        if sum(x is not None for x in (self.field, self.any_of, self.value, self.xpath, self.lookup)) != 1:
-            raise ValueError(f"'{self.path}': give exactly one of field, any_of, value, xpath or lookup")
+        spilled = re.search(r'[^\w/@.-]', self.path)
+        if spilled:
+            # Seen: 'EventDetail/View/User/Id**,xpath:': the call's JSON ran the next key into the path's string, and
+            # the reply said only "give exactly one of", about a field whose xpath was inside its path.
+            path = re.split(r'[^\w/@.-]', self.path, maxsplit=1)[0]
+            raise ValueError(f"path {self.path!r} holds more than a path (from {spilled.group()!r} on): the next key ran "
+                             f"into its string. Close the path's string and give the input as a key of its own, e.g. "
+                             f"{{\"path\": \"{path}\", \"xpath\": \"<the xpath>\"}}")
+        given = [k for k in ('field', 'any_of', 'value', 'xpath', 'lookup') if getattr(self, k) is not None]
+        if len(given) != 1:
+            raise ValueError(f"'{self.path}': give exactly one of field, any_of, value, xpath or lookup ("
+                             + (f"given {' and '.join(given)}" if given else "none given") + "), e.g. "
+                             f"{{\"path\": \"{self.path}\", \"field\": \"<input field>\"}}"
+                             + (": any_of alone lists the fields to try, first with a value wins"
+                                if {'field', 'any_of'} <= set(given) else ''))
         if self.dictionary is not None and self.field is None and self.any_of is None:
             raise ValueError(f"'{self.path}': dictionary needs field (or any_of) as the key")
         if self.transform and self.value is not None:
@@ -429,8 +442,8 @@ class TranslationMapping(BaseModel):
                                                  "the JSON layout's maps; required for xml and xml_fragments, e.g. "
                                                  "'logon' or 'Event'.")
     xml_namespace: str = Field('', description="xml and xml_fragments: the records' namespace, if any. Fragments that "
-                                               "declare none take the wrapper's default namespace, records:2 with the "
-                                               "standard wrapper (profile_sample says which).")
+                                               "declare none take the wrapper root's namespace: records:2 for a <records> "
+                                               "wrapper, event-logging:3 for an <Events> one (profile_sample says which).")
     json_layout: Literal['array', 'lines'] = Field('array', description=(
         "json input only, from profile_sample: 'array' (one JSON array; set jsonParser.addRootObject=false on the "
         "pipeline, or leave it: both are matched) or 'lines' (one object per line, or concatenated objects; "

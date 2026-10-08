@@ -57,7 +57,39 @@ XML_FRAGMENT_WRAPPER = """<?xml version="1.1" encoding="UTF-8"?>
 &fragment;
 </records>
 """
+# Fragments that are already event-logging <Event>s go in an <Events> wrapper, in event-logging:3: in a records one
+# they would be records:2 elements. Environments write their own wrappers this way too (seen on live: 'Event Logging
+# v3.4.2 Fragments', whose Events root puts every fragment that declares no namespace in event-logging:3).
+EVENTS_FRAGMENT_WRAPPER = """<?xml version="1.1" encoding="UTF-8"?>
+<!DOCTYPE Events [
+<!ENTITY fragment SYSTEM "fragment">
+]>
+<Events xmlns="event-logging:3" xmlns:stroom="stroom" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="event-logging:3 file://event-logging-v{version}.xsd" Version="{version}">
+&fragment;
+</Events>
+"""
 _XML_DECL = re.compile(r'^\s*<\?xml[^>]*\?>')
+_WRAPPER_ROOT = re.compile(r'<([A-Za-z_][\w.-]*)(\s[^>]*)?>\s*&fragment;')
+
+
+def wrapper_root(code: str) -> tuple[str | None, str]:
+    """A fragment wrapper's root element and its default namespace ('' for none): the namespace fragments that
+    declare none are read in."""
+    m = _WRAPPER_ROOT.search(re.sub(r'<!--.*?-->', '', code, flags=re.S))
+    if not m:
+        return None, ''
+    ns = re.search(r'\sxmlns\s*=\s*["\']([^"\']*)["\']', m.group(2) or '')
+    return m.group(1), ns.group(1) if ns else ''
+
+
+def event_logging_fragments(fragments: list) -> bool:
+    """Fragments that are event-logging <Event>s already (EventTime, EventDetail...), in its namespace or none; not a
+    source's own <Event> (Windows' System and EventData)."""
+    first = fragments[0]
+    parts = {etree.QName(c).localname for c in first if isinstance(c.tag, str)}
+    return (etree.QName(first).localname == 'Event' and etree.QName(first).namespace in (None, 'event-logging:3')
+            and {'EventTime', 'EventDetail'} <= parts)
 
 
 def xml_fragments(text: str) -> list | None:
@@ -72,18 +104,33 @@ def xml_fragments(text: str) -> list | None:
     return elements if len(elements) > 1 else None
 
 
-def xml_fragment_setup(namespace: str | None, record: str) -> dict[str, Any]:
-    effective = namespace or 'records:2'
+def xml_fragment_setup(namespace: str | None, record: str, wrapper: dict[str, Any] | None = None,
+                       others: list[dict[str, Any]] = ()) -> dict[str, Any]:
+    """How fragments are read: the wrapper converter (the environment's own when it has one: `wrapper` with its code,
+    name and path), the parser, and the namespace the XSLT then reads them in."""
+    code = (wrapper or {}).get('code') or XML_FRAGMENT_WRAPPER
+    root, wrapper_ns = wrapper_root(code)
+    effective = namespace or wrapper_ns
+    converter: dict[str, Any] = {'type': 'XML_FRAGMENT', 'code': code, 'root': root, 'namespace': wrapper_ns}
+    if wrapper and wrapper.get('uuid'):
+        converter.update(environment={k: wrapper[k] for k in ('name', 'uuid', 'path') if wrapper.get(k)},
+                         note=f"The environment's own wrapper ({wrapper.get('name')}): save this code in the build "
+                              f"(build_data_splitter save_as=<name>), as sibling sources do, so the fragments are read "
+                              f"the way the environment's other pipelines read theirs.")
+    else:
+        converter['note'] = ("The wrapper the XMLFragmentParser puts round the fragments (its textConverter); use the "
+                             "template's own wrapper if it already sets one.")
+    if others:
+        converter['other_wrappers'] = [{k: o[k] for k in ('name', 'path', 'root', 'namespace') if k in o} for o in others]
     return {
-        'text_converter': {'type': 'XML_FRAGMENT', 'code': XML_FRAGMENT_WRAPPER,
-                           'note': "The wrapper the XMLFragmentParser puts round the fragments (its textConverter); "
-                                   "use the template's own wrapper if it already sets one."},
+        'text_converter': converter,
         'parser': "XMLFragmentParser: a template whose chain has one (child_must_supply names its textConverter), "
                   "else create_pipeline from a translation template whose parser is the XMLParser, with "
                   "replace_parser='XMLFragmentParser'",
         'xslt_input': {'namespace': effective, 'root': '/', 'record': f'*/{record}',
-                       'note': ("The fragments declare no namespace, so inside the wrapper they take its default "
-                                "namespace, records:2: set xml_namespace to that." if not namespace else
+                       'note': (f"The fragments declare no namespace, so inside the wrapper they take its default, "
+                                f"{wrapper_ns or 'none'}: set xml_namespace to that. The XSLT reads them in it and "
+                                f"writes Events in event-logging:3." if not namespace else
                                 "The fragments declare their own namespace and keep it inside the wrapper."),
                        'mapping': {'input': 'xml_fragments', 'xml_namespace': effective, 'record': record}},
     }
@@ -198,7 +245,7 @@ def profile_many(samples: dict[str, str], max_records: int = 200) -> dict[str, A
     setup = {k: first[k] for k in ('suggested_parser', 'text_converter', 'parser_properties', 'xslt_input', 'parser')
              if k in first}
     return {'files': {n: {k: v for k, v in p.items() if k in ('format', 'records', 'lines', 'note', 'delimiter', 'has_header',
-                                                               'record_element', 'namespace')} for n, p in profiles.items()},
+                                                               'record_element', 'namespace', 'event_logging')} for n, p in profiles.items()},
             'format': first['format'] if len(formats) == 1 else 'mixed', 'records': sum(p.get('records', 0) for p in profiles.values()),
             'fields': fields, 'differences': differences, **setup,
             'hint': ("Map every field a rule needs with any_of where files name it differently, and give rules for the "
@@ -282,11 +329,15 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                 children = Counter(etree.QName(c).localname for c in fragments)
                 record_tag = children.most_common(1)[0][0]
                 namespace = etree.QName(fragments[0]).namespace
+                events = event_logging_fragments(fragments)
+                # The version is the default's here, where no settings are read: the tools write the configured one.
+                wrapper = {'code': EVENTS_FRAGMENT_WRAPPER.format(version='3.5.2')} if events else None
                 return {**result, 'format': 'xml fragments', 'record_element': record_tag, 'namespace': namespace,
+                        **({'event_logging': True} if events else {}),
                         'records': len(fragments), 'fields': _inventory([_xml_record_fields(f) for f in fragments[:max_records]]),
                         'suggested_parser': 'XMLFragmentParser with an XML_FRAGMENT text converter (the wrapper below); '
                                             'no root element, so the XMLParser cannot read it',
-                        **xml_fragment_setup(namespace, record_tag)}
+                        **xml_fragment_setup(namespace, record_tag, wrapper)}
             result['note'] = 'Starts with < but is not well-formed XML, as a document or as fragments'
 
     if text.startswith('['):

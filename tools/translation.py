@@ -49,6 +49,58 @@ def _check_converter(converter_type: str, code: str) -> None:
                         f"not <{etree.QName(root).localname}> (stroom://guide/data-splitter)")
 
 
+async def fragment_wrappers(ctx: Context, limit: int = 100) -> list[dict[str, Any]]:
+    """The environment's XML_FRAGMENT converters outside the workspace: name, uuid, path, code, and the root and
+    namespace the fragments are read in. Seen: the server proposed its records:2 wrapper where every wrapper in the
+    environment was an event-logging:3 <Events> one."""
+    import asyncio
+    from utils.profile import wrapper_root
+    stroom = gateway_from(ctx)
+    workspace = stroom.settings.workspace_folder
+    found = await stroom.find_documents('*', ['TextConverter'], limit)
+    refs = [(v['docRef'], v.get('path') or '') for v in found.get('values') or []
+            if (v.get('docRef') or {}).get('type') == 'TextConverter' and workspace not in (v.get('path') or '')]
+
+    async def read(ref: dict[str, Any], path: str) -> dict[str, Any] | None:
+        try:
+            doc = await stroom.get_doc('TextConverter', ref['uuid'])
+        except ToolError:
+            return None       # the find index can name a document since deleted
+        if doc.get('converterType') != 'XML_FRAGMENT' or '&fragment;' not in (doc.get('data') or ''):
+            return None
+        root, namespace = wrapper_root(doc['data'])
+        return {'name': ref.get('name'), 'uuid': ref['uuid'], 'path': path, 'code': doc['data'], 'root': root,
+                'namespace': namespace}
+
+    return [w for w in await asyncio.gather(*(read(r, p) for r, p in refs)) if w]
+
+
+async def with_fragment_setup(ctx: Context, profiled: dict[str, Any]) -> dict[str, Any]:
+    """A profile of XML fragments, with the wrapper this environment uses: its own (event-logging fragments: an
+    event-logging:3 one, else the most used), else the standard one (an <Events> one for event-logging fragments, in
+    the configured version)."""
+    first = next(iter((profiled.get('files') or {}).values()), profiled)     # several files: as the first is read
+    record = profiled.get('record_element') or first.get('record_element')
+    if profiled.get('format') != 'xml fragments' or not record:
+        return profiled
+    from collections import Counter
+    from utils.profile import EVENTS_FRAGMENT_WRAPPER, xml_fragment_setup
+    version = gateway_from(ctx).settings.event_logging_version
+    try:
+        found = await fragment_wrappers(ctx)
+    except Exception:     # a convenience on top of the standard wrapper: never fail a profile over it
+        found = []
+    events = first.get('event_logging')
+    fitting = [w for w in found if w['namespace'] == 'event-logging:3'] if events else found
+    if fitting:
+        most = Counter((w['root'], w['namespace']) for w in fitting).most_common(1)[0][0]
+        wrapper = next(w for w in fitting if (w['root'], w['namespace']) == most)
+    else:
+        wrapper = {'code': EVENTS_FRAGMENT_WRAPPER.format(version=version)} if events else None
+    others = [w for w in found if w is not wrapper]
+    return {**profiled, **xml_fragment_setup(first.get('namespace'), record, wrapper, others)}
+
+
 async def _generated(index_plan: FieldPlan | None) -> str:
     """The indexing XSLT an index plan generates, for a save given no code."""
     if index_plan is None:

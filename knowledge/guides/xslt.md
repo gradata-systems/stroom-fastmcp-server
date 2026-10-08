@@ -9,13 +9,29 @@ Stroom runs XSLT 2.0/3.0 (Saxon). Declare `xmlns:stroom="stroom"` to use Stroom 
 | `DSParser` (a text template's) | `<records><record><data name="field" value="..."/>` | `records:2` |
 | `JSONParser` (a JSON template's), no text converter | JSON as `map`/`array`/`string` elements, keys in `@key`; root `/map` for JSON lines, `/array` for an array (see the JSON guide) | `http://www.w3.org/2013/XSL/json` |
 | `XMLParser` (an XML template's) | the source XML | the source namespace |
-| `XMLFragmentParser` with an XML_FRAGMENT wrapper converter | the fragments (one `<Event>` per line) inside the wrapper's `records` root | the fragments' own namespace, else the wrapper's: `records:2` (see the Data Splitter guide) |
+| `XMLFragmentParser` with an XML_FRAGMENT wrapper converter | the fragments (one `<Event>` per line) inside the wrapper's root (`records`, or `Events`) | the fragments' own namespace, else the wrapper root's: `records:2` for a `<records>` wrapper, `event-logging:3` for an `<Events>` one |
 | Indexing pipelines | `<Events>` from the Events stream, with `@StreamId` and `@EventId` on each `Event` | `event-logging:3` |
 
 Match the record element and build one `Event` per record; the split filter hands the XSLT one
 record at a time. Without the right `xpath-default-namespace` (or a prefix bound to it) a bare `match="record"`
 or `select="map"` selects nothing, the output is empty text, and processing writes no Events and no error;
 `check_xslt` names such expressions, and stepping reports "Output contains no XML elements".
+
+### Namespaces, from raw input to Events
+
+Three namespaces are in play, and each step has its own: the parser's output (what the XSLT reads), the XSLT's
+output (`event-logging:3`, always), and the schema the `SchemaFilter` validates against (event-logging, picked by
+`xsi:schemaLocation`). A mapping sets the first with `input` (and `xml_namespace` for XML) and the generator writes
+the other two; by hand, `xpath-default-namespace` is the first and the default `xmlns` the second.
+
+| What you see | Why | Fix |
+| --- | --- | --- |
+| Stepping clean, but every record's output is an empty `<Events/>` (or "Output contains no XML elements"); processing writes no Events and no Error stream | The XSLT reads the input in the wrong namespace: its record template matches nothing | Read the parser's output in `step_sample` and take the root's `xmlns`: set the mapping's `xml_namespace` (or `xpath-default-namespace`) to it |
+| XML fragments come out empty | A fragment with no `xmlns` of its own takes the wrapper root's: `records:2` in a `<records>` wrapper, `event-logging:3` in an `<Events>` one | `xml_namespace` = the wrapper root's namespace (`profile_sample`'s `xslt_input.namespace`) |
+| JSON comes out empty | The JSONParser writes `http://www.w3.org/2013/XSL/json`; `json-to-xml()` writes `http://www.w3.org/2005/xpath-functions` | `input: json` sets it; by hand, read the parser's output in the first, a `json-to-xml()` result in the second |
+| Source XML comes out empty | Its own `xmlns` (Windows events: `http://schemas.microsoft.com/win/2004/08/events/event`) | `xml_namespace` = that namespace; with none, leave it empty |
+| Schema errors on elements that look right (`Event`, `EventTime` "not expected") | The output elements are not in `event-logging:3` (an XSLT with no default `xmlns`, or one copying input elements with their own namespace) | Write output with `xmlns="event-logging:3"` on the stylesheet; never `xsl:copy-of` an input element into an Event |
+| `schemaLocation` names a version this Stroom lacks | The `Events` root's `xsi:schemaLocation` picks the XSD | Use the configured version (`build_translation_xslt` writes it) |
 
 ## Output
 

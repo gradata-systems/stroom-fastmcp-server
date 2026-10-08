@@ -76,7 +76,8 @@ Parsing: profile_sample names the parser. JSON (an array, or one object per line
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
 XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an
 XML_FRAGMENT wrapper converter: a template with one, else create_pipeline from a template whose parser is the XMLParser, with
-replace_parser='XMLFragmentParser'; fragments without a namespace take the wrapper's, records:2. The XSLT reads
+replace_parser='XMLFragmentParser'; fragments without a namespace take the wrapper root's (records:2, or event-logging:3
+for an <Events> wrapper): build_data_splitter gives the environment's own wrapper and saves it. The XSLT reads
 the parser's output in its namespace (records:2 for a Data Splitter; http://www.w3.org/2013/XSL/json for JSON, root
 /map for JSON lines, /array for an array), so set xpath-default-namespace to it.
 

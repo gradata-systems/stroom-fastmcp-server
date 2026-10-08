@@ -10,7 +10,7 @@ from tests.test_xsltgen import SCHEMA, VALIDATOR, transform
 from tools import translation
 from tools.pipeline_writes import swap_parser
 from tools.pipelines import merge_layers
-from utils.profile import XML_FRAGMENT_WRAPPER, profile
+from utils.profile import XML_FRAGMENT_WRAPPER, profile, wrapper_root
 from utils.survey import sample_text, split_records
 from utils.xsltgen import TranslationMapping, generate
 
@@ -109,3 +109,98 @@ def test_the_wrapper_is_checked_and_the_parser_can_be_swapped():
     with pytest.raises(ToolError, match='replace_parser must be one of'):
         swap_parser(merge_layers(layers), 'XSLTFilter')
     assert etree.fromstring(XML_FRAGMENT_WRAPPER.replace('&fragment;', '<Event/>').encode()) is not None
+
+
+LIVE_WRAPPER = """<?xml version="1.1" encoding="UTF-8"?>
+<!DOCTYPE records [<!ENTITY fragment SYSTEM "fragment">]>
+<Events
+  xmlns="event-logging:3"
+  xmlns:stroom="stroom"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="event-logging:3 file://event-logging-v3.4.2.xsd"
+  Version="3.4.2">
+  &fragment;
+</Events>
+
+<!--<records xmlns="records:2">-->
+<!--&fragment;-->
+<!--</records>-->
+"""
+
+
+def _ctx(converters: dict[str, tuple[str, str, str]]):
+    """A Stroom holding these text converters: {uuid: (name, path, type and code as 'TYPE|code')}."""
+    from types import SimpleNamespace
+
+    class Stroom:
+        settings = SimpleNamespace(event_logging_version='3.5.2', workspace_folder='MCP Workspace')
+
+        async def find_documents(self, name, types, limit, offset=0):
+            return {'values': [{'docRef': {'type': 'TextConverter', 'uuid': u, 'name': n}, 'path': p}
+                               for u, (n, p, _) in converters.items()]
+                    + [{'docRef': {'type': 'Folder', 'uuid': 'f', 'name': 'Feeds'}, 'path': 'System'}]}
+
+        async def get_doc(self, kind, uuid):
+            if uuid not in converters:
+                raise ToolError('Document not found')
+            kind, code = converters[uuid][2].split('|', 1)
+            return {'converterType': kind, 'data': code}
+
+    return SimpleNamespace(lifespan_context={'stroom': Stroom()})
+
+
+def test_the_wrapper_root_and_its_namespace_are_read_past_comments():
+    assert wrapper_root(XML_FRAGMENT_WRAPPER) == ('records', 'records:2')
+    assert wrapper_root(LIVE_WRAPPER) == ('Events', 'event-logging:3')
+    assert wrapper_root('<!DOCTYPE x [<!ENTITY fragment SYSTEM "fragment">]><logs>&fragment;</logs>') == ('logs', '')
+
+
+async def test_fragments_follow_the_environments_own_wrapper():
+    # Seen on live: every fragment wrapper is an <Events> one in event-logging:3; the server proposed records:2.
+    ctx = _ctx({'w1': ('Event Logging v3.4.2 Fragments', 'System / Format Handling', f'XML_FRAGMENT|{LIVE_WRAPPER}'),
+                'ds': ('CSV', 'System / Feeds', 'DATA_SPLITTER|<dataSplitter/>'),
+                'own': ('Mine', 'System / MCP Workspace / b', f'XML_FRAGMENT|{XML_FRAGMENT_WRAPPER}'),
+                'gone': ('Deleted', 'System', 'unused|')})
+    setup = await translation.with_fragment_setup(ctx, profile(FRAGMENTS['sample']))
+    assert setup['text_converter']['code'] == LIVE_WRAPPER
+    assert setup['text_converter']['environment'] == {'name': 'Event Logging v3.4.2 Fragments', 'uuid': 'w1',
+                                                      'path': 'System / Format Handling'}
+    assert setup['xslt_input']['mapping'] == {'input': 'xml_fragments', 'xml_namespace': 'event-logging:3', 'record': 'Event'}
+    # The build's own converters (in the workspace) are not the environment's convention
+    assert 'other_wrappers' not in setup['text_converter']
+    # With none in the environment, the standard records:2 one
+    plain = await translation.with_fragment_setup(_ctx({}), profile(FRAGMENTS['sample']))
+    assert plain['text_converter']['code'] == XML_FRAGMENT_WRAPPER and plain['xslt_input']['namespace'] == 'records:2'
+
+
+async def test_event_logging_fragments_take_an_events_wrapper_in_the_configured_version():
+    events = ('<Event><EventTime><TimeCreated>2026-10-01T10:00:00.000Z</TimeCreated></EventTime>'
+              '<EventSource><System><Name>App</Name><Environment>Prod</Environment></System></EventSource>'
+              '<EventDetail><TypeId>1</TypeId></EventDetail></Event>') * 2
+    profiled = profile(events)
+    assert profiled['event_logging'] and profiled['text_converter']['root'] == 'Events'
+    setup = await translation.with_fragment_setup(_ctx({}), profiled)
+    assert 'event-logging-v3.5.2.xsd' in setup['text_converter']['code']
+    assert setup['xslt_input']['namespace'] == 'event-logging:3'
+    # A source's own <Event> (Windows' System, EventData) is not event-logging
+    assert not profile(FRAGMENTS['sample']).get('event_logging')
+
+
+def test_generated_xslt_reads_fragments_inside_an_events_wrapper():
+    mapping = {**FRAGMENTS['reference']['mapping'], 'unmatched': 'skip', 'xml_namespace': 'event-logging:3'}
+    result = generate(TranslationMapping.model_validate(mapping), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    wrapped = LIVE_WRAPPER.split(']>')[1].split('&fragment;')[0] + FRAGMENTS['sample'] + '</Events>'
+    events = transform(result['xslt'].replace("stroom:format-date(", "string(").replace(", 'yyyy-MM-dd''T''HH:mm:ss.SSSX')", ')'), wrapped)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    assert [e.findtext('e:EventSource/e:User/e:Id', namespaces=NS) for e in events.findall('e:Event', NS)][0] == 'alice'
+
+
+async def test_the_converter_step_gives_fragments_their_wrapper_rather_than_skipping_it():
+    # Seen: the plan's converter step called build_data_splitter, which said "no Data Splitter", and none was saved.
+    from tools.generation import build_data_splitter
+    ctx = _ctx({'w1': ('Event Logging v3.4.2 Fragments', 'System / Format Handling', f'XML_FRAGMENT|{LIVE_WRAPPER}')})
+    result = await build_data_splitter(ctx, sample=FRAGMENTS['sample'])
+    assert result['converter_type'] == 'XML_FRAGMENT' and result['converter'] == LIVE_WRAPPER
+    assert result['xslt_input']['mapping']['xml_namespace'] == 'event-logging:3'
+    assert "xml_namespace 'event-logging:3'" in result['hint']

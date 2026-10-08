@@ -312,8 +312,8 @@ def _no_events(element: str, keys: list[str]) -> dict[str, Any]:
     came out as an empty Events, and stepping said clean."""
     message = (f"None of the {len(keys)} records produced an Event: the XSLT writes Events, but its record templates "
                f"select nothing in the input. Usually the input's namespace (xpath-default-namespace: records:2 for a Data "
-               f"Splitter, and for XML fragments the wrapper's, records:2, unless they declare their own; the mapping's "
-               f"xml_namespace) or the record element's name (the mapping's record). Every record would be lost.")
+               f"Splitter, and for XML fragments the wrapper root's xmlns (records:2, or event-logging:3 for an <Events> "
+               f"wrapper) unless they declare their own; the mapping's xml_namespace) or the record element's name (the mapping's record). Every record would be lost.")
     return {'class': 'blocking', 'reason': 'No record produced an Event', 'severity': 'ERROR', 'element': element,
             'own_element': True, 'count': len(keys), 'records_affected': len(keys),
             'examples': [{'message': message, 'location': None}], 'records': keys[:20]}

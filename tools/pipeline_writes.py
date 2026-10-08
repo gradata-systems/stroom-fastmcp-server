@@ -1,5 +1,6 @@
 """Tools that create and change pipelines in a build."""
 import copy
+import json
 import logging
 import re
 from typing import Annotated, Any
@@ -7,7 +8,7 @@ from urllib.parse import quote
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from security.guard import MANAGED, build_tag, copy_of_tag, guard_from
 from tools.pipelines import chain_order, merge_layers
@@ -96,6 +97,12 @@ async def reference_entries(stroom: StroomGateway, merged: dict[str, Any], refer
     return out
 
 
+PROPERTY_EXAMPLE = ('[{"element": "translationFilter", "name": "xslt", "doc_type": "XSLT", "doc_uuid": "<its uuid>"}, '
+                    '{"element": "jsonParser", "name": "addRootObject", "value": false}]')
+_UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+_DOC_TYPES = {'xslt': 'XSLT', 'textConverter': 'TextConverter'}
+
+
 class PropertyValue(BaseModel):
     element: str = Field(description="Element id, e.g. 'translationFilter'.")
     name: str = Field(description="Property name, e.g. 'xslt', 'textConverter', 'index', 'indexName'.")
@@ -103,6 +110,33 @@ class PropertyValue(BaseModel):
     doc_type: str | None = Field(None, description="For document properties: e.g. 'XSLT', 'TextConverter', 'Index'.")
     value: str | int | bool | None = Field(None, description="For plain properties: the value, written as the type "
                                                              "Stroom declares for it (true/false, a number, text).")
+
+    @model_validator(mode='before')
+    @classmethod
+    def _dotted(cls, data: Any) -> Any:
+        # Agents guess the shape from 'translationFilter.xslt' as the descriptions name a property (the debug log of a
+        # VS Code session: "schema guessing"): "translationFilter.xslt=<uuid>", {"translationFilter.xslt": "<uuid>"},
+        # {"element": "translationFilter.xslt", ...} are read as the property they plainly are.
+        if isinstance(data, str) and '.' in data.partition('=')[0]:
+            key, _, given = data.partition('=')
+            data = {key.strip(): given.strip()}
+        if isinstance(data, dict):
+            dotted = data.get('property') or data.get('element') or ''
+            if 'name' not in data and isinstance(dotted, str) and '.' in dotted:
+                element, name = dotted.rsplit('.', 1)
+                data = {**{k: v for k, v in data.items() if k != 'property'}, 'element': element, 'name': name}
+            elif len(data) == 1 and '.' in next(iter(data)) and not {'element', 'name'} & set(data):
+                key, given = next(iter(data.items()))
+                element, name = key.rsplit('.', 1)
+                data = {'element': element, 'name': name, 'value': given}
+            given = data.get('value')
+            if (data.get('doc_uuid') is None and isinstance(given, str) and _UUID.match(given)
+                    and data.get('name') in _DOC_TYPES):
+                data = {**data, 'doc_uuid': given, 'doc_type': data.get('doc_type') or _DOC_TYPES[data['name']], 'value': None}
+            if not {'element', 'name'} <= set(data):
+                raise ValueError(f"a property is {{element, name}} with doc_uuid and doc_type (a document) or value (a "
+                                 f"plain property), e.g. {PROPERTY_EXAMPLE}; given {json.dumps(data, default=str)[:160]}")
+        return data
 
 
 async def _json_array_parser(stroom: StroomGateway, merged: dict[str, Any], properties: list[PropertyValue],
@@ -329,8 +363,8 @@ async def create_pipeline(
         template_uuid: Annotated[str | None, Field(description="Parent template, from find_pipeline_templates (its UUID; "
                                                                "`template` takes a UUID or a name too).")] = None,
         set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
-            description="What the child supplies, e.g. translationFilter.xslt and dsParser.textConverter. May be left "
-                        "for update_pipeline once the XSLT and converter are saved.")] = [],
+            description="What the child supplies (translationFilter.xslt, dsParser.textConverter), as objects: "
+                        + PROPERTY_EXAMPLE + ". May be left for update_pipeline once the XSLT and converter are saved.")] = [],
         build: Annotated[str | None, Field(description="The build this pipeline belongs to; defaults to the build this "
                                                        "session is working on (start_onboarding / start_build).")] = None,
         template: Annotated[str | None, Field(description="The template's UUID or exact name, instead of template_uuid.")] = None,
@@ -433,8 +467,8 @@ async def copy_pipeline(
             description="Text replacements applied to the names of the copied XSLTs and text converters, "
                         "e.g. {'V1.2': 'V1.3'}.")] = None,
         set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(
-            description="Properties to change on the copy, e.g. elasticIndexingFilter.indexName for a new "
-                        "index version.")] = [],
+            description="Properties to change on the copy, as objects, e.g. [{\"element\": \"elasticIndexingFilter\", "
+                        "\"name\": \"indexName\", \"value\": \"ecs-acme-v2\"}] for a new index version.")] = [],
         working_copy: Annotated[bool, Field(
             description="True when the copy will be written back over the original on promotion (an in-place "
                         "change); False for a new version that is promoted alongside it.")] = False,
@@ -580,8 +614,8 @@ async def set_pipeline_references(
 async def update_pipeline(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
-        set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(description="Element properties to set, e.g. "
-                                                                    "schemaFilter.schemaGroup or jsonParser.addRootObject.")] = [],
+        set_properties: Annotated[list[PropertyValue] | str, ONE_OR_MORE, Field(description="Element properties to set, as objects: "
+                                                                    + PROPERTY_EXAMPLE + ".")] = [],
         references: Annotated[list[PipelineReference] | str, ONE_OR_MORE, Field(description="Reference data to attach (added to any "
                                                                         "the pipeline already has), for stroom:lookup().")] = [],
 ) -> dict[str, Any]:

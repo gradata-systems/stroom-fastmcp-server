@@ -99,8 +99,10 @@ Step the pipeline after each change: the `dsParser` element's output shows the r
 
 Several root elements, e.g. one `<Event>` per line with no document root, are not XML the `XMLParser` can read.
 The `XMLFragmentParser` reads them through a text converter of type `XML_FRAGMENT`: the wrapper document the
-fragments are parsed inside, where the entity `fragment` is the stream (`profile_sample` returns it as
-`text_converter.code`):
+fragments are parsed inside, where the entity `fragment` is the stream. Environments usually have wrappers of
+their own: `profile_sample` returns the one to use as `text_converter.code` (the environment's own when there is one,
+named in `text_converter.environment`), and `build_data_splitter` with `save_as` saves it in the build. With none,
+the standard one is a `records` wrapper:
 
 ```xml
 <?xml version="1.1" encoding="UTF-8"?>
@@ -113,10 +115,25 @@ fragments are parsed inside, where the entity `fragment` is the stream (`profile
 </records>
 ```
 
+An `<Events xmlns="event-logging:3">` wrapper is as common (fragments that are event-logging `<Event>`s already
+always take one):
+
+```xml
+<?xml version="1.1" encoding="UTF-8"?>
+<!DOCTYPE Events [
+<!ENTITY fragment SYSTEM "fragment">
+]>
+<Events xmlns="event-logging:3" xmlns:stroom="stroom" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="event-logging:3 file://event-logging-v3.5.2.xsd" Version="3.5.2">
+&fragment;
+</Events>
+```
+
 Two things follow from the wrapper:
 
-- **Namespace.** A fragment that declares no `xmlns` of its own takes the wrapper's default namespace, so the
-  XSLT reads it in `records:2` (the mapping's default for `xml_fragments`); a fragment with its own namespace
+- **Namespace.** A fragment that declares no `xmlns` of its own takes the wrapper root's default namespace, so the
+  XSLT reads it in `records:2` inside a `<records>` wrapper and in `event-logging:3` inside an `<Events>` one: set
+  the mapping's `xml_namespace` to it (`records:2` is the default for `xml_fragments`). A fragment with its own namespace
   (Windows event XML, say) keeps it, and the mapping gives it as `xml_namespace`. Read in the wrong namespace, every
   record comes out as an empty `Events`: `step_sample` blocks on that.
 - **Records.** The fragments sit under the wrapper's root: mapping `input: xml_fragments, record: Event` matches

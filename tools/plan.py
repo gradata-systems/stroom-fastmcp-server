@@ -52,7 +52,7 @@ async def templates_reading(ctx: Context, fmt: str) -> str:
 STAGE_1 = [
     ('feed', 'Create the feed in the build', 'create_feed'),
     ('samples', 'Upload every sample file as its own stream', 'upload_sample files=[their paths] (sample= only for text pasted into the chat)'),
-    ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (or the XML fragment wrapper from profile_sample)', 'build_data_splitter stream_ids=<the sample streams>, save_text_converter'),
+    ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (for XML fragments: the wrapper, as the environment writes them)', 'build_data_splitter stream_ids=<the sample streams>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams; fix the mapping and build_translation_xslt uuid=... in between'),
@@ -462,6 +462,8 @@ async def start_onboarding(
     folder = await guard_from(ctx).build_folder(name)
     remember_build(ctx, name)
     profiled = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
+    from tools.translation import with_fragment_setup
+    profiled = await with_fragment_setup(ctx, profiled)
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
     template = await templates_reading(ctx, fmt)
@@ -474,7 +476,7 @@ async def start_onboarding(
         'profile': profiled,
         'parser': parser, 'template': template,
         'text_converter': ('needed: build_data_splitter from a spec, then save_text_converter' if fmt in TEXT_FORMATS else
-                           'needed: the XML fragment wrapper (profile text_converter)' if fmt == 'xml fragments' else
+                           'needed: the XML fragment wrapper (profile text_converter); build_data_splitter save_as=<name> saves it' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),
         'plan': plan,
         'next': nxt or dict(zip(('step', 'do', 'call', 'then'),

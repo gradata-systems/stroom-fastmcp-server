@@ -1,4 +1,5 @@
 """build_translation_xslt: a documentation table only from a sampled run, and saving the XSLT by reference."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -7,7 +8,7 @@ from fastmcp.exceptions import ToolError
 
 from tests.test_xsltgen import SCHEMA, mapping
 from tools import generation
-from utils.xsltgen import generate
+from utils.xsltgen import TranslationMapping, generate
 
 
 async def test_no_field_mapping_without_a_sample():
@@ -190,3 +191,29 @@ async def test_a_field_an_inferred_splitter_lacks_is_a_warning_not_a_refusal():
         assert any("field 'hosts'" in w and 'inferred Data Splitter' in w for w in guessed['warnings'])
         given = await generation.build_translation_xslt(ctx, m, sample=sample, splitter={'kind': 'delimited', 'header': True})
         assert not given['ok'] and any("field 'hosts'" in p for p in given['problems'])
+
+
+async def test_a_mapping_refused_for_its_shape_says_what_is_missing_and_shows_a_whole_one():
+    # Seen (a VS Code session): input left out, a rule without name, and an xpath run into its path's string
+    # ('EventDetail/View/User/Id**,xpath:'), answered with "Field required" and "give exactly one of".
+    from tools.generation import MAPPING_EXAMPLE
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    bad = {'events': [{'name': 'a'}, {'fields': [{'path': 'EventDetail/View/User/Id**,xpath: "User"'}]}]}
+    with pytest.raises(ToolError) as raised:
+        await generation.build_translation_xslt(ctx, bad)
+    text = str(raised.value)
+    assert "input: Field required (What the XSLT reads: data_splitter" in text
+    assert "events[1].name: Field required (Short name for this kind of event, e.g. 'logon'.)" in text
+    assert "holds more than a path" in text and '{"path": "EventDetail/View/User/Id", "xpath": "<the xpath>"}' in text
+    assert json.dumps(MAPPING_EXAMPLE) in text
+    # A value problem alone gets no example: the shape is right
+    with pytest.raises(ToolError) as raised:
+        await generation.build_translation_xslt(ctx, {**MAPPING_EXAMPLE, 'common': [{'path': 'EventSource/System/Name', 'field': 'a', 'any_of': ['b']}]})
+    assert 'given field and any_of' in str(raised.value) and 'any_of alone' in str(raised.value)
+    assert 'A whole mapping looks like' not in str(raised.value)
+
+
+def test_the_example_mapping_generates():
+    from tools.generation import MAPPING_EXAMPLE
+    result = generate(TranslationMapping.model_validate(MAPPING_EXAMPLE), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
