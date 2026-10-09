@@ -151,7 +151,11 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
     if not metas:
         return None
     newest = max(metas, key=lambda m: m.get('createMs') or 0)
-    text, _, _ = await read_head(gateway_from(ctx), newest['id'], 0, 20_000)
+    text, cut, _ = await read_head(gateway_from(ctx), newest['id'], 0, 20_000)
+    if cut and '\n' in text.rstrip('\n'):
+        # The head ends part-way through a record: profiled with it, 50 XML fragments (35 KB) read as key=value, their
+        # messages' "User: x" taken for pairs, and create_pipeline refused the XMLFragmentParser (Qwen, VS Code).
+        text = text[:text.rstrip('\n').rfind('\n') + 1]
     profiled = profile(text)
     return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': profiled['format'],
             'namespace': profiled.get('namespace'), 'root': profiled.get('root'),

@@ -165,3 +165,20 @@ async def test_next_says_what_to_do_when_its_tool_is_hidden(monkeypatch):
     monkeypatch.setattr(plan, 'remember_build', lambda ctx, build: None)
     result = await plan.with_next(None, 'b', {'ok': True})
     assert result['next']['if_missing'].startswith('create_pipeline not in your tool list? Call the activate_* tool')
+
+
+async def test_a_sample_cut_part_way_through_a_record_is_profiled_by_its_whole_records():
+    # Qwen in VS Code: 50 XML fragments (35 KB) read from their first 20,000 characters, the last fragment cut, were
+    # profiled as key=value ("User: x", "Action: [y]" in the messages), and create_pipeline refused the
+    # XMLFragmentParser that start_onboarding had named.
+    from tools import plan
+    record = ('<ns0:Event xmlns:ns0="http://schemas.microsoft.com/win/2004/08/events/event"><ns0:System>'
+              '<ns0:EventID>1000</ns0:EventID><ns0:Computer>ss.domain.com</ns0:Computer></ns0:System><ns0:EventData>'
+              '<ns0:Data>Sep 27 2026 23:48:10 - User: domain.com\\Bloggs, Joe - [[SecretServer]] Event: [User] '
+              'Action: [Login] By User: domain.com\\joe.bloggs (Item Id: 7)</ns0:Data></ns0:EventData></ns0:Event>\n')
+    head = (record * 5)[:len(record) * 4 + 200]
+    streams = {'Raw Events': [{'id': 7, 'feed': 'SS', 'createMs': 1}]}
+    with patch.object(plan, 'sample_streams', AsyncMock(return_value=streams)), \
+            patch('tools.sampling.read_head', AsyncMock(return_value=(head, True, 1))), \
+            patch.object(plan, 'gateway_from', lambda ctx: None):
+        assert (await plan.sample_format(None, 'b'))['format'] == 'xml fragments'

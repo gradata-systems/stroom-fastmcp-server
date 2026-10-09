@@ -106,6 +106,17 @@ async def test_check_xslt_rejects_malformed_xml(ctx):
     assert result['ok'] is False and 'Not well-formed' in result['errors'][0]
 
 
+@respx.mock
+async def test_xml_sent_html_escaped_is_read_unescaped_and_said_so(ctx):
+    # Qwen in VS Code sent &lt;?xml ... and was told only "Start tag expected, '<' not found".
+    import html
+    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    plain = await validation.check_xslt(ctx, XSLT)
+    escaped = await validation.check_xslt(ctx, html.escape(XSLT, quote=False))
+    assert escaped['errors'] == plain['errors'] and escaped['warnings'][0] == validation._ESCAPED
+    assert validation._unescaped('<a>&lt;b&gt;</a>') == ('<a>&lt;b&gt;</a>', [])     # escaped text inside real XML is left
+
+
 async def test_describe_translation_maps_outputs_to_inputs(ctx):
     result = await validation.describe_translation(ctx, xslt=XSLT)
     mapped = {m['output']: m['source'] for m in result['mappings']}

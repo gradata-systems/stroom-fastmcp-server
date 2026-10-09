@@ -120,8 +120,11 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     merged = pipelines.merge_layers(layers)
     chain = pipelines.chain_order(merged['elements'], merged['links'])
     types = {e['id']: e['type'] for e in merged['elements']}
-    # Source is implicit here (the chain starts at the element nothing links to); where it is stored, it links on.
     first = [t for t in (types[e] for e in chain) if t != 'Source'][0]
+    # The template stores no Source; the child does, linked to the new parser, as the UI draws it (seen: Source shown
+    # linked to nothing, though the pipeline processed).
+    e2e.check(types.get('Source') == 'Source' and {'from': 'Source', 'to': 'xmlFragmentParser'} in merged['links'],
+              f"Source is stored and feeds the XMLFragmentParser: {merged['links'][:2]}")
     e2e.check(first == 'XMLFragmentParser' and 'XMLParser' not in types.values()
               and all(link['to'] != 'xmlParser' and link['from'] != 'xmlParser' for link in merged['links']),
               f"the XMLFragmentParser starts the chain, in the XMLParser's place: {[types[e] for e in chain]}")

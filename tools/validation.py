@@ -1,5 +1,6 @@
 """Local validation of XSLT and event XML: well-formedness, schema, quality and field mapping."""
 import difflib
+import html
 import re
 from collections import Counter
 from typing import Annotated, Any
@@ -52,6 +53,16 @@ _ELEMENT_AXIS = re.compile(r'\b(?:child|descendant|self|descendant-or-self|follo
                            r'|ancestor|ancestor-or-self|following|preceding)::')
 
 XsltText = Annotated[str, Field(description="Full XSLT document text.")]
+
+_ESCAPED = "It came HTML-escaped (&lt; for <) and was read unescaped: send XML as it is, not escaped."
+
+
+def _unescaped(text: str) -> tuple[str, list[str]]:
+    """XML sent HTML-escaped, with no < anywhere (seen: Qwen in VS Code, answered only "Start tag expected"): read
+    unescaped, and said so."""
+    if '<' not in text and text.lstrip().startswith('&lt;'):
+        return html.unescape(text), [_ESCAPED]
+    return text, []
 EventsXml = Annotated[str, Field(description="An <Events> document, e.g. step output or a record from read_stream.")]
 
 
@@ -224,11 +235,12 @@ async def check_xslt(
     xsl:import / xsl:include targets that exist as XSLT documents in Stroom. Full compilation happens when
     the pipeline is stepped.
     """
+    xslt, escaped = _unescaped(xslt)
     try:
         root = etree.fromstring(xslt.encode('utf-8'))
     except etree.XMLSyntaxError as e:
-        return {'ok': False, 'errors': [f"Not well-formed XML (line {e.lineno}): {e.msg}"], 'warnings': []}
-    errors, warnings = [], []
+        return {'ok': False, 'errors': [f"Not well-formed XML (line {e.lineno}): {e.msg}"], 'warnings': escaped}
+    errors, warnings = [], list(escaped)
     if root.tag != f'{{{XSL}}}stylesheet' and root.tag != f'{{{XSL}}}transform':
         errors.append("Root element must be xsl:stylesheet")
     if not root.get('version'):
@@ -437,6 +449,9 @@ async def check_events(
     UTC timestamp; System Name, Environment, Generator, Device and TypeId present; exactly one action under
     EventDetail; no empty elements), per rule with the events failing it and examples.
     """
+    events_xml, escaped = _unescaped(events_xml)
+    if escaped:
+        return {**await check_events(ctx, events_xml, schema_version), 'note': _ESCAPED}
     schema = await validate_events(ctx, events_xml, schema_version)
     which = schema.get('schema', '')
     if which is None or 'records' in which:

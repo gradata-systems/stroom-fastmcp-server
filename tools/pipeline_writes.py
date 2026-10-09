@@ -45,8 +45,17 @@ def swap_parser(merged: dict[str, Any], new_type: str) -> tuple[dict[str, Any], 
     # And the link into it (Source -> parser): seen, an XMLFragmentParser added with only its outgoing links, which
     # nothing fed; the UI didn't show it, and stepping failed.
     incoming = [{'from': link['from'], 'to': link['to']} for link in merged['links'] if link['to'] == old]
-    data = {'elements': {'add': [{'id': new_id, 'type': new_type}], 'remove': [{'id': old, 'type': types[old]}]},
-            'links': {'add': [{'from': link['from'], 'to': new_id} for link in incoming]
+    added = [{'id': new_id, 'type': new_type}]
+    feeds = [link['from'] for link in incoming]
+    if not incoming:
+        # A template from before Stroom drew its Source element (Event Data (XML), locally and live) has no link into
+        # its parser: the new parser is fed from Source as Stroom's own children write it (seen: the pipeline
+        # processed, but the UI showed Source linked to nothing).
+        if 'Source' not in types:
+            added.insert(0, {'id': 'Source', 'type': 'Source'})
+        feeds = ['Source']
+    data = {'elements': {'add': added, 'remove': [{'id': old, 'type': types[old]}]},
+            'links': {'add': [{'from': f, 'to': new_id} for f in feeds]
                       + [{'from': new_id, 'to': link['to']} for link in outgoing], 'remove': incoming + outgoing}}
     return data, new_id, types[old]
 

@@ -108,6 +108,16 @@ def test_the_wrapper_is_checked_and_the_parser_can_be_swapped():
     assert chain_order(merged['elements'], merged['links'])[:2] == ['Source', 'xmlFragmentParser']
     with pytest.raises(ToolError, match='replace_parser must be one of'):
         swap_parser(merge_layers(layers), 'XSLTFilter')
+    # A template with no Source element (Event Data (XML), locally and live): the new parser is fed from a Source
+    # added as Stroom's own children write it (seen: the UI showed Source linked to nothing).
+    legacy = [{'pipelineData': {
+        'elements': {'add': [{'id': 'xmlParser', 'type': 'XMLParser'}, {'id': 'splitFilter', 'type': 'SplitFilter'}]},
+        'links': {'add': [{'from': 'xmlParser', 'to': 'splitFilter'}]}}}]
+    data, _, _ = swap_parser(merge_layers(legacy), 'XMLFragmentParser')
+    assert data['elements']['add'] == [{'id': 'Source', 'type': 'Source'}, {'id': 'xmlFragmentParser', 'type': 'XMLFragmentParser'}]
+    assert data['links']['add'] == [{'from': 'Source', 'to': 'xmlFragmentParser'}, {'from': 'xmlFragmentParser', 'to': 'splitFilter'}]
+    merged = merge_layers(legacy + [{'pipelineData': data}])
+    assert chain_order(merged['elements'], merged['links'])[:3] == ['Source', 'xmlFragmentParser', 'splitFilter']
     assert etree.fromstring(XML_FRAGMENT_WRAPPER.replace('&fragment;', '<Event/>').encode()) is not None
 
 
