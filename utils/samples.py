@@ -125,3 +125,22 @@ def as_named_samples(samples: Any, single: str | None = None) -> dict[str, str]:
         check_sample(text, name)
         named[name] = _unescape(text)
     return named
+
+
+# How much sample text a model should send: enough records to tell the format and fields, no more. The model writes
+# it out a token at a time (seen: Gemma 4 31B at ~22 tokens a second took over 75 s for 4,400 characters, and read 100
+# lines, 60 KB, it would have taken over ten minutes to send).
+SAMPLE_GUIDE = ("about 10 records and at most 8,000 characters a file: you write this text out a token at a time, so "
+                "more only costs time. Files on the user's disk are better given as files= (their paths): their text "
+                "then never passes through you")
+_LONG = 20_000
+
+
+def long_samples_note(named: dict[str, str]) -> str | None:
+    """A note for next time when the texts sent were far more than profiling needs."""
+    long = {name: len(text) for name, text in named.items() if len(text) > _LONG}
+    if not long:
+        return None
+    said = ', '.join(f"{name} ({size:,} characters)" for name, size in long.items())
+    return (f"More sample text than profiling needs: {said}. About 10 records a file is enough; for files on the "
+            f"user's disk give their paths (start_onboarding files=), so the text never passes through you.")

@@ -48,6 +48,33 @@ async def test_start_onboarding_profiles_every_file_and_returns_the_plan():
         await plan.start_onboarding(None, 'x', {})
 
 
+async def test_onboarding_files_on_disk_starts_with_the_build_not_their_text():
+    # Seen (Gemma 4 31B, VS Code): 100 lines of the sample read into the conversation to be written out again as
+    # start_onboarding's samples, at ~22 tokens a second. Given paths, nothing of the files passes through the model.
+    guard = SimpleNamespace(build_folder=AsyncMock(return_value={'_path': 'System/MCP Workspace/onboard-secretserver', 'uuid': 'f'}))
+    paths = ['c:\\samples\\secretserver.xml']
+    with patch.object(plan, 'guard_from', lambda c: guard), \
+            patch('tools.instructions.applicable_instructions', AsyncMock(return_value={'instructions': []})):
+        result = await plan.start_onboarding(None, 'SecretServer', files=paths)
+    assert result['build'] == 'onboard-secretserver' and 'profile' not in result and result['done'] is False
+    assert result['next']['call'] == {'tool': 'create_feed', 'arguments': {
+        'build': 'onboard-secretserver', 'name': '<the feed name the user confirmed>'}}
+    assert f"files={paths}" in result['then'][0]
+    assert "build='onboard-secretserver' stream_ids=" in result['then'][1]
+
+
+async def test_more_sample_text_than_profiling_needs_is_noted_for_next_time():
+    guard = SimpleNamespace(build_folder=AsyncMock(return_value={'_path': 'System/MCP Workspace/onboard-x', 'uuid': 'f'}))
+    long = 'date=2026-10-01 time=10:00:00 srcip=10.0.0.1 action=accept\n' * 400       # 23,600 characters
+    with patch.object(plan, 'guard_from', lambda c: guard), \
+            patch('tools.templates.find_pipeline_templates', AsyncMock(return_value={'candidates': []})), \
+            patch('tools.instructions.applicable_instructions', AsyncMock(return_value={'instructions': []})):
+        result = await plan.start_onboarding(None, 'x', {'a.log': long})
+        short = await plan.start_onboarding(None, 'x', {'a.log': long[:6000]})
+    assert result['sample_note'].startswith('More sample text than profiling needs: a.log (23,600 characters)')
+    assert 'start_onboarding files=' in result['sample_note'] and 'sample_note' not in short
+
+
 async def test_create_pipeline_refuses_documents_from_outside_the_build():
     guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed', 'mcp-generated', 'mcp-build-other']))
     props = [PropertyValue(element='translationFilter', name='xslt', doc_uuid='x', doc_type='XSLT')]

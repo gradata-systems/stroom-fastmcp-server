@@ -68,9 +68,14 @@ hide part of a server's tools behind tools that enable a group of them (VS Code:
 description covers it, then the named tool. Never work around a hidden tool with others, and never stop because one
 seems to be missing.
 
-Samples: ask for every sample file the user has and give them all to profile_sample (samples by file name): it
-reports what differs between files. Upload each file as its own stream, step them all, and survey_feed with those
-stream_ids shows every kind of event the sample holds; map variants with any_of.
+Samples: ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
+create_feed, upload_sample files=[the same paths], and start_onboarding again with the build and stream_ids, which
+profiles them; never read a file's text into the conversation to send it. Only pasted samples go as text
+(start_onboarding samples=), about 10 records each: you write that text out token by token. start_onboarding profiles
+them itself: don't call profile_sample as well. It reports what differs between files. Each file is its own stream:
+step them all, and survey_feed with those stream_ids shows every kind of event the sample holds; map variants with
+any_of. To fix a translation mapping, build_translation_xslt changes= only the rules or entries that change (with the
+uuid it saved, or the same build and name), not the whole mapping again.
 
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
@@ -149,10 +154,12 @@ def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None
 
 Stage 1, events:
 1. Ask whether there are more sample files than the one below (other appliances, versions or days) and get them all.
-   start_onboarding with every file by name: it profiles them (fields and timestamp shapes that differ between files,
-   the parser and template, whether a text converter is needed), creates the build and returns the plan. Follow `next`
-   in each result until it says promote; build_status shows what remains. A file's text is sent once more, to
-   upload_sample; after that every tool takes the sample streams (stream_ids) and reads them itself.
+   Files on the user's disk: start_onboarding files=[their paths] (it creates the build), create_feed, upload_sample
+   files=[the same paths], then start_onboarding with the build and stream_ids: it profiles them (fields and timestamp
+   shapes that differ between files, the parser and template, whether a text converter is needed) and returns the
+   plan. Never read a file into the conversation to send its text. Pasted samples only: start_onboarding samples= by
+   name, about 10 records each. Follow `next` in each result until it says promote; build_status shows what remains.
+   From then on every tool takes the sample streams (stream_ids) and reads them itself.
 2. Call create_feed with the feed name you propose (following sibling feeds' naming): the user confirms or corrects
    it in its confirmation; upload_sample once per file, so each is a
    stream. survey_feed with those stream_ids (and the build) lists the kinds of event the sample holds and where, so
@@ -175,8 +182,9 @@ Stage 1, events:
    it: which input field or constant goes to which event-logging path, one rule per kind of event, any_of where files
    name a field differently, extract for text fields holding several values, lookup or dictionary for values from
    reference data. Give it build and name: it saves the XSLT with the mapping (kept with it, so the documentation is
-   generated from it) and returns the document, not the code. Fix reported problems in the mapping and call again
-   with uuid= the saved XSLT; hand-edit only what a mapping cannot express.
+   generated from it) and returns the document, not the code. Fix reported problems with changes= only the rules
+   or entries that change (uuid= the saved XSLT, or the same build and name), not the whole mapping again; hand-edit
+   only what a mapping cannot express.
 5. create_pipeline from that template (with the pipeline_properties build_translation_xslt returned, e.g.
    jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.

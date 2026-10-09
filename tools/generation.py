@@ -21,6 +21,8 @@ from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
 from utils.samples import SampleTexts, check_sample
 from utils.localcheck import check_mapping, sample_records
+from utils.mappingchanges import apply_changes
+from utils.mappingstore import read_mapping
 from utils.xpathcheck import check_extractions, check_xpaths
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
@@ -115,11 +117,54 @@ def mapping_problems(e: ValidationError, unknown_keys: list[str]) -> list[str]:
     return out
 
 
+_SENT = 'sent_mappings'
+
+
+def _remember_mapping(ctx: Context, target: str, mapping: dict[str, Any] | TranslationMapping) -> None:
+    """The mapping as last sent for an XSLT (its uuid, or build/name), so a fix can send only its changes (this
+    replica's memory; a call that lands elsewhere falls back to the mapping saved with the XSLT)."""
+    if not target:
+        return
+    from tools.plan import _user
+    try:
+        sent = ctx.lifespan_context.setdefault(_SENT, {})
+        value = mapping.model_dump(exclude_none=True, exclude_defaults=True) if isinstance(mapping, TranslationMapping) else mapping
+        sent[(_user(ctx), target)] = json.loads(json.dumps(value))
+        while len(sent) > 500:
+            sent.pop(next(iter(sent)))
+    except Exception:
+        pass
+
+
+def _fix_hint(uuid: str | None, build: str | None, name: str | None) -> str:
+    return ("Fix the problems in the mapping (not the XSLT) and call again with changes= only the rules or entries that "
+            "change" + (f" and uuid='{uuid}'" if uuid else " and the same build and name" if build and name else
+                        ", or the whole mapping") + ".")
+
+
+async def _mapping_to_change(ctx: Context, target: str, uuid: str | None) -> dict[str, Any]:
+    from tools.plan import _user
+    try:
+        sent = ctx.lifespan_context.get(_SENT, {}).get((_user(ctx), target)) if target else None
+    except Exception:
+        sent = None
+    if sent:
+        return sent
+    if uuid:
+        kept = read_mapping((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'))
+        if kept and kept[0] == 'translation' and (kept[1] or {}).get('mapping'):
+            return kept[1]['mapping']
+        raise ToolError(f"XSLT {uuid} keeps no translation mapping to change: give the whole mapping")
+    raise ToolError("changes needs the XSLT they apply to: uuid= the saved XSLT, or the same build and name as the "
+                    "mapping sent before. Nothing was sent for those yet: give the whole mapping.")
+
+
 async def build_translation_xslt(
         ctx: Context,
-        mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str, Field(
+        mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str | None, Field(
             description="The translation mapping: {input, common: [{path, field|value|...}], events: [{name, when, fields}]}. "
-                        "Start from draft_translation_mapping and edit it. A field inventory is not a mapping.")],
+                        "Start from draft_translation_mapping and edit it. A field inventory is not a mapping. To fix "
+                        "one already sent, give changes instead.")] = None,
         schema_version: Annotated[str | None, Field(
             description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
@@ -151,6 +196,12 @@ async def build_translation_xslt(
         include_xslt: Annotated[bool, Field(description="When saving, also return the code (to read it).")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (rules kept "
                                                                  "as Unknown).")] = None,
+        changes: Annotated[dict[str, Any] | str | None, Field(description=(
+            "Instead of mapping, to fix one: only what changes, merged into the mapping last sent for this XSLT (the "
+            "same uuid, or build and name; else the one saved with uuid). events: rules, each replacing the rule of "
+            "that name whole (or added); common: entries, each replacing the one with that path (and data_name); "
+            "{name or path, \"remove\": true} removes one; any other key replaces it. Much less to write than the "
+            "whole mapping again."))] = None,
 ) -> dict[str, Any]:
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
@@ -159,8 +210,8 @@ async def build_translation_xslt(
     a time, user and action) are parsed with extract: a regular expression whose groups become fields; no
     substring-before/after chains. JSON held in a string is read with an xpath using json-to-xml(). Paths are
     checked against the schema: unknown paths come back with suggestions, constants are checked against
-    allowed values, and elements are written in schema order with empty inputs left out. Fix any problems in the
-    mapping and call again. With build and name (or uuid, to replace the XSLT saved before) the XSLT is saved
+    allowed values, and elements are written in schema order with empty inputs left out. Fix any problems and call
+    again with changes= only the rules or entries that change, not the whole mapping. With build and name (or uuid, to replace the XSLT saved before) the XSLT is saved
     with its mapping and the document comes back instead of the code, so step_sample steps it as saved; without
     them nothing is saved and the code comes back. The standing instructions (AGENTS docs) that apply
     come back with the result: check the mapping follows them, and set mapping.style from any XSLT style
@@ -170,6 +221,20 @@ async def build_translation_xslt(
     stepped over the sample streams.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
+    target = uuid or (f"{build}/{name}" if build and name else '')
+    applied = None
+    if changes is not None:
+        if mapping is not None:
+            raise ToolError("Give mapping (the whole one) or changes (only what changes), not both")
+        if isinstance(changes, str):
+            try:
+                changes = json.loads(changes)
+            except json.JSONDecodeError as e:
+                raise ToolError(f"changes is text that is not JSON ({e.msg} at character {e.pos}): pass it as an "
+                                f"object. " + ESCAPING)
+        mapping, applied = apply_changes(await _mapping_to_change(ctx, target, uuid), changes)
+    elif mapping is None:
+        raise ToolError("Give mapping (draft_translation_mapping drafts one), or changes to fix the one sent before")
     if isinstance(mapping, str):
         try:
             mapping = json.loads(mapping)
@@ -177,6 +242,8 @@ async def build_translation_xslt(
             around = mapping[max(0, e.pos - 30):e.pos + 30]
             raise ToolError(f"mapping is text that is not JSON ({e.msg} at character {e.pos}, around `{around}`): pass "
                             f"the mapping as an object, not a string. " + ESCAPING)
+    if isinstance(mapping, (dict, TranslationMapping)):
+        _remember_mapping(ctx, target, mapping)
     unknown_keys = sorted(set(mapping) - set(TranslationMapping.model_fields)) if isinstance(mapping, dict) else []
     if isinstance(splitter, dict):
         splitter = SplitterSpec.model_validate(splitter)     # as build_data_splitter gave it (its spec)
@@ -212,8 +279,9 @@ async def build_translation_xslt(
         # Fast: what the schema says is wrong comes back before the sample is read and checked (seen: minutes a call
         # on a large sample, for a mapping that could not have generated anyway).
         result.update(warnings=grouped(result.get('warnings') or []), sample_check='not run: fix the problems first',
-                      hint="Fix the problems in the mapping (not the XSLT) and call again; the sample is checked "
-                           "once they are fixed.")
+                      hint=_fix_hint(uuid, build, name) + " The sample is checked once they are fixed.")
+        if applied:
+            result['changes_applied'] = applied
         return result
     if sample is None and stream_ids:
         texts, read_notes = await read_sample_streams(ctx, stream_ids)
@@ -334,15 +402,19 @@ async def build_translation_xslt(
         else:
             raise ToolError("To save the XSLT give name (a new XSLT in the build) or uuid (the one saved before)")
         result['saved'] = {k: saved[k] for k in ('type', 'uuid', 'name', 'version')}
+        _remember_mapping(ctx, saved['uuid'], mapping)
         result.update({k: saved[k] for k in ('next', 'done') if k in saved})
         if not include_xslt:
             result.pop('xslt')
+    if applied:
+        result['changes_applied'] = applied
     if not result['ok']:
-        result['hint'] = "Fix the problems in the mapping (not the XSLT) and call again."
+        result['hint'] = _fix_hint(uuid, build, name)
     elif saved:
         result['hint'] = (f"Saved with its mapping as '{saved['name']}' ({saved['uuid']}). If no pipeline uses it yet, "
                           f"create_pipeline (it takes the build's XSLT); then step_sample over every sample stream. "
-                          f"To change it, edit the mapping and call again with uuid='{saved['uuid']}'.")
+                          f"To change it, call again with uuid='{saved['uuid']}' and changes= only the rules or "
+                          f"entries that change.")
     else:
         result['hint'] = ("Save it by calling again with build and name (or uuid to replace the one saved before): it "
                           "is kept with this mapping, so write_documentation can regenerate the Field mapping section "

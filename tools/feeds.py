@@ -13,7 +13,7 @@ from tools.streams import SampleStreams, read_sample_streams
 from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
-from utils.samples import SampleTexts, as_named_samples, check_sample
+from utils.samples import SAMPLE_GUIDE, SampleTexts, as_named_samples, check_sample, long_samples_note
 from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
 from utils.uploads import send_to_feed
 
@@ -34,8 +34,10 @@ def sent_by_user(settings, feed: dict[str, Any]) -> str:
 
 async def profile_sample(
         ctx: Context,
-        sample: Annotated[str | None, Field(description="A representative sample of the raw data, several records long: "
-                                                       "text to tell the format and fields from: the start of each file is enough (your reader may cut it: VS Code's read_file cuts a line at 2,000 characters). Never trimmed further, completed or repaired. The files themselves go to Stroom whole with upload_sample files=[their paths], never as this text.")] = None,
+        sample: Annotated[str | None, Field(description="A representative sample of the raw data, to tell the format "
+                                                       "and fields from: " + SAMPLE_GUIDE + ". Never trimmed further, "
+                                                       "completed or repaired. The files themselves go to Stroom whole "
+                                                       "with upload_sample files=[their paths], never as this text.")] = None,
         samples: Annotated[SampleTexts | None, Field(
             description="Several sample files of the same source: their texts, by file name or as a list. Profiled "
                         "each and together: fields and timestamp shapes only some files have are reported, as a mapping "
@@ -48,6 +50,8 @@ async def profile_sample(
     field's fill rate, inferred type and examples. Timestamps get a stroom:format-date pattern inferred from
     their values; string fields holding JSON are flagged. Says which parser and template to use, whether a text
     converter is needed, and for JSON the parser setting. With several files, also what differs between them.
+    Onboarding a source, don't call this first: start_onboarding profiles the samples itself, and each call
+    sends the text again.
     """
     notes = []
     if stream_ids and sample is None and samples is None:
@@ -57,8 +61,11 @@ async def profile_sample(
     if not named:
         raise ToolError("Give sample (the file's text), samples (several files' texts), or stream_ids")
     result = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
+    too_long = long_samples_note(named) if not stream_ids else None
     from tools.translation import with_fragment_setup
     result = await with_fragment_setup(ctx, result)      # the environment's own wrapper for XML fragments
+    if too_long:
+        result = {**result, 'sample_note': too_long}
     return {**result, 'read': notes} if notes else result
 
 

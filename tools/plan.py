@@ -15,7 +15,7 @@ from security.guard import MANAGED, build_tag, guard_from
 from tools.streams import SampleStreams, own_streams, read_sample_streams
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
-from utils.samples import SampleTexts, as_named_samples
+from utils.samples import SAMPLE_GUIDE, SampleTexts, as_named_samples, long_samples_note
 from utils.stroom import gateway_from
 
 Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.0'.")]
@@ -439,8 +439,14 @@ async def start_onboarding(
         ctx: Context,
         source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller' (names the build).")],
         samples: Annotated[SampleTexts | None, Field(
-            description="The text of every sample file the user has, by file name or as a list: text to tell the format and fields from: the start of each file is enough (your reader may cut it: VS Code's read_file cuts a line at 2,000 characters). Never trimmed further, completed or repaired. The files themselves go to Stroom whole with upload_sample files=[their paths], never as this text. Not paths: "
-                        "this server cannot read the client's files.")] = None,
+            description="Only for samples that are not files (pasted text): every sample's text, by name or as a list, to "
+                        "tell the format and fields from: " + SAMPLE_GUIDE + ". Never trimmed further, completed or "
+                        "repaired. Not paths: this server cannot read the client's files.")] = None,
+        files: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="The preferred start when the samples are files: their paths on the user's disk, every file "
+                        "they have. The build is created and the next steps given: create_feed, upload_sample "
+                        "files=these paths, then start_onboarding again with build and the stream_ids, which profiles "
+                        "them. Their text never passes through you.")] = [],
         build: Annotated[str | None, Field(description="Build name; defaults to one made from the source name.")] = None,
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the work will be promoted to, if known.")] = [],
         stream_ids: SampleStreams = [],
@@ -450,10 +456,12 @@ async def start_onboarding(
     between files, which parser and template to use, whether a text converter is needed), creates the build,
     and returns the plan with its first step and the standing instructions that apply. The work is not done
     until build_status shows every step done and promote_build has run; each tool's result says what is next.
-    For a large file, create the feed and upload_sample first, then give stream_ids instead of the text: the
-    server reads the streams itself, so the text is sent once.
+    Samples that are files: give files= (their paths) and no text; the server reads them once uploaded
+    (stream_ids). Never call profile_sample as well: this profiles them.
     """
     from tools.instructions import applicable_instructions
+    if files and samples is None and not stream_ids:
+        return await _files_first(ctx, source_name, files, build, folders)
     notes = []
     if stream_ids and samples is None:
         named, notes = await read_sample_streams(ctx, stream_ids)
@@ -462,12 +470,13 @@ async def start_onboarding(
     if not named:
         raise ToolError("Give the sample files' text (samples by file name), or stream_ids once they are uploaded; ask "
                         "the user for every file they have")
-    name = build or ('onboard-' + ''.join(c if c.isalnum() else '-' for c in source_name.lower()).strip('-')[:40])
+    name = _build_name(source_name, build)
     folder = await guard_from(ctx).build_folder(name)
     remember_build(ctx, name)
     profiled = profile_many(named) if len(named) > 1 else profile(next(iter(named.values())))
     from tools.translation import with_fragment_setup
     profiled = await with_fragment_setup(ctx, profiled)
+    too_long = long_samples_note(named) if samples is not None else None
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
     template = await templates_reading(ctx, fmt)
@@ -476,6 +485,7 @@ async def start_onboarding(
     nxt = await next_step(ctx, name) if stream_ids else None
     return {
         **({'read': notes} if notes else {}),
+        **({'sample_note': too_long} if too_long else {}),
         'build': name, 'folder': folder['_path'], 'source': source_name,
         'profile': profiled,
         'parser': parser, 'template': template,
@@ -492,6 +502,43 @@ async def start_onboarding(
                  "build_translation_xslt with the streams and build and name (it saves the XSLT with the mapping), the "
                  "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
                  "build_status shows what remains at any point."),
+        'tools': ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients"
+                  " hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
+                  "one whose description covers it, then the named tool. Never work around a hidden tool with others, and "
+                  "never stop because one seems to be missing."),
+    }
+
+
+def _build_name(source_name: str, build: str | None) -> str:
+    return build or ('onboard-' + ''.join(c if c.isalnum() else '-' for c in source_name.lower()).strip('-')[:40])
+
+
+async def _files_first(ctx: Context, source_name: str, files: list[str], build: str | None,
+                       folders: list[str]) -> dict[str, Any]:
+    """Onboarding from files on the user's disk: the build now, the profile once they are uploaded.
+
+    Seen (Gemma 4 31B in VS Code, ~22 tokens a second): the sample's text written into profile_sample and again into
+    start_onboarding took 77 s each; reading 100 lines of it, the next call would have taken over ten minutes.
+    """
+    from tools.instructions import applicable_instructions
+    name = _build_name(source_name, build)
+    folder = await guard_from(ctx).build_folder(name)
+    remember_build(ctx, name)
+    plan = checklist()
+    step, do = 'feed', plan[0]['what']
+    call, then = next_call('feed', name, [], [], [], None, None)
+    return {
+        'build': name, 'folder': folder['_path'], 'source': source_name, 'files': files,
+        'plan': plan,
+        'next': {'step': step, 'do': do, 'call': call, 'then': then},
+        'then': [f"upload_sample feed=<the feed> files={files}: run each command it gives in the user's terminal; "
+                 f"each prints the stream_id",
+                 f"start_onboarding source_name='{source_name}' build='{name}' stream_ids=<those stream ids>: it "
+                 f"profiles the uploaded files (format, fields, parser, template, converter) and says what is next"],
+        'done': False,
+        'standing_instructions': await applicable_instructions(ctx, folders, []),
+        'hint': ("Propose the feed name from sibling feeds and create_feed. Don't read the files' text into the "
+                 "conversation: the server reads the uploaded streams."),
         'tools': ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients"
                   " hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
                   "one whose description covers it, then the named tool. Never work around a hidden tool with others, and "
