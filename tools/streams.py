@@ -158,9 +158,16 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
 
 
 async def feed_created_ms(stroom: StroomGateway, feed: str) -> int | None:
-    """When the feed doc of that name was created, or None when there is none (or it can't be read)."""
+    """When the feed doc of that name was created, or None when there is none (or it can't be read).
+
+    Stream data spells a feed as Stroom first saw it: when no feed has that exact name, the one feed spelt the same
+    whatever its case is the feed (its earlier namesake, deleted, gave the spelling)."""
     try:
         ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+        if not (ref and ref.get('uuid')):
+            from tools.feeds import feeds_named
+            twins = await feeds_named(stroom, feed)
+            ref = twins[0] if len(twins) == 1 else None
         return (await stroom.get_doc('Feed', ref['uuid'])).get('createTimeMs') if ref and ref.get('uuid') else None
     except (ToolError, KeyError, TypeError):
         return None

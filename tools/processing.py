@@ -12,7 +12,7 @@ def _terms(expression: dict[str, Any] | None) -> list[str]:
     out = []
     for child in (expression or {}).get('children') or []:
         if child.get('type') == 'operator':
-            out.append(f"{child.get('op')}({', '.join(_terms(child))})")
+            out.append(f"{child.get('op') or 'AND'}({', '.join(_terms(child))})")
         else:
             out.append(f"{child.get('field')} {child.get('condition')} {child.get('value')}")
     return out

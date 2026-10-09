@@ -249,8 +249,10 @@ class WriteGuard:
             raise
 
     async def tags(self, ref: dict[str, Any]) -> list[str]:
-        node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
-        return node.get('tags') or []
+        # Only the DocRef's own fields: Stroom rejects any other (a search result's path, say) as "Unable to process
+        # JSON". Seen (Gemma, VS Code): every sample filter refused, for a feed found by a case-insensitive search.
+        node = await self._stroom.post('/explorer/v2/getFromDocRef', {k: ref.get(k) for k in ('type', 'uuid', 'name')})
+        return (node or {}).get('tags') or []
 
     async def check_managed(self, ref: dict[str, Any]) -> list[str]:
         tags = await self.tags(ref)

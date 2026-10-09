@@ -221,3 +221,13 @@ async def test_a_name_the_build_already_has_is_not_created_again():
         assert stroom.post.await_count == 0
         made = await guard.create('XSLT', 'Firewall Indexing', 'b')       # another type may share the name
         assert made['uuid'] == 'new'
+
+
+async def test_tags_are_asked_for_with_the_doc_ref_alone():
+    # Seen (Gemma, VS Code): a feed found by search carried its path, and Stroom refused the request as "Unable to
+    # process JSON", so every sample filter for the build failed.
+    stroom = SimpleNamespace(post=AsyncMock(return_value={'tags': ['mcp-build-b']}))
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    found = {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-V1.0', 'path': 'System / MCP Workspace / b'}
+    assert await guard.tags(found) == ['mcp-build-b']
+    stroom.post.assert_awaited_once_with('/explorer/v2/getFromDocRef', {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-V1.0'})

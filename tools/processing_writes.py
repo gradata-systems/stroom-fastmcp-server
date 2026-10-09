@@ -9,7 +9,7 @@ outputs of a given filter while that happens.
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 from typing import Annotated, Any
 
@@ -20,7 +20,7 @@ from pydantic import Field
 from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers
 from tools.processing import processing_status
-from tools.streams import refuse_older_than_feed
+from tools.streams import feed_created_ms, own_streams, refuse_older_than_feed
 from tools.stepping import stepped_clean
 from utils.consent import consent_from
 from utils.mappingstore import digest, normalise_xslt, read_agreed_template
@@ -346,6 +346,56 @@ async def _committed(stroom: StroomGateway, pipeline: dict[str, Any], destinatio
             f"committed to cluster {destination['cluster']}")
 
 
+def _iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+
+async def _feed_bounds(stroom: StroomGateway, pipeline_uuid: str, feed: str, stream_type: str,
+                       min_ms: int) -> tuple[int, str]:
+    """A feed-wide filter's lower bound, kept to the feed's own streams.
+
+    Seen (VS Code), the same day: Gemma guessed created_after at midnight after its sample arrived, so the filter
+    selected nothing and the agent waited out ten minutes; Qwen chose a date before the feed was made, which also
+    selects the streams of an earlier, deleted feed of that name. Raised to the feed's creation; a translation
+    pipeline's filter is refused when the feed has streams of its own that nothing has processed or will, and it
+    selects none of them. A filter for new data only, once the feed's streams are processed, is left alone.
+    """
+    created = await feed_created_ms(stroom, feed)
+    said = _iso(min_ms)
+    if created and min_ms < created:
+        min_ms, said = created, f"{_iso(created)} (when the feed was created: streams before then belong to an earlier feed of that name)"
+    rows = (await stroom.find_meta([_term('Feed', feed), _term('Type', stream_type)], 100)).get('values') or []
+    own = [m for m in own_streams([r['meta'] for r in rows if r['meta'].get('status') != 'DELETED'], created)
+           if m.get('createMs')]
+    if not own or any(m['createMs'] >= min_ms for m in own) or await _is_indexing(stroom, pipeline_uuid):
+        # An indexing pipeline may well index new data only (a new index version, the older Events in the old one).
+        return min_ms, said
+    filters = await stroom.processor_filters(pipeline_uuid)
+    handled = set(await _already_processed(stroom, pipeline_uuid, [m['id'] for m in own]))
+    waiting = [m for m in own if m['id'] not in handled and not any(_will_process(f, m) for f in filters)]
+    if waiting:
+        listed = ', '.join(f"{m['id']} ({_iso(m['createMs'])})" for m in sorted(waiting, key=lambda m: m['createMs']))
+        raise ToolError(f"A filter on feed {feed} for {stream_type} created after {_iso(min_ms)} selects none of the "
+                        f"feed's streams still to process, which were all created before then: {listed}. To process "
+                        f"the sample, give stream_ids; for the whole feed, created_after at or before the earliest of "
+                        f"them.")
+    return min_ms, said
+
+
+async def _refuse_duplicate(stroom: StroomGateway, pipeline_uuid: str, expression: dict[str, Any], min_ms: int | None) -> None:
+    """Seen (Gemma, VS Code): the same feed-wide filter made twice, neither selecting anything."""
+    from tools.processing import _terms
+    wanted = sorted(_terms(expression))
+    for f in await stroom.processor_filters(pipeline_uuid):
+        theirs = (f.get('queryData') or {}).get('expression')
+        earliest = f.get('minMetaCreateTimeMs')
+        if sorted(_terms(theirs)) == wanted and (earliest or 0) <= (min_ms or 0):
+            raise ToolError(f"Processor filter {f['id']} on this pipeline already selects these streams"
+                            + (f" (created after {_iso(earliest)})" if earliest else '') + ": processing_status shows "
+                            f"what it matched. If it matched nothing, the streams are not what it selects: a new filter "
+                            f"that selects them is needed, not the same one again.")
+
+
 async def create_processor_filter(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
@@ -356,7 +406,9 @@ async def create_processor_filter(
             "Stream type to process with a feed scope. Left out: Events for a pipeline that indexes Events, else "
             "the feed's own (Raw Events, Raw Reference, ...)."))] = None,
         created_after: Annotated[str | None, Field(
-            description="With a feed scope: only streams created after this ISO time. Required for a feed scope.")] = None,
+            description="With a feed scope: only streams created after this ISO time. Required for a feed scope. "
+                        "Raised to the feed's creation time if earlier; refused if it selects none of the feed's "
+                        "streams still to process. To process the sample, give stream_ids instead.")] = None,
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
@@ -407,12 +459,18 @@ async def create_processor_filter(
     else:
         if not created_after:
             raise ToolError("A feed-wide filter needs created_after, so it does not reprocess the feed's history")
-        min_ms = int(datetime.fromisoformat(created_after.replace('Z', '+00:00')).timestamp() * 1000)
+        try:
+            min_ms = int(datetime.fromisoformat(created_after.replace('Z', '+00:00')).timestamp() * 1000)
+        except ValueError:
+            raise ToolError(f"created_after '{created_after}' is not an ISO time, e.g. 2026-10-09T21:30:00Z")
+        min_ms, since = await _feed_bounds(stroom, pipeline_uuid, feed, stream_type, min_ms)
         expression = {'type': 'operator', 'op': 'AND', 'children': [_term('Feed', feed), _term('Type', stream_type)]}
-        scope, max_tasks = f"feed {feed} ({stream_type}) created after {created_after}", stroom.settings.max_feed_filter_tasks
+        scope, max_tasks = f"feed {feed} ({stream_type}) created after {since}", stroom.settings.max_feed_filter_tasks
     if source:
         expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
         scope += f", only Events from pipeline '{source['name']}'"
+    if feed:
+        await _refuse_duplicate(stroom, pipeline_uuid, expression, min_ms)
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
 
     destination = await elastic_destination(stroom, pipeline_uuid)
@@ -522,6 +580,74 @@ async def reprocess_streams(
             'hint': f"wait_for_processing with filter_id={created['id']} so only this run's outputs count."}
 
 
+def _selects(expression: dict[str, Any] | None, meta: dict[str, Any]) -> bool:
+    """Whether a filter's expression selects the stream, for the terms this server writes; any other term counts as
+    selecting it, so a stream is only ever reported unselected when it plainly is."""
+    if not expression:
+        return True
+    if expression.get('type') == 'operator':
+        children = [c for c in expression.get('children') or [] if c.get('enabled', True)]
+        results = [_selects(c, meta) for c in children]
+        op = expression.get('op') or 'AND'
+        if op == 'NOT' or not results:
+            return True
+        return any(results) if op == 'OR' else all(results)
+    field, condition, value = expression.get('field'), expression.get('condition'), str(expression.get('value'))
+    if condition == 'EQUALS' and field == 'Id':
+        return str(meta.get('id')) == value
+    if condition == 'EQUALS' and field == 'Feed':
+        return (meta.get('feedName') or '').lower() == value.lower()   # Stroom matches feed names whatever their case
+    if condition == 'EQUALS' and field == 'Type':
+        return meta.get('typeName') == value
+    if condition == 'IS_DOC_REF' and field == 'Pipeline':
+        return meta.get('pipelineUuid') == (expression.get('docRef') or {}).get('uuid')
+    return True
+
+
+def _will_process(f: dict[str, Any], meta: dict[str, Any]) -> bool:
+    """Whether the processor filter, enabled, selects the stream, its creation time included."""
+    created, earliest, latest = meta.get('createMs'), f.get('minMetaCreateTimeMs'), f.get('maxMetaCreateTimeMs')
+    return (bool(f.get('enabled')) and _selects((f.get('queryData') or {}).get('expression'), meta)
+            and not (created and earliest and created < earliest) and not (created and latest and created > latest))
+
+
+async def _unselected(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[str]:
+    """Why no enabled filter of the pipeline will process these streams; [] when one will (or might).
+
+    Seen (Gemma, VS Code): a feed-wide filter created after its sample arrived; the agent waited out three timeouts
+    of "tasks still running" for a filter whose tracker had matched nothing.
+    """
+    if not stream_ids:
+        return []
+    metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in stream_ids], len(stream_ids),
+                                                        op='OR')).get('values') or []]
+    filters = await stroom.processor_filters(pipeline_uuid)
+    from tools.processing import _terms
+    problems = []
+    for meta in sorted(metas, key=lambda m: m['id']):
+        created = meta.get('createMs')
+        reasons = []
+        for f in filters:
+            earliest, latest = f.get('minMetaCreateTimeMs'), f.get('maxMetaCreateTimeMs')
+            selects = ', '.join(_terms((f.get('queryData') or {}).get('expression'))) or 'everything'
+            if not _selects((f.get('queryData') or {}).get('expression'), meta):
+                reasons.append(f"filter {f['id']} selects {selects}")
+            elif created and earliest and created < earliest:
+                reasons.append(f"filter {f['id']} selects only streams created after {_iso(earliest)}")
+            elif created and latest and created > latest:
+                reasons.append(f"filter {f['id']} selects only streams created before {_iso(latest)}")
+            elif not f.get('enabled'):
+                reasons.append(f"filter {f['id']} is disabled")
+            else:
+                reasons = []
+                break
+        if reasons:
+            problems.append(f"No processor filter of this pipeline will process stream {meta['id']} ({meta.get('feedName')}, "
+                            f"{meta.get('typeName')}, created {_iso(created) if created else 'at an unknown time'}): "
+                            + '; '.join(reasons))
+    return problems
+
+
 async def wait_for_processing(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The pipeline that is processing.")],
@@ -545,6 +671,7 @@ async def wait_for_processing(
     deadline = time.monotonic() + timeout_seconds
     from tools.plan import build_of, with_next
     inferred = output_type is None
+    checked = None
     while True:
         status = await processing_status(ctx, pipeline_uuid)
         if not status['filters']:
@@ -557,6 +684,13 @@ async def wait_for_processing(
         if inferred and output_type is None:
             output_type = await output_stream_type(stroom, pipeline_uuid)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
+        if checked is None:
+            checked = await _unselected(stroom, pipeline_uuid, [raw for raw, metas in outputs.items() if not metas])
+            if checked:
+                return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
+                    'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'fail', 'problems': checked,
+                    'hint': "Nothing will process these streams, so there is nothing to wait for: "
+                            "create_processor_filter with stream_ids= them, then wait."})
         all_have_output = all(outputs.values()) or not expect_events
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
         if (all_have_output and finished) or time.monotonic() > deadline:

@@ -57,12 +57,13 @@ async def test_processing_refuses_a_pipeline_that_was_not_stepped_clean(ctx):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[1])
 
 
+FEED_MADE = 1791580000000         # 2026-10-09T21:06:40Z
 AGREED = {'name': 'ecs-acme-v2', 'index': 'ecs-acme-v2', 'cluster': 'ES_DEV', 'component_templates': ['ecs-base'],
           'xslt': digest(), 'agreed': '2026-10-03T09:00:00Z', 'dev_tools': 'PUT _index_template/ecs-acme-v2\n{}'}
 
 
 def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] = (), streams: dict | None = None,
-                agreed: dict | None = AGREED):
+                agreed: dict | None = AGREED, feed_streams: list[dict] = ()):
     """p1 is the pipeline under test (Elasticsearch indexing, or a translation); 'ev' is an events pipeline.
 
     streams maps a stream id to (type, producing pipeline); by default indexing reads Events from 'ev' and a
@@ -80,8 +81,15 @@ def mock_stroom(elastic: bool, filtered: list[int] = (), with_output: list[int] 
             'type': 'operator', 'op': 'OR', 'children': [{'type': 'term', 'field': 'Id', 'condition': 'EQUALS',
                                                           'value': str(i)} for i in filtered]}}}}]}))
 
+    respx.get(f'{API}/feed/v1/getDocRefForName/ACME').mock(
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'acme', 'name': 'ACME'}))
+    respx.get(f'{API}/feed/v1/acme').mock(return_value=httpx.Response(200, json={
+        'type': 'Feed', 'uuid': 'acme', 'name': 'ACME', 'createTimeMs': FEED_MADE}))
+
     def meta(request):
         terms = json.loads(request.content)['expression']['children']
+        if terms[0]['field'] == 'Feed':
+            return httpx.Response(200, json={'values': [{'meta': m} for m in feed_streams]})
         if terms[0]['field'] == 'Id':
             values = [{'meta': {'id': int(term['value']), 'typeName': streams[int(term['value'])][0],
                                 'pipelineUuid': streams[int(term['value'])][1]}}
@@ -343,19 +351,27 @@ async def test_translation_pipelines_only_process_the_builds_feeds(ctx):
 
 
 @respx.mock
-async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ctx):
+@pytest.mark.parametrize('earlier_feed', [True, False])
+async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ctx, earlier_feed):
     # Qwen in VS Code: DELINEA-SECRETSERVER-V1.0 in the build, an earlier Delinea-SecretServer-V1.0 in another; Stroom
     # filed the new feed's sample under the earlier spelling, and processing was refused as another build's feed.
+    # Gemma in VS Code: the earlier feed deleted, so no feed has the stream data's spelling at all.
     create = mock_stroom(elastic=False, streams={6: ('Raw Events', None)})
     respx.post(f'{API}/meta/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
         {'meta': {'id': 6, 'typeName': 'Raw Events', 'feedName': 'Delinea-SecretServer-V1.0'}}]}))
     respx.get(f'{API}/feed/v1/getDocRefForName/Delinea-SecretServer-V1.0').mock(
-        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'}))
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'})
+        if earlier_feed else httpx.Response(204))
     respx.get(f'{API}/feed/v1/old').mock(return_value=httpx.Response(200, json={
         'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0', 'createTimeMs': 0}))
-    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': [
-        {'docRef': {'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'}, 'path': 'System / MCP Workspace / a'},
-        {'docRef': {'type': 'Feed', 'uuid': 'new', 'name': 'DELINEA-SECRETSERVER-V1.0'}, 'path': 'System / MCP Workspace / b'}]}))
+    respx.get(f'{API}/feed/v1/new').mock(return_value=httpx.Response(200, json={
+        'type': 'Feed', 'uuid': 'new', 'name': 'DELINEA-SECRETSERVER-V1.0', 'createTimeMs': 0}))
+    found = [{'docRef': {'type': 'Feed', 'uuid': 'new', 'name': 'DELINEA-SECRETSERVER-V1.0'},
+              'path': 'System / MCP Workspace / b'}]
+    if earlier_feed:
+        found.insert(0, {'docRef': {'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'},
+                         'path': 'System / MCP Workspace / a'})
+    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': found}))
 
     async def tags(ref):
         return ['mcp-build-b'] if ref.get('type') == 'Pipeline' or ref.get('uuid') == 'new' else ['mcp-build-a']
@@ -363,6 +379,97 @@ async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ct
             check_managed=AsyncMock(), check_built=AsyncMock(), tags=tags)):
         gated = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
     assert gated['status'] == 'needs_approval'
+
+
+@respx.mock
+async def test_a_feed_wide_filter_starts_no_earlier_than_its_feed(ctx):
+    # Seen (Qwen, VS Code): created_after a week before the feed was made also selects an earlier, deleted namesake's
+    # streams, which Stroom keeps under the same name.
+    create = mock_stroom(elastic=False, feed_streams=[{'id': 6, 'createMs': FEED_MADE + 60_000}])
+    with patch('tools.processing_writes.guard_from', return_value=guard()):
+        gates, result = await gated_through(ctx, feed='ACME', created_after='2026-10-01T00:00:00Z')
+    assert json.loads(create.calls.last.request.content)['minMetaCreateTimeMs'] == FEED_MADE
+    assert 'created after 2026-10-09T21:06:40.000Z (when the feed was created' in result['scope']
+
+
+@respx.mock
+async def test_a_feed_wide_filter_that_selects_none_of_the_feeds_streams_is_refused(ctx):
+    # Seen (Gemma, VS Code): created_after midnight UTC, after the sample arrived: nothing was ever selected.
+    create = mock_stroom(elastic=False, feed_streams=[{'id': 6, 'createMs': FEED_MADE + 60_000},
+                                                      {'id': 2, 'createMs': FEED_MADE - 60_000}])   # a namesake's
+    with patch('tools.processing_writes.guard_from', return_value=guard()):
+        with pytest.raises(ToolError, match=r"selects none of the feed's streams.*: 6 \(2026-10-09T21:07:40.000Z\)\. "
+                                            r"To process the sample, give stream_ids"):
+            await processing_writes.create_processor_filter(ctx, 'p1', feed='ACME', created_after='2026-10-10T00:00:00Z')
+    assert not create.called
+
+
+@respx.mock
+@pytest.mark.parametrize('filtered, with_output', [([6], []), ([], [6])])
+async def test_a_feed_wide_filter_for_new_data_only_follows_the_processed_sample(ctx, filtered, with_output):
+    # The discovery flow: the sample processed by stream id, then the feed's new data from now on.
+    create = mock_stroom(elastic=False, filtered=filtered, with_output=with_output,
+                         feed_streams=[{'id': 6, 'createMs': FEED_MADE + 60_000}])
+    with patch('tools.processing_writes.guard_from', return_value=guard()):
+        await gated_through(ctx, feed='ACME', created_after='2026-10-10T00:00:00Z')
+    assert create.call_count == 1
+
+
+@respx.mock
+async def test_the_same_feed_wide_filter_is_not_made_twice(ctx):
+    create = mock_stroom(elastic=False)
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 775, 'pipelineUuid': 'p1', 'minMetaCreateTimeMs': FEED_MADE, 'queryData': {
+            'expression': {'type': 'operator', 'children': [
+                {'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': 'ACME'},
+                {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Raw Events'}]}}}}]}))
+    with patch('tools.processing_writes.guard_from', return_value=guard()):
+        with pytest.raises(ToolError, match='Processor filter 775 on this pipeline already selects these streams'):
+            await processing_writes.create_processor_filter(ctx, 'p1', feed='ACME', created_after='2026-10-09T22:00:00Z')
+    assert not create.called
+
+
+def waiting_on(filter_: dict) -> None:
+    """Stream 6 of feed ACME, made a minute after the feed, with no output yet; p1 has the one filter given."""
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 775, 'pipelineUuid': 'p1', 'enabled': filter_['enabled'],
+                             'minMetaCreateTimeMs': filter_.get('min'), 'queryData': {'expression': {
+                                 'type': 'operator', 'children': [
+                                     {'type': 'term', 'field': f, 'condition': 'EQUALS', 'value': v}
+                                     for f, v in filter_['terms']]}}}}]}))
+    respx.post(f'{API}/processorTask/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    respx.post(f'{API}/meta/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
+        {'meta': {'id': 6, 'feedName': 'ACME', 'typeName': 'Raw Events', 'createMs': FEED_MADE + 60_000}}]
+        if json.loads(request.content)['expression']['children'][0]['field'] == 'Id' else []}))
+
+
+@respx.mock
+@pytest.mark.parametrize('filter_, reason', [
+    ({'min': FEED_MADE + 3_600_000, 'enabled': True, 'terms': [('Feed', 'acme'), ('Type', 'Raw Events')]},
+     'filter 775 selects only streams created after 2026-10-09T22:06:40.000Z'),
+    ({'enabled': True, 'terms': [('Feed', 'OTHER'), ('Type', 'Raw Events')]},
+     'filter 775 selects Feed EQUALS OTHER, Type EQUALS Raw Events'),
+    ({'enabled': False, 'terms': [('Id', '6')]}, 'filter 775 is disabled'),
+])
+async def test_waiting_ends_at_once_when_no_filter_will_process_the_stream(ctx, filter_, reason):
+    # Seen (Gemma, VS Code): three timeouts of "tasks still running" for a filter whose tracker matched nothing.
+    waiting_on(filter_)
+    started = time.monotonic()
+    result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=60)
+    assert time.monotonic() - started < 5
+    assert result['gate'] == 'fail' and result['problems'] == [
+        f"No processor filter of this pipeline will process stream 6 (ACME, Raw Events, created "
+        f"2026-10-09T21:07:40.000Z): {reason}"]
+    assert result['hint'].startswith('Nothing will process these streams')
+
+
+@respx.mock
+async def test_waiting_goes_on_while_a_filter_selects_the_stream(ctx):
+    # Feed names match whatever their case, as in Stroom.
+    waiting_on({'min': FEED_MADE, 'enabled': True, 'terms': [('Feed', 'acme'), ('Type', 'Raw Events')]})
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=5)
+    assert result['hint'] == 'Tasks were still running at the timeout; call again.'
 
 
 @respx.mock
