@@ -83,6 +83,19 @@ def wrapper_root(code: str) -> tuple[str | None, str]:
     return m.group(1), ns.group(1) if ns else ''
 
 
+def clean_wrapper(code: str) -> str:
+    """An environment's fragment wrapper as a build saves its copy: without comments (seen: live's 'Event Logging
+    v3.4.2 Fragments' carries an older version of itself commented out, curly quotes and all, which every copy
+    inherited), its DOCTYPE named after the root element it wraps (seen: DOCTYPE records on an <Events> root), and no
+    blank lines left behind. The environment's own wrapper is left as it is."""
+    text = re.sub(r'<!--.*?-->', '', code, flags=re.S)
+    root, _ = wrapper_root(text)
+    if root:
+        text = re.sub(r'<!DOCTYPE\s+[\w.:-]+', f'<!DOCTYPE {root}', text, count=1)
+    lines = [line.rstrip() for line in text.splitlines()]
+    return '\n'.join(line for line in lines if line.strip()) + '\n'
+
+
 def event_logging_fragments(fragments: list) -> bool:
     """Fragments that are event-logging <Event>s already (EventTime, EventDetail...), in its namespace or none; not a
     source's own <Event> (Windows' System and EventData)."""
@@ -108,7 +121,7 @@ def xml_fragment_setup(namespace: str | None, record: str, wrapper: dict[str, An
                        others: list[dict[str, Any]] = ()) -> dict[str, Any]:
     """How fragments are read: the wrapper converter (the environment's own when it has one: `wrapper` with its code,
     name and path), the parser, and the namespace the XSLT then reads them in."""
-    code = (wrapper or {}).get('code') or XML_FRAGMENT_WRAPPER
+    code = clean_wrapper(wrapper['code']) if (wrapper or {}).get('code') else XML_FRAGMENT_WRAPPER
     root, wrapper_ns = wrapper_root(code)
     effective = namespace or wrapper_ns
     converter: dict[str, Any] = {'type': 'XML_FRAGMENT', 'code': code, 'root': root, 'namespace': wrapper_ns}

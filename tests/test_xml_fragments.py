@@ -172,7 +172,9 @@ async def test_fragments_follow_the_environments_own_wrapper():
                 'own': ('Mine', 'System / MCP Workspace / b', f'XML_FRAGMENT|{XML_FRAGMENT_WRAPPER}'),
                 'gone': ('Deleted', 'System', 'unused|')})
     setup = await translation.with_fragment_setup(ctx, profile(FRAGMENTS['sample']))
-    assert setup['text_converter']['code'] == LIVE_WRAPPER
+    # Saved as the environment's own, tidied: its commented-out older version left behind.
+    from utils.profile import clean_wrapper
+    assert setup['text_converter']['code'] == clean_wrapper(LIVE_WRAPPER) and '<!--' not in clean_wrapper(LIVE_WRAPPER)
     assert setup['text_converter']['environment'] == {'name': 'Event Logging v3.4.2 Fragments', 'uuid': 'w1',
                                                       'path': 'System / Format Handling'}
     assert setup['xslt_input']['mapping'] == {'input': 'xml_fragments', 'xml_namespace': 'event-logging:3', 'record': 'Event'}
@@ -211,6 +213,24 @@ async def test_the_converter_step_gives_fragments_their_wrapper_rather_than_skip
     from tools.generation import build_data_splitter
     ctx = _ctx({'w1': ('Event Logging v3.4.2 Fragments', 'System / Format Handling', f'XML_FRAGMENT|{LIVE_WRAPPER}')})
     result = await build_data_splitter(ctx, sample=FRAGMENTS['sample'])
-    assert result['converter_type'] == 'XML_FRAGMENT' and result['converter'] == LIVE_WRAPPER
+    from utils.profile import clean_wrapper
+    assert result['converter_type'] == 'XML_FRAGMENT' and result['converter'] == clean_wrapper(LIVE_WRAPPER)
     assert result['xslt_input']['mapping']['xml_namespace'] == 'event-logging:3'
     assert "xml_namespace 'event-logging:3'" in result['hint']
+
+
+def test_the_environments_wrapper_is_copied_without_its_comments():
+    # Live's 'Event Logging v3.4.2 Fragments' carries an older version of itself commented out (curly quotes and all)
+    # and a DOCTYPE named records on an <Events> root: a Delinea build's copy had both.
+    from pathlib import Path
+    from utils.profile import clean_wrapper, xml_fragment_setup
+    live = (Path(__file__).parent / 'fixtures' / 'live_fragment_wrapper_with_comments.xml').read_text(encoding='utf-8')
+    assert '<!--' in live and '<!DOCTYPE records' in live
+    clean = clean_wrapper(live)
+    assert '<!--' not in clean and '“' not in clean and '<!DOCTYPE Events [' in clean and '\n\n' not in clean
+    setup = xml_fragment_setup('http://schemas.microsoft.com/win/2004/08/events/event', 'Event',
+                               {'code': live, 'name': 'Event Logging v3.4.2 Fragments', 'uuid': 'w', 'path': 'System'})
+    assert setup['text_converter']['code'] == clean and setup['text_converter']['root'] == 'Events'
+    wrapped = etree.fromstring(clean.replace('<?xml version="1.1" encoding="UTF-8"?>', '')
+                               .replace('&fragment;', '<Event xmlns="x"/>').encode())
+    assert etree.QName(wrapped).localname == 'Events' and len(wrapped) == 1
