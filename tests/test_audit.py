@@ -70,3 +70,23 @@ async def test_a_tool_call_says_where_its_time_went(caplog):
     assert (call['stroom_requests'], call['stroom_ms'], call['user_ms']) == (2, 1020, 5000)
     assert call['slowest'] == 'POST /processorFilter/v1/find' and call['slowest_ms'] == 900
     assert call['duration_ms'] >= 0 and call['outcome'] == 'success'
+
+
+async def test_a_requests_wait_before_the_tool_is_measured_from_its_arrival():
+    # VS Code calls reached the tool 2 to 48 s after being sent, growing through a session, with nothing to say
+    # whether the wait was before the server or inside it ahead of the audit's own timing.
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from security.audit import ArrivalTimer, _waited_ms
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen.update(scope)
+    await ArrivalTimer(app)({'type': 'http'}, None, None)
+    arrived = seen['state']['arrived']
+    request = SimpleNamespace(scope={'state': {'arrived': arrived}})
+    with patch('fastmcp.server.dependencies.get_http_request', lambda: request):
+        assert _waited_ms(arrived + 1.5) == 1500
+    with patch('fastmcp.server.dependencies.get_http_request', side_effect=RuntimeError('no request')):
+        assert _waited_ms(time.perf_counter()) is None

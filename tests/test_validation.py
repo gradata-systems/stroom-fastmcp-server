@@ -1,8 +1,10 @@
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 import respx
+from fastmcp.exceptions import ToolError
 
 from tests.test_gateway import API, SETTINGS
 from tools import validation
@@ -143,3 +145,45 @@ def test_an_indexing_xslt_without_a_plan_is_documented_from_the_documents_it_wri
     assert ('| `Host` | Not described: no plan or schema covers it. | 50% of documents | `ws01` |' in section
             and '`Empty`' not in section)
     assert 'keeps no index plan' in section
+
+
+@respx.mock
+async def test_check_events_reads_the_events_streams_itself(ctx):
+    # Qwen in VS Code read 50 processed events back 23 at a time, 47 s a read, to send them to check_events.
+    mock_schemas()
+    bad = EVENT.replace('2026-09-28T10:00:00.000Z', 'not-a-date')
+    records = [EVENT, EVENT, bad]
+
+    def fetch(request):
+        index = json.loads(request.content)['sourceLocation']['recordIndex']
+        return httpx.Response(200, json={'data': records[index], 'dataType': 'SEGMENTED', 'streamTypeName': 'Events',
+                                          'totalItemCount': {'count': len(records)}})
+    respx.post(f'{API}/data/v1/fetch').mock(side_effect=fetch)
+    result = await validation.check_events(ctx, stream_ids=[42])
+    assert result['read'] == {42: {'checked': 3, 'records': 3}}
+    assert not result['schema']['valid'] and result['schema']['error_count'] == 1
+    with pytest.raises(ToolError, match='not both'):
+        await validation.check_events(ctx, EVENT, stream_ids=[42])
+
+
+async def test_describe_event_element_says_what_an_element_takes():
+    # Qwen in VS Code spent twelve minutes writing PowerShell to read the action elements and their children out of
+    # the XSD.
+    from pathlib import Path
+    from unittest.mock import AsyncMock, patch
+    from utils.eventschema import EventSchema
+    schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    with patch('tools.generation.event_schema', AsyncMock(return_value=schema)):
+        detail = await validation.describe_event_element(ctx, 'EventDetail')
+        from tools import explorer
+        assert (await explorer.describe_document(ctx, 'XMLSchema', element='EventDetail')) == detail
+        actions = next(c for c in detail['choices'] if 'Authenticate' in c['one_of'])
+        assert actions['one_required'] and {'Process', 'Unknown', 'Network'} <= set(actions['one_of'])
+        process = {c['name']: c for c in (await validation.describe_event_element(ctx, 'EventDetail/Process'))['children']}
+        assert process['Action']['required'] and 'Execute' in process['Action']['values']
+        assert process['Type']['values'] == ['OS', 'Service', 'Application'] and process['Command']['required']
+        leaf = await validation.describe_event_element(ctx, 'EventDetail/Authenticate/Action')
+        assert leaf['path'] == 'Event/EventDetail/Authenticate/Action' and 'Logon' in leaf['values']
+        with pytest.raises(ToolError, match="has no child 'Acess'"):
+            await validation.describe_event_element(ctx, 'EventDetail/Acess')

@@ -85,7 +85,8 @@ Text formats: write the Data Splitter with build_data_splitter from a spec (deli
 parsed body), which runs it on the sample and shows the records and field names; never by hand first.
 
 Translation: start from draft_translation_mapping (a valid mapping drafted from the sample: decide the action element
-per kind of event, the system name and environment), then build_translation_xslt with the edited mapping, the sample
+per kind of event, the system name and environment; describe_document type=XMLSchema element= says what an element
+takes: EventDetail for the action elements, EventDetail/<Action> for its children and values), then build_translation_xslt with the edited mapping, the sample
 (and the splitter spec) so fields no record has and time formats the values do not fit are caught before stepping;
 never write XSLT by hand, and never send the field inventory as the mapping. A field that no element of the schema
 means (a rule id, a byte count, a vendor code) is carried as Data of the action element (path
@@ -181,7 +182,7 @@ Stage 1, events:
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.
 6. create_processor_filter on all the sample stream ids, wait_for_processing (gate: one Events stream per raw stream,
    from code that stepped clean, in a build: after changing the XSLT, step again and reprocess_streams),
-   check_events on the output. Then write_documentation for the events pipeline with stream_ids = the sample streams:
+   check_events stream_ids=<the Events streams> (the server reads them). Then write_documentation for the events pipeline with stream_ids = the sample streams:
    its Field mapping section is generated from the kept mapping.
 
 Stage 2, indexing:
@@ -352,7 +353,7 @@ report. (When the user already knows what is broken, that is fix_pipeline_issue.
    processing_status shows which feeds its processor filters cover.
 2. Errors and schema compliance, first: find_streams for recent Raw Events on each of those feeds, and the Events
    and Error streams the pipeline produced from them (describe_stream). summarise_streams (kind=errors) on those raw
-   streams: its error groups, triaged as blocking, review or benign. check_events on sample Events records (read_stream):
+   streams: its error groups, triaged as blocking, review or benign. check_events stream_ids=<the Events streams> (the server reads them):
    the share that are valid against the schema and pass the quality rules. step_sample over up to {sample_size} raw
    records shows the same errors the current code gives now, and step_pipeline one record in detail.
 3. Say plainly whether there are errors worth worrying about: blocking ones (schema failures, fatal errors,

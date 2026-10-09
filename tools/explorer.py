@@ -1,4 +1,5 @@
 """Tools for finding and reading Stroom documents."""
+import re
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
@@ -82,7 +83,12 @@ async def get_document(
 async def describe_document(
         ctx: Context,
         type: Annotated[DocType, Field(description="Document type, as returned by find_documents.")],
-        uuid: Annotated[str, Field(description="Document UUID, as returned by find_documents.")],
+        uuid: Annotated[str, Field(description="Document UUID, as returned by find_documents. Left out with type "
+                                               "XMLSchema and element: the configured event-logging schema.")] = '',
+        element: Annotated[str | None, Field(
+            description="XMLSchema of event-logging only: what this element takes, e.g. 'EventDetail' (the action "
+                        "elements), 'EventDetail/Authenticate' or 'EventSource/User': its children (required, "
+                        "repeatable, one of a choice), a leaf's type and allowed values, each described.")] = None,
         find: Annotated[str | None, Field(
             description="Documentation only: return just the passages mentioning this (case-insensitive; several "
                         "terms separated by |), e.g. an event id, for a long reference document.")] = None,
@@ -96,11 +102,24 @@ async def describe_document(
     source, the input fields read, imports, dictionaries and lookups); for an Elastic Index or Lucene Index doc, a
     survey of what the index holds, read through Stroom: its fields, the newest documents (how often each field
     is populated, sample values) and the pipelines that feed it. A long Documentation doc (a vendor manual) comes
-    back cut short with its outline; find= returns the passages about one thing instead.
+    back cut short with its outline; find= returns the passages about one thing instead. For the event-logging
+    XMLSchema, element= says what an element takes (children, required, choices, allowed values), uuid optional.
     """
     from tools.pipelines import describe_pipeline
-    from tools.validation import describe_translation
+    from tools.validation import describe_event_element, describe_translation
+    if type == 'XMLSchema' and element is not None and not uuid:
+        return await describe_event_element(ctx, element)
+    if not uuid:
+        raise ToolError("Give the document's uuid (find_documents)")
     doc = await get_document(ctx, type, uuid)
+    version = re.search(r'event-logging-v([\d.]+)\.xsd', doc.get('systemId') or '') if type == 'XMLSchema' else None
+    if version:
+        # The whole XSD is over 100 KB (seen: an agent's client put it in a file, and the agent spent twelve minutes
+        # reading it with PowerShell): what an element takes, EventDetail's action elements by default.
+        return {'type': type, 'uuid': uuid, 'name': doc.get('name'), 'systemId': doc.get('systemId'),
+                **await describe_event_element(ctx, element or 'EventDetail', version.group(1)),
+                'hint': "element= any path below Event (e.g. EventDetail/Authenticate, EventSource/User) says what "
+                        "it takes; the XSD itself isn't returned."}
     if type == 'Documentation':
         return _passages(doc, find, context_lines)
     if type == 'Pipeline':

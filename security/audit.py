@@ -81,6 +81,31 @@ def audit(event: str, **fields: Any) -> None:
     audit_logger.info(json.dumps(record, default=str))
 
 
+class ArrivalTimer:
+    """ASGI middleware: when each HTTP request reached this server, kept in its scope's state, so a tool call's audit
+    says how long the request waited between arriving and the tool starting (before_ms). Seen: VS Code calls reaching
+    the tool 2 to 48 s after VS Code sent them, the wait growing through a session, with nothing to say whether it
+    was before the server or inside it (authentication, the MCP session) ahead of this middleware's own timing."""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get('type') == 'http':
+            scope.setdefault('state', {})['arrived'] = time.perf_counter()
+        await self.app(scope, receive, send)
+
+
+def _waited_ms(started: float) -> int | None:
+    """How long the current HTTP request waited before `started`, from ArrivalTimer's stamp; None outside HTTP."""
+    try:
+        from fastmcp.server.dependencies import get_http_request
+        arrived = get_http_request().scope.get('state', {}).get('arrived')
+    except Exception:   # stdio, tests, or no request in this context
+        return None
+    return round((started - arrived) * 1000) if arrived else None
+
+
 class AuditMiddleware(Middleware):
     """Records every tool call with its arguments, and every resource read (such as a guide) with its URI, each
     with its outcome and duration."""
@@ -106,10 +131,13 @@ async def _audited(context: MiddlewareContext[Any], call_next: CallNext[Any, Any
     reset_spent = _spent.set(spent)
     started = time.perf_counter()
 
+    before = _waited_ms(started)
+
     def timing() -> dict[str, Any]:
         # The rest of duration_ms (less Stroom and the user) is this server's own work and the network to Stroom.
         took = round((time.perf_counter() - started) * 1000)
-        return {'duration_ms': took, **{k: v for k, v in spent.items() if v}}
+        return {'duration_ms': took, **({'before_ms': before} if before is not None else {}),
+                **{k: v for k, v in spent.items() if v}}
     try:
         result = await call_next(context)
     except Exception as e:

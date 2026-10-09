@@ -1,4 +1,5 @@
 """Local validation of XSLT and event XML: well-formedness, schema, quality and field mapping."""
+import asyncio
 import difflib
 import html
 import re
@@ -10,6 +11,7 @@ from fastmcp.exceptions import ToolError
 from lxml import etree
 from pydantic import Field
 
+from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, declared_system_id, errors_for, event_logging_system_id
 from utils.stroom import gateway_from
 
@@ -436,19 +438,64 @@ async def describe_translation(
     return {'xslt': name, 'mapping_counts': dict(kinds), **result}
 
 
+async def _stream_events(ctx: Context, stream_ids: list[int]) -> tuple[str, dict[str, Any]]:
+    """The Events of processed streams as one <Events> document, read by the server (up to max_sample_records in
+    all), and what was read: seen, an agent reading 50 events back 23 at a time, 47 s a read, to check them."""
+    from tools.streams import _root_closed
+    stroom = gateway_from(ctx)
+    cap = stroom.settings.max_sample_records
+    merged, read = None, {}
+    for stream_id in stream_ids:
+        first = await stroom.fetch_data(stream_id, 0, 1)
+        if first.get('errors'):
+            raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(first['errors'])}")
+        if first.get('streamTypeName') not in (None, 'Events'):
+            raise ToolError(f"Stream {stream_id} is {first.get('streamTypeName')}, not Events: give the Events streams "
+                            f"processing wrote (wait_for_processing lists them)")
+        total = (first.get('totalItemCount') or {}).get('count') or 1
+        take = min(total, cap - sum(r['checked'] for r in read.values()))
+        bodies = [first]
+        for start in range(1, take, 20):
+            bodies += await asyncio.gather(*(stroom.fetch_data(stream_id, i, 1) for i in range(start, min(start + 20, take))))
+        for body in bodies[:take]:
+            root = _parse(_root_closed(body.get('data') or ''), f'stream {stream_id}')
+            if merged is None:
+                merged = root
+            else:
+                merged.extend(list(root))
+        read[stream_id] = {'checked': max(take, 0), 'records': total}
+        if sum(r['checked'] for r in read.values()) >= cap:
+            break
+    if merged is None:
+        raise ToolError("No Events records to check in those streams")
+    return etree.tostring(merged, encoding='unicode'), read
+
+
 async def check_events(
         ctx: Context,
-        events_xml: EventsXml,
+        events_xml: Annotated[str | None, Field(
+            description="An <Events> document, e.g. step output. For what processing wrote, give stream_ids "
+                        "instead.")] = None,
         schema_version: Annotated[str | None, Field(
             description="Event-logging version to validate against, e.g. '3.5.2'. Defaults to the version the "
                         "document declares in xsi:schemaLocation, else the configured version.")] = None,
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
+            description="Events streams processing wrote (wait_for_processing lists them): the server reads and "
+                        "checks their events itself, up to the server's max_sample_records in all, so they need "
+                        "not be read and sent back.")] = [],
 ) -> dict[str, Any]:
     """
     Check event XML both ways: against the event-logging XSD held in this Stroom instance (each error with
     its line, element path and message), and against the quality rules beyond the schema (TimeCreated a full
     UTC timestamp; System Name, Environment, Generator, Device and TypeId present; exactly one action under
-    EventDetail; no empty elements), per rule with the events failing it and examples.
+    EventDetail; no empty elements), per rule with the events failing it and examples. Give events_xml, or
+    stream_ids for Events streams in Stroom.
     """
+    if bool(events_xml) == bool(stream_ids):
+        raise ToolError("Give events_xml (an <Events> document) or stream_ids (Events streams), not both")
+    if stream_ids:
+        events_xml, read = await _stream_events(ctx, stream_ids)
+        return {**await check_events(ctx, events_xml, schema_version), 'read': read}
     events_xml, escaped = _unescaped(events_xml)
     if escaped:
         return {**await check_events(ctx, events_xml, schema_version), 'note': _ESCAPED}
@@ -460,6 +507,53 @@ async def check_events(
                 'quality': {'ok': schema['valid'], 'note': "not event-logging Events: the event quality rules don't apply"}}
     quality = await check_event_quality(ctx, events_xml)
     return {'ok': schema['valid'] and quality['ok'], 'schema': schema, 'quality': quality}
+
+
+async def describe_event_element(ctx: Context, path: str = '', version: str | None = None) -> dict[str, Any]:
+    """What an event-logging element takes, from the schema in this Stroom: its children in order, each with whether
+    it is required or repeatable, whether it is one of a choice (and whether one of that choice must be given), and
+    for a leaf its type and allowed values, each with the schema's description (describe_document's element=).
+    Seen: Qwen in VS Code spent twelve minutes writing PowerShell to read these out of the XSD."""
+    from tools.generation import event_schema
+    version = version or gateway_from(ctx).settings.event_logging_version
+    schema = await event_schema(ctx, version)
+    try:
+        chain = schema.resolve(path)
+    except ValueError as e:
+        raise ToolError(str(e))
+    decl = chain[-1].decl if chain else schema.event
+    where = '/'.join(['Event'] + [c.name for c in chain])
+    result: dict[str, Any] = {'path': where, 'schema_version': version}
+    if chain and schema.describe(chain):
+        result['description'] = schema.describe(chain)
+    if schema.is_leaf(decl):
+        result['type'] = schema.base_type(decl)
+        if schema.enumeration(decl):
+            result['values'] = schema.enumeration(decl)
+        return result
+    children, choices = [], {}
+    for child in schema.children(decl):
+        item: dict[str, Any] = {'name': child.name}
+        if child.required:
+            item['required'] = True
+        if child.repeatable:
+            item['repeatable'] = True
+        if child.choice is not None:
+            item['choice'] = child.choice
+            choices.setdefault(child.choice, []).append(child.name)
+        if schema.is_leaf(child.decl):
+            item['type'] = schema.base_type(child.decl)
+            if schema.enumeration(child.decl):
+                item['values'] = schema.enumeration(child.decl)
+        described = schema.describe(chain + [child])
+        if described:
+            item['description'] = described
+        children.append(item)
+    result['children'] = children
+    if choices:
+        result['choices'] = [{'choice': n, 'one_of': names, 'one_required': n in schema.required_choices}
+                             for n, names in choices.items()]
+    return result
 
 
 ALL_TOOLS = [check_xslt, check_events]

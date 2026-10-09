@@ -7,7 +7,7 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
 from config import Settings
-from security.audit import AuditMiddleware, configure_audit_log
+from security.audit import ArrivalTimer, AuditMiddleware, configure_audit_log
 from security.auth import oidc_auth, oidc_http_client
 from security.lenient import LenientArguments
 from security.repeats import RepeatGuard
@@ -108,9 +108,11 @@ if __name__ == '__main__':
         uvicorn_config = {'ssl_certfile': str(settings.tls_certfile), 'ssl_keyfile': str(settings.tls_keyfile)}
     else:
         logger.warning("Serving plain HTTP: TLS is terminated in front of the server, or this is local development")
+    from starlette.middleware import Middleware as ASGIMiddleware
     mcp.run(
         transport='http',
         host=settings.host,
         port=settings.port,
         uvicorn_config=uvicorn_config,
+        middleware=[ASGIMiddleware(ArrivalTimer)],
     )

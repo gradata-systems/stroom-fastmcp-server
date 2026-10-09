@@ -38,7 +38,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 
 | Event | When | Key fields |
 |---|---|---|
-| `tool_call` | every tool invocation, when it finishes | `tool`, `arguments`, `outcome` (`success` or `error`), `error`, `duration_ms`, and where that time went when any did: `stroom_requests` and `stroom_ms` (its Stroom requests and their total time), `slowest` and `slowest_ms` (the longest), `user_ms` (waiting on the user in a form). The rest is this server's own work and the network |
+| `tool_call` | every tool invocation, when it finishes | `tool`, `arguments`, `outcome` (`success` or `error`), `error`, `duration_ms`, and where that time went when any did: `stroom_requests` and `stroom_ms` (its Stroom requests and their total time), `slowest` and `slowest_ms` (the longest), `user_ms` (waiting on the user in a form). The rest is this server's own work and the network. `before_ms`: how long the HTTP request waited between reaching the server and the tool starting (sign-in, the MCP session); a call slow for the user but not here waited before reaching the server |
 | `upload` | a sample file sent to `/upload` with a ticket (`upload_sample` with `files`), when it finishes | `outcome` (`success`, `refused` or `error`), `reason`, `error`, `feed`, `file`, `receipt_id`, `stream_id`, `bytes`; `sub` is the user the ticket was given to |
 | `resource_read` | every resource read, such as a guide or convention profile, when it finishes | `uri`, `outcome`, `error`, `duration_ms` |
 | `stroom_request` | every Stroom REST request, and every sample upload to the datafeed | `method`, `path`, `outcome` (`success` or `error`), `status`, `error`, `took_ms`; uploads add `feed` and `bytes` |
