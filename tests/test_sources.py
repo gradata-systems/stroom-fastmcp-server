@@ -254,3 +254,34 @@ def test_the_records_rules_keep_as_unknown_are_named_by_what_they_hold():
     refused = next(p for p in kept['problems'] if p.startswith('[admin]'))
     assert "can't be kept as Unknown: 2 of its 2 sample records" in refused and '"admin_logon"' in refused
     assert not kept.get('kept_unknown')
+
+
+def test_data_with_an_element_of_its_own_is_warned():
+    # A Delinea SecretServer run (Qwen, VS Code): the source IP carried as Data on every event.
+    data = {'path': 'EventDetail/Unknown/Data', 'data_name': 'source_ip', 'field': 'user'}
+    other = {**MAPPING['events'][1], 'fields': [*MAPPING['events'][1]['fields'], data]}
+    result = generate(TranslationMapping.model_validate({**MAPPING, 'events': [MAPPING['events'][0], other]}), SCHEMA, '4.1.0')
+    assert any(w.startswith("[other] Data 'source_ip' looks like EventSource/Client/IPAddress") for w in result['warnings'])
+    # Mapped to its element as well: nothing to say.
+    client = {'path': 'EventSource/Client/IPAddress', 'field': 'user'}
+    result = generate(TranslationMapping.model_validate({**MAPPING, 'common': [*MAPPING['common'], client],
+                                                         'events': [MAPPING['events'][0], other]}), SCHEMA, '4.1.0')
+    assert not any('looks like' in w for w in result['warnings'])
+
+
+def test_a_type_id_shared_by_different_kinds_of_event_in_the_sample_is_warned():
+    # The SecretServer TypeId was its category ('Secret') for views, creates and deletes alike; a firewall's action
+    # (already one value per kind) is fine though its rules test the event type as well.
+    from utils.localcheck import shared_type_ids
+    def mapping(type_field):
+        return TranslationMapping.model_validate({**MAPPING, 'common': [
+            *[c for c in MAPPING['common'] if c['path'] != 'EventDetail/TypeId'],
+            {'path': 'EventDetail/TypeId', 'field': type_field}], 'events': [
+            {'name': 'view', 'when': [{'field': 'category', 'equals': 'Secret'}, {'field': 'action', 'equals': 'View'}],
+             'fields': [{'path': 'EventDetail/View/Document/Name', 'field': 'item'}]},
+            {'name': 'delete', 'when': [{'field': 'category', 'equals': 'Secret'}, {'field': 'action', 'equals': 'Delete'}],
+             'fields': [{'path': 'EventDetail/Delete/Document/Name', 'field': 'item'}]}]})
+    records = [{'category': 'Secret', 'action': 'View', 'item': 'a'}, {'category': 'Secret', 'action': 'Delete', 'item': 'b'}]
+    warned = shared_type_ids(mapping('category'), records)
+    assert warned and "'Secret' for rules delete, view" in warned[0]
+    assert shared_type_ids(mapping('action'), records) == []

@@ -1,6 +1,6 @@
 # Evaluation set
 
-Thirty-four samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Thirty-five samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -42,6 +42,7 @@ case), not a margin to spend.
 | `32_xml_fragments_windows_many` | Windows event XML fragments: 22 event ids, one each | Authenticate, Authorise, Process, Install, Create, Update, Delete, View | More kinds than the draft's twelve rules: every one its proper type, none Unknown |
 | `33_csv_cp1252_hr` | A CSV file in Windows-1252 on the user's disk | Create, Update, Delete | The feed's encoding: sent whole as UTF-8 the accented names are broken in Stroom though the user's excerpt shows them right; the user knows the encoding when asked |
 | `34_jsonl_schema_traps_nac` | JSON lines with values the schema rejects as written | Authenticate | Upper-case IPv6 (lower-cased), MAC addresses in three styles (to upper-case pairs), a port written `443/tcp`, an empty user |
+| `35_xml_fragments_secretserver_messages` | Windows event XML fragments (Delinea Secret Server), the event in a message string; 33 records, one per category and action, cut from a user's 1,000-record sample | Authenticate, Update, View, Create, Delete, Alert, Process | The kind of event extracted from the message (`extract`), details after it in three separator styles, the source IP in `EventSource/Client/IPAddress` (not Data), a TypeId per kind of event (not the category), none Unknown |
 | `21_csv_connections_odd_fields` | CSV with a header: connections made and ended, with the broker's own fields (zones, `destination_key`, a TLS fingerprint, policy, connection id) | Network (Connect, Close) | Fields with no element of their own carried as `Data` on the side they describe (`destination_key` under `Destination`, `source_zone` under `Source`) rather than invented or left Unknown: `forbidden_types: [Unknown]` and `data` checks |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record

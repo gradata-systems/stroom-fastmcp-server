@@ -1458,6 +1458,37 @@ class _Generator:
         else:
             etree.SubElement(parent, f'{{{XSL}}}call-template', name=name)
 
+    def _data_with_a_home(self, rules: list['EventRule']) -> None:
+        """Data entries whose name says the schema has an element for them (the draft's own field-name homes: a
+        client address, a user, a host, a session id), where the event doesn't map that element. Seen: a source IP and
+        a session id carried as Data on every SecretServer event, where EventSource/Client/IPAddress and
+        EventSource/SessionId were there to hold them."""
+        from utils.draftmap import HOMES, _matches
+        homes = []
+        for path, pattern in HOMES:
+            try:
+                self.schema.resolve(path)
+            except ValueError:
+                continue    # not in this version of the schema
+            homes.append((path, re.compile(pattern, re.I)))
+        found: dict[tuple[str, str], list[str]] = {}
+        for rule in rules:
+            if rule.drop:
+                continue
+            entries = list(self.m.common) + list(rule.fields)
+            mapped = {e.path for e in entries}
+            for e in entries:
+                if not e.path.endswith('/Data') or not e.data_name:
+                    continue
+                names = [e.data_name] + ([e.field] if e.field else [])
+                home = next((path for path, rx in homes if any(_matches(rx, n) for n in names)), None)
+                if home and home not in mapped:
+                    found.setdefault((e.data_name, home), []).append(rule.name)
+        for (name, home), where in found.items():
+            self._note(self.warnings, f"[{', '.join(where)}] Data '{name}' looks like {home}, which the schema has: map "
+                                      f"it there (Data is for what has no element of its own), or keep it as Data if "
+                                      f"it means something else.")
+
     def stylesheet(self, version: str) -> tuple[str, list[dict]]:
         m = self.m
         if m.input == 'xml' and not (m.root and m.record):
@@ -1484,6 +1515,7 @@ class _Generator:
         if catch_all:
             self._note(self.problems, f"Rules {catch_all} have no conditions, so the rules after them never run; "
                                       f"put the rule without conditions last")
+        self._data_with_a_home(rules)
         unread = [n for ex in m.extract for n in ex.names if n and not reads_input(m, n)]
         if unread:
             self._note(self.warnings, f"extract names {unread}, which nothing reads: map each to the element that means "

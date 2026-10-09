@@ -175,7 +175,7 @@ Stroom. With a read/write key, the e2e suites run there with `E2E_TARGET=live` (
 `dev/e2e_cleanup.py STAMP --apply` removes the run afterwards: filters, streams (marked deleted), documents and
 folders.
 
-The evaluation set in [dev/eval](dev/eval/README.md) has 34 cases across CSV, TSV and pipe-delimited text, JSON,
+The evaluation set in [dev/eval](dev/eval/README.md) has 35 cases across CSV, TSV and pipe-delimited text, JSON,
 XML and XML fragments, syslog, CEF and key=value (large files and a non-UTF-8 file among them), each with a
 reference solution (`dev/eval/offline.py` checks them with no Stroom): `--reference` runs those through the local stack without a model, and `--request` prints
 the request to give an agent, whatever runs it. `dev/eval/run_agent.py` runs them with headless Claude Code as the

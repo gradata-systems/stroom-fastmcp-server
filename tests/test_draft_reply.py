@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from lxml import etree
 
 from utils.draftmap import draft_mapping
 from utils.eventschema import EventSchema
@@ -76,6 +77,12 @@ def test_allow_unknown_on_a_rule_that_writes_an_action_element_means_nothing():
     assert any(w.startswith('[system_alert] allow_unknown is ignored: the rule writes Alert') for w in warnings)
     kept = field_mapping_markdown(mapping, SCHEMA).split('### Kept as Unknown', 1)[1].split('###', 1)[0]
     assert '`other`' in kept and 'system_alert' not in kept
+    # A catch-all the sample never reaches is said to be one, not a decision about the sample (seen: read beside
+    # "0 of 1000" in the event types).
+    events = etree.fromstring('<Events xmlns="event-logging:3"><Event><EventDetail><TypeId>START</TypeId><Alert>'
+                              '<Type>Other</Type></Alert></EventDetail></Event></Events>').findall('{event-logging:3}Event')
+    kept = field_mapping_markdown(mapping, SCHEMA, events).split('### Kept as Unknown', 1)[1].split('###', 1)[0]
+    assert "anything else None of the 1 sampled records reach it: it catches records the sample doesn't have." in kept
 
 
 def test_a_condition_given_with_its_input_inside_the_test_is_spread_out():

@@ -186,6 +186,42 @@ async def verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
     return any(t.endswith(f'-{digest}') for t in mine)
 
 
+# A translation pipeline whose processed Events passed check_events (read from their streams) is recorded the same
+# way, 'mcp-validated-<UTC time>-<code digest>': the plan's 'validated' step was never recorded, so build_status said
+# "not recorded" however often the events were checked, and agents checked again and again.
+VALIDATED = 'mcp-validated-'
+
+
+async def remember_validated(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Record that the pipeline's current code wrote Events that passed check_events."""
+    guard = guard_from(ctx)
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    try:
+        tags = await guard.tags(ref)
+        if MANAGED not in tags:
+            return False
+        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+        mine = sorted(t for t in tags if t.startswith(VALIDATED))
+        if not any(t.endswith(f'-{digest}') for t in mine):
+            await guard.tag([ref], [f"{VALIDATED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
+            if len(mine) >= KEEP_STEPPED:
+                await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
+        return True
+    except Exception as e:  # the record is a convenience; never fail the check over it
+        logger.warning("Couldn't record validated events on pipeline %s: %s", ref['uuid'], e)
+        return False
+
+
+async def validated(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Whether Events from the pipeline's current code passed check_events."""
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    mine = [t for t in await guard_from(ctx).tags(ref) if t.startswith(VALIDATED)]
+    if not mine:
+        return False
+    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+    return any(t.endswith(f'-{digest}') for t in mine)
+
+
 def record_key(stream_id: int, location: dict[str, Any]) -> str:
     """'stream:record', or 'stream:part:record' past the first part (record numbers restart in each part)."""
     part = location.get('partIndex') or 0

@@ -179,6 +179,12 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
         assert done['saved']['uuid'] == 'x-1'
         # Checking without saving asks nothing.
         assert 'status' not in await generation.build_translation_xslt(ctx, kept)
+        # A rule keeping none of the sample Unknown holds nothing to agree to: saved without asking (seen: the
+        # user asked to keep 'other' as Unknown for "none of the 1000" records).
+        logins = sample.replace(',status,,,,', ',login,carol,ok,s3,')
+        create.reset_mock()
+        saved = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=logins)
+        assert saved['saved']['uuid'] == 'x-1' and create.await_count == 1
 
 
 async def test_a_field_an_inferred_splitter_lacks_is_a_warning_not_a_refusal():

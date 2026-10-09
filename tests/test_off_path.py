@@ -28,7 +28,7 @@ def _events_streams():
 
 DONE = {
     'feed': True, 'samples': True, 'converter': True, 'translation': True, 'pipeline': True, 'ev_stepped': True,
-    'events': True, 'ev_documented': True, 'index_doc': True, 'ix_pipeline': True, 'ix_stepped': True,
+    'events': True, 'ev_validated': True, 'ev_documented': True, 'index_doc': True, 'ix_pipeline': True, 'ix_stepped': True,
     'agreed': True, 'filters': [{'finished': True}], 'verified': True, 'ix_documented': True,
 }
 
@@ -73,7 +73,7 @@ async def status_of(f: dict) -> dict:
             patch('tools.pipeline_writes.open_slots', AsyncMock(return_value=[])), \
             patch('tools.pipelines.merge_layers', lambda layers: {}), \
             patch('tools.stepping.stepped_clean', AsyncMock(side_effect=lambda c, p: stepped[p['uuid']])), \
-            patch('tools.stepping.verified', AsyncMock(return_value=f['verified'])), \
+            patch('tools.stepping.verified', AsyncMock(return_value=f['verified'])),             patch('tools.stepping.validated', AsyncMock(return_value=f['ev_validated'])), \
             patch('tools.processing_writes.elastic_destination', AsyncMock(
                 side_effect=lambda s, u: {'index name': 'acme-v1', 'cluster': 'ES'} if elastic and u == 'ix' else None)), \
             patch('tools.processing_writes.agreement_problem', AsyncMock(return_value=None if f['agreed'] else 'no')), \
@@ -91,7 +91,8 @@ STATES = [
     ('a translation', facts('lucene', 'pipeline'), 'pipeline', 'find_pipeline_templates'),
     ('an events pipeline', facts('lucene', 'ev_stepped'), 'stepped', 'step_sample'),
     ('stepped clean', facts('lucene', 'events'), 'processed', 'create_processor_filter'),
-    ('Events', facts('lucene', 'ev_documented'), 'documented', 'write_documentation'),
+    ('Events', facts('lucene', 'ev_validated'), 'validated', 'check_events'),
+    ('validated', facts('lucene', 'ev_documented'), 'documented', 'write_documentation'),
     ('documented', facts('lucene', 'index_doc'), 'index', 'get_field_conventions'),
     ('a Lucene index doc', facts('lucene', 'ix_pipeline'), 'indexing_pipeline', 'save_xslt'),
     ('a Lucene indexing pipeline', facts('lucene', 'ix_stepped'), 'indexed', 'step_sample'),

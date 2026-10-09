@@ -184,7 +184,11 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
     if kept:
         lines += ['### Kept as Unknown', '']
         lines += [f"- `{r.name}` ({' and '.join(condition_text(c) for c in r.when) or 'records no other rule matches'}): "
-                  f"{r.allow_unknown}" for r in kept]
+                  f"{r.allow_unknown}"
+                  # A catch-all the sample never reaches is a safety net, not events kept Unknown (seen: read as a
+                  # decision about the sample, beside "0 of 1000" in the event types).
+                  + (f" None of the {total} sampled records reach it: it catches records the sample doesn't have."
+                     if sampled and not by_rule.get(r.name) else '') for r in kept]
         lines.append('')
     if mapping.drop_when:
         lines += ['### Left untranslated', '']

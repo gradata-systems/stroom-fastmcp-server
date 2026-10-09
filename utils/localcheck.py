@@ -8,6 +8,7 @@ sample's values do not fit are the two mistakes that otherwise only show at step
 import difflib
 import json
 import re
+from collections import Counter
 from typing import Any
 
 from lxml import etree
@@ -151,12 +152,14 @@ def _items_of(record: Any, path: str) -> list[Any]:
 _TOKEN = re.compile(r'^[A-Za-z][\w.:-]{0,39}$')
 
 
-def _holds(c: Any, record: Any, derived: set[str]) -> bool | None:
+def _holds(c: Any, record: Any, derived: set[str], extracted: dict[str, str] | None = None) -> bool | None:
     """Whether a field condition holds for a record, as the XSLT would test it; None when it cannot be told here (an
-    xpath, a dictionary, or a field an extraction produces)."""
-    if c.xpath is not None or c.in_dictionary is not None or c.field in derived or c.scope == 'record':
+    xpath, a dictionary, or a field an extraction produces, unless its values are given)."""
+    if c.xpath is not None or c.in_dictionary is not None or c.scope == 'record':
         return None
-    value = _value_of(record, c.field)
+    if c.field in derived and (extracted is None or c.field not in extracted):
+        return None
+    value = extracted[c.field] if c.field in derived else _value_of(record, c.field)
     if c.present is not None:
         return bool(value and value.strip()) == c.present
     if value is None:
@@ -171,13 +174,32 @@ def _holds(c: Any, record: Any, derived: set[str]) -> bool | None:
         return None
 
 
-def rule_of(mapping: TranslationMapping, record: Any) -> str | None:
+def extracted_values(mapping: TranslationMapping, record: Any) -> dict[str, str] | None:
+    """The values the mapping's extractions give a record (the first match's groups, '' where it doesn't match), as
+    the XSLT's analyze-string does; None when one can't be run here (an xpath source, a regex Python can't read)."""
+    flags = {'i': re.I, 'm': re.M, 's': re.S, 'x': re.X}
+    values: dict[str, str] = {}
+    for ex in mapping.extract:
+        if ex.xpath is not None or not ex.field:
+            return None
+        text = values.get(ex.field) if ex.field in values else _value_of(record, ex.field)
+        try:
+            found = re.search(ex.regex, text or '', sum(flags.get(f, 0) for f in ex.flags))
+        except re.error:
+            return None
+        for i, name in enumerate(ex.names, 1):
+            if name:
+                values[name] = (found.group(i) or '') if found and i <= (found.re.groups or 0) else ''
+    return values
+
+
+def rule_of(mapping: TranslationMapping, record: Any, extracted: dict[str, str] | None = None) -> str | None:
     """The rule a record falls into: a drop rule ('drop: reason'), an event rule's name, '' when none matches, or None
     when a condition on the way cannot be told here."""
     derived = {n for ex in mapping.extract for n in ex.names if n}
     candidates = [(f'drop: {d.reason}', d.when) for d in mapping.drop_when] + [(r.name, r.when) for r in mapping.events]
     for name, when in candidates:
-        tests = [_holds(c, record, derived) for c in when]
+        tests = [_holds(c, record, derived, extracted) for c in when]
         if any(t is None for t in tests):
             return None
         if all(tests):
@@ -265,6 +287,34 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
     return problems, kept
 
 
+def shared_type_ids(mapping: TranslationMapping, records: list[Any]) -> list[str]:
+    """A TypeId read from one field for every rule that, in the sample, is the same for records of different rules:
+    events of different kinds share it. Seen: TypeId the SecretServer category ('User') for logons, logoffs and role
+    changes alike. Told from the sample, not the mapping's shape: a TypeId field whose values already differ per kind
+    (a firewall's action, FortiGate's logid) is fine though the rules test other fields as well."""
+    common = next((e for e in mapping.common if e.path.strip('/') == 'EventDetail/TypeId'), None)
+    if common is None or not common.field or mapping.for_each:
+        return []
+    own = {r.name for r in mapping.events if any(f.path.strip('/') == 'EventDetail/TypeId' for f in r.fields)}
+    derived = {n for ex in mapping.extract for n in ex.names if n}
+    by_value: dict[str, Counter] = {}
+    for record in records:
+        extracted = extracted_values(mapping, record) if mapping.extract else {}
+        name = rule_of(mapping, record, extracted)
+        if not name or name.startswith('drop: ') or name in own:
+            continue
+        value = (extracted or {}).get(common.field) if common.field in derived else _value_of(record, common.field)
+        if value:
+            by_value.setdefault(value, Counter())[name] += 1
+    shared = {v: rules for v, rules in by_value.items() if len(rules) > 1}
+    if not shared:
+        return []
+    examples = '; '.join(f"'{v}' for rules {', '.join(sorted(r))}" for v, r in list(shared.items())[:3])
+    return [f"EventDetail/TypeId reads '{common.field}', which in the sample is the same for events of different kinds "
+            f"({examples}). TypeId names the kind of event: give each rule its own (a value per rule, or an xpath "
+            f"joining the fields)."]
+
+
 def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, Any]:
     """Fields the mapping names that no sample record has (with close matches), and time formats the sample's
     values do not fit. Fields an extraction produces are known, not looked for."""
@@ -340,6 +390,7 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         warnings.append(f"fields in the sample that nothing reads: {unread[:12]}{' ...' if len(unread) > 12 else ''}: "
                         f"map each to the element that means it (a Data entry if nothing else fits), or leave it out on "
                         f"purpose.")
+    warnings += shared_type_ids(mapping, records)
     unknown_problems, kept = unknown_coverage(mapping, records)
     problems += unknown_problems
     return {'records': len(records), 'problems': problems, 'warnings': warnings, 'fields_seen': seen[:60],

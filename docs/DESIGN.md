@@ -571,7 +571,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | Tool | Purpose |
 | --- | --- |
 | `check_xslt` | Well-formed, XSLT 2.0/3.0 namespace, only real `stroom:` functions (an unknown one is refused with the nearest name), match/select expressions that would select nothing for want of the input namespace, event-logging elements the schema has no place for (checked against the XSD in Stroom), imports that resolve. Runs on every XSLT saved and on draft code before it is stepped |
-| `check_events` | Validate event XML (given, or read by the server from Events streams with `stream_ids`, up to `max_sample_records`) against the event-logging XSD held in the Stroom instance (the configured version, or the one the events declare); errors with line, path and a short fix hint |
+| `check_events` | Validate event XML (given, or read by the server from Events streams with `stream_ids`, up to `max_sample_records`; a pass on streams records an `mcp-validated-*` tag with the code's hash on the pipeline that wrote them, the plan's `validated` step) against the event-logging XSD held in the Stroom instance (the configured version, or the one the events declare); errors with line, path and a short fix hint |
 | `check_events` | Beyond the XSD: `EventTime/TimeCreated` parses, `EventSource/System/Name` set, no empty elements, `EventDetail` type matches the action |
 | `describe_document` | Read an XSLT and list, per output event-logging path, the input fields or expressions that feed it; flags constant values and paths never set |
 

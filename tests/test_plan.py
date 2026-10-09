@@ -118,7 +118,7 @@ async def _status_of(indexing_verified: bool, agreed: bool, filters: list[dict])
             patch('tools.pipeline_writes.open_slots', AsyncMock(return_value=[])), \
             patch('tools.pipelines.merge_layers', lambda layers: {}), \
             patch('tools.stepping.stepped_clean', AsyncMock(return_value=True)), \
-            patch('tools.stepping.verified', AsyncMock(return_value=indexing_verified)), \
+            patch('tools.stepping.verified', AsyncMock(return_value=indexing_verified)),             patch('tools.stepping.validated', AsyncMock(return_value=True)), \
             patch('tools.processing_writes.elastic_destination',
                   AsyncMock(side_effect=lambda s, u: {'index name': 'acme-v1', 'cluster': 'ES'} if u == 'ix' else None)), \
             patch('tools.processing_writes.agreement_problem', AsyncMock(return_value=None if agreed else 'not agreed')), \

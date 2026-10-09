@@ -471,6 +471,23 @@ async def _stream_events(ctx: Context, stream_ids: list[int]) -> tuple[str, dict
     return etree.tostring(merged, encoding='unicode'), read
 
 
+async def _record_validated(ctx: Context, stream_ids: list[int]) -> list[str]:
+    """The pipelines that wrote these Events streams, recorded as validated (the plan's 'validated' step)."""
+    from tools.stepping import remember_validated
+    stroom = gateway_from(ctx)
+    rows = (await stroom.find_meta([{'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(i)}
+                                    for i in stream_ids], len(stream_ids), op='OR')).get('values') or []
+    recorded = []
+    for uuid in sorted({(r.get('meta') or {}).get('pipelineUuid') for r in rows} - {None}):
+        try:
+            doc = await stroom.get(f'/pipeline/v1/{uuid}')
+        except ToolError:
+            continue
+        if await remember_validated(ctx, {'type': 'Pipeline', 'uuid': uuid, 'name': doc.get('name')}):
+            recorded.append(doc.get('name'))
+    return recorded
+
+
 async def check_events(
         ctx: Context,
         events_xml: Annotated[str | None, Field(
@@ -495,7 +512,10 @@ async def check_events(
         raise ToolError("Give events_xml (an <Events> document) or stream_ids (Events streams), not both")
     if stream_ids:
         events_xml, read = await _stream_events(ctx, stream_ids)
-        return {**await check_events(ctx, events_xml, schema_version), 'read': read}
+        result = {**await check_events(ctx, events_xml, schema_version), 'read': read}
+        if result['ok']:
+            result['recorded_for'] = await _record_validated(ctx, stream_ids)
+        return result
     events_xml, escaped = _unescaped(events_xml)
     if escaped:
         return {**await check_events(ctx, events_xml, schema_version), 'note': _ESCAPED}

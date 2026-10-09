@@ -29,6 +29,7 @@ HOMES = [
     ('EventSource/Server/Port', r'^(dst_?port|dest_?port|destination_?port|server_?port|dport|service_?port|dpt)$'),
     ('EventSource/User/Id', r'^(user|username|user_?name|user_?id|userid|account|account_?name|login|subject|actor|principal|uid|target_?user_?name|suser|src_?user|source_?user|holder|card_?holder|badge_?holder|badge_?user)$'),
     ('EventSource/RunAs/Id', r'^(run_?as|run_?as_?user|effective_?user|euser|as_?user)$'),
+    ('EventSource/SessionId', r'^(session_?id|sessionid|session_?key)$'),
     ('EventSource/Generator', r'^(generator|app|app_?name|application|program|process_?name|logger|service|cef_?product)$'),
     ('EventDetail/Description', r'^(message|msg|description|desc|text|summary|details)$'),
 ]

@@ -210,8 +210,8 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                     'until the verdict is clean: fix the mapping and build_translation_xslt uuid=... in between'),
         'processed': (('create_processor_filter', {'pipeline_uuid': tr, 'stream_ids': raw}),
                       'then wait_for_processing and check_events'),
-        'validated': (('check_events', {'events_xml': '<a record of the Events stream (read_stream)>'}),
-                      'one record of each kind of event'),
+        'validated': (('check_events', {'stream_ids': events or '<the Events streams wait_for_processing gave>'}),
+                      'the server reads the Events itself: never read them back to send them'),
         'documented': (('write_documentation', {'build': build, 'pipeline_uuid': tr, 'stream_ids': raw,
                                                 'markdown': '<the documentation, from the documentation guide>'}),
                        'the Field mapping section is generated'),
@@ -264,7 +264,7 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     from tools.builds import _build_docs, build_checks, kept_mapping
     from tools.processing import processing_status
     from tools.processing_writes import agreement_problem, elastic_destination
-    from tools.stepping import stepped_clean, verified
+    from tools.stepping import stepped_clean, validated, verified
     from tools.templates import _shape
     from utils.mappingstore import read_mapping
     stroom = gateway_from(ctx)
@@ -326,7 +326,7 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         'pipeline': bool(translation) and not any(p['missing'] for p in translation),
         'stepped': any(p['stepped'] for p in translation),
         'processed': bool(events),
-        'validated': None,   # not recorded: the model validates after processing
+        'validated': bool(translation) and all([await validated(ctx, p) for p in translation]),
         'documented': bool(translation) and all(p['name'] in documented for p in translation) and not stale,
         # A discovery index's doc is made at verification, once documents are in it: its pipeline comes first.
         'index': bool(by_type.get('Index') or by_type.get('ElasticIndex')) or (discovery and bool(indexing)),

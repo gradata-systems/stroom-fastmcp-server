@@ -302,6 +302,10 @@ async def build_translation_xslt(
                                 "again with stream_ids (the sample streams) or sample, so the check can show them"
                                 + (f" ({check['note']})" if check.get('note') else ''))
             sampled = {k['rule']: k for k in check.get('kept_unknown') or []}
+            # A rule keeping none of the sample Unknown (a catch-all for records the sample lacks) holds nothing to
+            # agree to: seen, the user asked to keep 'other' as Unknown for "none of the 1000" records.
+            kept = [r for r in kept if r.name in sampled]
+        if kept:
             details = {}
             for r in kept:
                 held = sampled.get(r.name)

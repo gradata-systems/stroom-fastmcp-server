@@ -44,7 +44,7 @@ from utils.triage import ErrorRules  # noqa: E402
 check = e2e.check
 TOOLS = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
 SAMPLE = e2e.CASES['csv']['sample']
-STAGE_1 = ['feed', 'samples', 'converter', 'translation', 'pipeline', 'stepped', 'processed', 'documented']
+STAGE_1 = ['feed', 'samples', 'converter', 'translation', 'pipeline', 'stepped', 'processed', 'validated', 'documented']
 PATHS = {
     'lucene': STAGE_1 + ['index', 'indexing_pipeline', 'indexed', 'index_documented', 'promoted'],
     'elasticsearch': STAGE_1 + ['index', 'indexing_pipeline', 'index_template', 'indexed', 'index_documented', 'promoted'],
@@ -52,7 +52,7 @@ PATHS = {
 # The first call `next` names for each step (indexed names the next one as it goes: the filter, the wait, verify_index).
 FIRST_CALL = {'feed': 'create_feed', 'samples': 'upload_sample', 'converter': 'build_data_splitter',
               'translation': 'draft_translation_mapping', 'pipeline': 'find_pipeline_templates', 'stepped': 'step_sample',
-              'processed': 'create_processor_filter', 'documented': 'write_documentation', 'index': 'get_field_conventions',
+              'processed': 'create_processor_filter', 'validated': 'check_events', 'documented': 'write_documentation', 'index': 'get_field_conventions',
               'indexing_pipeline': 'save_xslt', 'index_template': 'step_sample', 'indexed': 'create_processor_filter',
               'index_documented': 'write_documentation', 'promoted': 'promote_build'}
 # Lucene has no template step: the new indexing pipeline is stepped as the first call of indexed.
@@ -195,10 +195,18 @@ class Walk:
                          stream_ids=arguments['stream_ids'])
         check(done['gate'] == 'pass', f"processed into Events: {done['streams']}")
         self.events = [e for s in done['streams'] for e in s['events']]
-        record = (await run(self.ctx, 'read_stream', stream_id=self.events[0], record_count=1))['records'][0]
-        valid = await run(self.ctx, 'check_events', events_xml=record)
-        check(valid['ok'], 'the Events validate')
         return done
+
+    async def validated_step(self, call):
+        # The server reads the Events itself (seen: an agent read 50 back 23 at a time to send them), and records the
+        # check on the pipeline that wrote them, so the step is done rather than "not recorded".
+        valid = await run(self.ctx, 'check_events', **fill(call))
+        check(valid['ok'] and valid['read'] and valid.get('recorded_for'),
+              f"the Events read from their streams validate, recorded for {valid.get('recorded_for')}: {valid['read']}")
+        status = await build_status(self.ctx, self.build)
+        check(next(s['state'] for s in status['steps'] if s['step'] == 'validated') == 'done',
+              'build_status has the validated step done')
+        return valid
 
     async def documented_step(self, call):
         # As an agent got it wrong: the Events stream instead of the raw sample, and no change line. The server

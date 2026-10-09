@@ -227,15 +227,24 @@ def data_held(events: list[etree._Element], spec: dict[str, Any]) -> bool:
 
 
 Call = Callable[..., Awaitable[dict[str, Any]]]
+READ_EVENTS = 300     # events read and checked a stream: every one of a case's sample (a large file's streams are counted)
 
 
 async def check_output(call: Call, score: Score, case: dict[str, Any], events_stream_ids: list[int]) -> None:
     records, validity, totals, cut = [], [], 0, False
     for stream_id in events_stream_ids:
-        read = await call('read_stream', stream_id=stream_id, first_record=0, record_count=100)
-        got = read.get('records') or []
-        totals += read.get('total_records') or len(got)
-        cut = cut or (read.get('total_records') or 0) > len(got)
+        # Read on past the size limit (seen: case 35's events, a kilobyte each with the message as Description, read
+        # 17 of 33): every event of a case's sample, up to READ_EVENTS a stream.
+        got, first, total = [], 0, 0
+        while len(got) < READ_EVENTS:
+            read = await call('read_stream', stream_id=stream_id, first_record=first, record_count=100)
+            got += read.get('records') or []
+            total = read.get('total_records') or len(got)
+            first = read.get('next_first_record') or first + len(read.get('records') or [])
+            if not read.get('records') or first >= total:
+                break
+        totals += total
+        cut = cut or total > len(got)
         for record in got:
             records.append(record)
             validity.append(bool((await call('validate_events', events_xml=record)).get('valid')))
