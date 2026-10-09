@@ -179,11 +179,18 @@ async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: 
     feeds = {feed} if feed else {r['meta'].get('feedName') for r in (await stroom.find_meta(
         [_term('Id', i) for i in stream_ids or []], len(stream_ids or []), op='OR')).get('values') or []}
     outside = []
+    from tools.feeds import feeds_named
     for name in sorted(f for f in feeds if f):
         ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')
         feed_tags = await guard.tags(ref) if ref else []
         if not builds & set(feed_tags):
-            outside.append(name)
+            # Stream data names a feed as Stroom first spelt it: the build's feed may be the same name in another case.
+            twins = [f for f in await feeds_named(stroom, name) if f['uuid'] != (ref or {}).get('uuid')]
+            in_build = False
+            for twin in twins:
+                in_build = in_build or bool(builds & set(await guard.tags(twin)))
+            if not in_build:
+                outside.append(name)
     if outside:
         raise ToolError(f"Feed(s) {outside} are not in this build. A translation pipeline writes its Events into the "
                         f"input's feed, so it only processes the build's own feeds: step production records in place "

@@ -331,6 +331,8 @@ async def test_translation_pipelines_only_process_the_builds_feeds(ctx):
         {'meta': {'id': 6, 'typeName': 'Raw Events', 'feedName': 'PROD-FEED'}}]}))
     respx.get(f'{API}/feed/v1/getDocRefForName/PROD-FEED').mock(
         return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}))
+    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'docRef': {'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}, 'path': 'System / Feeds'}]}))
     with patch('tools.processing_writes.guard_from', return_value=guard(feed_tags=['mcp-generated'])):
         with pytest.raises(ToolError, match=r"Feed\(s\) \['PROD-FEED'\] are not in this build"):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
@@ -338,6 +340,29 @@ async def test_translation_pipelines_only_process_the_builds_feeds(ctx):
             await processing_writes.create_processor_filter(ctx, 'p1', feed='PROD-FEED',
                                                             created_after='2026-09-29T00:00:00Z')
     assert not create.called
+
+
+@respx.mock
+async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ctx):
+    # Qwen in VS Code: DELINEA-SECRETSERVER-V1.0 in the build, an earlier Delinea-SecretServer-V1.0 in another; Stroom
+    # filed the new feed's sample under the earlier spelling, and processing was refused as another build's feed.
+    create = mock_stroom(elastic=False, streams={6: ('Raw Events', None)})
+    respx.post(f'{API}/meta/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
+        {'meta': {'id': 6, 'typeName': 'Raw Events', 'feedName': 'Delinea-SecretServer-V1.0'}}]}))
+    respx.get(f'{API}/feed/v1/getDocRefForName/Delinea-SecretServer-V1.0').mock(
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'}))
+    respx.get(f'{API}/feed/v1/old').mock(return_value=httpx.Response(200, json={
+        'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0', 'createTimeMs': 0}))
+    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'docRef': {'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'}, 'path': 'System / MCP Workspace / a'},
+        {'docRef': {'type': 'Feed', 'uuid': 'new', 'name': 'DELINEA-SECRETSERVER-V1.0'}, 'path': 'System / MCP Workspace / b'}]}))
+
+    async def tags(ref):
+        return ['mcp-build-b'] if ref.get('type') == 'Pipeline' or ref.get('uuid') == 'new' else ['mcp-build-a']
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(
+            check_managed=AsyncMock(), check_built=AsyncMock(), tags=tags)):
+        gated = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
+    assert gated['status'] == 'needs_approval'
 
 
 @respx.mock

@@ -146,3 +146,23 @@ async def test_a_reference_sample_applies_from_long_ago_unless_told_otherwise():
         assert ticket.await_args.args[4] == {'EffectiveTime': '2000-01-01T00:00:00.000Z'}
         await feeds.upload_sample(ctx, 'ACME', sample='a,b\n1,2\n')
         assert 'EffectiveTime' not in send.await_args.args[3]
+
+
+async def test_a_feed_differing_from_another_only_in_case_is_refused():
+    # Qwen in VS Code made DELINEA-SECRETSERVER-V1.0 beside an earlier Delinea-SecretServer-V1.0: Stroom filed the new
+    # feed's streams under the earlier spelling, and processing refused them as another build's feed.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds
+    found = {'values': [{'docRef': {'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'},
+                         'path': 'System / MCP Workspace / onboard-delinea'}]}
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value=found))
+    asked = AsyncMock(return_value={'status': 'needs_confirmation'})
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
+            patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)):
+        with pytest.raises(ToolError, match=r"'Delinea-SecretServer-V1.0' \(System / MCP Workspace / onboard-delinea\) "
+                                            r"already exists, differing from 'DELINEA-SECRETSERVER-V1.0' only in case"):
+            await feeds.create_feed(None, 'b', 'DELINEA-SECRETSERVER-V1.0')
+        assert not asked.await_count                     # refused before the user is asked
+        assert (await feeds.create_feed(None, 'b', 'DELINEA-SECRETSERVER-V2.0'))['status'] == 'needs_confirmation'

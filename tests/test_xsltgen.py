@@ -641,3 +641,34 @@ def test_an_empty_constant_is_refused():
     from pydantic import ValidationError
     with pytest.raises(ValidationError, match="value '' writes an empty element"):
         mapping(common=BASE + [{'path': 'EventSource/Client/IPAddress', 'value': ''}])
+
+
+def test_data_values_interpolated_and_data_names_in_a_style():
+    # An AGENTS style guide could say Value="{...}" and PascalCase Names, and the mapping had no way to follow it.
+    logon = [*LOGON, {'path': 'EventDetail/Authenticate/Data', 'data_name': 'server_node', 'field': 'host'},
+             {'path': 'EventDetail/Authenticate/Data', 'data_name': 'IPAddress', 'value': 'a{b}'},
+             {'path': 'EventDetail/Authenticate/Data', 'data_name': 'first_two',
+              'xpath': "replace(data[@name='user']/@value, '^(.{2}).*', '$1')"}]
+    styled = mapping(events=[{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': logon},
+                             mapping().events[-1].model_dump(exclude_none=True)],
+                     style={'data_values': 'interpolated', 'data_names': 'PascalCase'})
+    # The names are the mapping's own from now on: the documentation and the checks see what the events hold.
+    assert [f.data_name for f in styled.events[0].fields if f.data_name] == ['Session', 'ServerNode', 'IPAddress', 'FirstTwo']
+    result = generate(styled, SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    xslt = result['xslt']
+    assert '<Data Name="ServerNode" Value="{' in xslt and '<Data Name="IPAddress" Value="a{{b}}"/>' in xslt
+    assert '<Data Name="FirstTwo" Value="{$' in xslt         # read into a variable, its braces kept out of the value
+    # An expression with a brace in it keeps xsl:attribute (a brace in a value template would need doubling).
+    from unittest.mock import patch
+    from utils.xsltgen import _Generator
+    with patch.object(_Generator, 'value_expr', lambda self, entry: "replace(., '^(.{2}).*', '$1')"):
+        braced = generate(styled, SCHEMA, '4.1.0')['xslt']
+    assert '<xsl:attribute name="Value" select="replace(.' in braced
+    events = transform(xslt, RECORDS.replace('<data name="sid" value="s1"/>', '<data name="sid" value="s1"/><data name="host" value="ws09"/>'))
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    data = {d.get('Name'): d.get('Value') for d in events.iter('{event-logging:3}Data')}
+    assert data['ServerNode'] == 'ws09' and data['IPAddress'] == 'a{b}' and data['FirstTwo'] == "o'" and data['Session'] == 's1'
+    # The defaults are unchanged.
+    plain = generate(mapping(), SCHEMA, '4.1.0')['xslt']
+    assert '<xsl:attribute name="Value"' in plain and 'Name="session"' in plain

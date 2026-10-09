@@ -168,7 +168,7 @@ Stage 1, events:
    the shared template writes them (twice fails validation). It lists their xsl:functions too (namespace,
    parameters, calls): call them in xpaths, with a functions entry (href, prefix, namespace) per shared XSLT.
    find_documents (content=...) for other XSLTs to reuse. An XSLT style in the standing instructions, or one the
-   user asks for, goes in the mapping's style (layout, naming, variables).
+   user asks for, goes in the mapping's style (layout, naming, variables, how Data values and Names are written).
    draft_translation_mapping with the sample streams gives a
    mapping to edit (its notes say what to decide: the action element per kind of event, System Name, Environment, a
    time zone); then build_translation_xslt (feeds=[the feed], stream_ids=the sample streams, splitter=the spec) with

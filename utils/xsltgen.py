@@ -330,6 +330,14 @@ class XsltStyle(BaseModel):
         "A conversion (a time format, or a strip_domain, domain or digits transform) used by at least this many "
         "elements is declared once as an xsl:function (mcp:parse_time, mcp:strip_domain) and called where it's "
         "needed; fewer are written inline. 0: always inline."))
+    data_values: Literal['attribute', 'interpolated'] = Field('attribute', description=(
+        "How a computed Data value is written: attribute, <Data Name=\"x\"><xsl:attribute name=\"Value\" "
+        "select=\"...\"/></Data>; interpolated, <Data Name=\"x\" Value=\"{...}\"/> (an attribute value template). "
+        "An expression holding a brace keeps xsl:attribute. Set it from an AGENTS style guide."))
+    data_names: Literal['as_given', 'snake_case', 'camelCase', 'PascalCase', 'kebab-case'] = Field(
+        'as_given', description=(
+            "Data element Names in this style (server_node becomes ServerNode in PascalCase), applied to every "
+            "data_name of the mapping; as_given keeps them as written. Set it from an AGENTS naming convention."))
     layout: Literal['modes', 'named', 'inline'] = Field('modes', description=(
         "How the templates are laid out. modes: each event kind, and each part several kinds share, is a template "
         "rule with its own mode (match=\"node()\" mode=\"eventTypeLogon\" in camelCase), applied to the record "
@@ -389,6 +397,17 @@ def style_name(text: str, naming: str) -> str:
     else:
         name = ('-' if naming == 'kebab-case' else '_').join(words)
     return name if not name[0].isdigit() else '_' + name
+
+
+_IN_STYLE = {'snake_case': r'[a-z][a-z0-9]*(_[a-z0-9]+)*', 'camelCase': r'[a-z][a-z0-9]*([A-Z][a-z0-9]*)*',
+             'PascalCase': r'[A-Z][A-Za-z0-9]*', 'kebab-case': r'[a-z][a-z0-9]*(-[a-z0-9]+)*'}
+
+
+def data_name_in(name: str, naming: str) -> str:
+    """A Data Name in the mapping's data_names style; a name already in it is kept (IPAddress stays, not IpAddress)."""
+    if naming == 'as_given' or re.fullmatch(_IN_STYLE[naming], name):
+        return name
+    return style_name(name, naming)
 
 
 def unique_name(base: str, taken: set[str], naming: str) -> str:
@@ -475,6 +494,16 @@ class TranslationMapping(BaseModel):
     unmatched: Literal['warn', 'skip'] = Field('warn', description="Records no rule matches: log a warning, or skip.")
     style: XsltStyle = Field(default_factory=XsltStyle, description="How the XSLT is written: naming, and when "
                                                                     "to use variables and xsl:maps.")
+    @model_validator(mode='after')
+    def _data_names_in_style(self) -> 'TranslationMapping':
+        # Applied to the mapping itself, so the XSLT, the documentation's tables and the sample checks all use the
+        # names the events will hold, and the kept mapping holds them.
+        if self.style.data_names != 'as_given':
+            for entry in [*self.common, *(f for rule in self.events for f in rule.fields)]:
+                if entry.data_name:
+                    entry.data_name = data_name_in(entry.data_name, self.style.data_names)
+        return self
+
     shared: list[SharedTemplate] = Field(default_factory=list, description=(
         "Named templates from shared XSLTs (xsl:import) that the environment's other translations call, e.g. one "
         "writing EventSource/Device from stream meta: the XSLT imports them and calls each in its element's place, "
@@ -1283,9 +1312,14 @@ class _Generator:
                     holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
                 element = etree.SubElement(holder, f'{{{EVT}}}Data', Name=entry.data_name)
                 if entry.value is not None:
-                    element.set('Value', entry.value)
+                    # A literal element's attributes are value templates: a brace in a constant is doubled.
+                    element.set('Value', entry.value.replace('{', '{{').replace('}', '}}'))
                 else:
-                    etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=self.value_expr(entry))
+                    expr = self.value_expr(entry)
+                    if self.m.style.data_values == 'interpolated' and not set('{}') & set(expr):
+                        element.set('Value', f'{{{expr}}}')
+                    else:
+                        etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=expr)
             elif item.shared is not None:
                 call = etree.SubElement(parent, f'{{{XSL}}}call-template', name=item.shared.template)
                 for name, select in item.shared.with_params.items():
@@ -1349,12 +1383,17 @@ class _Generator:
             if name in self._keep:
                 continue
             pattern = re.compile(r'\$' + re.escape(name) + r'(?![\w.-])')
+            # A Data element's Value="{...}" (style data_values interpolated) reads it too.
             reads = [(el, attr) for el in template.iter() if el is not variable
-                     for attr in ('test', 'select') if pattern.search(el.get(attr) or '')]
+                     for attr in ('test', 'select', 'Value') if pattern.search(el.get(attr) or '')
+                     and (attr != 'Value' or el.tag == f'{{{EVT}}}Data')]
             # Text two extractions read stays a variable, whatever the style's threshold: each is a regex over it.
             parsed = sum(len(re.findall(r'analyze-string\(string\(\$' + re.escape(name) + r'\[1\]\)', el.get(attr)))
                          for el, attr in reads) if name in self._extracted_texts else 0
-            if parsed < 2 and sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
+            # Inlined into a value template, a brace in the expression would be read as one: it stays a variable.
+            braced = any(attr == 'Value' for _, attr in reads) and bool(set('{}') & set(raw[name]))
+            if parsed < 2 and not braced and \
+                    sum(len(pattern.findall(el.get(attr))) for el, attr in reads) < self.m.style.variable_min_reads:
                 template.remove(variable)
                 plain = raw[name] if name not in self._xpath_names or is_call(raw[name]) else f'({raw[name]})'
                 # A Data Splitter or JSON field has one value per record, so its test reads naturally as
@@ -1368,6 +1407,8 @@ class _Generator:
                     # Only a test of whether the field has a value needs blank values left out. A value
                     # (after its guard, or after 'then'), a comparison and a [1] read the selector as it is.
                     after, before = m.string[m.end():], m.string[:m.start()].rstrip()
+                    if attr == 'Value':
+                        return plain
                     if not before and not after and attr == 'select' or after.startswith('[') \
                             or re.match(r'\s*!?=', after) or before.endswith('then'):
                         return plain

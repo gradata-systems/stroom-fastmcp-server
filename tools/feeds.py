@@ -14,7 +14,7 @@ from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SampleTexts, as_named_samples, check_sample
-from utils.stroom import body_text, gateway_from, set_body_text
+from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
 from utils.uploads import send_to_feed
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -62,6 +62,27 @@ async def profile_sample(
     return {**result, 'read': notes} if notes else result
 
 
+async def feeds_named(stroom: StroomGateway, name: str) -> list[dict[str, Any]]:
+    """Feed docs whose names are this one whatever their case: Stroom files a feed's streams under its name without
+    regard to case, so all of them share one set of streams, under whichever spelling it saw first."""
+    found = (await stroom.find_documents(name, ['Feed'], 50)).get('values') or []
+    return [{**v['docRef'], 'path': v.get('path')} for v in found
+            if (v.get('docRef') or {}).get('type') == 'Feed' and (v['docRef'].get('name') or '').lower() == name.lower()]
+
+
+async def _refuse_case_twin(stroom: StroomGateway, name: str) -> None:
+    """Seen (Qwen, VS Code): DELINEA-SECRETSERVER-V1.0 made beside an earlier Delinea-SecretServer-V1.0; its sample
+    stream was filed under the earlier spelling, processing refused it as another build's feed, and the agent spent the
+    rest of the session looking for a second feed."""
+    twins = [f for f in await feeds_named(stroom, name) if f['name'] != name]
+    if twins:
+        said = ', '.join(f"'{f['name']}' ({f.get('path') or 'path unknown'})" for f in twins)
+        raise ToolError(f"A feed named {said} already exists, differing from '{name}' only in case. Stroom files a feed's "
+                        f"streams under its name without regard to case, so the two would share their streams. Choose "
+                        f"a name that differs in more than case (a version, say), or, if it is the same source, use the "
+                        f"existing feed, or have it deleted first.")
+
+
 async def create_feed(
         ctx: Context,
         build: Build,
@@ -76,13 +97,16 @@ async def create_feed(
     confirmation form, before anything is made (call this rather than asking for the name in the chat first). Stroom checks the
     name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed.
     """
+    await _refuse_case_twin(gateway_from(ctx), name)
     details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', f"Create feed '{name}'", details,
                                            confirmation_id, editable={'name': ('Feed name', name)})
     if gate:
         return gate
-    name = edited(ctx, 'name', name)       # the user may have corrected it in the form
+    proposed, name = name, edited(ctx, 'name', name)       # the user may have corrected it in the form
     stroom = gateway_from(ctx)
+    if name != proposed:
+        await _refuse_case_twin(stroom, name)
     try:
         ref = await guard_from(ctx).create('Feed', name, build)
     except ToolError as e:
