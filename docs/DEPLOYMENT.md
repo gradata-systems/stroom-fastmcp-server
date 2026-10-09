@@ -41,7 +41,7 @@ tls:
 ```
 
 ```
-helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.16.39 -f values.yaml
+helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.16.40 -f values.yaml
 ```
 
 The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `oidc.issuerUrl`, and, with TLS on,
@@ -64,7 +64,7 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   triage) and `conventions` (field convention profiles) replace the image's copies when set.
 - **Security**: runs as uid 10001 with a read-only root file system, no capabilities, and no service account
   token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider; it answers `ok` and
-  the running version, e.g. `ok 0.16.39`, which MCP clients also see in the server's `serverInfo`.
+  the running version, e.g. `ok 0.16.40`, which MCP clients also see in the server's `serverInfo`.
 - **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, resource read, Stroom request,
   confirmation, approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md). To write
   it to a file instead, set `audit.file.enabled`. The file is on an `emptyDir` and lost with the pod, unless you
@@ -94,7 +94,7 @@ docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
   -e STROOM_MCP_OIDC_AUDIENCE=stroom-mcp \
   -e STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com \
   -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
-  ghcr.io/gradata-systems/stroom-fastmcp-server:0.16.39
+  ghcr.io/gradata-systems/stroom-fastmcp-server:0.16.40
 ```
 
 ## Settings
