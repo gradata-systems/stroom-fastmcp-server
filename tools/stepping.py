@@ -104,11 +104,20 @@ async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
     return prints
 
 
-# Clean steps are recorded as explorer tags on the pipeline, 'mcp-stepped-<UTC time>-<code digest>', so
-# every replica sees them and they survive restarts. Only pipelines the server manages (in a build) are
-# tagged: stepping anything else stays read-only. Promotion removes them with mcp-managed.
+# Clean steps are recorded as explorer tags on the pipeline, 'mcp-stepped-<code digest>', so every replica sees
+# them and they survive restarts; a passed index verification ('mcp-verified-') and Events that passed check_events
+# ('mcp-validated-') the same way. Only pipelines the server manages (in a build) are tagged: stepping anything else
+# stays read-only. Promotion removes them with mcp-managed.
+#
+# Stroom keeps all of a node's tags in one 255-character column. Seen in production: with a timestamp in each tag and
+# the last five of each kind kept, a pipeline's tags outgrew it, every new record was refused (500, "Data too long
+# for column 'tags'") and only logged, and promotion said the pipeline had never stepped clean. So a record is the
+# digest alone, and each kind keeps only what can still matter: the new record, and the one for the code saved now
+# (a draft stepped clean is recorded beside it, for when it is saved).
 STEPPED = 'mcp-stepped-'
-KEEP_STEPPED = 5
+VERIFIED = 'mcp-verified-'
+VALIDATED = 'mcp-validated-'
+TAGS_LIMIT = 255
 
 
 def fingerprint_digest(prints: dict[str, str]) -> str:
@@ -119,111 +128,94 @@ def stepped_tags(tags: list[str]) -> list[str]:
     return sorted(t for t in tags if t.startswith(STEPPED))
 
 
-async def remember_clean(ctx: Context, pipeline: dict[str, Any], draft_code: dict[str, str] | None,
-                         result: dict[str, Any]) -> None:
-    """Record the code a clean step_sample or step_records ran, for promotion's checks (the last few runs)."""
-    if result.get('verdict') != 'clean' or not result.get('records_stepped'):
-        return
-    guard = guard_from(ctx)
-    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    try:
-        tags = await guard.tags(ref)
-        if MANAGED not in tags:
-            return
-        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid'], draft_code))
-        mine = stepped_tags(tags)
-        if any(t.endswith(f'-{digest}') for t in mine):
-            return
-        await guard.tag([ref], [f"{STEPPED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
-        if len(mine) >= KEEP_STEPPED:
-            await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
-    except Exception as e:  # the record is a convenience; never fail the step over it
-        logger.warning("Couldn't record a clean step on pipeline %s: %s", ref['uuid'], e)
-
-
-async def stepped_clean(ctx: Context, pipeline: dict[str, Any]) -> bool:
-    """Whether the pipeline's saved code is code that has stepped clean (a recent run, on any replica)."""
-    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    mine = stepped_tags(await guard_from(ctx).tags(ref))
-    if not mine:
-        return False
-    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-    return any(t.endswith(f'-{digest}') for t in mine)
-
-
-# An indexing pipeline whose sample was indexed and found by verify_index's searches is recorded the same way,
-# 'mcp-verified-<UTC time>-<code digest>': the plan's 'indexed' step is done only then, not when it steps clean.
-VERIFIED = 'mcp-verified-'
-
-
 def verified_tags(tags: list[str]) -> list[str]:
     return sorted(t for t in tags if t.startswith(VERIFIED))
 
 
-async def remember_verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
-    """Record that the indexing pipeline's current code indexed the sample and verify_index found it."""
+def validated_tags(tags: list[str]) -> list[str]:
+    return sorted(t for t in tags if t.startswith(VALIDATED))
+
+
+def _digest_of(tag: str) -> str:
+    return tag.rsplit('-', 1)[-1]
+
+
+async def _record(ctx: Context, pipeline: dict[str, Any], prefix: str,
+                  draft_code: dict[str, str] | None = None) -> str | None:
+    """Record that the pipeline's code (or the draft stepped) passed, as a tag: 'recorded'; None for a pipeline
+    outside a build (never tagged); else why it couldn't be saved."""
     guard = guard_from(ctx)
     ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
     try:
         tags = await guard.tags(ref)
         if MANAGED not in tags:
-            return False
-        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-        mine = verified_tags(tags)
-        if not any(t.endswith(f'-{digest}') for t in mine):
-            await guard.tag([ref], [f"{VERIFIED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
-            if len(mine) >= KEEP_STEPPED:
-                await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
-        return True
-    except Exception as e:  # the record is a convenience; never fail the verification over it
-        logger.warning("Couldn't record a verified index on pipeline %s: %s", ref['uuid'], e)
+            return None
+        saved = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid'], draft_code)) \
+            if draft_code else saved
+        mine = [t for t in tags if t.startswith(prefix)]
+        tag = f'{prefix}{digest}'
+        stale = [t for t in mine if _digest_of(t) not in (digest, saved) or t != f'{prefix}{_digest_of(t)}']
+        if stale:
+            await guard.untag([ref], stale)
+        if tag not in mine:
+            kept = [t for t in tags if t not in stale]
+            if len(' '.join(kept + [tag])) > TAGS_LIMIT:
+                # Still too long (a long build name, say): the record for the saved code goes, the new one stays.
+                older = [t for t in kept if t.startswith(prefix)]
+                if older:
+                    await guard.untag([ref], older)
+            await guard.tag([ref], [tag])
+        return 'recorded'
+    except Exception as e:  # the record is a convenience; never fail the step over it, but say so
+        logger.warning("Couldn't record %s on pipeline %s: %s", prefix.strip('-'), ref['uuid'], e)
+        return (f"Passed, but the record of it couldn't be saved on the pipeline ({str(e)[:160]}): promotion will "
+                f"report it as not done.")
+
+
+async def _recorded(ctx: Context, pipeline: dict[str, Any], prefix: str) -> bool:
+    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
+    mine = [t for t in await guard_from(ctx).tags(ref) if t.startswith(prefix)]
+    if not mine:
         return False
+    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
+    return any(_digest_of(t) == digest for t in mine)
+
+
+async def remember_clean(ctx: Context, pipeline: dict[str, Any], draft_code: dict[str, str] | None,
+                         result: dict[str, Any]) -> None:
+    """Record the code a clean step_sample or step_records ran, for promotion's checks; the result says when the
+    record couldn't be saved."""
+    if result.get('verdict') != 'clean' or not result.get('records_stepped'):
+        return
+    outcome = await _record(ctx, pipeline, STEPPED, draft_code)
+    if outcome not in (None, 'recorded'):
+        result['record'] = outcome
+
+
+async def stepped_clean(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Whether the pipeline's saved code is code that has stepped clean (on any replica)."""
+    return await _recorded(ctx, pipeline, STEPPED)
+
+
+async def remember_verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
+    """Record that the indexing pipeline's current code indexed the sample and verify_index found it."""
+    return await _record(ctx, pipeline, VERIFIED) == 'recorded'
 
 
 async def verified(ctx: Context, pipeline: dict[str, Any]) -> bool:
     """Whether verify_index passed for the indexing pipeline's current code."""
-    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    mine = verified_tags(await guard_from(ctx).tags(ref))
-    if not mine:
-        return False
-    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-    return any(t.endswith(f'-{digest}') for t in mine)
-
-
-# A translation pipeline whose processed Events passed check_events (read from their streams) is recorded the same
-# way, 'mcp-validated-<UTC time>-<code digest>': the plan's 'validated' step was never recorded, so build_status said
-# "not recorded" however often the events were checked, and agents checked again and again.
-VALIDATED = 'mcp-validated-'
+    return await _recorded(ctx, pipeline, VERIFIED)
 
 
 async def remember_validated(ctx: Context, pipeline: dict[str, Any]) -> bool:
     """Record that the pipeline's current code wrote Events that passed check_events."""
-    guard = guard_from(ctx)
-    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    try:
-        tags = await guard.tags(ref)
-        if MANAGED not in tags:
-            return False
-        digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-        mine = sorted(t for t in tags if t.startswith(VALIDATED))
-        if not any(t.endswith(f'-{digest}') for t in mine):
-            await guard.tag([ref], [f"{VALIDATED}{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{digest}"])
-            if len(mine) >= KEEP_STEPPED:
-                await guard.untag([ref], mine[:len(mine) - KEEP_STEPPED + 1])
-        return True
-    except Exception as e:  # the record is a convenience; never fail the check over it
-        logger.warning("Couldn't record validated events on pipeline %s: %s", ref['uuid'], e)
-        return False
+    return await _record(ctx, pipeline, VALIDATED) == 'recorded'
 
 
 async def validated(ctx: Context, pipeline: dict[str, Any]) -> bool:
     """Whether Events from the pipeline's current code passed check_events."""
-    ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    mine = [t for t in await guard_from(ctx).tags(ref) if t.startswith(VALIDATED)]
-    if not mine:
-        return False
-    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-    return any(t.endswith(f'-{digest}') for t in mine)
+    return await _recorded(ctx, pipeline, VALIDATED)
 
 
 def record_key(stream_id: int, location: dict[str, Any]) -> str:

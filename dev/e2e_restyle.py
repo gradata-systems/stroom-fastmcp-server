@@ -240,6 +240,9 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
           f"the build's changes previewed in its Documentation, Unreleased, the code left alone: {preview}")
     stepped = await stepping.step_sample(ctx, pipeline['uuid'], raws)
     check(stepped['verdict'] == 'clean', f"steps clean: {stepped['verdict']}")
+    # Seen in VS Code: promotion said no clean step of the regenerated code was recorded, though it had stepped clean.
+    pipeline_doc = next(d for d in (await plan.build_status(ctx, build))['pipelines'] if d['uuid'] == pipeline['uuid'])
+    check(pipeline_doc['stepped'], 'the clean step of the regenerated code is recorded, as promotion checks it')
     after = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]
     check(after == before, f"every Event the same as the old XSLT wrote ({len(after)}, the VPN ones included)")
     check(await drift_of(ctx, build, pipeline['name']) == '', 'build_status: nothing to say about the XSLT')

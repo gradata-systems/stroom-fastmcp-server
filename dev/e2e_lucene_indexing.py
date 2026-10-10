@@ -134,7 +134,7 @@ async def main():
     ctx = e2e.SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': e2e.ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': e2e.AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = e2e.run_stamp()
     try:
         csv = await e2e.onboard(ctx, 'csv', e2e.CASES['csv'], stamp)
         v1 = await index_stage(ctx, csv, stamp)

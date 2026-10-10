@@ -1987,7 +1987,8 @@ class _Generator:
         def write_rules() -> None:
             body = etree.SubElement(record_template, f'{{{XSL}}}choose') if conditional else record_template
             for rule, root in trees:
-                test = ' and '.join(f'({self.condition(c)})' for c in rule.when)
+                # Each condition is a comparison or a call, which bind tighter than and: no brackets needed.
+                test = ' and '.join(self.condition(c) for c in rule.when)
                 holder = (etree.SubElement(body, f'{{{XSL}}}when', test=test) if test
                           else etree.SubElement(body, f'{{{XSL}}}otherwise')) if conditional else body
                 when = [self.condition(c, raw=True) for c in rule.when] or 'every record'

@@ -16,6 +16,7 @@ the mapping, the user's example index template, the dashboard's columns), and ca
 """
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -355,7 +356,56 @@ class Walk:
             call, markdown=f'## Purpose and data\n\nLogons indexed into {self.index_name}.\n'), change='Created')
 
     async def promoted_step(self, call):
+        await self._promotion_and_stale_documentation()
         return await run(self.ctx, 'promote_build', **fill(call, destinations=self._destinations()))
+
+    async def _promotion_and_stale_documentation(self):
+        """Asked for by the user: promotion waits for documentation the build's own change left behind, but a hand edit
+        of the XSLT only warns, so a user's own edits never hold a promotion up. Both put back afterwards."""
+        from tools.builds import _build_docs, kept_mapping
+        from utils.stroom import body_text, set_body_text
+        stroom = self.ctx.lifespan_context['stroom']
+        docs = await _build_docs(self.ctx, self.build)
+        translation = None
+        for d in docs:
+            if d['type'] == 'Pipeline' and ((await kept_mapping(self.ctx, d['uuid'])) or {}).get('kind') == 'translation':
+                translation = d
+                break
+        documentation = next(d for d in docs if d['type'] == 'Documentation' and d['name'] == translation['name'])
+        doc = await stroom.get_doc('Documentation', documentation['uuid'])
+        written = body_text(doc)
+        # Written before the build's change: the XSLT is what its mapping generates, the doc's digest isn't its.
+        set_body_text(doc, re.sub(r'(<!-- stroom-mcp field-mapping )[0-9a-f]{16}', r'\g<1>' + '0' * 16, written))
+        await stroom.put_doc(doc)
+        try:
+            await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations())
+            check(False, 'promotion refused while the documentation predates the build\'s change')
+        except ToolError as e:
+            check('Not promoted' in str(e) and 'write_documentation' in str(e) and translation['uuid'] in str(e),
+                  f"promotion waits for the documentation, naming the call: {str(e)[:140]}")
+        # A hand edit of the XSLT instead: the documentation is out of date too, but promotion only warns.
+        kept_xslt = (await kept_mapping(self.ctx, translation['uuid']))['xslt']['uuid']
+        xslt_ref = next(d for d in docs if d['type'] == 'XSLT' and d['uuid'] == kept_xslt)
+        xslt = await stroom.get_doc('XSLT', xslt_ref['uuid'])
+        code = xslt['data']
+        edited = await stroom.get_doc('XSLT', xslt_ref['uuid'])
+        edited['data'] = code.replace('<Environment>Dev</Environment>', '<Environment>Hand-edited</Environment>', 1)
+        check(edited['data'] != code, 'the XSLT edited by hand in Stroom (its Environment constant)')
+        await stroom.put_doc(edited)
+        doc = await stroom.get_doc('Documentation', documentation['uuid'])
+        set_body_text(doc, written)
+        await stroom.put_doc(doc)
+        try:
+            gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations())
+            warnings = gate['details'].get('warnings') or []
+            check(gate.get('status', '').startswith('needs_approval') or 'approval_id' in json.dumps(gate),
+                  'a hand edit: the approval is still offered')
+            check(any('predates' in w and 'waits for this' not in w for w in warnings),
+                  f"and the stale documentation is a warning in it: {[w[:90] for w in warnings]}")
+        finally:
+            restored = await stroom.get_doc('XSLT', xslt_ref['uuid'])
+            restored['data'] = code
+            await stroom.put_doc(restored)
 
     # -------------------------------------------------------------------------------------------------------
 
@@ -452,7 +502,7 @@ async def main():
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = e2e.run_stamp()
     paths = [p for p in sys.argv[1:] if p in PATHS] or list(PATHS)
     try:
         async with httpx.AsyncClient(base_url=ES, timeout=30) as es:

@@ -5,6 +5,7 @@ The mapping is read back from the XSLT (utils/xsltread), the XSLT regenerated fr
 the sample streams: it is saved only when every record's output is the same (or the user accepts the differences
 shown), after the user confirms, and the XSLT is then the one regenerated from it, so the two agree again.
 """
+import asyncio
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -26,9 +27,15 @@ async def _pipeline_of(ctx: Context, uuid: str) -> tuple[dict[str, Any], str]:
     """The pipeline that runs the XSLT as its own (not through a template), and the element it is set on."""
     from tools.pipelines import translation_docs
     stroom = gateway_from(ctx)
-    body = await stroom.post('/explorer/v2/findInContent', {
-        'filter': {'matchType': 'CONTAINS', 'pattern': uuid, 'caseSensitive': False},
-        'pageRequest': {'offset': 0, 'length': 50}})
+    for attempt in range(5):
+        body = await stroom.post('/explorer/v2/findInContent', {
+            'filter': {'matchType': 'CONTAINS', 'pattern': uuid, 'caseSensitive': False},
+            'pageRequest': {'offset': 0, 'length': 50}})
+        if any(((v.get('docContentMatch') or {}).get('docRef') or {}).get('type') == 'Pipeline'
+               for v in (body or {}).get('values') or []):
+            break
+        # Stroom's content index can lag a pipeline set up moments ago (seen under load): look again first.
+        await asyncio.sleep(1)
     found = []
     for value in (body or {}).get('values') or []:
         ref = (value.get('docContentMatch') or {}).get('docRef') or {}

@@ -149,13 +149,23 @@ async def small(ctx, stroom: StroomGateway, stamp: str) -> None:
     section = written.get('field_mapping') or ''
     e2e.check('### Source fields' in section and '`0xC000006A`: failed: bad password' in section,
               'the field mapping lists each source field with what the documentation says')
+    first_line = section.splitlines()[0] if section else ''
+    e2e.check(first_line.startswith('Counts are of ') and f'of stream {raw}' in first_line,
+              f"the section says which records its counts are of: {first_line}")
     folder = f'System/E2E Feeds/srcdocs-{stamp}'
     result = await e2e.agreed(builds.promote_build, ctx=ctx, build=build, destinations={
         'Feed': folder, 'Pipeline': folder, 'XSLT': folder, 'TextConverter': folder})
     print(f"    {result.get('promoted')}")
     for name in ('Acme directory source notes', 'Acme directory reference - audit log reference'):
-        found = [v for v in (await stroom.find_documents(name, ['Documentation'], 20)).get('values') or []
-                 if v['docRef']['name'] == name and (v.get('path') or '').replace(' / ', '/') == folder]
+        found = []
+        # Every run leaves a doc of this name in its own folder: all of them, not the first page (seen: this run's
+        # past the first 20). And the explorer's search can lag a move moments ago.
+        for _ in range(10):
+            found = [v for v in await stroom.find_all_documents(name, ['Documentation'])
+                     if v['docRef']['name'] == name and (v.get('path') or '').replace(' / ', '/') == folder]
+            if found:
+                break
+            await asyncio.sleep(2)
         e2e.check(len(found) >= 1, f"'{name}' beside the feed, in {folder}")
 
 
@@ -295,7 +305,7 @@ async def main():
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = e2e.run_stamp()
     try:
         await small(ctx, stroom, stamp)
         await large(ctx, stroom, stamp)

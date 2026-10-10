@@ -1,6 +1,8 @@
 """What promotion checks: a clean step of the pipeline's current code (recorded as tags by stepping), and docs."""
 from types import SimpleNamespace
 
+from fastmcp.exceptions import ToolError
+
 from tools import builds, stepping
 
 OWN = {'type': 'Pipeline', 'uuid': 'p', 'name': 'Acme'}
@@ -38,7 +40,11 @@ class FakeStroom:
         for ref in body['docRefs']:
             tags = self.node_tags.setdefault(ref['uuid'], [])
             if path.endswith('addTags'):
-                tags += [t for t in body['tags'] if t not in tags]
+                added = tags + [t for t in body['tags'] if t not in tags]
+                if len(' '.join(added)) > 255:
+                    # Stroom keeps a node's tags in one varchar(255) column.
+                    raise ToolError("Stroom rejected the request (500): Data too long for column 'tags' at row 1")
+                tags[:] = added
             else:
                 tags[:] = [t for t in tags if t not in body['tags']]
 
@@ -84,14 +90,40 @@ async def test_pipelines_the_server_does_not_manage_are_never_tagged():
     assert stroom.node_tags == {}
 
 
-async def test_only_the_last_few_clean_runs_are_kept():
+async def test_only_the_records_that_can_still_matter_are_kept():
+    # The new record, and the one for the code saved now: a draft stepped clean doesn't drop the saved code's.
     stroom = FakeStroom()
-    for n in range(stepping.KEEP_STEPPED + 3):
-        await stepping.remember_clean(ctx(stroom), P, {'translationFilter': f'v{n}'}, CLEAN)
-    await stepping.remember_clean(ctx(stroom), P, {'translationFilter': 'v0'}, CLEAN)  # dropped, so recorded again
-    assert len(stepping.stepped_tags(stroom.node_tags['p'])) == stepping.KEEP_STEPPED
-    await stepping.remember_clean(ctx(stroom), P, {'translationFilter': 'v0'}, CLEAN)  # already there: no change
-    assert len(stepping.stepped_tags(stroom.node_tags['p'])) == stepping.KEEP_STEPPED
+    await stepping.remember_clean(ctx(stroom), P, None, CLEAN)
+    for n in range(8):
+        await stepping.remember_clean(ctx(stroom), P, {'translationFilter': f'draft {n}'}, CLEAN)
+    assert len(stepping.stepped_tags(stroom.node_tags['p'])) == 2 and await stepping.stepped_clean(ctx(stroom), P)
+    stroom.code['x'] = 'draft 7'           # the last draft saved: recorded, as stepped before it was saved
+    assert await stepping.stepped_clean(ctx(stroom), P)
+
+
+async def test_records_fit_the_column_stroom_keeps_tags_in_and_old_ones_are_cleared():
+    # Seen in production: five timestamped records of each kind outgrew Stroom's 255 characters, every new record
+    # was refused, and promotion said the pipeline had never stepped clean.
+    stroom = FakeStroom()
+    stroom.node_tags['p'] += ['mcp-build-onboard-fortigate-firewall'] + [
+        f'mcp-stepped-2026101009{n:04d}-{n:016x}' for n in range(4)]
+    assert len(' '.join(stroom.node_tags['p'])) > 200
+    result = dict(CLEAN)
+    await stepping.remember_clean(ctx(stroom), P, None, result)
+    assert 'record' not in result and await stepping.stepped_clean(ctx(stroom), P)
+    assert not any(t.startswith('mcp-stepped-2026') for t in stroom.node_tags['p'])      # the old form cleared
+    assert await stepping.remember_verified(ctx(stroom), P) and await stepping.remember_validated(ctx(stroom), P)
+    await stepping.remember_clean(ctx(stroom), P, {'translationFilter': 'a draft'}, dict(CLEAN))
+    assert len(' '.join(stroom.node_tags['p'])) <= 255 and await stepping.stepped_clean(ctx(stroom), P)
+
+
+async def test_a_record_that_cannot_be_saved_is_said_in_the_reply():
+    stroom = FakeStroom()
+    stroom.node_tags['p'] += ['mcp-build-' + 'x' * 220]           # no room left at all
+    result = dict(CLEAN)
+    await stepping.remember_clean(ctx(stroom), P, None, result)
+    assert 'promotion will report it as not done' in result['record']
+    assert not await stepping.remember_verified(ctx(FakeStroom(managed=())), P)     # outside a build: not recorded
 
 
 async def test_build_checks_name_what_is_missing():

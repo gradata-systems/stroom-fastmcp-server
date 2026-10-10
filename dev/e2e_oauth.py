@@ -17,6 +17,7 @@ then
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -82,7 +83,7 @@ async def main(with_stroom: bool) -> None:
         text = ' '.join(getattr(b, 'text', '') for b in stroom_call.content or [])
         if with_stroom:
             check(not stroom_call.is_error, f"a Stroom tool runs as the user: {text[:160]}")
-            stamp = time.strftime('%H%M%S')
+            stamp = f"{time.strftime('%H%M%S')}{os.getpid() % 1000:03d}"
             args = {'build': f'oauth-{stamp}', 'name': f'OAUTH-{stamp}'}
             first = (await client.call_tool('create_feed', args)).structured_content
             feed = (await client.call_tool('create_feed', {**args, 'confirmation_id': first['confirmation_id']})).structured_content
@@ -109,7 +110,7 @@ async def main(with_stroom: bool) -> None:
         async def refuse(message, response_type, params, context):
             asked.append(message)
             return {'value': False}
-        stamp = time.strftime('%H%M%S')
+        stamp = f"{time.strftime('%H%M%S')}{os.getpid() % 1000:03d}"
         async with Client(f'{SERVER}/mcp', auth=BearerAuth(token), elicitation_handler=agree) as client:
             made = await client.call_tool('create_feed', {'build': f'oauth-{stamp}', 'name': f'OAUTH-E-{stamp}'})
             check(made.structured_content.get('uuid') and 'OAUTH-E-' in asked[-1],

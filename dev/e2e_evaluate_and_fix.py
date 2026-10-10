@@ -296,7 +296,7 @@ async def main():
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
     try:
-        await run(ctx, stroom, time.strftime('%H%M%S'))
+        await run(ctx, stroom, e2e.run_stamp())
         print('\nALL PASSED')
     finally:
         await stroom.close()

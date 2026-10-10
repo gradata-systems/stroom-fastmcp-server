@@ -211,7 +211,7 @@ async def main():
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})
-    stamp = time.strftime('%H%M%S')
+    stamp = e2e.run_stamp()
     try:
         async with httpx.AsyncClient(base_url=ES, timeout=30) as es:
             try:

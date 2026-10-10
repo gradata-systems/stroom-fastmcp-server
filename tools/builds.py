@@ -13,7 +13,7 @@ from security.guard import GENERATED, KEPT_MAPPING, MANAGED, build_tag, folder_p
 from tools.instructions import applicable_instructions
 from tools.processing_writes import agreement_problem, create_promotion_filters, elastic_destination, promotion_processing
 from tools.pipelines import translation_docs
-from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags, verified, verified_tags
+from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags, validated_tags, verified, verified_tags
 from tools.streams import summarise_events
 from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents, object_arrays,
                             index_field_mapping_markdown, sampled_events, written_fields_markdown)
@@ -125,6 +125,13 @@ def mapping_digest(kept: dict[str, Any]) -> str:
     return digest(json.dumps(kept['payload'], sort_keys=True), normalise_xslt(kept['xslt'].get('data') or ''))
 
 
+# A check promotion waits for, rather than one shown in the approval: documentation left behind by the build's own
+# change to a mapping or XSLT (asked for by the user, after an agent promoted with it stale and then made a second
+# doc trying to fix it). Not when the XSLT was changed by hand: that stays a warning, so a user's own edits never
+# hold a promotion up.
+BLOCKS = ' (promotion waits for this)'
+
+
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
     """What a build's pipelines still lack before promotion: a clean step of their current code (recorded as
     mcp-stepped-* tags on the pipeline), a Documentation doc (for new pipelines), a Field mapping section that
@@ -153,15 +160,17 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
             for lost in await lost_mappings(ctx, doc['uuid']):
                 problems.append(f"Pipeline '{doc['name']}': {lost}")
             continue
-        if kept['kind'] == 'translation':
-            drift = await _drift(ctx, kept)
-            if drift:
-                problems.append(f"Pipeline '{doc['name']}': {drift}")
+        drift = await _drift(ctx, kept) if kept['kind'] == 'translation' else ''
+        if drift:
+            problems.append(f"Pipeline '{doc['name']}': {drift}")
         if doc['name'] in documented:
             body = body_text(await gateway_from(ctx).get_doc('Documentation', documented[doc['name']]['uuid']))
             if doc_digest(body) != mapping_digest(kept):
+                # The build's own change (the XSLT is what its mapping generates) blocks; a hand edit only warns.
+                blocks = kept['kind'] == 'translation' and not drift
                 problems.append(f"Pipeline '{doc['name']}': the documentation's Field mapping predates the current mapping "
-                                f"or XSLT (write_documentation again)")
+                                f"or XSLT (write_documentation build=<this build> pipeline_uuid='{doc['uuid']}' "
+                                f"stream_ids=<its sample streams> change=<what changed>)" + (BLOCKS if blocks else ''))
     return problems
 
 
@@ -224,7 +233,15 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
         if not events:
             # A section of "(not in the sample)" documents nothing: say what the streams are and what stopped them.
             raise ToolError(await _no_events(stroom, loaded, stream_ids, kept['element'], marked['xslt'], len(outputs)))
-        section = field_mapping_markdown(mapping, schema, events)
+        # Which records the counts are of: seen in VS Code, counts from a different sample (the first records of one
+        # stream, then records spread over every stream) taken for a change in how events are routed.
+        per_stream: dict[str, int] = {}
+        for key in outputs:
+            stream = str(key).split(':')[0]
+            per_stream[stream] = per_stream.get(stream, 0) + 1
+        counted = ', '.join(f"{n} of stream {s}" for s, n in per_stream.items())
+        section = (f"Counts are of {len(outputs)} sample records ({counted}).\n\n"
+                   + field_mapping_markdown(mapping, schema, events))
         drift = await _drift(ctx, kept)
         if drift:
             section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
@@ -530,8 +547,13 @@ async def write_documentation(
         original = await stroom.get_doc('Pipeline', copy_of)
         name = original['name']
         beside = await _documentation_beside(stroom, original)
-    existing = next((d for d in await _build_docs(ctx, build)
-                     if d['type'] == 'Documentation' and d['name'] == name), None)
+    in_build = await _build_docs(ctx, build)
+    if not copy_of and not any(d['uuid'] == pipeline_uuid for d in in_build):
+        # A pipeline outside the build, promoted already: its documentation beside it is changed the same way, through
+        # a working copy in the build that promotion writes back (seen in VS Code: documented after promotion, a
+        # second doc of its name was made in a new workspace folder and the promoted one left as it was).
+        beside = await _documentation_beside(stroom, pipeline)
+    existing = next((d for d in in_build if d['type'] == 'Documentation' and d['name'] == name), None)
     if not change:
         if existing or beside:
             raise ToolError("This updates the pipeline's documentation: give change, one line for its version "
@@ -547,6 +569,15 @@ async def write_documentation(
         doc = await write(ref)
     else:
         doc = await guard.create_filled('Documentation', name, build, write)
+    if not copy_of and not any(d['uuid'] == pipeline_uuid for d in in_build) and beside:
+        # Not the build's plan (it has no pipeline of its own to make): what happens to this doc.
+        return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': True,
+                'working_copy_of': {k: beside[k] for k in ('type', 'uuid', 'name')},
+                'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
+                **({'field_mapping': generated_section} if generated_section else {}),
+                'next': f"Pipeline '{pipeline['name']}' is promoted, so its documentation is changed through this "
+                        f"working copy in build '{build}'. Give the user the link to review it; promote_build "
+                        f"build='{build}' (approved by the user) writes it back over the promoted doc, after a backup."}
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
                                         **({'field_mapping': generated_section} if generated_section else {}),
@@ -741,7 +772,9 @@ async def promote_build(
     destination folders (UUIDs are kept, so filters and references keep working); destination folders that
     don't exist yet are listed in the approval and created first. A working copy is written back over its
     original after the original is backed up to <workspace>/backups, then the copy is deleted. The build's
-    workspace folder is removed afterwards if nothing is left in it.
+    workspace folder is removed afterwards if nothing is left in it. What build_status says is missing goes in the
+    approval, except documentation the build's own change left behind: write_documentation again first (once
+    promoted, documentation only changes through a working copy).
     """
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
@@ -816,6 +849,10 @@ async def promote_build(
     details = {'build': build, 'plan': [f"create folder {path}" for path in creating]
                + [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}" for p in plan]}
     warnings = await build_checks(ctx, docs)
+    blocking = [w for w in warnings if w.endswith(BLOCKS)]
+    if blocking:
+        raise ToolError(f"Not promoted: {' '.join(blocking)}. Do it in the build first, then promote_build again: "
+                        f"once promoted, the pipeline's documentation can only change through a working copy.")
     if warnings:
         # Shown in the approval, so the user decides with them in view.
         details['warnings'] = warnings
@@ -860,7 +897,8 @@ async def promote_build(
             ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
             # Clean-step and verification records only mean something inside a build.
             tags = await guard.tags(ref)
-            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(tags) + verified_tags(tags))
+            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(tags) + verified_tags(tags)
+                              + validated_tags(tags))
             done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
         else:
             original = await stroom.get_doc(doc['type'], step['target'])

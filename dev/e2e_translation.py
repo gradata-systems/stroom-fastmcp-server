@@ -40,7 +40,13 @@ from utils.triage import ErrorRules  # noqa: E402
 LIVE = os.environ.get('E2E_TARGET') == 'live'
 VERSION = '3.5.2' if LIVE else '4.1.0'  # the local content pack has 4.1.0; live pipelines use 3.5.2
 # One stamp for every script in a run, so the run can be found and cleaned up.
-STAMP = os.environ.get('E2E_STAMP') or time.strftime('%H%M%S')
+def run_stamp() -> str:
+    """The stamp a run puts in the names of what it creates: the time and the process, so suites started in the same
+    second don't share names (seen running four at a time: a feed of the same name, a build both promoted into)."""
+    return f"{time.strftime('%H%M%S')}{os.getpid() % 1000:03d}"
+
+
+STAMP = os.environ.get('E2E_STAMP') or run_stamp()
 
 
 def target_settings() -> 'Settings':
@@ -214,9 +220,19 @@ async def documented_to_the_field(stroom, written: dict, fields: list[str], valu
 
 async def agreed(call, **kwargs):
     """Call a gated tool, then call again with the id it returned, as a user agreeing would."""
-    ids = {}
+    ids, asked = {}, None
     while True:
-        result = await call(**kwargs, **ids)
+        try:
+            result = await call(**kwargs, **ids)
+        except ToolError as e:
+            if 'issued for a different request' not in str(e) or asked is None:
+                raise
+            # Seen once with four suites running: say what changed between asking and agreeing.
+            again = await call(**kwargs)
+            changed = {k: (asked['details'].get(k), (again.get('details') or {}).get(k))
+                       for k in set(asked['details']) | set(again.get('details') or {})
+                       if asked['details'].get(k) != (again.get('details') or {}).get(k)}
+            raise ToolError(f"{e} -- details changed between asking and agreeing: {changed}") from e
         if not (isinstance(result, dict) and str(result.get('status', '')).startswith('needs_')):
             return result
         if result['status'] == 'needs_review':
@@ -226,7 +242,7 @@ async def agreed(call, **kwargs):
             continue
         key = 'confirmation_id' if result['status'] == 'needs_confirmation' else 'approval_id'
         print(f"    {result['status']}: {result['summary']}")
-        ids[key] = result[key]
+        ids[key], asked = result[key], result
 
 
 async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
@@ -355,6 +371,23 @@ async def promotion(ctx, csv: dict, stamp: str):
                                                              'name': csv['pipeline']['name']})).get('tags') or []
     check('mcp-generated' in tags and 'mcp-managed' not in tags and not any(t.startswith('mcp-stepped-') for t in tags),
           f"promoted pipeline keeps mcp-generated only: {tags}")
+
+    # Documented again after promotion (seen in VS Code): the promoted doc is changed through a working copy, written
+    # back by promoting the build again, not a second doc of its name in a new workspace folder.
+    redo = await builds.write_documentation(
+        ctx, csv['build'], csv['pipeline']['uuid'],
+        f"# {csv['pipeline']['name']}\n\n## Purpose and data\n\nReworded after promotion.\n\n"
+        f"## Field mapping\n\n| XPath | From |\n| --- | --- |\n| `EventSource/User/Id` | the user field |\n",
+        'Purpose reworded after promotion')
+    check((redo.get('working_copy_of') or {}).get('uuid') == csv['doc']['uuid'] and 'promote_build' in redo['next'],
+          f"a working copy of the promoted doc, to promote: {redo.get('working_copy_of')} {redo.get('next', '')[:100]}")
+    again = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations={})
+    text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('data') or ''
+    named = [v for v in (await stroom.find_documents(csv['doc']['name'], ['Documentation'], 20)).get('values') or []
+             if v['docRef']['name'] == csv['doc']['name']]
+    check('Reworded after promotion' in text and len(named) == 1
+          and any('back over' in line for line in again['promoted']),
+          f"written back over the promoted doc, the only one of its name: {again['promoted']}")
 
     fix_build = f'e2e-fix-{stamp}'
     copy = await agreed(pipeline_writes.copy_pipeline, ctx=ctx, build=fix_build, source_uuid=csv['pipeline']['uuid'],
