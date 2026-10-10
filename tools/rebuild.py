@@ -228,7 +228,9 @@ async def rebuild_mapping(
         + (f"it wrote the same output as the XSLT for all {len(before)} records stepped"
            if not differences else f"{len(differences)} output paths differ, as shown"),
         {'kept entries': rebuilt.reused, 'new entries': rebuilt.new[:20], 'removed entries': rebuilt.removed[:20],
-         'kept as xpath': rebuilt.raw[:20], **({'differences': [d['path'] for d in result.get('differences', [])]}
+         'kept as xpath': rebuilt.raw[:20],
+         **({'calling imported functions': rebuilt.imported_calls[:20]} if rebuilt.imported_calls else {}),
+         **({'differences': [d['path'] for d in result.get('differences', [])]}
                                                 if differences else {})},
         confirmation_id)
     if gate:

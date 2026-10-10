@@ -14,6 +14,9 @@ already calls them. As the agent would:
    with one Device whose HostName is the header and one Meta holding the GUID.
 2b. Its mapping lost (the Documentation tab cleared): rebuild_mapping reads it back from the XSLT and the shared XSLT
    it imports, fetched by name: each template, where it is called and the parameter passed, as they were.
+2c. A shared XSLT of functions: the translation calls one (an xpath entry) and steps clean, the User Id upper-cased;
+   its mapping lost, rebuild_mapping reads back the functions entry and the call, reported as calling an imported
+   function rather than as unread.
 3. The index plan takes stroom.feed from the shared indexing XSLT itself; the indexing XSLT calls the shared
    template instead of writing it, and the documents get one stroom object.
 """
@@ -47,6 +50,17 @@ from utils.xsltgen import SharedTemplate, TranslationMapping  # noqa: E402
 
 TEXT_TEMPLATE, ES_TEMPLATE = 'E2E Shared Text', 'E2E Shared Events to Elasticsearch'
 COMMON_EVENT, COMMON_ELASTIC = 'E2E-Common-Event-V1', 'E2E-Common-Elastic-V1'
+COMMON_FUNCTIONS = 'E2E-Common-Functions-V1'
+SHARED_FUNCTIONS = """<?xml version="1.1" encoding="UTF-8"?>
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:ef="urn:e2e:functions" version="3.0">
+  <!-- A value upper-cased, as an environment's shared functions might normalise one. -->
+  <xsl:function name="ef:shout" as="xs:string">
+    <xsl:param name="text" />
+    <xsl:sequence select="upper-case(string($text[1]))" />
+  </xsl:function>
+</xsl:stylesheet>
+"""
 
 SHARED_EVENT = """<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xmlns="event-logging:3" xmlns:stroom="stroom" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
@@ -182,6 +196,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     print('### shared XSLTs, and sibling pipelines that use them')
     await shared_doc(stroom, COMMON_EVENT, SHARED_EVENT)
     await shared_doc(stroom, COMMON_ELASTIC, SHARED_ELASTIC)
+    await shared_doc(stroom, COMMON_FUNCTIONS, SHARED_FUNCTIONS)
     text_template = await fixture_template(stroom, TEXT_TEMPLATE, 'Event Data (Text)')
     es_template = await fixture_template(stroom, ES_TEMPLATE, 'Indexing', elastic=True)
     src = f'e2e-shared-src-{stamp}'
@@ -271,6 +286,36 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
               f"each shared template, where it is called and the parameter passed: {back.get('shared')}")
     again = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
     e2e.check(again['verdict'] == 'clean', 'the XSLT saved from the rebuilt mapping steps clean')
+
+    print('\n### 2c. a shared XSLT of functions: called from an xpath entry, and read back when the mapping is lost')
+    functions = [{'href': COMMON_FUNCTIONS, 'prefix': 'ef', 'namespace': 'urn:e2e:functions'}]
+    shout = {'path': 'EventSource/User/Id', 'xpath': "ef:shout(data[@name='user']/@value)"}
+    calling = TranslationMapping.model_validate({
+        **mapping.model_dump(exclude_none=True), 'functions': functions,
+        'common': [shout if f.path == 'EventSource/User/Id' else f.model_dump(exclude_none=True) for f in mapping.common]})
+    updated = await e2e.agreed(generation.build_translation_xslt, ctx=ctx, mapping=calling, uuid=saved['saved']['uuid'],
+                               change='User Id upper-cased by the shared functions', include_xslt=True)
+    e2e.check(updated['ok'] and f'href="{COMMON_FUNCTIONS}"' in updated['xslt'] and 'ef:shout(' in updated['xslt'],
+              f"the XSLT imports the functions and calls one: {updated.get('problems')}")
+    stepped = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    output = (await stepping.step_pipeline(ctx, pipeline['uuid'], raw, 0))['elements']['translationFilter']['output']
+    user = etree.fromstring(output.encode()).findtext('.//e:EventSource/e:User/e:Id', namespaces=ns)
+    e2e.check(stepped['verdict'] == 'clean' and user and user == user.upper(),
+              f"Stroom resolves the import by name and runs the function: User Id {user!r}")
+    cleared = await stroom.get_doc('XSLT', saved['saved']['uuid'])
+    cleared['description'] = ''
+    await stroom.put_doc(cleared)
+    restored = await e2e.agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=saved['saved']['uuid'])
+    back = read_mapping((await stroom.get_doc('XSLT', saved['saved']['uuid']))['description'])[1]['mapping']
+    rebuilt = restored['rebuilt']
+    e2e.check(bool(restored.get('saved')) and 'differences' not in restored and back.get('functions') == functions
+              and shout in back.get('common', []) + [f for r in back['events'] for f in r.get('fields', [])],
+              f"the functions entry and the call read back: {back.get('functions')}")
+    e2e.check(any('User/Id' in c for c in rebuilt.get('calls_imported_functions') or [])
+              and not any('User/Id' in x for x in rebuilt.get('kept_as_xpath') or []),
+              f"the call reported as calling an imported function, not as unread: {rebuilt.get('calls_imported_functions')}")
+    stepped = await stepping.step_sample(ctx, pipeline['uuid'], [raw])     # as rebuild_mapping's next says
+    e2e.check(stepped['verdict'] == 'clean', 'the XSLT saved from the rebuilt mapping steps clean')
 
     print('\n### 3. the index: the shared indexing template called, its fields planned from it')
     await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=[raw])

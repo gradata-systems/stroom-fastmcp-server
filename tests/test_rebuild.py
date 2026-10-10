@@ -122,6 +122,9 @@ def test_what_the_xslt_is_read_as():
     assert other.test is None and reading.namespace == 'records:2'
 
 
+SEEN = ('<xsl:template name="seen"><xsl:param name="value"/><xsl:param name="via" select="\'vpn\'"/>'
+        '<xsl:if test="normalize-space($value)"><Data Name="host_seen" Value="{$value}"/></xsl:if>'
+        '<Data Name="via" Value="{$via}"/></xsl:template>')
 HAND_EDITS = {
     # A new field: a Data element written when its value is there.
     'a Data element added': (
@@ -135,6 +138,17 @@ HAND_EDITS = {
         [], ['rule logon: EventSource/User/Id', 'rule other: EventSource/User/Id']),
     'a constant changed': (lambda code: code.replace('<Action>Logon</Action>', '<Action>Logoff</Action>', 1),
                            ['rule logon: EventDetail/Authenticate/Action'], []),
+    # A named template of the XSLT's own, called with a parameter (select, or text) and one left at its default.
+    'a template called with parameters': (
+        lambda code: code.replace('</Authenticate>', '<xsl:call-template name="seen"><xsl:with-param name="value" '
+                                  'select="data[@name=\'host\']/@value"/></xsl:call-template></Authenticate>', 1)
+        .replace('</xsl:stylesheet>', SEEN + '</xsl:stylesheet>'),
+        ['rule logon: EventDetail/Authenticate/Data Data host_seen', 'rule logon: EventDetail/Authenticate/Data Data via'], []),
+    'a template called with a text parameter': (
+        lambda code: code.replace('</Authenticate>', '<xsl:call-template name="seen"><xsl:with-param name="value">'
+                                  'ws01</xsl:with-param></xsl:call-template></Authenticate>', 1)
+        .replace('</xsl:stylesheet>', SEEN + '</xsl:stylesheet>'),
+        ['rule logon: EventDetail/Authenticate/Data Data host_seen', 'rule logon: EventDetail/Authenticate/Data Data via'], []),
     'a condition changed': (
         lambda code: code.replace("data[@name='action']/@value = 'login'", "data[@name='action']/@value = ('login', 'keepalive')", 1),
         [], []),
@@ -152,6 +166,12 @@ def test_a_hand_edit_is_carried_into_the_mapping_and_the_regenerated_xslt_writes
     assert rebuilt.new == new and rebuilt.removed == removed and rebuilt.problems == []
     regenerated = code_of(rebuilt.mapping)
     assert events(regenerated, RECORDS) == events(edited, RECORDS)
+    if edit.startswith('a template called'):
+        data = {(f.data_name): f.model_dump(exclude_defaults=True) for f in rebuilt.mapping.events[0].fields if f.data_name}
+        assert data['via'].get('value') == 'vpn'                  # the parameter's default
+        assert data['host_seen'] == ({'path': 'EventDetail/Authenticate/Data', 'data_name': 'host_seen', 'field': 'host'}
+                                     if edit.endswith('parameters') else
+                                     {'path': 'EventDetail/Authenticate/Data', 'data_name': 'host_seen', 'value': 'ws01'})
     if edit == 'a condition changed':
         assert rebuilt.mapping.events[0].when[0].one_of == ['login', 'keepalive']      # read back as the idiom
         assert len(events(edited, RECORDS)) == 2 and b'Logon' in events(edited, RECORDS)[1]
@@ -273,7 +293,9 @@ def test_imports_are_read_back_from_the_xslt_and_the_xslts_it_imports(case):
     m, imported = IMPORTS[case]
     code = code_of(m)
     rebuilt = rebuild(code, None, None, imported)
-    assert rebuilt.problems == [], rebuilt.summary()
+    assert rebuilt.problems == [] and rebuilt.raw == [], rebuilt.summary()
+    # A call of an imported function is an xpath entry in the mapping too: told apart from what wasn't read.
+    assert rebuilt.imported_calls == (['rule logon: EventDetail/Authenticate/Data Data loud'] if m.functions else [])
     assert [s.model_dump(exclude_defaults=True) for s in rebuilt.mapping.shared] == \
         [s.model_dump(exclude_defaults=True) for s in m.shared]
     assert rebuilt.mapping.functions == m.functions

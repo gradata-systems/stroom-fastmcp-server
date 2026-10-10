@@ -159,6 +159,23 @@ def _scope(template: etree._Element) -> dict[str, str]:
     return {v.get('name'): v.get('select') or '' for v in template.iter(f'{X}variable') if v.get('select')}
 
 
+def _param_value(param: etree._Element) -> str:
+    """What an xsl:param or xsl:with-param gives, as an expression: its select, else its text as a string (an
+    xsl:param with neither is the empty string)."""
+    if param.get('select'):
+        return param.get('select')
+    if len(param) == 0:
+        return literal(param.text or '')
+    return ''       # content of elements: not an expression; left unread
+
+
+def _params(template: etree._Element, call: etree._Element, scope: dict[str, str]) -> dict[str, str]:
+    """A called template's parameters: what the call passes (read in the caller's scope), else their defaults."""
+    out = {p.get('name'): _param_value(p) for p in template.findall(f'{X}param') if p.get('name')}
+    out.update({w.get('name'): resolve(_param_value(w), scope) for w in call.findall(f'{X}with-param') if w.get('name')})
+    return {k: v for k, v in out.items() if v}
+
+
 def resolve(expr: str, scope: dict[str, str]) -> str:
     """The expression with its variables replaced by what they select (repeatedly: one may read another)."""
     for _ in range(10):
@@ -336,11 +353,13 @@ def _read_child(child: etree._Element, tag: str, path: list[str], scope: dict[st
             if template is None and tag == f'{X}call-template':
                 # A named template of an imported XSLT (a mapping's shared entry): what it writes is in that XSLT.
                 rule.calls.append(SharedCall('/'.join(path), key, {
-                    w.get('name'): w.get('select') or '' for w in child.findall(f'{X}with-param') if w.get('name')}))
+                    w.get('name'): _param_value(w) for w in child.findall(f'{X}with-param') if w.get('name')}))
             elif template is None:
                 rule.notes.append(f"{'/'.join(path)}: template {key} isn't in the XSLT")
             else:
-                _walk(template, path, {**scope, **_scope(template)}, templates, rule)
+                # The XSLT's own template (the generator's, or one added by hand): followed in place, its
+                # parameters bound to what the call passes.
+                _walk(template, path, {**scope, **_scope(template), **_params(template, child, scope)}, templates, rule)
         elif tag == f'{X}sequence':
             select = child.get('select') or ''
             if select.startswith('mcp:') and '(' in select and _is_data_call(select):
@@ -400,12 +419,14 @@ class Rebuilt:
     new: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     raw: list[str] = field(default_factory=list)        # kept as the expression itself (an xpath entry)
+    imported_calls: list[str] = field(default_factory=list)   # xpath entries calling an imported XSLT's functions
     notes: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
     def summary(self) -> dict[str, Any]:
         return {k: v for k, v in {'entries_kept': self.reused, 'entries_new': self.new, 'entries_removed': self.removed,
-                                  'kept_as_xpath': self.raw, 'not_read': self.notes, 'problems': self.problems}.items()
+                                  'kept_as_xpath': self.raw, 'calls_imported_functions': self.imported_calls,
+                                  'not_read': self.notes, 'problems': self.problems}.items()
                 if v or k == 'entries_kept'}
 
 
@@ -576,9 +597,11 @@ class _Idioms:
         if leaf.value is not None:
             return {**base, 'value': leaf.value}, False
         expr = self.inline(canonical(leaf.expr or ''))
-        found = self.idiom(expr, leaf.guard)
+        found = self.idiom(expr, leaf.guard)      # first: a map of one key is its value, guarded by the key
         if found:
             return {**base, **found}, False
+        if re.fullmatch(_STRING, expr):
+            return {**base, 'value': unquote(expr)}, False      # a string, passed as a parameter, say
         return {**base, 'xpath': self.portable(expr)}, True
 
     def idiom(self, expr: str, guard: str | None = None) -> dict[str, Any] | None:
@@ -798,6 +821,12 @@ def _imported(reading: Reading, imported: dict[str, str]) -> tuple[list[dict[str
     return shared, functions, problems
 
 
+def _calls_imported(xpath: str | None, reading: Reading) -> bool:
+    """Whether an expression calls a function of an XSLT it imports (one of the prefixes bound for them)."""
+    return bool(xpath) and any(re.search(r'(?<![\w.-])' + re.escape(prefix) + r':[\w.-]+\(', xpath)
+                               for prefix in reading.prefixes)
+
+
 def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
             imported: dict[str, str] | None = None) -> Rebuilt:
     """A mapping for this XSLT: the kept mapping where the XSLT still reads as it generates (kept_code, what it
@@ -832,7 +861,8 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
         elif rule.test:
             spec['when'], raw = idioms.conditions(rule.test)
             if raw:
-                out.raw.append(f"rule {name}: its condition")
+                calls = any(_calls_imported(c.get('xpath'), reading) for c in spec['when'])
+                (out.imported_calls if calls else out.raw).append(f"rule {name}: its condition")
         if rule.drop:
             spec['drop'] = True
             rules_out.append(spec)
@@ -863,7 +893,8 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
             where = f"rule {name}: {leaf.path}" + (f" Data {leaf.data_name}" if leaf.data_name else '')
             out.new.append(where)
             if raw:
-                out.raw.append(where)
+                # An imported XSLT's function is only called through xpath, so that entry is as the mapping had it.
+                (out.imported_calls if _calls_imported(entry.get('xpath'), reading) else out.raw).append(where)
         if old:
             now = {leaf.key for leaf in rule.leaves}
             out.removed += [f"rule {name}: {k[0]}" + (f" Data {k[1]}" if k[1] else '') for k in old_leaves if k not in now]
