@@ -235,9 +235,10 @@ async def build_translation_xslt(
             "Save over an edit made by hand in Stroom's editor since the server saved the XSLT, though the new code "
             "undoes it. Only when the user has said to drop their edit: a save that would undo one is refused, saying "
             "what it changed, so it can be carried into the mapping (rebuild_mapping) instead."))] = False,
-        hand_edit_choices: Annotated[dict[str, Literal['keep', 'overwrite']] | None, Field(description=(
-            "Only from a needs_guidance reply about a hand edit, with the user's answers: for each field it names, "
-            "'keep' (their hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))] = None,
+        hand_edit_choices: Annotated[dict[str, Literal['keep', 'overwrite', 'per_field']] | None, Field(description=(
+            "Only from a needs_guidance reply about a hand edit, with the user's answers: {'*': 'overwrite'} to "
+            "overwrite the XSLT with the change (every hand edit dropped), or for each field it names 'keep' (their "
+            "hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))] = None,
 ) -> dict[str, Any]:
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind

@@ -81,38 +81,49 @@ class Outline(NamedTuple):
     writes: Counter
     reads: Counter
     names: dict[str, set[str]]      # each item: the names it is written as
+    within: dict[str, set[str]]     # each item written: the XPaths read inside it, its value's source
+
+
+def _read(element: etree._Element) -> list[str]:
+    """The XPaths an element reads itself: an XSL instruction's select and test, a result element's {...}."""
+    if etree.QName(element).namespace == XSL:
+        return [value for attribute, value in element.attrib.items() if attribute in ('select', 'test')]
+    return [e for value in element.attrib.values() for e in _AVT.findall(value)]
 
 
 def outline(code: str) -> Outline:
     """What the XSLT writes (element and key names, constants) and reads (XPaths), each counted."""
     from utils.xsltversion import strip
-    writes, reads, names = Counter(), Counter(), {}
+    writes, reads, names, within = Counter(), Counter(), {}, {}
     try:
         root = etree.fromstring(re.sub(r'^\s*<\?xml[^>]*\?>', '', strip(code or '')).encode('utf-8'))
     except etree.XMLSyntaxError:
-        return Outline(writes, reads, names)
+        return Outline(writes, reads, names, within)
     for element in root.iter(etree.Element):
         for item in _written(element):
             writes[item] += 1
             names.setdefault(item, set()).add(item.split(' = ')[0].split(' ')[-1])
+            # What it is written from: a key renamed by hand still reads its field's source.
+            within.setdefault(item, set()).update(
+                expression(v) for e in element.iter(etree.Element) for v in _read(e) if expression(v))
         in_xsl = etree.QName(element).namespace == XSL
-        found = ([value for attribute, value in element.attrib.items() if attribute in ('select', 'test')] if in_xsl
-                 else [e for value in element.attrib.values() for e in _AVT.findall(value)])
-        for value in found:
+        for value in _read(element):
             item = expression(value)
             if item:
                 reads[item] += 1
                 names.setdefault(item, set()).update(_context(element) if in_xsl else {_named(element)})
-    return Outline(writes, reads, names)
+    return Outline(writes, reads, names, within)
 
 
 class Undone(NamedTuple):
     """Something the edit changed that new code undoes: an item it added and new code lacks, or one it took out
-    that new code has again. names: what it is written as, to match it to a plan's field."""
+    that new code has again. names: what it is written as, and within: what an element written reads inside it (its
+    value's source), to match it to a plan's field."""
     verb: str
     item: str
     again: bool
     names: frozenset
+    within: frozenset = frozenset()
 
     def __str__(self) -> str:
         return f"{self.verb} {self.item} again" if self.again else f"no longer {self.verb} {self.item}"
@@ -133,10 +144,12 @@ def undone(base: str | None, current: str, new: str) -> list[Undone]:
             if count > bc[item]:
                 have = sum(k for x, k in nc.items() if (_related(item, x) if verb == 'reads' else x == item))
                 if have < count:
-                    out.append(Undone(verb, item, False, frozenset(c.names.get(item, ()))))
+                    out.append(Undone(verb, item, False, frozenset(c.names.get(item, ())),
+                                      frozenset(c.within.get(item, ()))))
         for item, count in bc.items():
             if cc[item] < count and nc[item] > cc[item]:
-                out.append(Undone(verb, item, True, frozenset(n.names.get(item, set()) | b.names.get(item, set()))))
+                out.append(Undone(verb, item, True, frozenset(n.names.get(item, set()) | b.names.get(item, set())),
+                                  frozenset(n.within.get(item, set()) | b.within.get(item, set()))))
     return out
 
 
@@ -197,10 +210,12 @@ def plan_fields(kind: str, payload: dict[str, Any] | None) -> dict[str, PlanFiel
 
 
 def touches(u: Undone, f: PlanField) -> bool:
-    """Whether something the edit changed is (part of) the field: written as its name, or reading what it reads."""
+    """Whether something the edit changed is (part of) the field: written as its name, reading what it reads, or
+    written from what it reads (a key renamed by hand: <string key="created_at"> still reads event.created's source)."""
     if u.names & f.names:
         return True
-    return u.verb == 'reads' and any(s and (s in u.item or _related(u.item, s)) for s in f.sources)
+    read = [u.item] if u.verb == 'reads' else list(u.within)
+    return any(s and r and (s in r or _related(r, s)) for s in f.sources for r in read)
 
 
 def collisions(kind: str, kept: dict[str, Any] | None, new: dict[str, Any] | None,

@@ -195,13 +195,13 @@ async def test_build_status_says_an_index_xslt_was_edited_by_hand(stroom):
 EMAIL = [f.model_copy(update={'source': 'EventSource/User/Email'}) if f.name == 'user.name' else f for f in FIELDS]
 
 
-def asking(answer: str | None = None) -> SimpleNamespace:
-    """A call's context: no forms (the agent asks), or a form the user answers."""
+def asking(*answers: str) -> SimpleNamespace:
+    """A call's context: no forms (the agent asks), or forms the user answers, in turn."""
     from utils.consent import ConsentStore
-    if answer is None:
+    if not answers:
         return SimpleNamespace(lifespan_context={'consent': ConsentStore(use_elicitation=False)})
-    return SimpleNamespace(lifespan_context={'consent': ConsentStore()},
-                           elicit=AsyncMock(return_value=SimpleNamespace(action='accept', data=answer)))
+    return SimpleNamespace(lifespan_context={'consent': ConsentStore()}, elicit=AsyncMock(
+        side_effect=[SimpleNamespace(action='accept', data=a) for a in answers]))
 
 
 async def save_in(ctx, index_plan: FieldPlan, **kw):
@@ -217,6 +217,11 @@ async def test_a_field_changed_by_hand_and_by_the_agent_is_the_users_to_decide(s
     # The agent's change: user.name from the user's email. Asked, not refused or saved.
     asked = await save_in(ctx, plan(fields=EMAIL))
     assert asked['status'] == 'needs_guidance' and asked['saved'] is None and stroom.docs['x-1']['data'] == edited
+    # First, one question: overwrite the XSLT with the change, or decide field by field (asked for by the user).
+    assert "changes 1 field the edit changed too: user.name" in asked['hand_edit']['question']
+    assert asked['hand_edit']['options'] == {'overwrite': 'Overwrite the XSLT with the change',
+                                             'per_field': 'Decide field by field'}
+    assert "hand_edit_choices={'*': 'overwrite'}" in asked['hint']
     [question] = asked['hand_edit_collisions']
     assert question['field'] == 'user.name' and question['options'] == {'keep': 'Keep my hand edit',
                                                                         'overwrite': 'Use the proposed field'}
@@ -248,14 +253,14 @@ async def test_only_the_colliding_field_is_overwritten_the_rest_of_the_edit_is_k
     stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
     stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
     stroom.edit_by_hand(METHOD, EDITED_IN)
-    ctx = asking('Use the proposed field')
+    ctx = asking('Decide field by field', 'Use the proposed field')
     with pytest.raises(ToolError) as e:
         await save_in(ctx, plan(fields=EMAIL))
-    assert ctx.elicit.await_count == 1 and 'field user.name' in ctx.elicit.await_args.args[0]
+    assert ctx.elicit.await_count == 2 and 'field user.name' in ctx.elicit.await_args.args[0]
     assert 'no longer writes number bytes' in str(e.value) and 'User/Name' not in str(e.value).split('What the edit')[0]
     # Answered once for the XSLT as it is: carrying the rest isn't asked again.
     await save_in(ctx, plan(BYTES.model_copy(update={'source': 'EventDetail/View/Resource/InboundSize'}), fields=EMAIL))
-    assert ctx.elicit.await_count == 1
+    assert ctx.elicit.await_count == 2
     out = run(stroom.docs['x-1']['data'])
     assert '<number key="bytes">512</number>' in out and 'Alice Smith' not in out
 
@@ -282,3 +287,54 @@ async def test_a_constant_changed_by_hand_and_in_the_mapping_is_asked_about(stro
         await translation.update_xslt(ctx, 'x-1', generate(prod, SCHEMA, '4.1.0')['xslt'], mapping=prod,
                                       hand_edit_choices={'common: EventSource/System/Environment': 'overwrite'})
         assert '<Environment>Prod</Environment>' in stroom.docs['x-1']['data']
+
+
+async def test_a_key_renamed_by_hand_is_linked_to_its_field(stroom):
+    # Asked for by the user: a key renamed by hand (method -> verb) is still the field it was: where the agent's change
+    # is to that field, the user is asked about it, not just refused.
+    ctx = asking()
+    await save_in(ctx, plan())
+    stroom.edit_by_hand('<string key="method">', '<string key="verb">')
+    upper = [f.model_copy(update={'source': 'upper-case(EventDetail/*/Resource/HTTPMethod)'})
+             if f.name == 'http.request.method' else f for f in FIELDS]
+    asked = await save_in(ctx, plan(fields=upper))
+    [question] = asked['hand_edit_collisions']
+    assert question['field'] == 'http.request.method' and 'added string verb' in question['question']
+    # Kept: the change to it left out, the rename carried into the plan.
+    with pytest.raises(ToolError, match='The user keeps their edit of http.request.method'):
+        await save_in(ctx, plan(fields=upper), hand_edit_choices={'http.request.method': 'keep'})
+    verb = [f.model_copy(update={'name': 'http.request.verb'}) if f.name == 'http.request.method' else f for f in FIELDS]
+    await save_in(ctx, plan(fields=verb))
+    assert '<string key="verb">GET</string>' in run(stroom.docs['x-1']['data'])
+
+
+async def test_a_key_renamed_by_hand_with_no_change_to_its_field_is_carried(stroom):
+    ctx = asking()
+    await save_in(ctx, plan())
+    stroom.edit_by_hand('<string key="method">', '<string key="verb">')
+    with pytest.raises(ToolError, match=r'no longer writes string verb.*writes string method again'):
+        await save_in(ctx, plan(ACTION))
+
+
+async def test_the_user_overwrites_the_xslt_in_one_step(stroom):
+    # Asked for by the user: one choice up front to overwrite the XSLT, rather than one a field. Every hand edit goes,
+    # the fields the change changes and the rest alike.
+    await save_in(asking(), plan())
+    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand(METHOD, EDITED_IN)
+    ctx = asking('Overwrite the XSLT with the change')
+    await save_in(ctx, plan(fields=EMAIL))
+    assert ctx.elicit.await_count == 1 and '(the edit changed 3 other things as well)' in ctx.elicit.await_args.args[0]
+    code = stroom.docs['x-1']['data']
+    assert 'EventSource/User/Email' in code and 'User/Name' not in code and 'bytes' not in code
+
+
+async def test_overwriting_in_one_step_from_the_chat(stroom):
+    ctx = asking()
+    await save_in(ctx, plan())
+    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    assert (await save_in(ctx, plan(fields=EMAIL)))['status'] == 'needs_guidance'
+    await save_in(ctx, plan(fields=EMAIL), hand_edit_choices={'*': 'overwrite'})
+    assert 'EventSource/User/Email' in stroom.docs['x-1']['data']

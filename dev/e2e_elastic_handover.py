@@ -379,13 +379,42 @@ async def main():
         asked = await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=proposed, uuid=xslt['uuid'])
         fields = [q['field'] for q in asked.get('hand_edit_collisions') or []]
         print(f"    {(asked.get('hand_edit_collisions') or [{}])[0].get('question', asked)}")
-        e2e.check(asked.get('status') == 'needs_guidance' and fields == ['event.created'],
-                  f"asked whether to keep the hand edit or use the proposed field: {fields}")
+        e2e.check(asked.get('status') == 'needs_guidance' and fields == ['event.created']
+                  and 'Overwrite the XSLT with the change' in json.dumps(asked.get('hand_edit')),
+                  f"asked first whether to overwrite the XSLT or decide field by field, then per field: {fields}")
+        # The user overwrites in one step.
         await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=proposed, uuid=xslt['uuid'],
-                                    hand_edit_choices={'event.created': 'overwrite'}, change='event.created from the outcome')
+                                    hand_edit_choices={'*': 'overwrite'}, change='event.created from the outcome')
         after = (await stroom.get_doc('XSLT', xslt['uuid']))['data']
         e2e.check('current-dateTime()' not in after and 'Outcome/Success' in after,
-                  'the user chose the proposed field: saved over their edit of it')
+                  'the user chose to overwrite: saved over their edit')
+
+        print("\n### a key renamed by hand is its field still: field by field, the user keeps their edit")
+        doc = await stroom.get_doc('XSLT', xslt['uuid'])
+        await stroom.put_doc({**doc, 'data': doc['data'].replace('<string key="created">', '<string key="created_at">', 1)})
+        back = proposed.model_copy(update={'fields': [
+            f.model_copy(update={'source': 'EventTime/TimeCreated'}) if f.name == 'event.created' else f
+            for f in proposed.fields]})
+        asked = await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=back, uuid=xslt['uuid'])
+        fields = [q['field'] for q in asked.get('hand_edit_collisions') or []]
+        e2e.check(asked.get('status') == 'needs_guidance' and fields == ['event.created'],
+                  f"the renamed key (created_at) is linked to event.created, and asked about: {fields}")
+        try:
+            await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=back, uuid=xslt['uuid'],
+                                        hand_edit_choices={'event.created': 'keep'})
+            refused = ''
+        except ToolError as e:
+            refused = str(e)
+        e2e.check('The user keeps their edit of event.created' in refused and 'string created_at' in refused,
+                  'kept: the change to it left out, the rename to carry into the plan')
+        renamed = proposed.model_copy(update={'fields': [
+            f.model_copy(update={'name': 'event.created_at'}) if f.name == 'event.created' else f
+            for f in proposed.fields]})
+        await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=renamed, uuid=xslt['uuid'],
+                                    change='event.created renamed event.created_at, as the user did by hand')
+        after = (await stroom.get_doc('XSLT', xslt['uuid']))['data']
+        e2e.check('key="created_at"' in after and 'key="created"' not in after,
+                  'the rename carried into the plan: saved, written as event.created_at')
         if '--live' in sys.argv:
             await live(ctx, stroom, csv, events, es_template, stamp)
             await live_structure(ctx, stroom, es_template, stamp)

@@ -20,9 +20,10 @@ index_plan=... uuid=`). An edit the user made by hand in Stroom since (another f
 changed) is kept: a save that would undo it is refused, saying what it changed. Carry it into the plan (a field it
 added as a field of the plan, with its name, type and source XPath) and save again; `discard_hand_edit=true` only when
 the user says to drop it. `build_status` reports such an edit. Where your change is to a field they edited too, the
-user is asked, per field, whether to keep their edit or use the proposed field: in a form, or as `needs_guidance`
-with the questions to ask them exactly, answered by calling again with `hand_edit_choices={field: 'keep' or
-'overwrite'}`. Never answer for them. If they keep it, leave your change to that field out and carry their edit.
+user is asked first whether to overwrite the XSLT with your change (every hand edit dropped) or decide field by
+field, then, field by field, whether to keep their edit or use the proposed field: in forms, or as `needs_guidance`
+with the questions to ask them exactly, answered by calling again with `hand_edit_choices={'*': 'overwrite'}` or
+`{field: 'keep' or 'overwrite'}`. Never answer for them. If they keep it, leave your change to that field out and carry their edit.
 
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
 index's mapping) and the component templates it is composed of. Give it to `draft_index_mapping` as well as to

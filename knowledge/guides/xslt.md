@@ -248,8 +248,9 @@ defaults, this is how an XSLT is brought up to them. Never send the kept mapping
 summarises it (`mapping=true` shows it, to read). `build_status` says when an XSLT was written by an earlier generator
 (and is unchanged since), as against edited by hand: a hand edit is carried into the mapping (`changes=`) first; a
 save that would undo it is refused, saying what it changed (`discard_hand_edit=true` only when the user says to drop
-it). Where a change is to a field the edit changed too (a constant they changed, say), the user is asked per field
-whether to keep their edit or use the proposed one (`hand_edit_choices`, from their answers, never chosen for them). For a hand edit it shows what differs (`-` what the mapping generates, `+` what
+it). Where a change is to a field the edit changed too (a constant they changed, say), the user is asked first whether
+to overwrite the XSLT with the change, else per field whether to keep their edit or use the proposed one
+(`hand_edit_choices`, from their answers, never chosen for them). For a hand edit it shows what differs (`-` what the mapping generates, `+` what
 the XSLT has). `rebuild_mapping uuid=<xslt>` carries a hand edit into the mapping, or reads a lost mapping back from
 the XSLT alone (its Documentation tab cleared; lookups, dictionaries and imported XSLTs' templates and functions too; a call of
 an imported function stays an xpath entry, reported under `calls_imported_functions`):

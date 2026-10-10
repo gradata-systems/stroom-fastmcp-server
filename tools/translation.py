@@ -319,9 +319,11 @@ async def _kept_code(ctx: Context, kind: str, payload: dict[str, Any]) -> str | 
 
 
 KEEP, OVERWRITE = 'Keep my hand edit', 'Use the proposed field'
-HandEditChoices = Annotated[dict[str, Literal['keep', 'overwrite']] | None, Field(description=(
-    "Only from a needs_guidance reply about a hand edit, with the user's answers: for each field it names, 'keep' "
-    "(their hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))]
+OVERWRITE_ALL, PER_FIELD = 'Overwrite the XSLT with the change', 'Decide field by field'
+HandEditChoices = Annotated[dict[str, Literal['keep', 'overwrite', 'per_field']] | None, Field(description=(
+    "Only from a needs_guidance reply about a hand edit, with the user's answers: {'*': 'overwrite'} to overwrite the "
+    "XSLT with the change (every hand edit dropped), or for each field it names 'keep' (their hand edit) or "
+    "'overwrite' (with the proposed field). Never chosen for them."))]
 _CHOICES = 'hand_edit_choices'
 
 
@@ -355,7 +357,24 @@ async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str
     by = f" (by {doc['updateUser']})" if doc.get('updateUser') else ''
     clashes = collisions(kind, kept[1], payload, items) if kept and kind == kept[0] else {}
     decided = _remembered(ctx, (_user(ctx), doc.get('uuid'), hashlib.sha256(current.encode()).hexdigest()[:16]))
-    decided.update({k: v for k, v in (choices or {}).items() if k in clashes})
+    decided.update({k: v for k, v in (choices or {}).items() if k in clashes or k == '*'})
+    # One question first (asked for by the user): overwrite the XSLT with the change, every hand edit dropped, or
+    # decide field by field. Answered per field already, it isn't asked.
+    upfront = None
+    if clashes and '*' not in decided and not all(label in decided for label in clashes):
+        others = len({str(u) for u in items} - {str(u) for _, _, hit in clashes.values() for u in hit})
+        upfront = (f"XSLT '{doc.get('name')}' was edited by hand in Stroom{by}, and the agent's change changes "
+                   f"{len(clashes)} field{'s' if len(clashes) > 1 else ''} the edit changed too: {', '.join(clashes)}"
+                   + (f" (the edit changed {others} other thing{'s' if others > 1 else ''} as well)" if others else '')
+                   + ". Overwrite the XSLT with the change, dropping your hand edits, or decide field by field?")
+        chosen = await consent_from(ctx).choose(ctx, 'hand_edit', upfront, [OVERWRITE_ALL, PER_FIELD])
+        if chosen in (OVERWRITE_ALL, PER_FIELD):
+            decided['*'] = 'overwrite' if chosen == OVERWRITE_ALL else 'per_field'
+            upfront = None
+        elif chosen is not None:
+            return chosen       # the form, for the client to show
+    if decided.get('*') == 'overwrite':
+        return None
     asked = []
     for label, (old, proposed, hit) in clashes.items():
         if label in decided:
@@ -365,7 +384,8 @@ async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str
                     f"agent's change " + (f"proposes {proposed}" if proposed else "removes it")
                     + (f" (the plan had {old})" if old and proposed else '') + ". Keep your hand edit, or use the "
                     f"proposed field?")
-        chosen = await consent_from(ctx).choose(ctx, 'hand_edit', question, [KEEP, OVERWRITE])
+        # Unanswered up front (no form): the per-field questions go to the agent with it, for one round in the chat.
+        chosen = None if upfront else await consent_from(ctx).choose(ctx, 'hand_edit', question, [KEEP, OVERWRITE])
         if chosen is None:
             asked.append({'field': label, 'question': question, 'options': {'keep': KEEP, 'overwrite': OVERWRITE}})
         elif chosen in (KEEP, OVERWRITE):
@@ -373,11 +393,17 @@ async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str
         else:
             return chosen       # the form, for the client to show
     if asked:
-        return {'status': 'needs_guidance', 'saved': None, 'hand_edit_collisions': asked,
+        first = ({'hand_edit': {'question': upfront, 'options': {'overwrite': OVERWRITE_ALL, 'per_field': PER_FIELD}}}
+                 if upfront else {})
+        return {'status': 'needs_guidance', 'saved': None, **first, 'hand_edit_collisions': asked,
                 'hint': "Not saved: the user edited these fields by hand since the server saved the XSLT, and your "
-                        "change changes them too. Ask the user each question exactly, offering both options, then call "
-                        "again with the same arguments and hand_edit_choices={field: 'keep' or 'overwrite'}. Don't "
-                        "choose for them."}
+                        "change changes them too. " + (
+                            "Ask the user the hand_edit question first, exactly, offering both options. To overwrite: "
+                            "call again with the same arguments and hand_edit_choices={'*': 'overwrite'}. Field by "
+                            "field: ask each of the hand_edit_collisions questions too, " if upfront else
+                            "Ask the user each question exactly, offering both options, ")
+                        + "then call again with the same arguments and hand_edit_choices={field: 'keep' or "
+                          "'overwrite'}. Don't choose for them."}
     overwritten = [label for label, choice in decided.items() if choice == 'overwrite' and label in clashes]
     left = [u for u in items if not any(u in clashes[label][2] for label in overwritten)]
     if not left:
