@@ -48,11 +48,11 @@ import e2e_translation as e2e  # noqa: E402
 from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
-from utils.mappingstore import read_agreed_template  # noqa: E402
+from utils.mappingstore import read_agreed_template, read_mapping  # noqa: E402
 from tools import builds, indexing, processing_writes, stepping, templates, translation  # noqa: E402
 from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
-from utils.fieldplan import FieldPlan  # noqa: E402
+from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
 from utils.templatecheck import compose  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
@@ -330,6 +330,62 @@ async def main():
         e2e.check(stored.get('enabled') is True, f"filter {started['filter_id']} created enabled")
         # No Elasticsearch here: stop it again, so it doesn't fail in the background.
         await e2e.agreed(processing_writes.set_processor_filter_enabled, ctx=ctx, filter_id=started['filter_id'], enabled=False)
+
+        print("\n### an ECS field added by hand in Stroom's editor is kept through the agent's next change")
+        # Asked by the user: the indexing XSLT edited by hand to write event.created too, then the plan regenerated
+        # at the agent's next change, and the edit was gone.
+        doc = await stroom.get_doc('XSLT', xslt['uuid'])
+        created = '<string key="created"><xsl:value-of select="EventTime/TimeCreated" /></string>'
+        code = doc['data']
+        code = (code.replace('<map key="event">', '<map key="event">' + created, 1) if '<map key="event">' in code else
+                code.replace('<xsl:template match="Event">\n    <map>', '<xsl:template match="Event">\n    <map>'
+                             '<map key="event">' + created + '</map>', 1))
+        e2e.check(created in code, 'the edit made')
+        await stroom.put_doc({**doc, 'data': code})
+        status = await build_status(ctx, csv['build'])
+        e2e.check(any('edited by hand since the server saved it' in c and 'carry it into the index plan' in c
+                      for c in status['before_promotion']), 'build_status says the XSLT was edited by hand')
+        try:
+            await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=plan, uuid=xslt['uuid'],
+                                        change='Saved again from its plan')
+            refused = ''
+        except ToolError as e:
+            refused = str(e)
+        print(f'    {refused[:220]}')
+        e2e.check(refused.startswith('Not saved:') and 'no longer writes string created' in refused,
+                  'regenerating from the plan without the edit is refused, saying what it would undo')
+        e2e.check(created in (await stroom.get_doc('XSLT', xslt['uuid']))['data'], 'the edit is still in Stroom')
+        carried = plan.model_copy(update={'fields': [*plan.fields, PlannedField(name='event.created', type='date',
+                                                                               source='EventTime/TimeCreated')]})
+        await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=carried, uuid=xslt['uuid'],
+                                    change='event.created, added by hand, carried into the plan')
+        after = await stroom.get_doc('XSLT', xslt['uuid'])
+        e2e.check('key="created"' in after['data'] and read_mapping(after['description'])[1]['fields'][-1]['name']
+                  == 'event.created', 'carried into the plan, saved: the field written, and kept in the plan')
+        stepped = await stepping.step_sample(ctx, pipeline['uuid'], events)
+        e2e.check(stepped['verdict'] == 'clean', f"stepped clean with the carried field: {stepped['verdict']}")
+        status = await build_status(ctx, csv['build'])
+        e2e.check(not any('edited by hand since the server saved it' in c for c in status['before_promotion']),
+                  'and no longer reported as edited by hand')
+
+        print("\n### a field edited by hand that the agent's change changes too: the user decides")
+        doc = await stroom.get_doc('XSLT', xslt['uuid'])
+        mine = doc['data'].replace(created, created.replace('EventTime/TimeCreated', 'current-dateTime()'), 1)
+        e2e.check(mine != doc['data'], "the field's source changed by hand: when the event was indexed")
+        await stroom.put_doc({**doc, 'data': mine})
+        proposed = carried.model_copy(update={'fields': [
+            f.model_copy(update={'source': 'EventDetail/*/Outcome/Success'}) if f.name == 'event.created' else f
+            for f in carried.fields]})
+        asked = await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=proposed, uuid=xslt['uuid'])
+        fields = [q['field'] for q in asked.get('hand_edit_collisions') or []]
+        print(f"    {(asked.get('hand_edit_collisions') or [{}])[0].get('question', asked)}")
+        e2e.check(asked.get('status') == 'needs_guidance' and fields == ['event.created'],
+                  f"asked whether to keep the hand edit or use the proposed field: {fields}")
+        await translation.save_xslt(ctx, csv['build'], f'{index}-XSLT', index_plan=proposed, uuid=xslt['uuid'],
+                                    hand_edit_choices={'event.created': 'overwrite'}, change='event.created from the outcome')
+        after = (await stroom.get_doc('XSLT', xslt['uuid']))['data']
+        e2e.check('current-dateTime()' not in after and 'Outcome/Success' in after,
+                  'the user chose the proposed field: saved over their edit of it')
         if '--live' in sys.argv:
             await live(ctx, stroom, csv, events, es_template, stamp)
             await live_structure(ctx, stroom, es_template, stamp)

@@ -8,6 +8,7 @@ from lxml import etree
 from pydantic import Field
 
 from security.guard import guard_from
+from utils.consent import consent_from
 from tools.validation import check_xslt
 from utils.fieldplan import FieldPlan
 from utils.mappingstore import normalise_xslt, with_mapping
@@ -283,6 +284,116 @@ async def create_xslt(
     return await with_next(ctx, build, {**_summary(saved), **extra})
 
 
+DiscardHandEdit = Annotated[bool, Field(description=(
+    "Save over an edit made by hand in Stroom's editor since the server saved the XSLT, though the new code undoes "
+    "it. Only when the user has said to drop their edit: a save that would undo one is refused, saying what it "
+    "changed, so it can be carried into the mapping or plan instead."))]
+
+_CARRY = {
+    'translation': "carry it into the mapping: rebuild_mapping uuid='{uuid}' stream_ids=<the sample streams> reads it "
+                   "from the XSLT, proven on the sample (or build_translation_xslt changes=)",
+    'index': "carry it into the index plan: a field the edit added as a field of index_plan (its name, type, and source: "
+             "the XPath it reads, from the Event), one it removed left out, a source it changed changed",
+    'cef': "carry it into the CEF plan (overrides), as the edit made it",
+}
+
+
+async def _kept_code(ctx: Context, kind: str, payload: dict[str, Any]) -> str | None:
+    """What the mapping or plan kept with an XSLT generates now: the code the server saved, but for its own changes."""
+    try:
+        if kind == 'translation':
+            from tools.generation import event_schema
+            from utils.xsltgen import generate
+            version = payload.get('schema_version') or gateway_from(ctx).settings.event_logging_version
+            generated = generate(TranslationMapping.model_validate(payload['mapping']), await event_schema(ctx, version),
+                                 version)
+            return generated['xslt'] if generated['ok'] else None
+        if kind == 'index':
+            return FieldPlan.model_validate(payload).xslt()
+        if kind == 'cef':
+            from utils.cef import CefPlan
+            return CefPlan.model_validate(payload).xslt()
+    except Exception:       # no longer generates: the whole XSLT then counts as the edit's
+        return None
+    return None
+
+
+KEEP, OVERWRITE = 'Keep my hand edit', 'Use the proposed field'
+HandEditChoices = Annotated[dict[str, Literal['keep', 'overwrite']] | None, Field(description=(
+    "Only from a needs_guidance reply about a hand edit, with the user's answers: for each field it names, 'keep' "
+    "(their hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))]
+_CHOICES = 'hand_edit_choices'
+
+
+def _remembered(ctx: Context, key: tuple) -> dict[str, str]:
+    """The user's answers for this XSLT as it is now, kept for the session: asked once, however many calls."""
+    try:
+        return ctx.lifespan_context.setdefault(_CHOICES, {}).setdefault(key, {})
+    except Exception:
+        return {}
+
+
+async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str | None = None,
+                         payload: dict[str, Any] | None = None, choices: dict[str, str] | None = None) -> Any:
+    """None when new code keeps the edit made by hand since the server saved the XSLT (doc, as it is now), or the user
+    said to overwrite what it undoes; otherwise the question to return (a form, or needs_guidance), or ToolError
+    saying what to carry. kind and payload: the mapping or plan the new code is from, to tell which of its fields the
+    agent's change touches that the edit touched too: those the user decides."""
+    import hashlib
+    from tools.plan import _user
+    from utils.handedit import collisions, undone
+    from utils.mappingstore import code_diff, read_mapping
+    from utils.xsltversion import untouched
+    current = doc.get('data') or ''
+    if untouched(doc.get('description'), current) is not False:
+        return None     # as the server saved it, or saved before it recorded what (no edit to tell)
+    kept = read_mapping(doc.get('description'))
+    base = await _kept_code(ctx, *kept) if kept else None
+    items = undone(base, current, code)
+    if not items:
+        return None
+    by = f" (by {doc['updateUser']})" if doc.get('updateUser') else ''
+    clashes = collisions(kind, kept[1], payload, items) if kept and kind == kept[0] else {}
+    decided = _remembered(ctx, (_user(ctx), doc.get('uuid'), hashlib.sha256(current.encode()).hexdigest()[:16]))
+    decided.update({k: v for k, v in (choices or {}).items() if k in clashes})
+    asked = []
+    for label, (old, proposed, hit) in clashes.items():
+        if label in decided:
+            continue
+        edit = '; '.join(f"{'took out' if u.again else 'added'} {u.item}" for u in hit[:3])
+        question = (f"XSLT '{doc.get('name')}', field {label}: you edited it by hand in Stroom{by}, which {edit}. The "
+                    f"agent's change " + (f"proposes {proposed}" if proposed else "removes it")
+                    + (f" (the plan had {old})" if old and proposed else '') + ". Keep your hand edit, or use the "
+                    f"proposed field?")
+        chosen = await consent_from(ctx).choose(ctx, 'hand_edit', question, [KEEP, OVERWRITE])
+        if chosen is None:
+            asked.append({'field': label, 'question': question, 'options': {'keep': KEEP, 'overwrite': OVERWRITE}})
+        elif chosen in (KEEP, OVERWRITE):
+            decided[label] = 'keep' if chosen == KEEP else 'overwrite'
+        else:
+            return chosen       # the form, for the client to show
+    if asked:
+        return {'status': 'needs_guidance', 'saved': None, 'hand_edit_collisions': asked,
+                'hint': "Not saved: the user edited these fields by hand since the server saved the XSLT, and your "
+                        "change changes them too. Ask the user each question exactly, offering both options, then call "
+                        "again with the same arguments and hand_edit_choices={field: 'keep' or 'overwrite'}. Don't "
+                        "choose for them."}
+    overwritten = [label for label, choice in decided.items() if choice == 'overwrite' and label in clashes]
+    left = [u for u in items if not any(u in clashes[label][2] for label in overwritten)]
+    if not left:
+        return None
+    carry = _CARRY.get(kept[0] if kept else '', "write code that keeps it").format(uuid=doc.get('uuid'))
+    kept_fields = [label for label, choice in decided.items() if choice == 'keep' and label in clashes]
+    shown = (f" What the edit changed (- what its {'mapping' if kept[0] == 'translation' else kept[0] + ' plan'} "
+             f"generates, + the XSLT): " + ' | '.join(code_diff(base, current)) + '.') if kept and base else ''
+    keeps = (f" The user keeps their edit of {', '.join(kept_fields)}: leave your change to "
+             f"{'it' if len(kept_fields) == 1 else 'them'} out, and make {'it' if len(kept_fields) == 1 else 'them'} "
+             f"as the edit has {'it' if len(kept_fields) == 1 else 'them'}." if kept_fields else '')
+    raise ToolError(f"Not saved: XSLT '{doc.get('name')}' was edited by hand since the server saved it{by}, and this "
+                    f"code undoes the edit: it {'; '.join(str(u) for u in left[:8])}.{shown}{keeps} Tell the user, and "
+                    f"{carry}; then save again. Only if the user says to drop their edit: discard_hand_edit=true.")
+
+
 async def update_xslt(
         ctx: Context,
         uuid: Annotated[str, Field(description="XSLT UUID.")],
@@ -292,16 +403,29 @@ async def update_xslt(
         index_plan: IndexPlan = None,
         cef_plan: Any = None,
         change: str | None = None,
-) -> dict[str, Any]:
+        discard_hand_edit: bool = False,
+        hand_edit_choices: dict[str, str] | None = None,
+) -> Any:
     """
     Replace an XSLT's code, after check_xslt passes. Only XSLTs this server created (including working
     copies of production XSLTs) can be changed; prove the change with step_sample and draft_code first. Give
-    the mapping the new code was generated from, so the documentation follows the change.
+    the mapping the new code was generated from, so the documentation follows the change. Code that undoes an
+    edit made by hand since the server saved the XSLT is refused (discard_hand_edit: the user said to drop it); where
+    the change is to a field the edit changed too, the user is asked whether to keep their edit or overwrite it: the
+    question comes back instead of the saved doc (anything without a uuid), for the caller to return.
     """
     await _checked(ctx, code)
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('XSLT', uuid)
     await guard_from(ctx).check_managed({'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')})
+    if not discard_hand_edit:
+        kind, payload = (('translation', {'mapping': mapping.model_dump(exclude_none=True, exclude_defaults=True)})
+                         if mapping is not None else ('index', index_plan.model_dump()) if index_plan is not None
+                         else ('cef', cef_plan.model_dump(exclude_defaults=True)) if cef_plan is not None
+                         else (None, None))
+        gate = await hand_edit_gate(ctx, doc, code, kind, payload, hand_edit_choices)
+        if gate is not None:
+            return gate
     previous = dict(doc)
     from utils.xsltversion import adopt, strip
     # The history lives in the description, not the code: one an earlier version kept in the code moves there.
@@ -393,13 +517,17 @@ async def save_xslt(
         agent_model: Annotated[str | None, Field(description=(
             "The model you are, e.g. 'claude-haiku-5-5', for the version history; once given, remembered for the "
             "session."))] = None,
+        discard_hand_edit: DiscardHandEdit = False,
+        hand_edit_choices: HandEditChoices = None,
 ) -> dict[str, Any]:
     """
     Save an XSLT written by hand, or an indexing XSLT from its plan (index_plan, no code): create it in the build,
     or with uuid replace the code of one this server created (including working copies of production XSLTs;
     prove a hand edit with step_sample and draft_code first). It is checked with check_xslt and not saved if that
     fails. A translation generated from a mapping is saved by build_translation_xslt (build and name, or uuid),
-    which keeps the mapping with it for the documentation.
+    which keeps the mapping with it for the documentation. An edit the user made by hand since is kept: code
+    that undoes it is refused, saying what it changed, to carry into the plan; where the plan changes a field the
+    edit changed too, the user is asked whether to keep their edit or use the proposed field.
     """
     from utils.xsltversion import remember_model
     remember_model(ctx, agent_model)
@@ -408,7 +536,8 @@ async def save_xslt(
     if code is None:
         code = await _generated(index_plan)
     if uuid:
-        return await update_xslt(ctx, uuid, code, version, None, index_plan, change=said)
+        return await update_xslt(ctx, uuid, code, version, None, index_plan, change=said,
+                                 discard_hand_edit=discard_hand_edit, hand_edit_choices=hand_edit_choices)
     return await create_xslt(ctx, build, name, code, None, index_plan, change=said)
 
 

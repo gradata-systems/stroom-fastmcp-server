@@ -219,6 +219,13 @@ async def draft_cef_mapping(
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="The Events feed: its folder's standing "
                                                                          "instructions apply.")] = [],
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the pipeline will live in.")] = [],
+        discard_hand_edit: Annotated[bool, Field(description=(
+            "Save over an edit made by hand in Stroom's editor since the server saved the XSLT, though the new code "
+            "undoes it. Only when the user has said to drop their edit: a save that would undo one is refused, saying "
+            "what it changed, so it can be carried into the plan (overrides) instead."))] = False,
+        hand_edit_choices: Annotated[dict[str, Literal['keep', 'overwrite']] | None, Field(description=(
+            "Only from a needs_guidance reply about a hand edit, with the user's answers: for each field it names, "
+            "'keep' (their hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))] = None,
 ) -> dict[str, Any]:
     """
     CEF (ArcSight Common Event Format) output: draft which Event value goes to which CEF key, as flattened text,
@@ -369,8 +376,12 @@ async def draft_cef_mapping(
         target = uuid or ((await _kept_xslt(ctx, pipeline_uuid)) if pipeline_uuid else None)
         said = change or (('CEF plan changes: ' + '; '.join(done)) if target and done else
                           'Saved again from its CEF plan' if target else 'Created from its CEF plan')
-        saved = await (update_xslt(ctx, target, plan.xslt(), cef_plan=plan, change=said) if target else
+        saved = await (update_xslt(ctx, target, plan.xslt(), cef_plan=plan, change=said,
+                                   discard_hand_edit=discard_hand_edit, hand_edit_choices=hand_edit_choices)
+                       if target else
                        create_xslt(ctx, build, name, plan.xslt(), cef_plan=plan, change=said))
+        if not isinstance(saved, dict) or not saved.get('uuid'):
+            return saved if not isinstance(saved, dict) else {**result, **saved}    # asked about fields edited by hand
         result['saved'] = {k: saved.get(k) for k in ('type', 'uuid', 'name', 'version')}
         result['hint'] = _next(plan, saved.get('uuid'), result)
     else:

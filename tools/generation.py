@@ -1,7 +1,7 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
 import re
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -231,6 +231,13 @@ async def build_translation_xslt(
             "that name whole (or added); common: entries, each replacing the one with that path (and data_name); "
             "{name or path, \"remove\": true} removes one; any other key replaces it. Much less to write than the "
             "whole mapping again."))] = None,
+        discard_hand_edit: Annotated[bool, Field(description=(
+            "Save over an edit made by hand in Stroom's editor since the server saved the XSLT, though the new code "
+            "undoes it. Only when the user has said to drop their edit: a save that would undo one is refused, saying "
+            "what it changed, so it can be carried into the mapping (rebuild_mapping) instead."))] = False,
+        hand_edit_choices: Annotated[dict[str, Literal['keep', 'overwrite']] | None, Field(description=(
+            "Only from a needs_guidance reply about a hand edit, with the user's answers: for each field it names, "
+            "'keep' (their hand edit) or 'overwrite' (with the proposed field). Never chosen for them."))] = None,
 ) -> dict[str, Any]:
     """
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
@@ -437,7 +444,10 @@ async def build_translation_xslt(
         said = change or ('Mapping changes: ' + '; '.join(applied) if applied else
                           'Saved again from its mapping' if uuid else 'Created from its mapping')
         if uuid:
-            saved = await update_xslt(ctx, uuid, result['xslt'], mapping=mapping, change=said)
+            saved = await update_xslt(ctx, uuid, result['xslt'], mapping=mapping, change=said,
+                                      discard_hand_edit=discard_hand_edit, hand_edit_choices=hand_edit_choices)
+            if not isinstance(saved, dict) or not saved.get('uuid'):
+                return saved        # the user is asked about fields edited by hand: nothing saved yet
         elif name:
             saved = await create_xslt(ctx, build, name, result['xslt'], mapping=mapping, change=said)
         else:

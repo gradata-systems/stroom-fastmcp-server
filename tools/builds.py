@@ -160,7 +160,7 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
             for lost in await lost_mappings(ctx, doc['uuid']):
                 problems.append(f"Pipeline '{doc['name']}': {lost}")
             continue
-        drift = await _drift(ctx, kept) if kept['kind'] == 'translation' else ''
+        drift = await (_drift(ctx, kept) if kept['kind'] == 'translation' else _plan_drift(ctx, kept))
         if drift:
             problems.append(f"Pipeline '{doc['name']}': {drift}")
         if doc['name'] in documented:
@@ -172,6 +172,24 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
                                 f"or XSLT (write_documentation build=<this build> pipeline_uuid='{doc['uuid']}' "
                                 f"stream_ids=<its sample streams> change=<what changed>)" + (BLOCKS if blocks else ''))
     return problems
+
+
+async def _plan_drift(ctx: Context, kept: dict[str, Any]) -> str | None:
+    """For an XSLT saved from an index or CEF plan: an edit made by hand since, which a save from the plan would undo
+    (and is refused until the edit is carried into the plan). Before, said nowhere, and the next change undid it."""
+    from tools.translation import _CARRY, _kept_code
+    from utils.mappingstore import code_diff
+    from utils.xsltversion import untouched
+    xslt = kept['xslt']
+    if untouched(xslt.get('description'), xslt.get('data')) is not False:
+        return None
+    base = await _kept_code(ctx, kept['kind'], kept['payload'])
+    if base is not None and normalise_xslt(base) == normalise_xslt(xslt.get('data') or ''):
+        return None
+    differs = (' What differs (- what the plan generates, + the XSLT): ' +
+               ' | '.join(code_diff(base, xslt.get('data') or ''))) if base else ''
+    return (f"its XSLT was edited by hand since the server saved it, and differs from what its {kept['kind']} plan "
+            f"generates: {_CARRY[kept['kind']]}, as a save from the plan that undoes the edit is refused.{differs}")
 
 
 async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
@@ -256,6 +274,9 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
                             f"{stream_ids} gave no CEF lines. Its stream_ids are the Events streams it sends "
                             f"(wait_for_processing on the events pipeline lists them).")
         section = plan.markdown(examples_from(plan, lines, [e for e in events if e is not None]))
+        drift = await _plan_drift(ctx, kept)
+        if drift:
+            section += f"\nNote: {drift[0].upper() + drift[1:].split(' What differs')[0]}\n"
     else:
         plan = FieldPlan.model_validate(kept['payload'])
         if plan.discovery:
@@ -287,6 +308,9 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
         section = index_field_mapping_markdown(plan, population, documents, schema) + _agreed_line(pipeline)
+        drift = await _plan_drift(ctx, kept)
+        if drift:
+            section = section.rstrip() + f"\n\nNote: {drift[0].upper() + drift[1:].split(' What differs')[0]}\n"
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
 
 

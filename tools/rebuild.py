@@ -242,7 +242,9 @@ async def rebuild_mapping(
         confirmation_id)
     if gate:
         return {**result, **gate}
-    saved = await update_xslt(ctx, uuid, regenerated['xslt'], mapping=rebuilt.mapping, change=said)
+    # The hand edit is carried by the rebuilt mapping, proven on the sample above (or its differences accepted).
+    saved = await update_xslt(ctx, uuid, regenerated['xslt'], mapping=rebuilt.mapping, change=said,
+                              discard_hand_edit=True)
     result.update(saved={k: saved.get(k) for k in ('type', 'uuid', 'name', 'version')},
                   next=("step_sample the pipeline over its sample streams (its code changed to what the mapping "
                         "generates), then write_documentation again: its Field mapping section comes from the rebuilt "

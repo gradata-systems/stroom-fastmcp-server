@@ -723,6 +723,36 @@ mapping first (the message shows what differs, element by element, as `-` what t
 the XSLT has: a Data element added, a part no longer written); saved before digests were recorded, either, said as such. Seen in production after 0.16.43: a
 generated XSLT was called "edited by hand", and the agent went looking for the edit.
 
+**A hand edit is not saved over.** Asked for by the user: an indexing XSLT generated from its plan, edited by hand in
+Stroom to write another ECS field (`http.request.body.bytes`), was regenerated from the plan at the agent's next
+change, and the edit was gone; nothing had said it was there (only a translation's hand edit was reported). Now every
+save over an XSLT (`save_xslt`, `build_translation_xslt`, `draft_cef_mapping`; all through `update_xslt`) whose code
+changed since the server last saved it (its digest) checks the new code keeps the edit. What the edit changed is read
+from the XSLT against what its kept mapping or plan generates (`utils/handedit.py`): the element and key names it
+writes (`<number key="bytes">`, `<Data Name="device_class">`) and the constants in them, and the XPaths it reads (`select`, `test`, `{...}` in
+attribute values), counted. New code keeps the edit when it still writes and reads what the edit added, and doesn't
+again what it took out, however it is written: the edit carried into the plan comes back in the generator's style
+(with `xsl:if` round it, brackets and whitespace its own, a templated object's fields read relative to its element).
+Code that undoes it is refused, saying what it undoes, what the edit changed (`-`/`+`, element by element) and how to
+carry it: into the index plan as a field (name, type, source), into the CEF plan's overrides, or into the mapping with
+`rebuild_mapping` (which proves the edit carried on the sample, so its own save isn't checked). With no kept plan (an
+XSLT the agent wrote), everything the XSLT writes and reads now counts as the edit's. `discard_hand_edit=true` saves
+over it, only when the user says to drop the edit.
+
+Where the agent's change is to a field the edit changed too, the two collide, and the user decides, field by field
+(asked for by the user: keep their hand edit, or overwrite it with the proposed field). The fields the change touches
+are the plan's that differ from the kept plan (an index field by name, a CEF key per kind of event, a translation's
+path per rule); each thing the edit changed carries the names it is written as (the key or element round an
+expression, the elements an `xsl:if` holds), matched to those fields' names and sources. Each collision is a question
+naming the field, what the edit did, what the plan had and what the change proposes, with two options (Keep my hand
+edit, Use the proposed field): a form where the client has them, else `needs_guidance` for the agent to ask, answered
+with `hand_edit_choices={field: 'keep' or 'overwrite'}`. Nothing is saved until every collision is answered. The
+answers are kept for the session against the XSLT as it is, so carrying the rest isn't asked again. Overwrite lets
+that field's part of the edit go; keep leaves the change to it out, and the edit is carried like any other. What the
+edit changed outside the changed fields is never asked about: it is carried, or the save refused. `build_status` reports an index or CEF plan's XSLT edited by hand,
+as it does a translation's, and the documentation's Field mapping section notes it. An XSLT saved before digests were
+recorded is not checked: whether it changed since can't be told.
+
 **Regenerating from the kept mapping.** `build_translation_xslt uuid=<xslt>` with neither `mapping` nor `changes`
 regenerates the XSLT from the mapping kept with it (and the schema version it was saved for), as the generator writes
 it now; the change is recorded as "Regenerated from its mapping" unless `change` says otherwise. `describe_document`
@@ -942,7 +972,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 | Data larger than a model's context | A 15 MB, 200,000-record file sent to Stroom directly, onboarded from its stream id, every record processed, no tool reply over 64,000 characters | `dev/e2e_large_sample.py` |
 | Errors and invalid data | The agent's own errors fixed first; errors the user accepts as benign, documented and not raised again; Elasticsearch rejections reported per document; data that is not well-formed caught | `dev/e2e_errors.py` |
 | Evaluating and fixing existing pipelines | A health check of a production pipeline (errors and schema compliance first, then its mapping and events), suggested fixes proven, a reported issue located, reproduced, proven and applied in place | `dev/e2e_evaluate_and_fix.py`: on a pipeline the server did not build, a schema failure found (one record lost), a proven fix for it, and a reported issue fixed in place with a backup |
-| Indexing | Lucene and Elasticsearch; field plans from conventions or the user's example index template; templates agreed, then committed; discovery indices; versioned copies; verification | `dev/e2e_lucene_indexing.py` (a v2 copy indexes an added field beside v1); `dev/e2e_index_versions.py` (a v2 of a production Elasticsearch indexing pipeline: only the added field differs, its template from v1's, new Events only, v1 still running); `dev/e2e_elastic_handover.py --live` and `dev/e2e_discovery.py` against Elasticsearch 9: events indexed, every search found through Stroom and directly, each hit traced to its record |
+| Indexing | Lucene and Elasticsearch; field plans from conventions or the user's example index template; templates agreed, then committed; discovery indices; versioned copies; verification | `dev/e2e_lucene_indexing.py` (a v2 copy indexes an added field beside v1); `dev/e2e_index_versions.py` (a v2 of a production Elasticsearch indexing pipeline: only the added field differs, its template from v1's, new Events only, v1 still running); `dev/e2e_elastic_handover.py` (an ECS field added to the indexing XSLT by hand in Stroom: reported by `build_status`, the plan's regeneration refused, saved once carried into the plan, stepped clean; then a field's source changed both by hand and by the plan: the user asked, and their choice of the proposed field saved); `dev/e2e_elastic_handover.py --live` and `dev/e2e_discovery.py` against Elasticsearch 9: events indexed, every search found through Stroom and directly, each hit traced to its record |
 | The plan as guidance | Every state of the plan, in order and out of it, names the right step and call; following `next` reaches promotion without a refusal; wrong moves are stopped with the call that puts them right | `tests/test_off_path.py` (the states and the wrong moves, against a mocked Stroom), `dev/e2e_plan_walk.py` (the walk, on Lucene and Elasticsearch) |
 | Clients | Sign-in as the user, forms for confirmations and approvals, VS Code setup, the evaluation set of 21 samples (`dev/eval`), with headless Claude Code as the agent (`run_agent.py`) | Sign-in as VS Code does it works end to end (`dev/e2e_oauth.py`); every case's reference solution passes on the local stack. An agent on the default model passes every case with no hints, each case in most of its runs (`--repeat`); lighter models are measured against the same bar |
 | Deployment | Container image, Helm chart, TLS, CI; the e2e suites against a live instance | Released as a container image and Helm chart; the translation, existing-feed and generator suites pass on the live instance and are cleaned up afterwards |

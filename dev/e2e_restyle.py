@@ -342,8 +342,17 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     blocking = json.dumps(stepped.get('groups') or [])
     check(stepped['verdict'] == 'blocking' and 'function named' in blocking,
           f"stepping it: {stepped['verdict']}, {blocking[:160]}")
+    # Regenerating would undo the edit: refused, saying what it changed (asked for by the user: a hand edit kept).
+    try:
+        await generation.build_translation_xslt(ctx, uuid=xslt['uuid'], stream_ids=raws, include_xslt=False)
+        said = ''
+    except Exception as e:
+        said = str(e)
+    check(said.startswith('Not saved:') and "stroom:extract($body,'logid')" in said
+          and 'discard_hand_edit' in said, f"regenerating over the edit is refused: {said[:200]}")
+    # The user says to drop it (it breaks the translation): saved over.
     again = await generation.build_translation_xslt(ctx, uuid=xslt['uuid'], stream_ids=raws, include_xslt=False,
-                                                    change='Regenerated over a hand edit')
+                                                    change='Regenerated over a hand edit', discard_hand_edit=True)
     check(again['ok'] and await drift_of(ctx, build, pipeline['name']) == '', 'regenerated again: clean')
 
     print('\n### 6. a function call given as a field is refused')

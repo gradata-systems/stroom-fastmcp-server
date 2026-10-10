@@ -15,6 +15,15 @@ it (`ecs_check`: a name in an ECS field set that ECS doesn't define, or a known 
 composes Elastic's `ecs@mappings`, and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
 name one ECS's way. A field of the user's own goes outside ECS's field sets.
 
+The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
+index_plan=... uuid=`). An edit the user made by hand in Stroom since (another field written, one taken out, a source
+changed) is kept: a save that would undo it is refused, saying what it changed. Carry it into the plan (a field it
+added as a field of the plan, with its name, type and source XPath) and save again; `discard_hand_edit=true` only when
+the user says to drop it. `build_status` reports such an edit. Where your change is to a field they edited too, the
+user is asked, per field, whether to keep their edit or use the proposed field: in a form, or as `needs_guidance`
+with the questions to ask them exactly, answered by calling again with `hand_edit_choices={field: 'keep' or
+'overwrite'}`. Never answer for them. If they keep it, leave your change to that field out and carry their edit.
+
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
 index's mapping) and the component templates it is composed of. Give it to `draft_index_mapping` as well as to
 `propose_index_template`: the plan's field names then follow it (the example's `User.Id` for the user and `TypeId`
