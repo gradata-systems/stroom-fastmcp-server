@@ -37,9 +37,13 @@ async def test_the_naming_choice_is_a_form_with_the_options_as_a_picker():
     profiles = {'ecs': {'description': 'ECS'}, 'stroom-flat': {}}
     with patch.object(indexing, '_conventions', lambda ctx: profiles), patch('utils.consent._modern', lambda ctx: False):
         got = await indexing.get_field_conventions(ctx_with(client), backend='elasticsearch')
-    question, options = client.asked[0]
-    assert options == ['From an index template', 'Follow an existing index in Stroom',
-                       'ECS (Elastic Common Schema) convention', 'Stroom flat convention']
+    question, answer = client.asked[0]
+    from fastmcp.server.elicitation import parse_elicit_response_type
+    field = parse_elicit_response_type(answer).schema['properties']['value']
+    assert field['enum'] == ['From an index template', 'Follow an existing index in Stroom',
+                             'ECS (Elastic Common Schema) convention', 'Stroom flat convention']
+    # Titled with the question, which VS Code's chat history shows beside the answer (it showed "Q: Value").
+    assert field['title'] == question == "How should the new index's fields be named?"
     assert got['status'] == 'chosen' and 'draft_index_mapping convention=stroom-flat' in got['hint']
     assert "isn't asked again" in got['hint']
 
@@ -195,3 +199,15 @@ async def test_a_choice_made_in_the_drafts_own_form_drafts_as_chosen():
             patch.object(indexing, '_example_from_index', AsyncMock(return_value=read)) as followed:
         assert await drafting(ctx, convention='ecs') == 'past the questions'
     assert followed.await_args.args[1] == 'f' and len(client.asked) == 2
+
+
+async def test_a_confirmation_is_titled_with_what_it_agrees_to():
+    # Seen in VS Code: every answer in the chat history read "Q: Value"; the question is the field's title now.
+    from fastmcp.server.elicitation import parse_elicit_response_type
+    client = FormClient(SimpleNamespace(value=True))
+    store = ConsentStore(use_elicitation=True)
+    ctx = SimpleNamespace(lifespan_context={'consent': store}, elicit=client.elicit)
+    with patch('utils.consent._modern', lambda ctx: False):
+        assert await store.require(ctx, 'confirmation', 'create_feed', 'Create feed ACME-VPN-V1.0', {'a': 1}, None) is None
+    field = parse_elicit_response_type(client.asked[0][1]).schema['properties']['value']
+    assert field == {'title': 'Create feed ACME-VPN-V1.0', 'type': 'boolean'}

@@ -182,7 +182,8 @@ class ConsentStore:
             try:
                 asked = time.perf_counter()
                 try:
-                    answer = await ctx.elicit(f"{summary}\n\n{_format(details)}", _answer_type(kind, editable))
+                    answer = await ctx.elicit(f"{summary}\n\n{_format(details)}",
+                                              _answer_type(kind, editable, summary))
                 finally:
                     spent_waiting_for_user(round((time.perf_counter() - asked) * 1000))
             except Exception as e:  # client without elicitation support
@@ -190,7 +191,7 @@ class ConsentStore:
             else:
                 data = getattr(answer, 'data', None)
                 # With a value to edit, accepting the form is the confirmation; otherwise its yes/no is.
-                confirmed = True if editable else data
+                confirmed = True if editable else _value(data)
                 agreed = getattr(answer, 'action', None) == 'accept' and bool(confirmed)
                 edits = _settled(editable, {k: getattr(data, k, None) for k in editable})
                 changed = _changed(editable, edits)
@@ -220,34 +221,36 @@ class ConsentStore:
                         f"the new values and no id to get a fresh {kind}."}
 
 
-    async def choose(self, ctx: Any, action: str, question: str, options: list[str]) -> Any:
+    async def choose(self, ctx: Any, action: str, question: str, options: list[str], title: str | None = None) -> Any:
         """The option the user picks in a form, or None when the client can't show one here (the agent then asks
         them). Seen: an agent given the choices asked in the chat, on Gemma and on Claude alike, with no picker.
         Cancelling the form stops the call, as declining a confirmation does. On a modern connection, the form
-        comes back as an input-required result for the tool to return; its answer arrives with the repeated call."""
+        comes back as an input-required result for the tool to return; its answer arrives with the repeated call.
+        title: the question as its answer's heading, where the question itself is long (the question otherwise)."""
         if not self.use_elicitation or not options:
             return None
         if _modern(ctx):
-            return self._choice_round(ctx, action, question, options)
+            return self._choice_round(ctx, action, question, options, title)
         if not hasattr(ctx, 'elicit'):
             return None
         try:
             asked = time.perf_counter()
             try:
-                answer = await ctx.elicit(question, list(options))
+                from typing import Literal
+                answer = await ctx.elicit(question, _titled(title or question, Literal[tuple(options)]))
             finally:
                 spent_waiting_for_user(round((time.perf_counter() - asked) * 1000))
         except Exception as e:  # client without elicitation support
             logger.info("Elicitation unavailable for a choice, left to the agent to ask: %s", e)
             return None
-        chosen = getattr(answer, 'data', None) if getattr(answer, 'action', None) == 'accept' else None
+        chosen = _value(getattr(answer, 'data', None)) if getattr(answer, 'action', None) == 'accept' else None
         audit('choice', action=action, question=question, outcome='chosen' if chosen else 'declined',
               via='elicitation', **({'choice': chosen} if chosen else {}))
         if not chosen:
             raise ToolError(f"The user made no choice: {question}")
         return chosen if chosen in options else None
 
-    def _choice_round(self, ctx: Any, action: str, question: str, options: list[str]) -> Any:
+    def _choice_round(self, ctx: Any, action: str, question: str, options: list[str], title: str | None = None) -> Any:
         """Modern connections: the choice made (kept in the call's state, so a later question in the same call
         can follow it), an input-required result to ask, or None if the client has no forms."""
         state = _call_state(ctx)
@@ -277,7 +280,7 @@ class ConsentStore:
         audit('choice', action=action, question=question, outcome='requested', via='form')
         form = mcp_types.ElicitRequest(params=mcp_types.ElicitRequestFormParams(
             message=question, requested_schema={'type': 'object', 'required': ['choice'], 'properties': {
-                'choice': {'type': 'string', 'title': question, 'enum': list(options)}}}))
+                'choice': {'type': 'string', 'title': heading(title or question), 'enum': list(options)}}}))
         return mcp_types.InputRequiredResult(input_requests={key: form},
                                             request_state=json.dumps(state, sort_keys=True))
 
@@ -330,7 +333,8 @@ class ConsentStore:
                                      f"proposal stands. Decline to stop."}
                 for key, (title, proposed) in editable.items()}} if editable else
                 {'type': 'object', 'required': ['value'], 'properties': {
-                    'value': {'type': 'boolean', 'title': 'Approve' if kind == 'approval' else 'Confirm',
+                    'value': {'type': 'boolean',
+                              'title': heading(summary) or ('Approve' if kind == 'approval' else 'Confirm'),
                               'description': summary}}})))
         return mcp_types.InputRequiredResult(input_requests={key: form},
                                             request_state=json.dumps(state, sort_keys=True))
@@ -431,11 +435,32 @@ def _changed(editable: dict[str, tuple[str, str]], edits: dict[str, str]) -> dic
     return {k: v for k, v in edits.items() if v != editable[k][1]}
 
 
-def _answer_type(kind: str, editable: dict[str, tuple[str, str]]) -> Any:
-    """The classic elicitation's answer: a yes/no, or with values to edit, just a text field for each, its proposal
-    as the default (accepting the form confirms; clients step through fields one at a time)."""
+def heading(text: str, limit: int = 150) -> str:
+    """A question as the heading of its answer: its first line, cut at a word near limit."""
+    first = (text or '').strip().splitlines()[0] if (text or '').strip() else ''
+    return first if len(first) <= limit else first[:limit].rsplit(' ', 1)[0].rstrip(',;:') + '…'
+
+
+def _titled(title: str, answer: Any) -> Any:
+    """A one-field answer whose field is titled with the question. Seen in VS Code: its chat history shows each answer
+    beside its field's title, and a bare yes/no or list of options is wrapped by FastMCP as a field titled 'Value', so
+    every answer read 'Q: Value'. Read back as .value."""
+    from dataclasses import make_dataclass
+    from typing import Annotated
+    from pydantic import Field
+    return make_dataclass('Answer', [('value', Annotated[answer, Field(title=heading(title))])])
+
+
+def _value(data: Any) -> Any:
+    return getattr(data, 'value', data)
+
+
+def _answer_type(kind: str, editable: dict[str, tuple[str, str]], summary: str = '') -> Any:
+    """The classic elicitation's answer: a yes/no (titled with what it agrees to), or with values to edit, just a
+    text field for each, its proposal as the default (accepting the form confirms; clients step through fields one
+    at a time)."""
     if not editable:
-        return bool
+        return _titled(summary or ('Approve' if kind == 'approval' else 'Confirm'), bool)
     from dataclasses import field, make_dataclass
     return make_dataclass('Answer', [(key, str, field(default=proposed, metadata={'title': title}))
                                      for key, (title, proposed) in editable.items()])

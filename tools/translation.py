@@ -367,7 +367,9 @@ async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str
                    f"{len(clashes)} field{'s' if len(clashes) > 1 else ''} the edit changed too: {', '.join(clashes)}"
                    + (f" (the edit changed {others} other thing{'s' if others > 1 else ''} as well)" if others else '')
                    + ". Overwrite the XSLT with the change, dropping your hand edits, or decide field by field?")
-        chosen = await consent_from(ctx).choose(ctx, 'hand_edit', upfront, [OVERWRITE_ALL, PER_FIELD])
+        chosen = await consent_from(ctx).choose(ctx, 'hand_edit', upfront, [OVERWRITE_ALL, PER_FIELD],
+                                                f"XSLT '{doc.get('name')}', edited by hand: overwrite it, or decide "
+                                                f"field by field?")
         if chosen in (OVERWRITE_ALL, PER_FIELD):
             decided['*'] = 'overwrite' if chosen == OVERWRITE_ALL else 'per_field'
             upfront = None
@@ -385,7 +387,8 @@ async def hand_edit_gate(ctx: Context, doc: dict[str, Any], code: str, kind: str
                     + (f" (the plan had {old})" if old and proposed else '') + ". Keep your hand edit, or use the "
                     f"proposed field?")
         # Unanswered up front (no form): the per-field questions go to the agent with it, for one round in the chat.
-        chosen = None if upfront else await consent_from(ctx).choose(ctx, 'hand_edit', question, [KEEP, OVERWRITE])
+        chosen = None if upfront else await consent_from(ctx).choose(
+            ctx, 'hand_edit', question, [KEEP, OVERWRITE], f"{label}, edited by hand: keep your edit, or use the proposed one?")
         if chosen is None:
             asked.append({'field': label, 'question': question, 'options': {'keep': KEEP, 'overwrite': OVERWRITE}})
         elif chosen in (KEEP, OVERWRITE):
