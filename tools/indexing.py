@@ -24,7 +24,7 @@ from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from, edited
 from utils.fielddoc import index_field_mapping_markdown
-from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
+from utils.fieldplan import ECS_COMPONENT, Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
@@ -181,6 +181,9 @@ async def get_field_conventions(
         backend: Annotated[Backend | None, Field(description="The index's backend: for Elasticsearch, the user's example "
                                                              "comes first (an index template, or an existing index in "
                                                              "Stroom), a convention profile only without one.")] = None,
+        ecs_fields: Annotated[str | None, Field(description=(
+            "With name=ecs: the ECS fields under a field set or prefix (e.g. 'process', 'user.target'), each with its "
+            "type and what it holds, to name a field ECS's way."))] = None,
 ) -> dict[str, Any]:
     """
     Field naming conventions for indexes. Without a name (and no configured default) this lists the profiles
@@ -296,7 +299,16 @@ async def get_field_conventions(
                 fields = await stroom.post('/dataSource/v1/findFields', {
                     'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
                 reference[f"{ref['type']} {doc_name}"] = {f['fldName']: f['fldType'] for f in fields.get('values') or []}
-    return {'name': name, 'profile': profile, 'reference_fields': reference}
+    out = {'name': name, 'profile': profile, 'reference_fields': reference}
+    if name == 'ecs':
+        # The full schema, as Elastic publishes it: plans following ECS are checked against it.
+        from utils import ecs
+        out['ecs'] = {'version': ecs.version(), 'field_sets': ecs.schema()['field_sets'],
+                      'note': "Names in these field sets must be ECS fields (draft_index_mapping and save_xslt check "
+                              "them); a field of the user's own goes outside them. ecs_fields='<set>' lists a set."}
+        if ecs_fields:
+            out['ecs_fields'] = ecs.fields_in(ecs_fields)
+    return out
 
 
 def _draft_discovery(backend: str, index_name: str, discovery: Discovery) -> dict[str, Any]:
@@ -417,13 +429,21 @@ async def draft_index_mapping(
     populated = events['path_population']
     fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
               PlannedField(name='EventId', type='id', source='@EventId')]
-    unused = []
+    unused, mapped, ecs_unplaced = [], [], []
     for path, spec in (profile.get('field_map') or {}).items():
+        if example_template and path.startswith('EventDetail/*/'):
+            # Any action's Action or Outcome as one field (ECS's event.action): ECS's way, not the example's, which
+            # names each action's own (Authenticate.Action).
+            continue
         # A name is planned once, from the first of its paths the sample populates (the client's address, else the
         # source address of whichever Network action the event records).
         if population_of(path, populated) and not any(f.name == spec['name'] for f in fields):
-            fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path))
-        elif not population_of(path, populated):
+            fields.append(PlannedField(name=spec['name'], type=spec['type'], source=path,
+                                       transform=spec.get('transform')))
+            mapped.append(path)
+        elif population_of(path, populated):
+            mapped.append(path)
+        else:
             unused.append(path)
     # What happened, from the event's action element (Alert's Type and Severity, Authenticate's Action and Outcome,
     # Process, Update), planned by default: a user asked for these each time. Network's are the profile's.
@@ -433,16 +453,36 @@ async def draft_index_mapping(
     for path in sorted(populated):
         if (added >= 20 or not populated[path] or not path.startswith('EventDetail/') or 'Data' in path.split('/')
                 or path.startswith('EventDetail/Network/') or not field_group(path)
-                or any(source_matches(f.source, path) for f in fields)):
+                or any(source_matches(f.source, path) for f in fields)
+                or any(source_matches(m, path) for m in mapped)):
             continue
         taken = {f.name for f in fields}
         name = nested_name(path, 'ecs') if nested else _derive(path, 'pascal', False, taken)
         if not name or name in taken:
             continue
-        fields.append(PlannedField(name=name, source=path,
-                                   type='boolean' if path.endswith('/Success') else 'long' if path.endswith('/Port')
-                                   else 'keyword'))
+        type_ = 'boolean' if path.endswith('/Success') else 'long' if path.endswith('/Port') else 'keyword'
+        if convention == 'ecs' and not example_template:
+            from utils.ecs import check as ecs_check
+            if ecs_check(name, type_):
+                # A name in an ECS field set that ECS doesn't define (process.type): not drafted, for the user to
+                # name, as ECS asks, outside its field sets.
+                ecs_unplaced.append(f"{path}: {name} would be in an ECS field set without being an ECS field; not "
+                                    f"planned (name it outside ECS's field sets if the user wants it)")
+                continue
+        fields.append(PlannedField(name=name, source=path, type=type_))
         added += 1
+    # ECS: a Data element whose name is an ECS field's, written another way (source_ip, SourceIp as source.ip), under
+    # that name and ECS's type. A draft for the user to review: abbreviations (src_ip) are not guessed.
+    ecs_data = []
+    if convention == 'ecs':
+        from utils.ecs import for_data_name, plan_type
+        for path, names in (events.get('data_names') or {}).items():
+            for data_name in names:
+                ecs_name = for_data_name(data_name)
+                if ecs_name and "'" not in data_name and not any(f.name == ecs_name for f in fields):
+                    fields.append(PlannedField(name=ecs_name, type=plan_type(ecs_name),
+                                               source=f"{path}[@Name='{data_name}']/@Value"))
+                    ecs_data.append(f"Data '{data_name}' ({path}) as ECS's {ecs_name}")
     example_notes, subobjects = [], True
     if example_template:
         try:
@@ -487,7 +527,7 @@ async def draft_index_mapping(
         example_notes.append(f"{sorted(values)}: written by the shared template {use.template} ({use.href})"
                              + ('' if found else '; not found as an XSLT document, so typed as a keyword'))
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
-                     subobjects=subobjects, shared=list(shared))
+                     subobjects=subobjects, shared=list(shared), convention=convention)
     if pasted and backend == 'elasticsearch':
         build = await _build_of_stream(ctx, events_stream_ids[0])
         if build:
@@ -507,6 +547,9 @@ async def draft_index_mapping(
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
             **({'from_example': example_notes} if example_template or shared else {}),
+            **({'ecs_data_elements': ecs_data} if ecs_data else {}),
+            **({'ecs_not_planned': ecs_unplaced} if ecs_unplaced else {}),
+            **({'ecs_check': plan.convention_problems()} if plan.convention_problems() else {}),
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
                     "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
                     "write_documentation generates the Field mapping section."}
@@ -1467,6 +1510,10 @@ async def propose_index_template(
         body, notes = from_example(body, example, components, discovery=plan.discovery is not None)
         if kept_note:
             notes.insert(0, kept_note)
+        if plan.convention == 'ecs' and ECS_COMPONENT not in (body.get('composed_of') or []):
+            # The user's example is followed as it is; said, so they can add Elastic's recommended base.
+            notes.append(f"the example doesn't compose {ECS_COMPONENT}, Elastic's recommended base for an ECS index "
+                         f"template (built in from Elasticsearch 8.13): add it to composed_of if the user wants it")
     stroom = gateway_from(ctx)
     if not example_template and not without_example:
         # No template to commit yet: one handed out now would be applied to the cluster without the user's

@@ -246,6 +246,9 @@ async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: Tran
             pass
     elif index_plan is not None:
         doc['description'] = with_mapping(doc.get('description'), 'index', index_plan.model_dump())
+        if index_plan.convention_problems():
+            # Saved all the same: a field of the user's own may be meant. Said so they decide.
+            extra['ecs_check'] = index_plan.convention_problems()
     elif cef_plan is not None:
         doc['description'] = with_mapping(doc.get('description'), 'cef', cef_plan.model_dump(exclude_defaults=True))
     return extra

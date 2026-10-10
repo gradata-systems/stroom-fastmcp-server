@@ -355,6 +355,19 @@ def _leaf_paths(event: etree._Element) -> set[str]:
     return paths
 
 
+def _data_names(event: etree._Element) -> set[tuple[str, str]]:
+    """(path of the Data element, its Name) for each Data element with a value, ignoring repeats."""
+    names = set()
+    for data in event.iter(f'{{{EVT}}}Data'):
+        if data.get('Name') and (data.get('Value') or '').strip():
+            parts, current = [], data
+            while current is not None and current is not event:
+                parts.append(etree.QName(current).localname)
+                current = current.getparent()
+            names.add(('/'.join(reversed(parts)), data.get('Name')))
+    return names
+
+
 async def summarise_events(
         ctx: Context,
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to profile.")],
@@ -369,6 +382,7 @@ async def summarise_events(
     types, type_ids, actions = Counter(), Counter(), Counter()
     examples: dict[str, int] = {}
     populated: Counter = Counter()
+    data_names: Counter = Counter()
     count = 0
     for stream_id in stream_ids:
         records, _ = await read_records(stroom, stream_id, 0, max_events - count, None, 50_000_000)
@@ -386,11 +400,16 @@ async def summarise_events(
                 if action_el is not None:
                     actions[f"{kind}/{(action_el.findtext(f'{{{EVT}}}Action') or '(none)').strip()}"] += 1
                 populated.update(_leaf_paths(event))
+                data_names.update(_data_names(event))
         if count >= max_events:
             break
     return {'events': count, 'event_types': dict(types.most_common()), 'type_ids': dict(type_ids.most_common(50)),
             'actions': dict(actions.most_common(50)),
             'path_population': {p: round(100 * n / count, 1) for p, n in sorted(populated.items())} if count else {},
+            # Which Data elements each Data path holds, by Name (each as a percentage of events): the path alone
+            # doesn't say, and an index plan maps them one by one.
+            'data_names': {path: {name: round(100 * n / count, 1) for (p, name), n in sorted(data_names.items()) if p == path}
+                           for path in sorted({p for p, _ in data_names})} if count else {},
             'hint': "Percentages are of events sampled; raise max_events for a fuller picture."
             if count >= max_events else None}
 

@@ -76,3 +76,32 @@ async def test_without_an_example_the_profiles_style_names_them():
         nested, _ = await draft(convention='ecs', without_example=True)
     assert flat['EventDetail/Alert/Type'] == 'AlertType' and flat['EventDetail/Network/*/Source/Port'] == 'SourcePort'
     assert nested['EventDetail/Alert/Type'] == 'alert.type' and nested['EventDetail/Network/*/Source/Port'] == 'source.port'
+
+
+async def test_following_ecs_what_happened_and_data_elements_are_named_as_ecs_names_them():
+    # Asked by the user: the full ECS schema, not only the profile's few names. Any action's Action and Outcome as
+    # ECS's event.action and event.outcome (success/failure), a Data element whose name is an ECS field's under that
+    # name, and the template composed of Elastic's ecs@mappings.
+    profiles = {p.stem: yaml.safe_load(p.read_text(encoding='utf-8')) for p in CONVENTIONS.glob('*.yaml')}
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(default_convention=None))})
+    summary = {'path_population': POPULATED, 'data_names': {
+        'EventDetail/Network/Permit/Data': {'user_agent_original': 35.0, 'session_id': 35.0}}}
+    agreed = SimpleNamespace(require=AsyncMock(return_value=None))
+    with patch.object(indexing, 'summarise_events', AsyncMock(return_value=summary)), \
+            patch.object(indexing, '_conventions', lambda c: profiles), \
+            patch.object(indexing, 'consent_from', lambda c: agreed), \
+            patch.object(indexing, '_build_of_stream', AsyncMock(return_value=None)):
+        result = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'ecs-firewall-v1', events_stream_ids=[1],
+                                                    convention='ecs', without_example=True)
+    fields = {f['name']: f for f in result['plan']['fields']}
+    assert fields['event.action']['source'] == 'EventDetail/*/Action'
+    assert fields['event.outcome']['transform'] == 'outcome' and fields['process.command_line']['type'] == 'keyword'
+    assert not {'authenticate.action', 'authenticate.outcome.success', 'process.action'} & set(fields)   # not twice
+    # A derived name in an ECS field set that ECS doesn't define is left for the user to name; one outside ECS's
+    # field sets (alert.type) is a custom field, which ECS allows.
+    assert 'process.type' not in fields and any(n.startswith('EventDetail/Process/Type') for n in result['ecs_not_planned'])
+    assert 'alert.type' in fields
+    assert fields['user_agent.original']['source'] == "EventDetail/Network/Permit/Data[@Name='user_agent_original']/@Value"
+    assert not any('session_id' in f['source'] for f in fields.values())                 # not an ECS field's name
+    assert result['ecs_data_elements'] and 'ecs_check' not in result
+    assert result['plan']['convention'] == 'ecs' and result['rendered']['body']['composed_of'] == ['ecs@mappings']

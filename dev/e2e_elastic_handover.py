@@ -270,10 +270,14 @@ async def main():
         alone = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=standalone)
         built = json.loads(alone['dev_tools'].split('\n', 1)[1])
         props = built['template']['mappings']['properties']
+        notes = alone.get('from_example') or []
         e2e.check(alone.get('status') == 'needs_review' and 'composed_of' not in built and built['priority'] == 120
                  and not alone.get('component_templates')
-                 and not any('composed_of' in n for n in alone.get('from_example') or []),
+                 and not any('composed_of' in n and 'ecs@mappings' not in n for n in notes),
                  'built with no component templates, none asked for')
+        # The plan follows ECS: Elastic's recommended base is suggested, the user's example still followed as it is.
+        e2e.check(any("doesn't compose ecs@mappings" in n for n in notes),
+                  'the example not composing ecs@mappings is said, not changed')
         e2e.check(props['StreamId'] == {'type': 'long'} and props['@timestamp'] == {'type': 'date'}
                  and props['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128}
                  and props['host']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128},

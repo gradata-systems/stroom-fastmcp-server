@@ -50,6 +50,8 @@ LUCENE = {
 ELASTIC = {'id': 'long', 'keyword': 'keyword', 'text': 'text', 'date': 'date', 'long': 'long',
            'double': 'double', 'boolean': 'boolean', 'ip': 'ip'}
 _ES_JSON_ELEMENT = {'id': 'number', 'long': 'number', 'double': 'number', 'boolean': 'boolean'}
+# Elasticsearch's built-in component template mapping ECS fields (8.13 and later): composed by an ECS plan's template.
+ECS_COMPONENT = 'ecs@mappings'
 
 
 class PlannedField(BaseModel):
@@ -57,6 +59,15 @@ class PlannedField(BaseModel):
     type: LogicalType
     source: str = Field(description="XPath from the Event element, e.g. 'EventSource/User/Id' or '@StreamId'.")
     description: str = ''
+    transform: Literal['outcome'] | None = Field(None, description=(
+        "outcome: an Outcome/Success (true/false) as ECS's event.outcome (success/failure); left out with no Outcome."))
+
+    def value(self, at: str | None = None) -> str:
+        """The XPath for the value written, from the source (or at, the source relative to a template's element)."""
+        at = at or self.source
+        if self.transform == 'outcome':
+            return f"{at} ! (if (. = 'false') then 'failure' else 'success')"
+        return at
 
 
 class Discovery(BaseModel):
@@ -151,6 +162,17 @@ class FieldPlan(BaseModel):
         "Elasticsearch: the index template's subobjects setting, from the user's example. Documents are written "
         "nested either way (user.id, user.name -> \"user\": {\"id\", \"name\"}). With false, the template maps "
         "each dotted name as a field of its own, and a value may sit beside its dotted names (time, time.min)."))
+    convention: str | None = Field(default=None, description=(
+        "The naming convention the plan follows (draft_index_mapping's), e.g. 'ecs': its names and types are "
+        "checked against it."))
+
+    def convention_problems(self) -> list[str]:
+        """Where the plan departs from its convention: for ECS, names in its field sets it doesn't define, and
+        types that don't map to its own (utils/ecs)."""
+        if self.convention != 'ecs':
+            return []
+        from utils.ecs import problems
+        return problems(self.fields)
 
     @classmethod
     def for_discovery(cls, index_name: str, discovery: Discovery) -> 'FieldPlan':
@@ -214,8 +236,13 @@ class FieldPlan(BaseModel):
             node[parts[-1]] = {'type': ELASTIC[f.type]}
         mappings: dict[str, Any] = {'dynamic': False, **({} if self.subobjects else {'subobjects': False}),
                                     'properties': properties}
-        return {'name': template_name, 'body': {
-            'index_patterns': [f'{self.index_name}*'], 'priority': priority, 'template': {'mappings': mappings}}}
+        body: dict[str, Any] = {'index_patterns': [f'{self.index_name}*'], 'priority': priority}
+        if self.convention == 'ecs':
+            # Elastic's recommended base for an ECS index template: its built-in component template, mapping ECS
+            # fields by name. The plan's own properties still set each planned field's type (an index template's
+            # mappings override its components').
+            body['composed_of'] = [ECS_COMPONENT]
+        return {'name': template_name, 'body': {**body, 'template': {'mappings': mappings}}}
 
     def _discovery_template(self, priority: int) -> dict[str, Any]:
         """Permissive: dynamic mapping, strings as keywords, guardrails; explicit types only for the fields Stroom
@@ -357,7 +384,8 @@ class FieldPlan(BaseModel):
                 return _call(f, indent)
             element = _ES_JSON_ELEMENT.get(f.type, 'string')
             at = source or f.source
-            return f'{indent}<xsl:if test="{at}"><{element} key="{key}"><xsl:value-of select="{at}" /></{element}></xsl:if>'
+            return (f'{indent}<xsl:if test="{at}"><{element} key="{key}"><xsl:value-of select="{f.value(at)}" />'
+                    f'</{element}></xsl:if>')
         # A field a shared template writes is not written here: the template is called in its place.
         items: list[Any] = [f for f in self.fields if not self.written_by(f.name)] + list(self.shared)
 
@@ -482,7 +510,7 @@ class FieldPlan(BaseModel):
         if self.discovery:
             return self._discovery_xslt(version)
         if self.backend == 'lucene':
-            body = '\n'.join([f'      <data name="{f.name}" value="{{{f.source}}}" />' for f in self.fields
+            body = '\n'.join([f'      <data name="{f.name}" value="{{{f.value()}}}" />' for f in self.fields
                               if not self.written_by(f.name)]
                              + [_call(u, '      ') for u in self.shared])
             return f"""<?xml version="1.1" encoding="UTF-8"?>

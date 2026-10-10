@@ -10,6 +10,11 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 | XSLT output | `records:2` | `xpath-functions` JSON XML |
 | Fields | On the index doc (`create_index_doc` with the plan) | An Elasticsearch index template, built by `propose_index_template` from the user's example (an index template or an index's mapping, with its component templates) and applied to the cluster by its admin |
 
+Following ECS (the `ecs` profile, no example): the server has the full schema. The plan's names are checked against
+it (`ecs_check`: a name in an ECS field set that ECS doesn't define, or a known field of another type), the template
+composes Elastic's `ecs@mappings`, and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
+name one ECS's way. A field of the user's own goes outside ECS's field sets.
+
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
 index's mapping) and the component templates it is composed of. Give it to `draft_index_mapping` as well as to
 `propose_index_template`: the plan's field names then follow it (the example's `User.Id` for the user and `TypeId`
