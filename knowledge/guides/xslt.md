@@ -232,3 +232,12 @@ declared again in every template that reads it. A part several rules write the s
 of its own and applied from each (EventSource, and below an action element, a Source, a Destination, a Rule or an
 Outcome: the action element itself, Deny or Permit, Authenticate or View, may differ). These come from the mapping,
 which is what is changed; the XSLT is regenerated from it.
+
+## Regenerating a saved XSLT
+
+The mapping an XSLT was generated from is kept with it. `build_translation_xslt uuid=<xslt>`, with no mapping and no
+changes, regenerates it from that mapping as the generator writes it now: after a server upgrade changes the style
+defaults, this is how an XSLT is brought up to them. Never send the kept mapping back whole; `describe_document`
+summarises it (`mapping=true` shows it, to read). `build_status` says when an XSLT was written by an earlier generator
+(and is unchanged since), as against edited by hand: a hand edit is carried into the mapping (`changes=`) first, or it
+is lost when the XSLT is regenerated.

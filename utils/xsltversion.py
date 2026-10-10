@@ -87,12 +87,28 @@ def pending_of(description: str | None) -> dict[str, Any] | None:
         return None
 
 
+def last_saved(description: str | None, code: str | None) -> dict[str, str] | None:
+    """What the server recorded of its last save of this code: the newest pending entry with a digest, else the
+    newest version history line ({'digest', 'by'}); None when nothing was recorded (saved before digests were)."""
+    entries = [e for e in (pending_of(description) or {}).get('entries') or [] if e.get('digest')]
+    if entries:
+        return {'digest': entries[-1]['digest'], 'by': entries[-1].get('by') or ''}
+    history = rows(code or '')
+    return {'digest': history[-1]['digest'], 'by': history[-1].get('by') or ''} if history else None
+
+
+def untouched(description: str | None, code: str | None) -> bool | None:
+    """Whether the code is exactly what the server last saved (True), changed since (False), or unknown (None)."""
+    saved = last_saved(description, code)
+    return None if saved is None else saved['digest'] == _digest(code or '')
+
+
 def without_pending(description: str | None) -> str:
     return _PENDING.sub('\n\n', description or '').strip()
 
 
 def with_pending(description: str | None, previous: dict[str, Any] | None, author: str, change: str, by: str,
-                 now: datetime | None = None) -> str:
+                 now: datetime | None = None, code: str | None = None) -> str:
     """The description with this change added to the build's pending changes. The first also keeps what the code
     was before the build touched it, so an edit made by hand before then is recorded too."""
     now = now or datetime.now(timezone.utc)
@@ -101,7 +117,8 @@ def with_pending(description: str | None, previous: dict[str, Any] | None, autho
         old = (previous or {}).get('data') or ''
         pending['base'] = {'digest': _digest(old), 'user': (previous or {}).get('updateUser'),
                            'time_ms': (previous or {}).get('updateTimeMs')} if old else None
-    pending['entries'].append({'date': now.strftime('%Y-%m-%d'), 'author': author or '-', 'change': change, 'by': by})
+    pending['entries'].append({'date': now.strftime('%Y-%m-%d'), 'author': author or '-', 'change': change, 'by': by,
+                               **({'digest': _digest(code)} if code is not None else {})})
     return (without_pending(description) + '\n\n' + PENDING_START + '\n' + json.dumps(pending, indent=1) + '\n'
             + PENDING_END).strip()
 

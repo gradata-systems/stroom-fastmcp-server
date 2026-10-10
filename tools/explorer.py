@@ -93,6 +93,9 @@ async def describe_document(
             description="Documentation only: return just the passages mentioning this (case-insensitive; several "
                         "terms separated by |), e.g. an event id, for a long reference document.")] = None,
         context_lines: Annotated[int, Field(ge=0, le=60, description="With find: lines kept around each match.")] = 8,
+        mapping: Annotated[bool, Field(description=(
+            "XSLT only: the mapping kept with it, whole, to read. Not needed to change it (build_translation_xslt "
+            "uuid= changes= only what changes) or to regenerate it (uuid= alone)."))] = False,
 ) -> dict[str, Any]:
     """
     A document's full content by type and UUID (XSLT, TextConverter and Documentation content verbatim in
@@ -126,6 +129,7 @@ async def describe_document(
         doc['pipeline'] = await describe_pipeline(uuid, ctx)
     elif type == 'XSLT':
         doc['translation'] = await describe_translation(ctx, xslt=doc.get('data') or '')
+        _kept_summary(doc, uuid, mapping)
     elif type in ('ElasticIndex', 'Index'):
         from tools.indexing import survey_index
         try:
@@ -138,6 +142,42 @@ async def describe_document(
             survey['fed_by'] = [{**p, 'plan': bool(p['plan'])} for p in survey['fed_by']]
             doc['survey'] = survey
     return doc
+
+
+def _kept_summary(doc: dict[str, Any], uuid: str, whole: bool) -> None:
+    """The mapping kept in an XSLT's description as a summary, and its pending changes as their lines: seen in
+    production, the whole mapping (1,400 lines) was spilled by the client to a file, which the agent read in parts and
+    then sent back whole to regenerate the XSLT."""
+    from utils.mappingstore import _BLOCK, read_mapping
+    from utils.xsltversion import pending_of, without_pending
+    description = doc.get('description') or ''
+    kept, pending = read_mapping(description), pending_of(description)
+    if not kept and not pending:
+        return
+    doc['description'] = without_pending(_BLOCK.sub('', description)).strip()
+    if pending:
+        doc['pending_changes'] = [e.get('change') for e in pending.get('entries') or []]
+    if not kept:
+        return
+    kind, payload = kept
+    if whole:
+        doc['kept_mapping'] = {'kind': kind, **payload}
+        return
+    summary: dict[str, Any] = {'kind': kind}
+    if kind == 'translation':
+        from tools.describe import _event_kinds
+        body = payload.get('mapping') or {}
+        summary.update({'schema_version': payload.get('schema_version'), 'input': body.get('input'),
+                        'rules': _event_kinds(body), 'common_entries': len(body.get('common') or []),
+                        'extractions': len(body.get('extract') or []),
+                        'style': body.get('style') or "the generator's current defaults"})
+        summary['how'] = (f"build_translation_xslt uuid='{uuid}' changes={{...}} changes it (only what changes); "
+                          f"uuid='{uuid}' alone regenerates it as the generator writes it now. describe_document "
+                          f"mapping=true shows it whole, to read; never send it back whole.")
+    else:
+        summary.update({k: (len(v) if isinstance(v, list) else v) for k, v in payload.items()
+                        if not isinstance(v, dict)})
+    doc['kept_mapping'] = summary
 
 
 DOC_CHARS = 30_000     # a Documentation doc's text returned whole up to this; past it, the outline and find=

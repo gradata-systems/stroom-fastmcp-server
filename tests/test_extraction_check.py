@@ -57,3 +57,35 @@ def test_where_it_stops_on_a_regex_that_matches_but_the_text_goes_on():
                                                                          'after: ` 2026`')
     assert where_it_stops('^Sep (\\d+) x', '', ['Sep 27 2026']).startswith('It matches as far as `Sep 27 ` and stops')
     assert 'drop the $' in where_it_stops('^Sep$', '', ['Sep 27'])
+
+
+def kv_mapping(*keys: str) -> TranslationMapping:
+    return TranslationMapping.model_validate({
+        'input': 'json',
+        'extract': [{'field': 'body', 'regex': f'(?:^|\s){k}="([^"]*)"', 'names': [k]} for k in keys],
+        'common': [{'path': 'EventSource/Device/HostName', 'field': 'host'}],
+        'events': [{'name': 'all', 'fields': [{'path': 'EventDetail/TypeId', 'field': keys[0]}]}]})
+
+
+def test_every_sample_text_is_tried_not_the_first_200():
+    # Seen in production: a VPN rule's keys first appeared at the 557th of 3,933 records; reading only the first 200,
+    # the check said they matched nothing, and a sound mapping was refused.
+    import json
+    lines = [{'host': 'fw1', 'body': f'type="traffic" action="deny" n="{n}"'} for n in range(600)]
+    lines[557]['body'] = 'type="event" action="negotiate" remip="10.0.0.1" vpntunnel="hq"'
+    sample = '\n'.join(json.dumps(line) for line in lines)
+    m = kv_mapping('action', 'vpntunnel', 'nothere')
+    records, _ = sample_records(m, sample, None)
+    assert len(records) == 600
+    problems, warnings = check_extractions(m, sample, None, records)
+    assert not any('vpntunnel' in p for p in problems)
+    assert any("matches 1 of the 600 sample texts; the rest leave ['vpntunnel'] empty" in w for w in warnings)
+    # A key no record has is still refused, and the reason says so, not "matches as far as ``".
+    [missing] = [p for p in problems if 'nothere' in p]
+    assert 'none of the 600 sample texts' in missing and 'None of these texts has `nothere="`' in missing
+
+
+def test_a_key_that_is_there_says_where_its_value_stops_matching():
+    texts = ['eventtime=1790 level="notice" logid="0001"']
+    assert where_it_stops(r'(?:^|\s)level=([0-9]+)', '', texts) == \
+        'It finds `level=`, then the regex goes on with `([0-9]+)`, the text with `"notice" logid="0001"`.'

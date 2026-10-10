@@ -652,6 +652,9 @@ def lines_in(output: str) -> list[str]:
             return [v for v in values if 'CEF:' in v]
         except etree.XMLSyntaxError:
             pass
+    # Stroom's stepping puts an XML declaration before a text XSLT's output (seen: '<?xml version="1.1"
+    # encoding="UTF-8"?>CEF:0|...'): not part of the line. A syslog prefix is, and stays.
+    text = re.sub(r'<\?xml[^>]*\?>', '', text)
     return [line.strip() for line in text.splitlines() if line.strip().startswith('CEF:')
             or re.search(r'CEF:\d+\|', line)]
 
@@ -710,7 +713,15 @@ def review(lines: list[str], events: list[etree._Element], custom_keys: bool | N
             flag(f"a header of {len(header)} fields, where CEF has 7 (CEF:n|vendor|product|version|class id|name|severity), "
                  f"or an unescaped | in one", line)
         elif header[6] not in SEVERITIES:
-            flag(f"severity '{header[6]}' is not 0 to 10 (or Low, Medium, High, Very-High)", line)
+            rest = _split_header(line)[1]
+            shifted = re.match(r'(\d{1,2}|Low|Medium|High|Very-High)\|', rest)
+            if shifted and shifted.group(1) in SEVERITIES:
+                # Seen in a pipeline written by hand: 'Secret viewed: a=b|c' as the name, its | not escaped, so 'c'
+                # was read as the severity and the real one began the extension.
+                flag(f"an unescaped | in the header's name or class id (in '{header[5]}|{header[6]}'): escape it as \\|",
+                     line)
+            else:
+                flag(f"severity '{header[6]}' is not 0 to 10 (or Low, Medium, High, Very-High)", line)
         keys = [k for k, _ in pairs]
         for k in sorted({k for k in keys if keys.count(k) > 1}):
             flag(f"key {k} given twice in a line", line)

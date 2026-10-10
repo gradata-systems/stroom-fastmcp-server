@@ -19,12 +19,15 @@ Version = Annotated[str | None, Field(
     description="The document version from the last read; the save is refused if it changed since.")]
 
 
-def _pending(ctx: Context, description: str | None, previous: dict[str, Any] | None, change: str) -> str:
+def _pending(ctx: Context, description: str | None, previous: dict[str, Any] | None, change: str,
+             code: str | None = None) -> str:
     """The description with this change pending: the build's changes become one line of the XSLT's version history
     when the build is promoted, not a line a save."""
     from tools.plan import _user
     from utils.xsltversion import agent_line, with_pending
-    return with_pending(description, previous, _user(ctx), change, agent_line(ctx))
+    # The saved code's digest: a later difference from what its mapping generates is then a hand edit only when the
+    # code changed since; otherwise the generator did (build_status said "edited by hand" after an upgrade).
+    return with_pending(description, previous, _user(ctx), change, agent_line(ctx), code=code)
 
 
 def _summary(doc: dict[str, Any]) -> dict[str, Any]:
@@ -228,7 +231,7 @@ async def create_xslt(
     doc = await stroom.get_doc('XSLT', ref['uuid'])
     doc['data'] = code
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
-    doc['description'] = _pending(ctx, doc.get('description'), None, change or 'Created')
+    doc['description'] = _pending(ctx, doc.get('description'), None, change or 'Created', doc['data'])
     from tools.plan import with_next
     return await with_next(ctx, build, {**_summary(await stroom.put_doc(doc)), **extra})
 
@@ -256,7 +259,7 @@ async def update_xslt(
     from utils.xsltversion import carry
     doc['data'] = carry(code, previous.get('data'))
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
-    doc['description'] = _pending(ctx, doc.get('description'), previous, change or 'Changed')
+    doc['description'] = _pending(ctx, doc.get('description'), previous, change or 'Changed', doc['data'])
     return {**_summary(await stroom.put_doc(doc, version)), **extra}
 
 

@@ -93,3 +93,30 @@ async def test_changes_need_a_mapping_to_change():
         await generation.build_translation_xslt(ctx(), mapping(), changes={'unmatched': 'warn'})
     with pytest.raises(ToolError, match='Give mapping'):
         await generation.build_translation_xslt(ctx())
+
+
+async def test_a_saved_xslt_is_regenerated_from_its_kept_mapping_without_sending_it():
+    # Seen in production: asked to restyle an XSLT, an agent wrote a mapping from memory (refused), then sent the
+    # 1,400-line kept mapping back whole. uuid alone regenerates it, as the generator writes it now.
+    from utils.mappingstore import with_mapping
+    kept = with_mapping('Acme events', 'translation', {'schema_version': '4.1.0',
+                                                       'mapping': mapping().model_dump(exclude_none=True)})
+    gateway = SimpleNamespace(settings=SimpleNamespace(event_logging_version='3.5.2'),
+                              get_doc=AsyncMock(return_value={'description': kept}))
+    from tools import translation
+    saved = {'type': 'XSLT', 'uuid': 'x-1', 'name': 'ACME-Events', 'version': 'v3'}
+    schema = AsyncMock(return_value=SCHEMA)
+    with patch.object(generation, 'event_schema', schema), \
+            patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})), \
+            patch.object(generation, 'gateway_from', lambda c: gateway), \
+            patch.object(translation, 'update_xslt', AsyncMock(return_value=saved)) as update:
+        result = await generation.build_translation_xslt(ctx(), uuid='x-1')
+    assert result['ok'] and result['saved']['version'] == 'v3'
+    assert schema.await_args.args[-1] == '4.1.0'            # the version it was saved for, not the configured one
+    assert update.await_args.kwargs['change'] == 'Regenerated from its mapping'
+    assert [r.name for r in update.await_args.kwargs['mapping'].events] == ['logon', 'other']
+    # The style is today's defaults: interpolated values, variables just in time.
+    assert 'Value="{' in update.await_args.args[2] and '<xsl:attribute name="Value"' not in update.await_args.args[2]
+    # Without a uuid (or build and name) there is nothing to regenerate.
+    with pytest.raises(ToolError, match='uuid= a saved XSLT alone'):
+        await generation.build_translation_xslt(ctx())

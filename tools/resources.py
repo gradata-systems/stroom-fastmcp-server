@@ -195,7 +195,8 @@ Stage 1, events:
    reference data. Give it build and name: it saves the XSLT with the mapping (kept with it, so the documentation is
    generated from it) and returns the document, not the code. Fix reported problems with changes= only the rules
    or entries that change (uuid= the saved XSLT, or the same build and name), not the whole mapping again; hand-edit
-   only what a mapping cannot express.
+   only what a mapping cannot express. To regenerate a saved XSLT as the generator now writes it (its current style),
+   give uuid= alone: never send its kept mapping back.
 5. create_pipeline from that template (with the pipeline_properties build_translation_xslt returned, e.g.
    jsonParser.addRootObject, and references for any lookup maps), then step_sample over every sample stream until the
    verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single records to debug.

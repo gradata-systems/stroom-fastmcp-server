@@ -159,12 +159,26 @@ async def _mapping_to_change(ctx: Context, target: str, uuid: str | None) -> dic
                     "mapping sent before. Nothing was sent for those yet: give the whole mapping.")
 
 
+async def _kept_mapping(ctx: Context, target: str, uuid: str | None) -> tuple[dict[str, Any], str | None]:
+    """The mapping to regenerate from, and the schema version it was saved for: the one kept with the XSLT (uuid),
+    else the one last sent for the build and name."""
+    if uuid:
+        kept = read_mapping((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'))
+        if kept and kept[0] == 'translation' and (kept[1] or {}).get('mapping'):
+            return kept[1]['mapping'], kept[1].get('schema_version')
+        raise ToolError(f"XSLT {uuid} keeps no translation mapping to regenerate from: give the whole mapping "
+                        f"(draft_translation_mapping drafts one)")
+    return await _mapping_to_change(ctx, target, None), None
+
+
 async def build_translation_xslt(
         ctx: Context,
         mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str | None, Field(
             description="The translation mapping: {input, common: [{path, field|value|...}], events: [{name, when, fields}]}. "
                         "Start from draft_translation_mapping and edit it. A field inventory is not a mapping. To fix "
-                        "one already sent, give changes instead.")] = None,
+                        "one already sent, give changes instead. Leave both out, with uuid=, to regenerate a saved "
+                        "XSLT from the mapping kept with it (as the generator now writes it: its current style "
+                        "defaults); never send a kept mapping back whole.")] = None,
         schema_version: Annotated[str | None, Field(
             description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
@@ -244,7 +258,14 @@ async def build_translation_xslt(
                                 f"object. " + ESCAPING)
         mapping, applied = apply_changes(await _mapping_to_change(ctx, target, uuid), changes)
     elif mapping is None:
-        raise ToolError("Give mapping (draft_translation_mapping drafts one), or changes to fix the one sent before")
+        if not target:
+            raise ToolError("Give mapping (draft_translation_mapping drafts one), changes to fix the one sent before, "
+                            "or uuid= a saved XSLT alone to regenerate it from the mapping kept with it")
+        # Regenerated from the mapping kept with the XSLT, as the generator writes it now (seen: an agent asked to
+        # restyle an XSLT sent its 1,400-line kept mapping back whole, after a first attempt written from memory).
+        mapping, kept_version = await _kept_mapping(ctx, target, uuid)
+        version = schema_version or kept_version or version
+        change = change or 'Regenerated from its mapping'
     if isinstance(mapping, str):
         try:
             mapping = json.loads(mapping)

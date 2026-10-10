@@ -84,3 +84,30 @@ def test_a_cef_plan_is_extended_without_moving_what_it_has():
     assert by_path['EventDetail/View/Resource/Name']['key'] not in ('cs1', 'suser')
     assert {a['key'] for a in added if a['path'].startswith('EventDetail/View/Resource')} <= {'cs2', 'cs3', 'cs4', 'cs5', 'cs6'}
     assert all(a['event_type'] == 'View' for a in added) and 'EventSource/User/Id' not in by_path
+
+
+async def test_an_elasticsearch_follow_on_gets_the_admins_delete_before_reindexing():
+    # Asked for by the user: a reindex is handled carefully. The cluster's admin deletes what the old Events streams
+    # put in the index before the affected streams are processed again, or those events are indexed twice.
+    from tools import builds, processing_writes, templates
+    from unittest.mock import patch
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-vault-v1', time_field='@timestamp', fields=[
+        PlannedField(name='StreamId', type='long', source='@StreamId'),
+        PlannedField(name='UserId', type='keyword', source='EventSource/User/Id')])
+    kept = {'kind': 'index', 'payload': plan.model_dump(), 'element': 'xsltFilter', 'xslt': {}}
+    entry = {'uuid': 'p-ix', 'name': 'Vault - Indexing'}
+    with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
+            patch.object(templates, '_shape', AsyncMock(return_value={'stage': 'indexing', 'backend': 'elasticsearch'})), \
+            patch.object(processing_writes, 'elastic_destination',
+                         AsyncMock(return_value={'index name': 'ecs-vault-v1', 'cluster': 'prod-es'})), \
+            patch.object(coverage, 'gateway_from', lambda ctx: SimpleNamespace()):
+        few = await coverage._review_follow_on(None, entry, cef.events_of(EVENTS), {}, [101, 102])
+        many = await coverage._review_follow_on(None, entry, cef.events_of(EVENTS),
+                                                {'from': '2026-10-01T00:00:00Z', 'to': '2026-10-02T00:00:00Z'}, None)
+        none = await coverage._review_follow_on(None, entry, cef.events_of(EVENTS), {}, [])
+    assert few['kind'] == 'index' and 'EventDetail/View/Resource/Type (1 of 1 events)' in few['not_indexed']
+    es = few['elasticsearch']
+    assert es['index'] == 'ecs-vault-v1' and es['cluster'] == 'prod-es' and 'check_index_template' in es['template']
+    assert 'POST ecs-vault-v1/_delete_by_query {"query": {"terms": {"StreamId": [101, 102]}}}' in es['admin']
+    assert 'created from 2026-10-01T00:00:00Z to 2026-10-02T00:00:00Z' in many['elasticsearch']['admin']
+    assert none['elasticsearch']['admin'] == 'No Events streams of the affected raw streams were indexed yet.'

@@ -7,7 +7,8 @@ The CSV feed from the translation suite, indexed on Lucene (the Lucene suite's s
 overview (its events and indexing pipelines, each with its generated documentation found by tag, and the index);
 a field asked about by the user's name for it (user_id for UserId), traced from the index doc's row to its
 event-logging path and the events doc's row, with how to search it; a field nothing names; a feed that doesn't
-exist.
+exist. And a second events pipeline (a v2 being tried) whose processor filter names the feed only by its doc
+reference (Feed IS_DOC_REF, no value: most of a production Stroom's filters): found all the same.
 """
 import asyncio
 import json
@@ -21,7 +22,8 @@ sys.path.insert(0, str(ROOT / 'dev'))
 
 import e2e_translation as e2e  # noqa: E402
 from e2e_lucene_indexing import index_stage  # noqa: E402
-from tools import builds, describe  # noqa: E402
+from tools import builds, describe, pipeline_writes, processing_writes, templates  # noqa: E402
+from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 
 check, agreed = e2e.check, e2e.agreed
@@ -94,6 +96,26 @@ async def main():
         except Exception as e:
             refused = str(e)
         check('No feed named' in refused and csv['feed'] in refused, f"an unknown feed, with feeds named like it: {refused}")
+
+        print('\n### a pipeline reading the feed through a filter naming its doc (IS_DOC_REF)')
+        template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
+                        if c['name'] == 'Event Data (Text)')
+        properties = (await stroom.get_doc('Pipeline', csv['pipeline']['uuid']))['pipelineData']['properties']['add']
+        converter = next(p['value']['entity'] for p in properties if p['element'] == 'dsParser')
+        trial = await agreed(pipeline_writes.create_pipeline, ctx=ctx, build=f"{csv['build']}-v2",
+                             name=f"{csv['feed']}-Events-V2", template_uuid=template['uuid'], reuse_existing_docs=True,
+                             set_properties=[
+                                 PropertyValue(element='dsParser', name='textConverter', doc_uuid=converter['uuid'],
+                                               doc_type='TextConverter'),
+                                 PropertyValue(element='translationFilter', name='xslt', doc_uuid=csv['xslt']['uuid'],
+                                               doc_type='XSLT')])
+        feed_doc = (await stroom.find_documents(csv['feed'], ['Feed'], 5))['values'][0]['docRef']
+        await processing_writes._create_filter(stroom, trial, {'type': 'operator', 'op': 'AND', 'children': [
+            {'type': 'term', 'field': 'Feed', 'condition': 'IS_DOC_REF', 'docRef': feed_doc},
+            {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Raw Events'}]}, 10, 1, None, enabled=False)
+        again = await describe.describe_feed(ctx, csv['feed'])
+        check(any(p['uuid'] == trial['uuid'] and p['kind'] == 'events' for p in again['pipelines']),
+              f"found through its doc reference: {[(p['pipeline'], p['kind']) for p in again['pipelines']]}")
         print('\nALL PASSED')
     finally:
         await stroom.close()

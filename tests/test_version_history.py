@@ -77,3 +77,31 @@ def test_the_docs_version_control_takes_one_row_a_build_and_keeps_an_older_chang
     assert versionlog.pending_of(released) == [] and versionlog.consolidate(released) is None
     fresh = versionlog.with_pending('# New', '', 'Created', 'peter (agent)')
     assert versionlog.NONE_YET in fresh and versionlog.rows_of(versionlog.consolidate(fresh, DAY1))[0]['change'] == 'Created'
+
+
+async def test_drift_tells_a_generator_upgrade_from_an_edit_made_by_hand():
+    # Seen in production after 0.16.43: build_status called a generated XSLT "edited by hand", because the
+    # generator's defaults had changed, and the agent went looking for the edit.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tests.test_xsltgen import SCHEMA, mapping
+    from tools import builds, generation
+    from utils.xsltgen import generate
+    from utils.xsltversion import with_pending
+    m = mapping()
+    old = generate(mapping(style={'variables': 'top', 'data_values': 'attribute'}), SCHEMA, '4.1.0')['xslt']
+    payload = {'schema_version': '4.1.0', 'mapping': m.model_dump(exclude_none=True, exclude_defaults=True)}
+
+    async def drift(code: str, description: str):
+        kept = {'payload': payload, 'xslt': {'uuid': 'x-1', 'data': code, 'description': description}}
+        with patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)):
+            return await builds._drift(SimpleNamespace(), kept)
+    saved = with_pending('', None, 'pk', 'Created', 'stroom-mcp 0.16.42', code=old)
+    upgraded = await drift(old, saved)
+    assert 'written by an earlier generator (stroom-mcp 0.16.42) and is unchanged since' in upgraded
+    assert "build_translation_xslt uuid='x-1' (no mapping) regenerates it" in upgraded and 'by hand' not in upgraded
+    edited = await drift(old.replace('<EventSource>', '<EventSource><!-- mine -->'), saved)
+    assert edited.startswith('its XSLT was edited by hand since the server saved it')
+    unknown = await drift(old, '')
+    assert 'edited by hand, or written by an earlier version of the generator' in unknown
+    assert await drift(generate(m, SCHEMA, '4.1.0')['xslt'], saved) is None

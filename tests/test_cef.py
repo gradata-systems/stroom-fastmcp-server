@@ -224,3 +224,16 @@ def test_forwarding_pipelines_are_found_by_their_kafka_producer_and_step_as_cef(
     assert _classify({'p': 'XMLParser', 'x': 'XSLTFilter', 't': 'TextWriter'}, {})[0] != 'forwarding'
     assert sends_on('CEF:0|a|b|1|x|y|3|act=z') and sends_on('<kafkaRecords><kafkaRecord topic="t"/></kafkaRecords>')
     assert not sends_on('some text the XSLT copied through')
+
+
+def test_a_text_pipelines_lines_lose_strooms_xml_declaration_and_an_unescaped_pipe_is_named():
+    # Seen stepping a CEF pipeline written by hand: its text output came with an XML declaration before it, and its
+    # name's | (unescaped) was reported as an invalid severity.
+    from utils import cef
+    out = ('<?xml version="1.1" encoding="UTF-8"?>CEF:0|D|S|1|User-Login|User logged in|3|suser=a\n'
+           'CEF:0|D|S|1|Secret-View|Secret viewed: a=b|c|3|suser=b\n'
+           '<134>Oct 10 09:00:00 fw CEF:0|D|S|1|X|Y|3|suser=c\n')
+    lines = cef.lines_in(out)
+    assert lines[0].startswith('CEF:0|D|S|1|User-Login') and lines[2].startswith('<134>Oct 10')   # syslog prefix kept
+    [problem] = cef.review(lines, [], False)['problems']
+    assert problem.startswith("an unescaped | in the header's name or class id (in 'Secret viewed: a=b|c')")

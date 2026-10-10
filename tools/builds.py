@@ -154,8 +154,23 @@ async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
     if not regenerated['ok']:
         return f"the mapping kept with its XSLT no longer generates: {regenerated['problems'][:2]}"
     if normalise_xslt(regenerated['xslt']) != normalise_xslt(kept['xslt'].get('data') or ''):
-        return ("its XSLT differs from what its mapping generates (edited by hand): change the mapping and build_translation_xslt "
-                "(uuid=...) to save it again, or accept that the documentation says so")
+        from utils.xsltversion import last_saved, untouched
+        xslt = kept['xslt']
+        regenerate = f"build_translation_xslt uuid='{xslt.get('uuid')}' (no mapping) regenerates it from the mapping kept with it"
+        same = untouched(xslt.get('description'), xslt.get('data'))
+        if same:
+            # Seen in production after 0.16.43: reported as edited by hand, and the agent went looking for the edit.
+            by = (last_saved(xslt.get('description'), xslt.get('data')) or {}).get('by') or 'an earlier version'
+            return (f"its XSLT was written by an earlier generator ({by}) and is unchanged since; the generator now "
+                    f"writes its mapping differently (e.g. its style defaults). {regenerate}, as the generator writes "
+                    f"it now")
+        if same is False:
+            return (f"its XSLT was edited by hand since the server saved it, and differs from what its mapping "
+                    f"generates: carry the edit into the mapping, then {regenerate}; or accept that the documentation "
+                    f"says so")
+        return (f"its XSLT differs from what its mapping generates: edited by hand, or written by an earlier version "
+                f"of the generator (it was saved before the server recorded which). {regenerate}; carry any hand edit "
+                f"into the mapping first")
     return None
 
 

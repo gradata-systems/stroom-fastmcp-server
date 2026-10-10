@@ -125,10 +125,18 @@ async def _templates(ctx: Context, said: dict[str, Any]) -> dict[str, Any]:
                                                                 'child_must_supply')} for c in found.get('candidates') or []]
     except Exception as e:      # the search is advice; a broken pipeline elsewhere must not stop the draft
         out['forwarding_templates_error'] = str(e)[:200]
+    # Pipelines and XSLTs in the workspace are drafts, not the environment's practice (seen: twenty leftover builds'
+    # pipelines filled the list, and the production one it was looking for wasn't in it).
+    from security.guard import guard_from
+    from tools.builds import _path
+    drafts = f"System/{guard_from(ctx).workspace}/"
+
+    def draft(path: Any) -> bool:
+        return (_path(path) + '/').startswith(drafts)
     existing = {}
     for pattern in ('*CEF*', '*ArcSight*', '*Arcsight*'):
-        for v in (await stroom.find_documents(pattern, ['Pipeline'], 50)).get('values') or []:
-            if v['docRef'].get('type') == 'Pipeline':
+        for v in (await stroom.find_documents(pattern, ['Pipeline'], 200)).get('values') or []:
+            if v['docRef'].get('type') == 'Pipeline' and not draft(v.get('path')):
                 existing[v['docRef']['uuid']] = {'uuid': v['docRef']['uuid'], 'name': v['docRef']['name'],
                                                  'path': v.get('path')}
     for entry in list(existing.values())[:20]:
@@ -143,8 +151,9 @@ async def _templates(ctx: Context, said: dict[str, Any]) -> dict[str, Any]:
     try:
         body = await stroom.post('/explorer/v2/findInContent', {
             'filter': {'matchType': 'CONTAINS', 'pattern': 'CEF:0', 'caseSensitive': False},
-            'pageRequest': {'offset': 0, 'length': 30}})
-        xslts = [(v.get('docContentMatch') or {}).get('docRef') or {} for v in (body or {}).get('values') or []]
+            'pageRequest': {'offset': 0, 'length': 200}})
+        xslts = [(v.get('docContentMatch') or {}).get('docRef') or {} for v in (body or {}).get('values') or []
+                 if not draft(v.get('path'))]
         xslts = [{'uuid': r.get('uuid'), 'name': r.get('name')} for r in xslts if r.get('type') == 'XSLT']
         if xslts:
             out['xslts_writing_cef'] = xslts[:10]

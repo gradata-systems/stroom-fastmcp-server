@@ -130,12 +130,49 @@ def _shown(text: str, limit: int = 60) -> str:
     return '`' + text.replace('`', "'") + '`'
 
 
+_LEAD = re.compile(r'^(?:\^|\(\?:[^()]*\))?')       # ^, or a leading (?:^|\s)-like group
+_KEY = re.compile(r'(?:\\[^dDsSwWbBpPnrt]|[^\\()\[\]{}.*+?|^$])+')    # the literal text after it
+
+
+def _searched(regex: str, py_flags: int, texts: list[str]) -> str | None:
+    r"""For a regex that looks for a key anywhere in a line ((?:^|\s)logdesc="([^"]*)"): whether the texts have its
+    key at all. Seen: such a regex was said to match "as far as ``", true at the text's start and no help; the 200
+    texts read simply had no logdesc=."""
+    lead = _LEAD.match(regex).group(0)
+    found = _KEY.match(regex, len(lead))
+    key = re.sub(r'\\(.)', r'\1', found.group(0)) if found else ''
+    if len(key) < 3:
+        return None
+    flags = py_flags & re.IGNORECASE
+    holding = [(t, m) for t in texts for m in [re.search(re.escape(key), t, flags)] if m]
+    if not holding:
+        return (f"None of these texts has {_shown(key)}: a key the sample lacks (its records may be elsewhere in the "
+                f"feed), or one spelt otherwise in the text.")
+    # The key is there: how far the rest of the regex goes on from it.
+    rest = regex[found.end():]
+    text, at = holding[0][0], holding[0][1].end()
+    for cut in range(len(rest), 0, -1):
+        try:
+            went = re.match(rest[:cut], text[at:], py_flags)
+        except re.error:
+            continue
+        if went:
+            return (f"It finds {_shown(key + text[at:at + went.end()])} and stops there: the regex goes on with "
+                    f"{_shown(rest[cut:], 30)}, the text with {_shown(text[at + went.end():], 30)}.")
+    return (f"It finds {_shown(key)}, then the regex goes on with {_shown(rest, 30)}, the text with "
+            f"{_shown(text[at:], 30)}.")
+
+
 def where_it_stops(regex: str, flags: str, texts: list[str]) -> str:
     """Where a regex stops matching the texts: the longest start of it that matches the start of a text, and what
     the text has there instead of what the regex goes on with."""
     py_flags = 0
     for f in flags:
         py_flags |= _PY_FLAGS.get(f, 0)
+    if not regex.startswith('^'):
+        found = _searched(regex, py_flags, texts[:8])
+        if found:
+            return found
     best = None   # (matched characters, cut, text)
     for text in texts[:8]:
         for cut in range(len(regex), 0, -1):
@@ -165,6 +202,16 @@ def where_it_stops(regex: str, flags: str, texts: list[str]) -> str:
     return message
 
 
+_NOT_XML = re.compile('[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
+
+
+def _texts_document(proc, texts: list[str]):
+    """The texts as <t><s>text</s>...</t>, for XPath to test a regex on all of them at once. A character XML can't
+    hold becomes U+FFFD."""
+    body = ''.join(f'<s>{escape(_NOT_XML.sub(chr(0xfffd), t))}</s>' for t in texts)
+    return proc.parse_xml(xml_text=f'<t>{body}</t>')
+
+
 def check_extractions(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None,
                       records: list[Any]) -> tuple[list[str], list[str]]:
     """Each extraction's regex run (with XPath's own regex rules, by Saxon) on the text it reads in the sample:
@@ -180,6 +227,7 @@ def check_extractions(mapping: TranslationMapping, sample: str | list[str], spli
     documents = None
     produced = set()
     problems, warnings = [], []
+    held: dict[str, Any] = {}       # each source's texts, as one document
     for n, ex in enumerate(mapping.extract):
         source = ex.field or ex.xpath
         where = f"extract[{n}] ({source})"
@@ -206,25 +254,28 @@ def check_extractions(mapping: TranslationMapping, sample: str | list[str], spli
                 text = value.string_value if value is not None else ''
                 if text:
                     texts.append(text)
-        texts = texts[:200]
         if not texts:
             continue    # nothing to read: the xpath and field checks say so
+        # Every text the sample has, in one document read once per source: the first 200 alone missed a VPN rule's
+        # keys, whose records began at the 557th of 3,933, and a sound mapping was refused (seen in production).
+        if source not in held:
+            held[source] = _texts_document(proc, texts)
         xp = proc.new_xpath_processor()
+        xp.set_context(xdm_item=held[source])
+        test = f"matches(., {literal(ex.regex)}, {literal(ex.flags)})"
         try:
-            hits = xp.evaluate_single(f"count(({', '.join(literal(t) for t in texts)})"
-                                      f"[matches(., {literal(ex.regex)}, {literal(ex.flags)})])")
+            hits = xp.evaluate_single(f"count(/t/s[{test}])")
             matched = int(hits.string_value) if hits is not None else 0
         except Exception as e:
             problems.append(f"{where}: the regex is not a valid XPath regular expression: "
                             f"{str(e).strip().splitlines()[0][:200]}." + (ESCAPED_TWICE if '\\\\' in ex.regex else ''))
             continue
         if matched == 0:
-            misses = [t for t in texts]
             problems.append(f"{where}: the regex matches none of the {len(texts)} sample texts, so {names} would be empty "
-                            f"in every event. {where_it_stops(ex.regex, ex.flags, misses)}")
+                            f"in every event. {where_it_stops(ex.regex, ex.flags, texts)}")
         elif matched < len(texts):
-            missed = next((t for t in texts if not proc.new_xpath_processor().effective_boolean_value(
-                f"matches({literal(t)}, {literal(ex.regex)}, {literal(ex.flags)})")), None)
+            first_miss = xp.evaluate_single(f"string((/t/s[not({test})])[1])")
+            missed = first_miss.string_value if first_miss is not None else None
             warnings.append(f"{where}: the regex matches {matched} of the {len(texts)} sample texts; the rest leave "
                             f"{names} empty. E.g. {_shown(missed or '', 160)}: "
                             + (where_it_stops(ex.regex, ex.flags, [missed]) if missed else ''))

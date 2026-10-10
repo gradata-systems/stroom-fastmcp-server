@@ -98,3 +98,25 @@ def test_a_misremembered_field_is_answered_with_the_fields_sharing_its_words():
     fields = ['StreamId', 'UserId', 'AuthenticateUserId', 'UserDomain', 'HostName']
     assert similar('User.DomainName', fields) == ['UserDomain', 'UserId', 'AuthenticateUserId', 'HostName']
     assert similar('Nothing', fields) == []
+
+
+def test_an_xslts_kept_mapping_is_summarised_unless_asked_for_whole():
+    # Seen in production: describe_document returned a 1,400-line kept mapping; the client spilled it to a file, and
+    # the agent read it in parts and sent it back whole to regenerate the XSLT.
+    from tests.test_xsltgen import mapping
+    from tools.explorer import _kept_summary
+    from utils.mappingstore import with_mapping
+    from utils.xsltversion import with_pending
+    payload = {'schema_version': '4.1.0', 'mapping': mapping().model_dump(exclude_none=True, exclude_defaults=True)}
+    description = with_pending(with_mapping('Acme VPN events', 'translation', payload), None, 'pk', 'Created', 'x',
+                               code='<x/>')
+    doc = {'description': description}
+    _kept_summary(doc, 'x-1', False)
+    assert doc['description'] == 'Acme VPN events' and doc['pending_changes'] == ['Created']
+    summary = doc['kept_mapping']
+    assert summary['rules'][0].startswith('logon: Authenticate') and summary['common_entries'] == 6
+    assert summary['style'] == "the generator's current defaults"
+    assert "uuid='x-1' alone regenerates it" in summary['how'] and 'never send it back whole' in summary['how']
+    whole = {'description': description}
+    _kept_summary(whole, 'x-1', True)
+    assert whole['kept_mapping']['mapping'] == payload['mapping']

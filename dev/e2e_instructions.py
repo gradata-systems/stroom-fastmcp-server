@@ -66,7 +66,8 @@ async def main():
         for _ in range(15):  # explorer search indexes new docs after a short delay
             result = await instructions.get_instructions(ctx, feeds=[feed])
             texts = [i['instructions'] for i in result['instructions']]
-            if any(stamp in t for t in texts) and len([t for t in texts if stamp in t]) >= 2:
+            listed = any(o['uuid'] == created[2]['uuid'] for o in result['other_instruction_docs'])
+            if len([t for t in texts if stamp in t]) >= 2 and listed:     # all three found, not just the two
                 break
             await asyncio.sleep(2)
         mine = [i for i in result['instructions'] if stamp in i['instructions']]
