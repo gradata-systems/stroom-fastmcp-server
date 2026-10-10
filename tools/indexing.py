@@ -175,6 +175,31 @@ async def _choose(ctx: Context, question: str, options: list[str]) -> Any:
     return await store.choose(ctx, 'get_field_conventions', question, options) if store else None
 
 
+_NAMING = 'field_naming_chosen'
+_NAMING_TTL = 4 * 3600
+
+
+def _remember_naming(ctx: Context, **choice: Any) -> None:
+    """How the user chose, in get_field_conventions' form, to name the index's fields: so draft_index_mapping doesn't
+    ask them again. Seen in VS Code: the user picked ECS in the form, the agent drafted with convention=ecs but no
+    without_example, and the user was asked the same question again (and with it, would have confirmed it again)."""
+    from tools.plan import _user
+    try:
+        ctx.lifespan_context.setdefault(_NAMING, {})[_user(ctx)] = {**choice, 'at': time.time()}
+    except Exception:
+        pass
+
+
+def _naming_chosen(ctx: Context) -> dict[str, Any]:
+    """The user's own choice in the form, this session (only a form's answer: one the agent relays isn't theirs)."""
+    from tools.plan import _user
+    try:
+        chosen = ctx.lifespan_context.get(_NAMING, {}).get(_user(ctx)) or {}
+    except Exception:
+        return {}
+    return chosen if chosen and time.time() - chosen['at'] < _NAMING_TTL else {}
+
+
 async def get_field_conventions(
         ctx: Context,
         name: Annotated[str | None, Field(description="Convention profile to use; omit to list them.")] = None,
@@ -246,16 +271,19 @@ async def get_field_conventions(
                     return which
                 pick = existing[0] if len(existing) == 1 else labels.get(which or '')
                 if pick:
+                    _remember_naming(ctx, like_index=pick['uuid'])
                     result.update(like_index=pick['uuid'], hint=f"The user chose to follow '{pick['name']}': "
-                                  f"draft_index_mapping like_index={pick['uuid']} (with the events streams).")
+                                  f"draft_index_mapping like_index={pick['uuid']} (with the events streams); not "
+                                  f"asked again.")
             elif option['option'] == 'example index template':
                 result['hint'] = ("Ask the user to paste the index template (and any component templates) into the "
                                   "chat, and end your turn: a form can't carry it. Then draft_index_mapping "
                                   "example_template= it, exactly as given.")
             else:
                 profile_name = option['option'].removeprefix('convention profile ')
-                result['hint'] = (f"draft_index_mapping convention={profile_name} without_example=true (with the "
-                                  f"events streams).")
+                _remember_naming(ctx, convention=profile_name)
+                result['hint'] = (f"draft_index_mapping convention={profile_name} (with the events streams): the user "
+                                  f"chose it in the form, so it isn't asked again.")
             return result
         return {'status': 'needs_guidance', 'options': options,
                 **({'backend': 'elasticsearch (every indexing template is an Elasticsearch one)',
@@ -378,16 +406,32 @@ async def draft_index_mapping(
         # First, whatever else is asked: the streams must be Events (a Records stream, or a source's own data, is
         # refused with how to index it).
         await require_events(gateway_from(ctx), events_stream_ids)
-    if backend == 'elasticsearch' and not (example_template or like_index):
+    chosen = _naming_chosen(ctx)
+    if backend == 'elasticsearch' and not (example_template or like_index) and convention \
+            and chosen.get('convention') == convention:
+        pass        # the user chose this convention in get_field_conventions' form: asked once, not again
+    elif backend == 'elasticsearch' and not (example_template or like_index):
         # Names, types and structure come from what the environment already indexes: the agent asks the user,
         # and indexing from a convention alone is the user's call, made in a form, not the agent's.
+        picked: dict[str, Any] = {}
         if not without_example:
             options = await get_field_conventions(ctx, backend='elasticsearch')
-            return {**options, 'drafted': False,
-                    'hint': "Not drafted: ask the user for their example first, offering these options. Then "
-                            "draft_index_mapping with example_template=... (pasted) or like_index=<uuid>; only if they "
-                            "have neither, with convention=... and without_example=true, which they confirm."}
-        gate = await consent_from(ctx).require(
+            # Answered in the form just now: drafted as the user chose (seen in VS Code: the user picked ECS here
+            # too, and was told to be asked again, a third time, in the chat).
+            picked = _naming_chosen(ctx) if isinstance(options, dict) and options.get('status') == 'chosen' else {}
+            chosen = picked or chosen
+            if picked.get('like_index'):
+                like_index = picked['like_index']
+            elif picked.get('convention'):
+                convention = picked['convention']
+            elif not isinstance(options, dict):
+                return options      # the form, on a modern connection: the answer comes with the repeated call
+            else:
+                return {**options, 'drafted': False,
+                        'hint': "Not drafted: ask the user for their example first, offering these options. Then "
+                                "draft_index_mapping with example_template=... (pasted) or like_index=<uuid>; only if "
+                                "they have neither, with convention=... and without_example=true, which they confirm."}
+        gate = None if picked else await consent_from(ctx).require(
             ctx, 'confirmation', 'draft_index_mapping',
             f"Index '{index_name}' into Elasticsearch without an example index template",
             {'field names and types from': f"the '{convention}' convention" if convention else 'no convention given',
@@ -406,7 +450,9 @@ async def draft_index_mapping(
         # Following another source's index is the user's choice, as the example is: its fields are read through
         # Stroom first, so the user confirms what they'd get, and what only the template itself would give.
         example_template, like_note, read = await _example_from_index(ctx, like_index)
-        gate = await consent_from(ctx).require(
+        # Picked in get_field_conventions' form: the user isn't asked again (what can't be read through Stroom is
+        # said in the result, for the agent to tell them).
+        gate = None if chosen.get('like_index') == like_index else await consent_from(ctx).require(
             ctx, 'confirmation', 'draft_index_mapping',
             f"Name the fields of index '{index_name}' after an existing index in Stroom", {
                 'follow': f"Elastic Index doc '{read['doc']}'" + (f" (index {read['index']})" if read['index'] else ''),
@@ -418,6 +464,10 @@ async def draft_index_mapping(
             confirmation_id)
         if gate:
             return gate
+        if chosen.get('like_index') == like_index:
+            like_note = ((like_note + ' ') if like_note else '') + (
+                "Not readable through Stroom, so tell the user: its index template itself (settings, component "
+                "templates, keyword sub-fields, ignore_above), Elasticsearch defaults for those unless they paste it.")
     if not convention and example_template:
         # The example names the fields; a profile only says which event paths are worth indexing.
         convention = 'ecs' if 'ecs' in profiles else next(iter(profiles), None)

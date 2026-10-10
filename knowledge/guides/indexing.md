@@ -40,7 +40,8 @@ becomes a field when the pipeline writes that field (documents can't write to an
 
 The choice is the user's: `get_field_conventions backend=elasticsearch` asks them in a form, with the choices as a
 picker (From an index template, Follow an existing index in Stroom, then a convention per profile), and its reply
-(`status: chosen`) gives the next call; call it without asking first. Where the client has no forms, it returns the
+(`status: chosen`) gives the next call; call it without asking first. The user isn't asked again: the draft
+with the convention (or index) they picked goes ahead. Where the client has no forms, it returns the
 choices (`needs_guidance`): offer exactly those, in order, recommending none. An example is pasted into the chat, as a choice form can't carry it, so ask for it there
 and wait for it before drafting. Following an existing index in Stroom (`like_index`) reads its field names and
 Elasticsearch types through Stroom, with nothing to paste, and the user confirms it in a form that says what was

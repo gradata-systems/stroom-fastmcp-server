@@ -40,7 +40,54 @@ async def test_the_naming_choice_is_a_form_with_the_options_as_a_picker():
     question, options = client.asked[0]
     assert options == ['From an index template', 'Follow an existing index in Stroom',
                        'ECS (Elastic Common Schema) convention', 'Stroom flat convention']
-    assert got['status'] == 'chosen' and 'convention=stroom-flat without_example=true' in got['hint']
+    assert got['status'] == 'chosen' and 'draft_index_mapping convention=stroom-flat' in got['hint']
+    assert "isn't asked again" in got['hint']
+
+
+async def drafting(ctx, **kw):
+    """draft_index_mapping as far as its questions: past them, it reads the streams (stopped there)."""
+    with patch.object(indexing, 'require_events', AsyncMock()),             patch.object(indexing, 'summarise_events', AsyncMock(side_effect=RuntimeError('past the questions'))),             patch('utils.consent._modern', lambda ctx: False):
+        try:
+            return await indexing.draft_index_mapping(ctx, 'elasticsearch', 'fortigate-v1', events_stream_ids=[7], **kw)
+        except RuntimeError as e:
+            return str(e)
+
+
+async def test_a_convention_chosen_in_the_form_is_not_asked_about_again():
+    # Seen in VS Code: the user picked ECS in the form, the agent drafted with convention=ecs (no without_example),
+    # and the user was asked the same question again; with without_example, they'd have confirmed it again instead.
+    client = FormClient('ECS (Elastic Common Schema) convention')
+    ctx = ctx_with(client)
+    profiles = {'ecs': {'description': 'ECS'}, 'stroom-flat': {}}
+    with patch.object(indexing, '_conventions', lambda ctx: profiles), patch('utils.consent._modern', lambda ctx: False):
+        await indexing.get_field_conventions(ctx, backend='elasticsearch')
+        assert await drafting(ctx, convention='ecs') == 'past the questions'
+        assert await drafting(ctx, convention='ecs', without_example=True) == 'past the questions'
+        assert len(client.asked) == 1
+        # Another convention than the one chosen is asked about again, once, and drafted as the user answers.
+        client.picks.append('Stroom flat convention')
+        assert await drafting(ctx, convention='stroom-flat') == 'past the questions' and len(client.asked) == 2
+
+
+async def test_a_choice_the_agent_relays_is_still_confirmed():
+    # Without forms, the agent says what the user chose: drafting from a convention alone stays the user's to confirm.
+    ctx = ctx_with(FormClient())
+    ctx.lifespan_context['consent'] = ConsentStore(use_elicitation=False)
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {}}):
+        await indexing.get_field_conventions(ctx, backend='elasticsearch')
+        gate = await drafting(ctx, convention='ecs', without_example=True)
+    assert gate['status'] == 'needs_confirmation'
+
+
+async def test_an_index_picked_in_the_form_is_followed_without_asking_again():
+    client = FormClient('Follow an existing index in Stroom', 'Fortigate (System / Elastic Indices)')
+    ctx = ctx_with(client, [('k', 'Keycloak'), ('f', 'Fortigate')])
+    read = ({'template': {}}, 'Read from Fortigate.', {'doc': 'Fortigate', 'index': 'fortigate', 'fields': 3,
+                                                        'source': 'Stroom', 'examples': ['User.Id']})
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {}}), patch('utils.consent._modern', lambda ctx: False),             patch.object(indexing, '_example_from_index', AsyncMock(return_value=read)):
+        await indexing.get_field_conventions(ctx, backend='elasticsearch')
+        assert await drafting(ctx, like_index='f') == 'past the questions'
+    assert len(client.asked) == 2       # the two picks, and no confirmation after them
 
 
 async def test_following_an_index_asks_which_and_a_cancelled_form_stops():
@@ -129,3 +176,22 @@ async def test_a_pipeline_copy_leaves_out_the_documents_set_properties_replaces(
             ctx, build='acme-v2', source_uuid='p1', new_name='ACME-V2 - Indexing', rename={'V1': 'V2'},
             set_properties=[PropertyValue(element='xsltFilter', name='xslt', doc_uuid='x2', doc_type='XSLT')])
     assert asked['status'] == 'needs_confirmation' and asked['details']['copied documents'] == ['ACME-V2']
+
+
+async def test_a_choice_made_in_the_drafts_own_form_drafts_as_chosen():
+    # Seen in VS Code: drafted with no choice yet, draft_index_mapping asked in its form, the user picked ECS, and it
+    # still returned "not drafted: ask the user", so the agent asked them a third time in the chat.
+    client = FormClient('ECS (Elastic Common Schema) convention')
+    ctx = ctx_with(client)
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {}, 'stroom-flat': {}}):
+        assert await drafting(ctx, convention='stroom-flat') == 'past the questions'
+    assert len(client.asked) == 1
+    # Following an index picked there too.
+    client = FormClient('Follow an existing index in Stroom', 'Fortigate (System / Elastic Indices)')
+    ctx = ctx_with(client, [('k', 'Keycloak'), ('f', 'Fortigate')])
+    read = ({'template': {}}, None, {'doc': 'Fortigate', 'index': 'fortigate', 'fields': 3, 'source': 'Stroom',
+                                     'examples': ['User.Id']})
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {}}), \
+            patch.object(indexing, '_example_from_index', AsyncMock(return_value=read)) as followed:
+        assert await drafting(ctx, convention='ecs') == 'past the questions'
+    assert followed.await_args.args[1] == 'f' and len(client.asked) == 2
