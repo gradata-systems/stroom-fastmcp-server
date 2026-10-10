@@ -57,9 +57,6 @@ _PATTERN_LETTERS = set('GuyDMLdQqYwWEecFaHkKhmsSAnNVzOXxZp')
 Scope = Literal['record', 'item']
 
 
-# A directory's attributes of a person, which belong in User/UserDetails.
-_PERSON_DETAIL = re.compile(r'(department|dept|organi[sz]ation|org|unit|team|division|business_?group|job_?title|title|staff_?number)', re.I)
-
 class Lookup(BaseModel):
     """Reference data: what stroom:lookup() finds for a key in a map a reference loader provides (find_reference_data
     lists the maps). The pipeline must name the loader as a pipeline reference (create_pipeline references, or
@@ -1146,15 +1143,6 @@ class _Generator:
         scope = entry.scope
         if entry.lookup:
             self.reference_maps.add(entry.lookup.map)
-            looked_up = (entry.lookup.path or '').strip('/').rsplit('/', 1)[-1]
-            if '/User/Groups/' in f'/{entry.path}' or (_PERSON_DETAIL.fullmatch(looked_up)
-                                                       and '/UserDetails/' not in f'/{entry.path}'):
-                # Seen (eval case 15, Haiku): a directory's department written as a security group, then as Data.
-                self._note(self.warnings, f"{entry.path} is looked up from {entry.lookup.map} ({looked_up or 'its value'}): "
-                                          f"a person's department, organisation or business group from a directory "
-                                          f"goes in User/UserDetails (Unit, Organisation, Group, Title), on the user "
-                                          f"it describes; User/Groups is for the security groups an account belongs "
-                                          f"to.")
             key = self.key_expr(entry.lookup.field, entry.lookup.xpath, scope)
             # The value's elements are in no namespace, while the stylesheet's default XPath namespace is the
             # input's: *:name selects them whatever that is, at any depth below the value.
