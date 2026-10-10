@@ -1,36 +1,80 @@
 """The mapping an XSLT was generated from, kept with the XSLT.
 
-An XSLT doc's description carries the translation mapping (or an indexing field plan) as JSON between markers,
-so the documentation's Field mapping section can be regenerated later, a change can start from the mapping
-rather than the XSLT, and hand edits to the XSLT since the mapping are detected.
+An XSLT doc's description (its Documentation tab in Stroom) carries the translation mapping (or an indexing field
+plan, or a CEF plan), so the documentation's Field mapping section can be regenerated later, a change can start from
+the mapping rather than the XSLT, and hand edits to the XSLT since the mapping are detected. It is kept hidden, as
+compact JSON in an HTML comment, after a visible note asking people to leave it be: shown as it was (1,400 lines of
+JSON for one translation), it buried the tab's own text. The same goes for a build's pending changes and a
+pipeline's agreed index template. Blocks written before (shown, between --- markers) are still read, and are
+rewritten hidden when the document is next saved.
 """
 import hashlib
 import json
 import re
 from typing import Any
 
-START = '--- stroom-mcp {kind} mapping (generated; change the mapping and regenerate, rather than the XSLT) ---'
-END = '--- end of stroom-mcp mapping ---'
-_BLOCK = re.compile(r'--- stroom-mcp (translation|index|cef) mapping[^\n]*---\n(.*?)\n--- end of stroom-mcp mapping ---',
-                    re.S)
+NOTE = ("*Below, hidden, is what stroom-mcp keeps for this document: the mapping it is generated from, a build's "
+        "pending changes, an agreed index template. Please don't edit or delete it: change the document through the "
+        "agent.*")
+# Shown blocks, as written before: read, and replaced by hidden ones when next written.
+_SHOWN = re.compile(r'\n*--- stroom-mcp ([a-z ]+?) (?:\([^\n]*\) )?---\n(.*?)\n--- end of stroom-mcp [a-z ]+? ---\n*', re.S)
+_HIDDEN = re.compile(r'\n*<!-- stroom-mcp ([a-z ]+): kept by the server, do not edit or delete\n(.*?)\n-->\n*', re.S)
+_NOTE = re.compile(r'\n*' + re.escape(NOTE) + r'\n*')
+# Where the server's part of a description begins: its note, a hidden block, or a shown one written before.
+SERVER_PART = re.compile(r'(?:^|\n)(?:' + re.escape(NOTE[:20]) + r'|<!-- stroom-mcp [a-z ]+: kept by the server'
+                         r'|--- stroom-mcp )')
+
+
+def read_block(description: str | None, name: str) -> Any:
+    """A block's JSON, hidden or (written before) shown; None when there is none or it doesn't parse."""
+    for pattern in (_HIDDEN, _SHOWN):
+        for match in pattern.finditer(description or ''):
+            if match.group(1) == name:
+                try:
+                    return json.loads(match.group(2))
+                except ValueError:
+                    return None
+    return None
+
+
+def without_block(description: str | None, name: str | None = None) -> str:
+    """The description without the named block, hidden or shown; with name None, without every server block and
+    the note: the document's own text (and its version history)."""
+    def drop(match: re.Match) -> str:
+        return '\n\n' if name is None or match.group(1) == name else match.group(0)
+    text = _SHOWN.sub(drop, _HIDDEN.sub(drop, description or ''))
+    if name is None or not (_HIDDEN.search(text) or _SHOWN.search(text)):
+        text = _NOTE.sub('\n\n', text)      # the note stays only while a block it speaks of does
+    return text.strip()
+
+
+def with_block(description: str | None, name: str, payload: Any) -> str:
+    """The description with the block (hidden, compact JSON) replacing any earlier one, after the note. A comment
+    can't hold '--': written '-\\u002d', which JSON reads back as '--' (it only occurs inside a string)."""
+    body = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).replace('--', '-\\u002d')
+    block = f"<!-- stroom-mcp {name}: kept by the server, do not edit or delete\n{body}\n-->"
+    text = _NOTE.sub('\n\n', without_block(description, name)).strip()
+    at = SERVER_PART.search(text)
+    head, tail = (text, '') if not at else (text[:at.start()], text[at.start():])
+    return '\n\n'.join(part.strip() for part in (head, NOTE, tail, block) if part.strip())
 
 
 def with_mapping(description: str | None, kind: str, payload: dict[str, Any]) -> str:
-    """The description with the mapping block replacing any earlier one."""
-    text = _BLOCK.sub('', description or '').strip()
-    block = f"{START.format(kind=kind)}\n{json.dumps(payload, indent=1, ensure_ascii=False)}\n{END}"
-    return f"{text}\n\n{block}".strip() if text else block
+    """The description with the mapping block replacing any earlier one (of any kind)."""
+    text = description or ''
+    for other in ('translation', 'index', 'cef'):
+        if other != kind:
+            text = without_block(text, f'{other} mapping')
+    return with_block(text, f'{kind} mapping', payload)
 
 
 def read_mapping(description: str | None) -> tuple[str, dict[str, Any]] | None:
     """(kind, payload) from a description, or None when it holds no mapping block."""
-    match = _BLOCK.search(description or '')
-    if not match:
-        return None
-    try:
-        return match.group(1), json.loads(match.group(2))
-    except ValueError:
-        return None
+    for kind in ('translation', 'index', 'cef'):
+        payload = read_block(description, f'{kind} mapping')
+        if payload is not None:
+            return kind, payload
+    return None
 
 
 def normalise_xslt(text: str) -> str:
@@ -71,23 +115,9 @@ def replace_section(markdown: str, heading: str, body: str, exact: bool = False)
 
 # The Elasticsearch index template the user agreed for an indexing pipeline, kept in the pipeline's description: what
 # the cluster admin was asked to apply, for the index and cluster and the indexing XSLT it was agreed against.
-_AGREED_START = '--- stroom-mcp agreed index template (confirmed by the user; check_index_template to change it) ---'
-_AGREED_END = '--- end of stroom-mcp agreed index template ---'
-_AGREED = re.compile(r'--- stroom-mcp agreed index template[^\n]*---\n(.*?)\n--- end of stroom-mcp agreed index template ---',
-                     re.S)
-
-
 def with_agreed_template(description: str | None, agreed: dict[str, Any]) -> str:
-    text = _AGREED.sub('', description or '').strip()
-    block = f"{_AGREED_START}\n{json.dumps(agreed, indent=1, ensure_ascii=False)}\n{_AGREED_END}"
-    return f"{text}\n\n{block}".strip() if text else block
+    return with_block(description, 'agreed index template', agreed)
 
 
 def read_agreed_template(description: str | None) -> dict[str, Any] | None:
-    match = _AGREED.search(description or '')
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1))
-    except ValueError:
-        return None
+    return read_block(description, 'agreed index template')

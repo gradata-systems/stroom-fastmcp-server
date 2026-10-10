@@ -23,6 +23,7 @@ last (past the 300th record, as in production, where they began at the 557th of 
 """
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,7 +168,8 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     [lacking] = [p for p in first_only['problems'] if "['vpntunnel']" in p]
     check('None of these texts has `vpntunnel="`' in lacking and 'its records may be elsewhere' in lacking,
           f"the first stream alone lacks the VPN keys, and says so: {lacking[:150]}")
-    old_style = {**MAPPING, 'style': {'variables': 'top', 'data_values': 'attribute'}}
+    old_style = {**MAPPING, 'style': {'variables': 'top', 'data_values': 'attribute', 'data_entries': 'guarded',
+                                      'data_run_min': 99}}
     built = await generation.build_translation_xslt(ctx, old_style, stream_ids=raws, build=build, name=f'{feed}-Events',
                                                     agent_model='e2e-model', include_xslt=False)
     check(built['ok'] and not any('vpntunnel' in p for p in built['problems']),
@@ -215,12 +217,22 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
           and '<xsl:function name="mcp:value"' in new_code, 'one function a key=value shape, called with the key')
     check('mode="source"' in new_code and 'mode="destination"' in new_code,
           "the Network rules' Source and Destination written once, whatever their action element")
-    check('Value="{' in new_code and '<xsl:attribute name="Value"' not in new_code, 'Data values interpolated')
+    check("<xsl:sequence select=\"mcp:data('dstintfrole', mcp:quoted_value($body, 'dstintfrole'))\"/>" in new_code
+          and '<xsl:attribute name="Value"' not in new_code and '<Data Name="dstintfrole"' not in new_code,
+          'Data entries one line each, through mcp:data')
+    runs = sorted(set(re.findall(r'mode="(data_[^"]+)"', new_code)))
+    check(bool(runs) and all(new_code.count(f'mode="{r}"/>') >= 2 for r in runs),
+          f"the Data runs the Network rules share, written once: {runs}")
     check(not just_in_time(old_code) and just_in_time(new_code) and len(new_code) < len(old_code),
           f"variables declared where first used, not at each template's start; {len(old_code):,} -> "
           f"{len(new_code):,} characters")
     pending = (await explorer.describe_document(ctx, 'XSLT', xslt['uuid']))['pending_changes']
     check(pending[-1] == 'Regenerated from its mapping', f"pending changes: {pending}")
+    shown = (await explorer.describe_document(ctx, 'XSLT', xslt['uuid']))['description']
+    preview = [line.strip() for line in shown.splitlines() if line.strip().startswith('| Unreleased |')]
+    check(len(preview) == 1 and 'Created from its mapping; Regenerated from its mapping' in preview[0]
+          and 'version history' not in new_code,
+          f"the build's changes previewed in its Documentation, Unreleased, the code left alone: {preview}")
     stepped = await stepping.step_sample(ctx, pipeline['uuid'], raws)
     check(stepped['verdict'] == 'clean', f"steps clean: {stepped['verdict']}")
     after = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]

@@ -174,7 +174,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
         e2e.check(result['ok'] and result.get('saved'), f"{layout}: saved with its mapping: {result.get('problems')}")
         sheet = etree.fromstring(result['xslt'].encode())
         functions = sorted(f.get('name') for f in sheet.findall('xsl:function', NS))
-        e2e.check(functions == ['mcp:parse_time', 'mcp:strip_domain'],
+        e2e.check(functions == ['mcp:data', 'mcp:parse_time', 'mcp:strip_domain'],   # mcp:data: its Data entries
                   f"{layout}: the time format and strip_domain, each used twice, are functions: {functions}")
         record = sheet.find("xsl:template[@mode='event']", NS)
         if layout == 'modes':

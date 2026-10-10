@@ -2,10 +2,13 @@
 
 Every pipeline built, changed or evaluated gets a Documentation doc with the pipeline's name, written with
 `write_documentation` in Markdown. The same content is returned in the chat. On an update, revise the sections
-that changed; the tool keeps the `## Version control` block at the end (give `change`: what changed and why; a new
+that changed; the tool keeps the `## Version control` block at the end, with an `Unreleased` row previewing the
+build's changes until it is promoted (give `change`: what changed and why; a new
 doc's is "Created"). Changes made while a build is worked on wait there, hidden, and become one row (version, date,
 who, through which agent and model, what changed, the XSLT version) when the build is promoted. Each XSLT the
-server saves carries the same history as a comment at its start, with edits made by hand found and recorded as such.
+server saves keeps the same history in its own Documentation tab (a `## Version history` table, previewed the same
+way), with edits made by hand found and recorded as such; the code itself is left as generated. Below the history,
+hidden, is what the server keeps for the XSLT (its mapping, pending changes): a note there asks people to leave it.
 
 ## Sections
 

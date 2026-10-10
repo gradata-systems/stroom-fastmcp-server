@@ -395,7 +395,7 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS, reviewed=True,
                                             confirmation_id=asked['confirmation_id'])
         assert json.loads(read_agreed_template(saved['description'])['dev_tools'].split('\n', 1)[1])['priority'] == 500
-        assert saved['description'].count('agreed index template (') == 1
+        assert saved['description'].count('<!-- stroom-mcp agreed index template: kept by the server') == 1
 
 
 def test_the_users_own_fields_are_matched_by_path_before_convention_names():

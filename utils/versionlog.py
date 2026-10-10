@@ -5,7 +5,7 @@ Asked for by the user: changes such as event types found only once a whole feed 
 for them, are recorded with the documentation they changed; and one row for a build, written when it is done, not a
 row each time the documentation is rewritten while it is worked on. So write_documentation keeps the rows as they
 are and adds its change to the pending changes (a comment at the end of the doc), and promote_build turns them into
-one row. A doc written before this carries a bullet change log (`## Change log`, `- date: change`): its lines
+one row. Until then an Unreleased row previews it (asked for by the user, to see what a build has done). A doc written before this carries a bullet change log (`## Change log`, `- date: change`): its lines
 become the first rows.
 """
 import json
@@ -19,6 +19,8 @@ _ROW = re.compile(r'^\|\s*(\d+)\s*\|([^|]*)\|([^|]*)\|(.*)\|([^|]*)\|\s*$')
 _BULLET = re.compile(r'^-\s*(\d{4}-\d{2}-\d{2}):\s*(.*)$')
 _PENDING = re.compile(r'\n*<!-- stroom-mcp pending changes (.*?) -->\n*', re.S)
 NONE_YET = "No version released yet: this build's changes are recorded here when it is promoted."
+UNRELEASED = ("No version released yet: the Unreleased row is this build's changes so far, recorded as a version when "
+              "it is promoted.")
 
 
 def body_of(markdown: str) -> str:
@@ -62,12 +64,20 @@ def _cell(text: str) -> str:
     return (text or '').replace('|', '\\|').replace('\n', ' ').strip()
 
 
-def block(rows: list[dict[str, str]]) -> str:
+def _distinct(entries: list[dict[str, str]], key: str) -> list[str]:
+    return list(dict.fromkeys(e.get(key) for e in entries if e.get(key)))
+
+
+def block(rows: list[dict[str, str]], pending: list[dict[str, str]] | None = None) -> str:
     lines = [HEADING, '', '| Version | Date | By | Change | Code |', '| --- | --- | --- | --- | --- |']
     lines += [f"| {r['version']} | {r['date']} | {_cell(r.get('by', ''))} | {_cell(r['change'])} | "
               f"{_cell(r.get('code', ''))} |" for r in rows]
+    if pending:
+        # What promotion will write, previewed: not a number, so it is never read back as a released row.
+        lines.append(f"| Unreleased | {pending[-1].get('date', '')} | {_cell('; '.join(_distinct(pending, 'by')))} | "
+                     f"{_cell('; '.join(_distinct(pending, 'change')))} | {_cell((_distinct(pending, 'code') or [''])[-1])} |")
     if not rows:
-        lines += ['', NONE_YET]
+        lines += ['', UNRELEASED if pending else NONE_YET]
     return '\n'.join(lines) + '\n'
 
 
@@ -80,7 +90,7 @@ def with_pending(body: str, old: str, change: str, by: str, code: str = '', now:
     """The documentation: body, the version control rows as they were, and this change pending."""
     now = now or datetime.now(timezone.utc)
     entries = pending_of(old) + [{'date': now.strftime('%Y-%m-%d'), 'change': change, 'by': by, 'code': code}]
-    return f"{body_of(body)}\n\n{block(rows_of(old))}\n{_pending_comment(entries)}"
+    return f"{body_of(body)}\n\n{block(rows_of(old), entries)}\n{_pending_comment(entries)}"
 
 
 def consolidate(markdown: str, now: datetime | None = None) -> str | None:
@@ -90,10 +100,9 @@ def consolidate(markdown: str, now: datetime | None = None) -> str | None:
         return None
     now = now or datetime.now(timezone.utc)
     rows = rows_of(markdown)
-    distinct = lambda key: list(dict.fromkeys(e.get(key) for e in entries if e.get(key)))  # noqa: E731
     rows.append({'version': str(int(rows[-1]['version']) + 1 if rows else 1), 'date': now.strftime('%Y-%m-%d'),
-                 'by': '; '.join(distinct('by')), 'change': '; '.join(distinct('change')),
-                 'code': (distinct('code') or [''])[-1]})
+                 'by': '; '.join(_distinct(entries, 'by')), 'change': '; '.join(_distinct(entries, 'change')),
+                 'code': (_distinct(entries, 'code') or [''])[-1]})
     return f"{body_of(markdown)}\n\n{block(rows)}"
 
 

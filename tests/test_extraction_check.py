@@ -62,7 +62,7 @@ def test_where_it_stops_on_a_regex_that_matches_but_the_text_goes_on():
 def kv_mapping(*keys: str) -> TranslationMapping:
     return TranslationMapping.model_validate({
         'input': 'json',
-        'extract': [{'field': 'body', 'regex': f'(?:^|\s){k}="([^"]*)"', 'names': [k]} for k in keys],
+        'extract': [{'field': 'body', 'regex': rf'(?:^|\s){k}="([^"]*)"', 'names': [k]} for k in keys],
         'common': [{'path': 'EventSource/Device/HostName', 'field': 'host'}],
         'events': [{'name': 'all', 'fields': [{'path': 'EventDetail/TypeId', 'field': keys[0]}]}]})
 

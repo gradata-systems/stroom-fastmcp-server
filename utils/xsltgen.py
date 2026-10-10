@@ -361,6 +361,15 @@ class XsltStyle(BaseModel):
         "How a computed Data value is written: interpolated (the default), <Data Name=\"x\" Value=\"{...}\"/> (an "
         "attribute value template); attribute, <Data Name=\"x\"><xsl:attribute name=\"Value\" select=\"...\"/></Data>. "
         "An expression holding a brace keeps xsl:attribute. Set it from an AGENTS style guide."))
+    data_entries: Literal['function', 'guarded'] = Field('function', description=(
+        "How a Data entry read from the input is written: function (the default), one line a Data, "
+        "<xsl:sequence select=\"mcp:data('name', value)\"/>, the function writing it only when the value is present; "
+        "guarded, an xsl:if around each Data element. A Data entry with a map, default or conversion is always "
+        "guarded. Set it from an AGENTS style guide."))
+    data_run_min: int = Field(4, ge=2, description=(
+        "Data entries several rules write the same way, this many or more in a row, are written once as a template "
+        "of their own and applied in each rule's place (the modes and named layouts). Set it from an AGENTS style "
+        "guide; a large number keeps every Data entry in its rule."))
     variables: Literal['just_in_time', 'top'] = Field('just_in_time', description=(
         "Where variables are declared: just_in_time (the default), immediately before the first element that reads "
         "each, inside the innermost element holding every read; top, all at the start of their template. Set it "
@@ -768,6 +777,19 @@ class _Generator:
         self._check_functions()
         self._own_functions = self._choose_functions()
         self._keyed, self._keyed_functions = self._choose_keyed()
+        # mcp:data writes a Data entry only when its value is present: one line a Data entry instead of an xsl:if
+        # and two reads of the value (seen: 135 of them, 31 KB of a 50 KB translation).
+        self._data_function_wanted = mapping.style.data_entries == 'function' and any(
+            e.data_name and e.value is None and not (e.map or e.default is not None or e.transform or e.time_format
+                                                     or e.repeat)
+            for e in mapping.common + [f for r in mapping.events for f in r.fields])
+        self._data_function = unique_name(style_name('data', mapping.style.naming),
+                                          set(self._own_functions.values()) | set(self._keyed_functions.values())
+                                          | {'json-to-xml'}, mapping.style.naming)
+        self._data_function_used = False
+        self._data_plans: dict[tuple, list[tuple[int, int, tuple]]] = {}
+        self._data_templates: dict[tuple, str] = {}
+        self._token_cache: dict[int, str] = {}
 
     @staticmethod
     def conversions(entry: FieldMapping) -> list[tuple]:
@@ -832,6 +854,18 @@ class _Generator:
     def own_functions(self) -> list[etree._Element]:
         """The XSLT's own functions, one per repeated conversion: a value in, the converted value out."""
         out = []
+        if self._data_function_used:
+            nil = (f"[not(normalize-space(.) = ({', '.join(literal(v) for v in self.m.nil_values)}))]"
+                   if self.m.nil_values else '')
+            function = etree.Element(f'{{{XSL}}}function', name=f'mcp:{self._data_function}', **{'as': 'element()?'})
+            function.append(etree.Comment(_comment("A Data entry, Name and Value, when the value is present"
+                                                   + (f" (not blank, nor {', '.join(self.m.nil_values)})"
+                                                      if self.m.nil_values else ' (not blank)'))))
+            etree.SubElement(function, f'{{{XSL}}}param', name='name', **{'as': 'xs:string'})
+            etree.SubElement(function, f'{{{XSL}}}param', name='value', **{'as': 'item()*'})
+            present = etree.SubElement(function, f'{{{XSL}}}if', test=f"exists($value[normalize-space(.)]{nil})")
+            etree.SubElement(present, f'{{{EVT}}}Data', Name='{$name}', Value='{$value}')
+            out.append(function)
         for shape, name in self._keyed_functions.items():
             flags = f", {literal(shape[3])}" if shape[3] else ''
             function = etree.Element(f'{{{XSL}}}function', name=f'mcp:{name}', **{'as': 'xs:string?'})
@@ -1449,24 +1483,21 @@ class _Generator:
     def emit(self, parent: etree._Element, node: _Node, enclosing: str | None = None, inline: bool = False) -> None:
         items = [(k.child.index, 0, n, k) for n, k in enumerate(node.kids.values())] + \
                 [(c.index, 1, n, (c, e)) for n, (c, e) in enumerate(node.data)]
+        runs = {start: (length, tokens) for start, length, tokens in self.data_plan(node)}
+        data_at, skip = -1, 0
         for _, is_data, _, item in sorted(items, key=lambda i: i[:3]):
             if is_data:
-                child, entry = item
-                if entry.repeat:
-                    holder = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(entry))
-                else:
-                    test = self.leaf_test(entry)
-                    holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
-                element = etree.SubElement(holder, f'{{{EVT}}}Data', Name=entry.data_name)
-                if entry.value is not None:
-                    # A literal element's attributes are value templates: a brace in a constant is doubled.
-                    element.set('Value', entry.value.replace('{', '{{').replace('}', '}}'))
-                else:
-                    expr = self.value_expr(entry)
-                    if self.m.style.data_values == 'interpolated' and not set('{}') & set(expr):
-                        element.set('Value', f'{{{expr}}}')
-                    else:
-                        etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=expr)
+                data_at += 1
+                if skip:
+                    skip -= 1
+                    continue
+                if data_at in runs:
+                    # Data entries other rules write the same way, in a row: their template, in their place.
+                    length, tokens = runs[data_at]
+                    self.invoke(parent, self.data_template(tokens, [e for _, e in node.data[data_at:data_at + length]]))
+                    skip = length - 1
+                    continue
+                self.emit_data(parent, item[1], enclosing)
             elif item.shared is not None:
                 call = etree.SubElement(parent, f'{{{XSL}}}call-template', name=item.shared.template)
                 for name, select in item.shared.with_params.items():
@@ -1479,6 +1510,119 @@ class _Generator:
                 self.invoke(parent, self.template_for(item))
             else:
                 self.emit_element(parent, item, enclosing, inline)
+
+    def emit_data(self, parent: etree._Element, entry: FieldMapping, enclosing: str | None) -> None:
+        """A Data entry: mcp:data(name, value) when its guard is only that the value is present, else an xsl:if
+        around the element (or a loop over repeated values)."""
+        if entry.repeat:
+            holder = etree.SubElement(parent, f'{{{XSL}}}for-each', select=self.repeat_items(entry))
+        else:
+            test = self.leaf_test(entry)
+            if entry.value is None and self._data_function_wanted and test and test != enclosing:
+                expr = self.value_expr(entry)
+                if re.fullmatch(r'\$[\w.-]+', expr) and test in (expr, f'exists({expr})'):
+                    self._data_function_used = True
+                    etree.SubElement(parent, f'{{{XSL}}}sequence',
+                                     select=f"mcp:{self._data_function}({literal(entry.data_name)}, {expr})")
+                    return
+            holder = etree.SubElement(parent, f'{{{XSL}}}if', test=test) if test and test != enclosing else parent
+        element = etree.SubElement(holder, f'{{{EVT}}}Data', Name=entry.data_name)
+        if entry.value is not None:
+            # A literal element's attributes are value templates: a brace in a constant is doubled.
+            element.set('Value', entry.value.replace('{', '{{').replace('}', '}}'))
+        else:
+            expr = self.value_expr(entry)
+            if self.m.style.data_values == 'interpolated' and not set('{}') & set(expr):
+                element.set('Value', f'{{{expr}}}')
+            else:
+                etree.SubElement(element, f'{{{XSL}}}attribute', name='Value', select=expr)
+
+    def data_token(self, entry: FieldMapping) -> str:
+        """A Data entry written out in full, as a template would hold it: equal tokens write the same Data."""
+        if entry.repeat:
+            return f'#repeat-{id(entry)}'       # a loop over values: never shared
+        if id(entry) not in self._token_cache:
+            holder = etree.Element('fragment')
+            self.in_scope(holder, lambda: self.emit_data(holder, entry, None))
+            self._token_cache[id(entry)] = etree.tostring(holder, encoding='unicode')
+        return self._token_cache[id(entry)]
+
+    def choose_data_runs(self, roots: list[tuple[str, _Node]]) -> None:
+        """Runs of Data entries several rules write the same way, in a row, data_run_min or more: each written once
+        as a template. Greedily, the run saving most first; each rule keeps its Data in order, so its Events don't
+        change (asked for by the user: a FortiGate translation wrote the same thirty Data entries in four rules)."""
+        if self.m.style.layout == 'inline':
+            return
+        lists: list[tuple[tuple, list[str]]] = []      # (token tuple of a node's Data, the rules writing it)
+        index: dict[tuple, int] = {}
+
+        def walk(node: _Node, rule: str) -> None:
+            for kid in node.kids.values():
+                walk(kid, rule)
+            if node.data:
+                tokens = tuple(self.data_token(e) for _, e in node.data)
+                if tokens not in index:
+                    index[tokens] = len(lists)
+                    lists.append((tokens, []))
+                if rule not in lists[index[tokens]][1]:
+                    lists[index[tokens]][1].append(rule)
+        for rule, root in roots:
+            walk(root, rule)
+        least = self.m.style.data_run_min
+        taken = [[False] * len(tokens) for tokens, _ in lists]
+        while True:
+            places: dict[tuple, list[tuple[int, int]]] = {}
+            for n, (tokens, _) in enumerate(lists):
+                for i in range(len(tokens)):
+                    for j in range(i + 1, len(tokens) + 1):
+                        if taken[n][j - 1]:
+                            break
+                        if j - i >= least:
+                            places.setdefault(tokens[i:j], []).append((n, i))
+            # Where a run occurs in distinct places (one list may hold it twice only if they don't overlap).
+            best, best_saving = None, 0
+            for run, found in places.items():
+                spots, last = [], {}
+                for n, i in found:
+                    if i >= last.get(n, -1):
+                        spots.append((n, i))
+                        last[n] = i + len(run)
+                writers = sum(len(lists[n][1]) for n, _ in spots)
+                saving = len(run) * (writers - 1)
+                if writers > 1 and (saving > best_saving or saving == best_saving and best and len(run) > len(best[0])):
+                    best, best_saving = (run, spots), saving
+            if not best:
+                break
+            run, spots = best
+            users = []
+            for n, i in spots:
+                for k in range(i, i + len(run)):
+                    taken[n][k] = True
+                self._data_plans.setdefault(lists[n][0], []).append((i, len(run), run))
+                users += [u for u in lists[n][1] if u not in users]
+            self._data_users[run] = users
+
+    def data_plan(self, node: _Node) -> list[tuple[int, int, tuple]]:
+        if not node.data or not self._data_plans:
+            return []
+        return self._data_plans.get(tuple(self.data_token(e) for _, e in node.data), [])
+
+    def data_template(self, run: tuple, entries: list[FieldMapping]) -> str:
+        """The template writing a run of Data entries, named after its first and last, made once."""
+        if run not in self._data_templates:
+            naming = self.m.style.naming
+            taken = ({name for name, _ in self._templates.values()} | {u.template for u in self.m.shared}
+                     | set(self._rule_names.values()) | {'event', 'item'})
+            words = [re.sub(r'[^A-Za-z0-9]+', '-', e.data_name or '').strip('-').lower() or 'data'
+                     for e in (entries[0], entries[-1])]
+            name = unique_name(style_name(f'data-{words[0]}-to-{words[1]}', naming), taken, naming)
+            template = self.new_template(name)
+            self._data_templates[run] = name
+            key = f'data run {name}'
+            self._templates[key] = (name, template)
+            self.users[key] = self._data_users.get(run, [])
+            self.in_scope(template, lambda: [self.emit_data(template, e, None) for e in entries])
+        return self._data_templates[run]
 
     def repeat_items(self, entry: FieldMapping) -> str:
         field_name, xpath, scope = self.src_of(entry)
@@ -1557,7 +1701,7 @@ class _Generator:
                     # Only a test of whether the field has a value needs blank values left out. A value
                     # (after its guard, or after 'then'), a comparison and a [1] read the selector as it is.
                     after, before = m.string[m.end():], m.string[:m.start()].rstrip()
-                    if attr == 'Value':
+                    if attr == 'Value' or (attr == 'select' and m.string.startswith(f'mcp:{self._data_function}(')):
                         return plain
                     if not before and not after and attr == 'select' or after.startswith('[') \
                             or re.match(r'\s*!?=', after) or before.endswith('then'):
@@ -1719,7 +1863,8 @@ class _Generator:
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
         uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
-            or bool(self._own_functions) or bool(self._keyed_functions)     # the mcp prefix: its own functions
+            or bool(self._own_functions) or bool(self._keyed_functions) \
+            or self._data_function_wanted                                       # the mcp prefix: its own functions
         bound = {f.prefix: f.namespace for f in m.functions}
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
                  **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {}), **bound}
@@ -1742,6 +1887,8 @@ class _Generator:
         etree.SubElement(events, f'{{{XSL}}}apply-templates', select=records, mode='event')
         self.choose_shared([(rule.name, root) for rule, root in trees if root is not None])
         self._templates: dict[str, tuple[str, etree._Element]] = {}
+        self._data_users: dict[tuple, list[str]] = {}
+        self.choose_data_runs([(rule.name, root) for rule, root in trees if root is not None])
         record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='event')
         if m.for_each:
             # One record, several events: each item is handed to the rules with the record as a tunnel parameter.

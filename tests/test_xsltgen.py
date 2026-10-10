@@ -138,8 +138,8 @@ def test_variables_only_for_fields_read_often_and_declared_where_used():
     following = etree.tostring(user.getnext()).decode()
     assert '$user' in following                      # the next element is the first to read it
     # A field read only by its own element stays where it is used, with a short guard, its value interpolated.
-    assert """<xsl:if test="normalize-space(data[@name='sid']/@value)">""" in xslt
-    assert '''Value="{data[@name='sid']/@value}"''' in xslt
+    # One line a Data entry: the function writes it only when the value is present (the guard, once).
+    assert """<xsl:sequence select="mcp:data('session', data[@name='sid']/@value)"/>""" in xslt
     # Declared at the start of the rule instead, for a style guide that says so.
     top = generate(mapping(events=rules, style={'layout': 'inline', 'variables': 'top'}), SCHEMA, '4.1.0')['xslt']
     rule = etree.fromstring(top.encode()).find(f"{XSL_NS}template[@mode='event']")
@@ -622,7 +622,7 @@ def test_a_conversion_several_elements_use_is_one_function_of_the_xslts_own():
     assert result['ok'], result['problems']
     xslt = result['xslt']
     sheet = etree.fromstring(xslt.encode())
-    functions = sheet.findall(f'{{{XSL_URI}}}function')
+    functions = [f for f in sheet.findall(f'{{{XSL_URI}}}function') if f.get('name') != 'mcp:data']
     assert [f.get('name') for f in functions] == ['mcp:strip_domain']
     assert xslt.count("replace(replace(") == 1 and xslt.count('mcp:strip_domain(') == 2   # defined once, called twice
     events = transform(xslt, DOMAIN_RECORDS)
@@ -630,9 +630,9 @@ def test_a_conversion_several_elements_use_is_one_function_of_the_xslts_own():
     assert [u.text for u in events.iter('{event-logging:3}Id')] == ['bob', 'bob']
     # 0: always inline; one use: inline too.
     inline = generate(mapping(common=base, events=rules, style={'function_min_uses': 0}), SCHEMA, '4.1.0')['xslt']
-    assert 'xsl:function' not in inline and inline.count('replace(replace(') == 2
+    assert 'mcp:strip_domain' not in inline and inline.count('replace(replace(') == 2
     once = generate(mapping(events=rules), SCHEMA, '4.1.0')['xslt']
-    assert 'xsl:function' not in once
+    assert 'mcp:strip_domain' not in once
 
 
 def test_a_time_format_several_elements_use_is_one_function():
@@ -644,7 +644,7 @@ def test_a_time_format_several_elements_use_is_one_function():
     result = generate(mapping(common=timed + BASE[1:], events=rules, style={'naming': 'camelCase'}), SCHEMA, '4.1.0')
     assert result['ok'], result['problems']
     sheet = etree.fromstring(result['xslt'].encode())
-    [function] = sheet.findall(f'{{{XSL_URI}}}function')
+    [function] = [f for f in sheet.findall(f'{{{XSL_URI}}}function') if f.get('name') != 'mcp:data']
     assert function.get('name') == 'mcp:parseTime'
     assert function.find(f'{{{XSL_URI}}}sequence').get('select') == \
         "stroom:format-date($value, 'dd/MM/yyyy HH:mm:ss', '+10:00')"
@@ -669,7 +669,7 @@ def test_data_values_interpolated_and_data_names_in_a_style():
               'xpath': "replace(data[@name='user']/@value, '^(.{2}).*', '$1')"}]
     styled = mapping(events=[{'name': 'logon', 'when': [{'field': 'action', 'equals': 'login'}], 'fields': logon},
                              mapping().events[-1].model_dump(exclude_none=True)],
-                     style={'data_values': 'interpolated', 'data_names': 'PascalCase'})
+                     style={'data_values': 'interpolated', 'data_names': 'PascalCase', 'data_entries': 'guarded'})
     # The names are the mapping's own from now on: the documentation and the checks see what the events hold.
     assert [f.data_name for f in styled.events[0].fields if f.data_name] == ['Session', 'ServerNode', 'IPAddress', 'FirstTwo']
     result = generate(styled, SCHEMA, '4.1.0')
@@ -688,9 +688,9 @@ def test_data_values_interpolated_and_data_names_in_a_style():
     data = {d.get('Name'): d.get('Value') for d in events.iter('{event-logging:3}Data')}
     assert data['ServerNode'] == 'ws09' and data['IPAddress'] == 'a{b}' and data['FirstTwo'] == "o'" and data['Session'] == 's1'
     # Interpolated is the default now (asked for by the user); attribute is there for a style guide that wants it.
-    plain = generate(mapping(), SCHEMA, '4.1.0')['xslt']
+    plain = generate(mapping(style={'data_entries': 'guarded'}), SCHEMA, '4.1.0')['xslt']
     assert '<Data Name="session" Value="{' in plain and '<xsl:attribute name="Value"' not in plain
-    old = generate(mapping(style={'data_values': 'attribute'}), SCHEMA, '4.1.0')['xslt']
+    old = generate(mapping(style={'data_values': 'attribute', 'data_entries': 'guarded'}), SCHEMA, '4.1.0')['xslt']
     assert '<xsl:attribute name="Value"' in old and 'Name="session"' in old
 
 
@@ -724,7 +724,7 @@ def firewall_mapping(**style) -> TranslationMapping:
     """A key=value message read through one extraction per key, and two Network rules writing the same Source,
     Destination and Data: the shape of the FortiGate translation that came to 93 KB."""
     def kv(key, quoted=True):
-        return {'field': 'msg', 'regex': f'(?:^|\s){key}="([^"]*)"' if quoted else f'(?:^|\s){key}=(\S+)', 'names': [key]}
+        return {'field': 'msg', 'regex': rf'(?:^|\s){key}="([^"]*)"' if quoted else rf'(?:^|\s){key}=(\S+)', 'names': [key]}
     network = [{'path': 'Source/Device/IPAddress', 'field': 'srcip'}, {'path': 'Destination/Device/IPAddress', 'field': 'dstip'},
                {'path': 'Data', 'data_name': 'dstintfrole', 'field': 'dstintfrole'}, {'path': 'Data', 'data_name': 'proto', 'field': 'proto'}]
     rules = [{'name': name, 'when': [{'field': 'action', 'equals': action}],
@@ -767,3 +767,38 @@ def test_the_action_free_path_keeps_everything_but_the_action():
     assert action_free('EventDetail/Authenticate/Data') == 'EventDetail/*/Data'
     assert action_free('EventDetail/TypeId') == 'EventDetail/TypeId'
     assert action_free('EventSource/Client/IPAddress') == 'EventSource/Client/IPAddress'
+
+
+def test_data_entries_are_one_line_each_and_runs_several_rules_write_are_shared_with_the_same_events():
+    # Asked for by the user: a production translation's Data lists (135 guarded Data, 31 KB of 50 KB) repeated the
+    # same thirty entries in four rules. The same Events come out of the compact form as out of the guarded one.
+    fields = {'srcintfrole', 'logid', 'policyid', 'service'}
+    def with_data(**style):
+        m = firewall_mapping(**style).model_dump(exclude_none=True)
+        m['extract'] += [{'field': 'msg', 'regex': rf'(?:^|\s){k}="([^"]*)"', 'names': [k]}
+                         for k in ('srcintfrole', 'logid', 'service')] + \
+                        [{'field': 'msg', 'regex': rf'(?:^|\s)policyid=(\S+)', 'names': ['policyid']}]
+        for rule in m['events']:
+            element = rule['fields'][1]['path'].split('/')[2]
+            rule['fields'] += [{'path': f'EventDetail/Network/{element}/Data', 'data_name': k, 'field': k}
+                               for k in sorted(fields)]
+        return TranslationMapping.model_validate(m)
+    compact = generate(with_data(), SCHEMA, '4.1.0')
+    old = generate(with_data(data_entries='guarded', data_run_min=99), SCHEMA, '4.1.0')
+    assert compact['ok'] and old['ok'], (compact['problems'], old['problems'])
+    xslt = compact['xslt']
+    assert "<xsl:sequence select=\"mcp:data('logid', mcp:quoted_value($msg, 'logid'))\"/>" in xslt
+    assert '<xsl:function name="mcp:data" as="element()?">' in xslt and '<xsl:if test="mcp:quoted_value' not in xslt
+    # The Data both Network rules write, a run, written once and applied in each.
+    sheet = etree.fromstring(xslt.encode())
+    runs = [t.get('mode') for t in sheet.findall(f'{XSL_NS}template') if (t.get('mode') or '').startswith('data_')]
+    assert len(runs) == 1 and xslt.count(f'mode="{runs[0]}"/>') == 2, runs
+    assert '<xsl:if test=' in old['xslt'] and 'mcp:data' not in old['xslt']
+    # One record with the keys (one of them blank, one 'N/A'-free nil-less value), one without them.
+    records = FIREWALL.replace('proto=6 user="bob"', 'proto=6 user="bob" logid="0001" service="" srcintfrole="lan" policyid=7')
+    new_events, old_events = transform(xslt, records), transform(old['xslt'], records)
+    assert VALIDATOR.validate(new_events), [e.message for e in VALIDATOR.error_log]
+    canon = lambda doc: [etree.tostring(e, method='c14n') for e in doc.findall('e:Event', {'e': 'event-logging:3'})]
+    assert canon(new_events) == canon(old_events)
+    written = [d.get('Name') for d in new_events.iter('{event-logging:3}Data')]
+    assert {'logid', 'srcintfrole', 'policyid'} <= set(written) and 'service' not in written   # a blank value: none

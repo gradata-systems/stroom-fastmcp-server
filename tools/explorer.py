@@ -148,13 +148,13 @@ def _kept_summary(doc: dict[str, Any], uuid: str, whole: bool) -> None:
     """The mapping kept in an XSLT's description as a summary, and its pending changes as their lines: seen in
     production, the whole mapping (1,400 lines) was spilled by the client to a file, which the agent read in parts and
     then sent back whole to regenerate the XSLT."""
-    from utils.mappingstore import _BLOCK, read_mapping
-    from utils.xsltversion import pending_of, without_pending
+    from utils.mappingstore import read_mapping, without_block
+    from utils.xsltversion import pending_of
     description = doc.get('description') or ''
     kept, pending = read_mapping(description), pending_of(description)
     if not kept and not pending:
         return
-    doc['description'] = without_pending(_BLOCK.sub('', description)).strip()
+    doc['description'] = without_block(description, None)     # its own text and its version history
     if pending:
         doc['pending_changes'] = [e.get('change') for e in pending.get('entries') or []]
     if not kept:

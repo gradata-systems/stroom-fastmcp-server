@@ -243,21 +243,32 @@ async def environment(ctx, stroom: StroomGateway, stamp: str, build: str, events
     described = await explorer.describe_document(ctx, 'XSLT', kafka_xslt['uuid'])
     e2e.check(described['pending_changes'] == ['Created from its CEF plan', 'Session id as cn2, asked for by the SOC']
               and described['kept_mapping']['kind'] == 'cef', f"pending: {described['pending_changes']}")
+    unreleased = [l.strip() for l in described['description'].splitlines() if l.strip().startswith('| Unreleased |')]
+    e2e.check(len(unreleased) == 1 and 'Created from its CEF plan; Session id as cn2' in unreleased[0],
+              f"previewed in the XSLT, unreleased: {unreleased}")
     step = await stepping.step_sample(ctx, kafka_pipeline['uuid'], [events_id])
     e2e.check(step['verdict'] == 'clean', 'the Kafka pipeline steps clean again')
     await builds.write_documentation(ctx, build, kafka_pipeline['uuid'],
                                      f"# CEF-{stamp}-Kafka\n\n## Purpose and data\n\nSecretServer Events to ArcSight "
                                      f"as CEF.\n", 'Session id as cn2', stream_ids=[events_id])
+    text = (await stroom.get_doc('Documentation', kafka_doc['uuid']))['data']
+    e2e.check('| Unreleased |' in text and versionlog.rows_of(text) == [],
+              "the doc previews its unreleased row, nothing released yet")
     destination = await _create(stroom, 'Folder', f'promoted-{stamp}', folder)
     where = f'{folder_path}/promoted-{stamp}'
     result = await e2e.agreed(builds.promote_build, ctx=ctx, build=build,
                               destinations={t: where for t in ('Feed', 'Pipeline', 'XSLT', 'Documentation', 'KafkaConfig')})
     e2e.check(len(result['promoted']) >= 7, f"promoted {len(result['promoted'])} documents")
-    history = xsltversion.rows((await stroom.get_doc('XSLT', kafka_xslt['uuid']))['data'])
+    promoted_xslt = await stroom.get_doc('XSLT', kafka_xslt['uuid'])
+    history = xsltversion.history(promoted_xslt['description'])
+    e2e.check('stroom-mcp version history' not in promoted_xslt['data'], 'the history kept out of the code')
     e2e.check(len(history) == 1 and 'Session id as cn2' in history[0]['change'] and 'Created' in history[0]['change']
               and history[0]['how'] == 'agent', f"the XSLT's version history: {history}")
     rows = versionlog.rows_of((await stroom.get_doc('Documentation', kafka_doc['uuid']))['data'])
     e2e.check(len(rows) == 1 and 'Session id as cn2' in str(rows[0]), f"the doc's version control: {rows}")
+    e2e.check('| Unreleased |' not in (await stroom.get_doc('XSLT', kafka_xslt['uuid']))['description']
+              and '| Unreleased |' not in (await stroom.get_doc('Documentation', kafka_doc['uuid']))['data'],
+              'promoted: the previews replaced by the released line and row')
 
 
 if __name__ == '__main__':

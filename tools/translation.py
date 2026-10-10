@@ -30,6 +30,12 @@ def _pending(ctx: Context, description: str | None, previous: dict[str, Any] | N
     return with_pending(description, previous, _user(ctx), change, agent_line(ctx), code=code)
 
 
+def _previewed(doc: dict[str, Any]) -> str:
+    """The description with the build's changes so far previewed in its version history, marked Unreleased."""
+    from utils.xsltversion import preview
+    return preview(doc.get('description'), doc.get('data') or '')
+
+
 def _summary(doc: dict[str, Any]) -> dict[str, Any]:
     return {'type': doc.get('type'), 'uuid': doc.get('uuid'), 'name': doc.get('name'), 'version': doc.get('version')}
 
@@ -232,6 +238,7 @@ async def create_xslt(
     doc['data'] = code
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
     doc['description'] = _pending(ctx, doc.get('description'), None, change or 'Created', doc['data'])
+    doc['description'] = _previewed(doc)
     from tools.plan import with_next
     return await with_next(ctx, build, {**_summary(await stroom.put_doc(doc)), **extra})
 
@@ -256,10 +263,13 @@ async def update_xslt(
     doc = await stroom.get_doc('XSLT', uuid)
     await guard_from(ctx).check_managed({'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')})
     previous = dict(doc)
-    from utils.xsltversion import carry
-    doc['data'] = carry(code, previous.get('data'))
+    from utils.xsltversion import adopt, strip
+    # The history lives in the description, not the code: one an earlier version kept in the code moves there.
+    doc['description'] = adopt(doc.get('description'), previous.get('data'))
+    doc['data'] = strip(code)
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
     doc['description'] = _pending(ctx, doc.get('description'), previous, change or 'Changed', doc['data'])
+    doc['description'] = _previewed(doc)
     return {**_summary(await stroom.put_doc(doc, version)), **extra}
 
 

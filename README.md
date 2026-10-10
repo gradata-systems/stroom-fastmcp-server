@@ -97,9 +97,13 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   time formats the values do not fit) before anything is stepped. Several sample files of one source are profiled
   together, uploaded one stream each, and all stepped.
 - Generated XSLT is written to be read: a template rule per kind of event, parts several rules write the same way
-  (EventSource, a Network action's Source and Destination) written once, variables declared just before their first
-  use, `Data` values as `Value="{...}"`, and key=value extractions as one function called with the key. A style guide
-  in an `AGENTS` doc can change each (`stroom://guide/xslt`).
+  (EventSource, a Network action's Source and Destination, a run of the same `Data` entries) written once, variables
+  declared just before their first use, each `Data` entry one line (`mcp:data('name', value)`, written only when the
+  value is present), and key=value extractions as one function called with the key. A style guide in an `AGENTS` doc
+  can change each (`stroom://guide/xslt`). Each XSLT's version history is a table in its Documentation tab (the
+  code is left as generated), and like its doc's version control it previews a build's changes, marked Unreleased,
+  until promotion records them as a version. The mapping and other data the server keeps there are hidden, after a
+  note asking people to leave them.
 - Reference data and dictionaries are first-class: `lookup` and `dictionary` sources in the mapping, the Reference
   Data pipeline built from a mapping, and the events pipeline naming the feed as a pipeline reference.
 - One record may hold several events (`for_each`), a value may repeat (`repeat`), and records the user wants left

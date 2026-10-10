@@ -263,11 +263,12 @@ async def consolidate_versions(ctx: Context, docs: list[dict[str, Any]]) -> list
             doc = await stroom.get_doc('XSLT', ref['uuid'])
             pending = xsltversion.pending_of(doc.get('description'))
             if pending:
-                doc['data'] = xsltversion.consolidate(doc.get('data') or '', pending)
-                doc['description'] = xsltversion.without_pending(doc.get('description'))
+                description = xsltversion.adopt(doc.get('description'), doc.get('data'))
+                doc['description'] = xsltversion.consolidate(description, doc.get('data') or '')
+                doc['data'] = xsltversion.strip(doc.get('data') or '')
                 await stroom.put_doc(doc)
-                done.append(f"recorded the build's changes as version {len(xsltversion.rows(doc['data']))} of XSLT "
-                            f"'{ref['name']}'")
+                done.append(f"recorded the build's changes as version {len(xsltversion.history(doc['description']))} "
+                            f"of XSLT '{ref['name']}' (its Documentation)")
         elif ref['type'] == 'Documentation':
             doc = await stroom.get_doc('Documentation', ref['uuid'])
             text = versionlog.consolidate(body_text(doc))

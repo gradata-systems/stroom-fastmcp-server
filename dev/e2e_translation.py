@@ -334,10 +334,14 @@ async def promotion(ctx, csv: dict, stamp: str):
               f"missing destination folders created first: {result['promoted'][:2]}")
     text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('data') or ''
     check('translation e2e test' in text, f"promoted documentation keeps its text: {len(text)} chars")
-    # The build's changes, one version each: a line at the start of the XSLT, a row at the end of its documentation.
-    code = (await stroom.get_doc('XSLT', csv['xslt']['uuid'])).get('data') or ''
-    check('<!-- stroom-mcp version history\n v1 | ' in code and '| agent |' in code and '| 1 |' in text,
-          "version 1 recorded in the XSLT's history and the documentation's version control")
+    # The build's changes, one version each: a row of the XSLT's history (its Documentation tab, not its code), a row
+    # at the end of its documentation.
+    from utils.xsltversion import history
+    xslt_doc = await stroom.get_doc('XSLT', csv['xslt']['uuid'])
+    rows = history(xslt_doc.get('description'))
+    check([r['version'] for r in rows] == ['1'] and rows[0]['how'] == 'agent' and '| 1 |' in text
+          and 'version history' not in (xslt_doc.get('data') or ''),
+          "version 1 recorded in the XSLT's history (its Documentation, not its code) and the documentation's version control")
     check("removed the build's workspace folder, now empty" in result['promoted']
           and await guard_from(ctx).build_folder(csv['build'], create=False) is None, 'the emptied build folder is removed')
     made = result.get('processing_filters') or []

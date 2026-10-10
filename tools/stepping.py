@@ -96,7 +96,10 @@ async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
         code = (draft_code or {}).get(doc['element'])
         if code is None:
             code = (await stroom.get_doc(doc['doc']['type'], doc['doc']['uuid'])).get('data') or ''
-        prints[doc['element']] = hashlib.sha256(code.encode()).hexdigest()
+        # Not the version history, which isn't code: a draft stepped clean is still clean once saved, its history
+        # (the build's changes, previewed as unreleased) added to it (seen: e2e_translation, once saves previewed it).
+        from utils.xsltversion import strip
+        prints[doc['element']] = hashlib.sha256(strip(code).encode()).hexdigest()
     return prints
 
 

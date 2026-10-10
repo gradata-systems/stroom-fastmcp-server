@@ -186,6 +186,8 @@ The mapping's `style` decides how the XSLT reads. Take it from an XSLT style sec
 | `inline_map_max_keys` | 3 | A value map used by one element with at most this many keys is written inline as an `if`; longer or shared ones become one `xsl:map`. 0: always `xsl:map`. |
 | `function_min_uses` | 2 | A conversion this many elements use (a time format, or a `strip_domain`, `domain` or `digits` transform) is declared once as an `xsl:function` (`mcp:parse_time`, `mcp:strip_domain`) and called; fewer stay inline. 0: always inline. |
 | `data_values` | `interpolated` | How a computed `Data` value is written: `interpolated`, `<Data Name="x" Value="{...}"/>`; `attribute`, `<Data Name="x"><xsl:attribute name="Value" select="..."/></Data>`. An expression holding a brace keeps `xsl:attribute` (or its variable). |
+| `data_entries` | `function` | How a `Data` entry read from the input is written: `function`, one line, `<xsl:sequence select="mcp:data('name', value)"/>`, the XSLT's own `mcp:data` writing it only when the value is present (not blank, nor a `nil_values` value); `guarded`, an `xsl:if` around each `Data` element. An entry with a map, a default or a conversion is always guarded. |
+| `data_run_min` | 4 | `Data` entries several rules write the same way, this many or more in a row, are written once as a template (`data_logid_to_dstintfrole`, after its first and last) and applied in each rule's place; each rule keeps its order. A large number keeps every entry in its rule. |
 | `data_names` | `as_given` | `Data` Names in a style, applied to every `data_name` of the mapping: `server_node` is `ServerNode` in `PascalCase`; a name already in the style is kept (`IPAddress`). Also `snake_case`, `camelCase`, `kebab-case`. The names are the mapping's own from then on, so the documentation and the index fields follow them. |
 | `layout` | `modes` | `modes`: each event kind is a template rule with its own mode (`match="node()" mode="eventTypeLogon"` with `camelCase` naming), applied to the record with `select="."` from the record template's `xsl:choose`; parts several kinds share are mode templates too. `named`: the same with named templates and `xsl:call-template`. `inline`: every kind written in the `xsl:choose`. |
 
@@ -225,6 +227,11 @@ xpaths.
    them. Nothing is saved; errors come back per record and element.
 
 ## Less repetition, by the generator
+
+Each `Data` entry read from the input is one line, `<xsl:sequence select="mcp:data('logid', mcp:quoted_value($body,
+'logid'))"/>`: the value read once, and written only when present. A run of `Data` entries several rules write the
+same way is a template of its own, applied in each rule's place (`data_run_min`). Seen: 135 guarded `Data` elements
+were 31 KB of a 50 KB FortiGate translation; with both, the translation is 25 KB, writing the same Events.
 
 Extractions that differ only by the key they find in one text field (`key="..."` for thirty keys) become one function
 a shape, called with the key: `mcp:quoted_value($body, 'dstintfrole')`, in place of an `analyze-string` variable a key
