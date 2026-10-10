@@ -378,7 +378,56 @@ async def check_event_quality(ctx: Context, events_xml: EventsXml) -> dict[str, 
 _INPUT_FIELD = re.compile(r"""(?:data|string|number|boolean|map|array)\[@(?:name|key)\s*=\s*['"]([^'"]+)['"]\]""")
 
 
+FN = 'http://www.w3.org/2005/xpath-functions'
+
+
+def index_fields(root: etree._Element) -> list[dict[str, str]] | None:
+    """An indexing XSLT's fields, each its name and source: an Elasticsearch document's dotted key path (each map's
+    key, then the value's own), or a Lucene record's data name; None when the XSLT writes neither. A variable is read
+    as what it holds. A field a template writes for whatever element it is applied to (an object several actions
+    share) is named from that template's own keys, with the template's mode: its source is relative to that element.
+    Seen in VS Code: an indexing XSLT described as '[Event] map/map/string' outputs, 36 of them, which say nothing of
+    the fields; the agent read them out of a file the client spilled them to, and its model fell into a loop."""
+    def variables(template: etree._Element) -> dict[str, str]:
+        return {v.get('name'): v.get('select') for v in template.iter(f'{{{XSL}}}variable')
+                if v.get('name') and v.get('select')}
+
+    def resolved(text: str, held: dict[str, str]) -> str:
+        for _ in range(3):      # a variable may read another
+            text = re.sub(r'\$([\w.-]+)', lambda m: held.get(m.group(1), m.group(0)), text)
+        return text
+    fields: list[dict[str, str]] = []
+    for template in root.iter(f'{{{XSL}}}template'):
+        held = variables(template)
+        where = '' if template.get('match') in ('Event', None) and not template.get('name') \
+            else f"[{template.get('mode') or template.get('name')}] "
+        for el in template.iter():
+            if not isinstance(el.tag, str):
+                continue
+            q = etree.QName(el)
+            if q.namespace == FN and el.get('key') and q.localname not in ('map', 'array'):
+                keys = [a.get('key') for a in reversed(list(el.iterancestors()))
+                        if etree.QName(a).namespace == FN and a.get('key')]
+                value = next((v.get('select') for v in el.iter(f'{{{XSL}}}value-of', f'{{{XSL}}}sequence')), None)
+                fields.append({'field': where + '.'.join(keys + [el.get('key')]),
+                               'source': resolved(value or _text(el), held), 'type': q.localname})
+            elif q.localname == 'data' and q.namespace == 'records:2' and el.get('name'):
+                value = el.get('value') or ''
+                fields.append({'field': where + el.get('name'),
+                               'source': resolved(value[1:-1] if value.startswith('{') else value, held)})
+            elif q.namespace == XSL and q.localname == 'call-template' and not where:
+                fields.append({'field': f"(written by the shared template {el.get('name')})", 'source': ''})
+    return fields if any(f['source'] for f in fields) else None
+
+
 def _describe(root: etree._Element) -> dict[str, Any]:
+    fields = index_fields(root)
+    if fields is not None:
+        # An indexing XSLT: its fields by name, not the JSON elements that write them.
+        source_text = etree.tostring(root, encoding='unicode')
+        return {'index_fields': fields,
+                'imports': [e.get('href') for e in root.iter(f'{{{XSL}}}import', f'{{{XSL}}}include')],
+                'lookups': sorted(set(re.findall(r"stroom:(?:lookup|bitmap-lookup)\(\s*'([^']+)'", source_text)))}
     mappings: list[dict[str, str]] = []
 
     def output_path(node: etree._Element) -> str:
@@ -434,6 +483,8 @@ async def describe_translation(
         doc = await gateway_from(ctx).get(f'/xslt/v1/{xslt_uuid}')
         xslt, name = doc.get('data') or '', doc.get('name')
     result = _describe(_parse(xslt, 'XSLT'))
+    if 'index_fields' in result:
+        return {'xslt': name, 'kind': 'indexing', 'field_count': len(result['index_fields']), **result}
     kinds = Counter(m['kind'] for m in result['mappings'])
     return {'xslt': name, 'mapping_counts': dict(kinds), **result}
 

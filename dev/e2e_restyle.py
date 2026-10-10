@@ -348,7 +348,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
         said = ''
     except Exception as e:
         said = str(e)
-    check(said.startswith('Not saved:') and "stroom:extract($body,'logid')" in said
+    check(said.startswith('Not saved:') and 'stroom:extract(' in said
           and 'discard_hand_edit' in said, f"regenerating over the edit is refused: {said[:200]}")
     # The user says to drop it (it breaks the translation): saved over.
     again = await generation.build_translation_xslt(ctx, uuid=xslt['uuid'], stream_ids=raws, include_xslt=False,

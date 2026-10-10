@@ -389,6 +389,11 @@ async def draft_index_mapping(
             description="Elasticsearch: only when the user has no example index template and no existing index to "
                         "follow; they confirm it in a form, and the convention alone names the fields.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+        replaces: Annotated[str | None, Field(description=(
+            "When this index replaces an existing one (e.g. its fields renamed to ECS): the old indexing XSLT's uuid, "
+            "or its pipeline's. The reply lists the fields the old index wrote that this draft doesn't (replaced: "
+            "with their sources and how often the sample populates them), to ask the user about; no need to read "
+            "the old XSLT."))] = None,
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
@@ -592,8 +597,10 @@ async def draft_index_mapping(
     # Network paths once, whichever action: one field for a source address, not one per Permit and Deny.
     unmapped = sorted(dict.fromkeys(any_action(p) for p in populated
                                     if populated[p] and not any(source_matches(f.source, p) for f in fields)))
+    replaced = await _replaced(ctx, replaces, plan, populated) if replaces else None
     # No XSLT here: save_xslt index_plan= generates it, and half the reply was code the agent never reads.
-    return {'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered,
+    return {**({'replaced': replaced} if replaced else {}),
+            'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered,
             'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
             'field_mapping': index_field_mapping_markdown(plan, populated),
             **({'from_example': example_notes} if example_template or shared else {}),
@@ -603,6 +610,63 @@ async def draft_index_mapping(
             'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
                     "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
                     "write_documentation generates the Field mapping section."}
+
+
+async def _replaced(ctx: Context, replaces: str, plan: FieldPlan, populated: dict[str, float]) -> dict[str, Any]:
+    """What the index being replaced wrote that the draft doesn't. Seen in VS Code: asked to make an indexing pipeline
+    write ECS, the agent compared its draft with the old XSLT by reading describe_document's output from a file its
+    client spilled it to, and its model fell into a loop."""
+    from lxml import etree
+    from tools.pipelines import translation_docs
+    from tools.validation import index_fields
+    stroom = gateway_from(ctx)
+    try:
+        doc = await stroom.get_doc('XSLT', replaces)
+    except Exception:       # a pipeline's uuid: its indexing XSLT
+        doc = None
+    if not doc or not doc.get('data'):
+        try:
+            entries = [e for e in translation_docs(replaces, await stroom.pipeline_layers(replaces))
+                       if e['doc']['type'] == 'XSLT']
+        except Exception as e:
+            raise ToolError(f"replaces={replaces}: neither an XSLT nor a pipeline this server can read ({e})") from e
+        if not entries:
+            raise ToolError(f"replaces={replaces}: the pipeline runs no XSLT")
+        doc = await stroom.get_doc('XSLT', entries[-1]['doc']['uuid'])
+    kept = read_mapping(doc.get('description'))
+    if kept and kept[0] == 'index':
+        old = [{'field': f['name'], 'source': f['source']} for f in kept[1].get('fields') or []]
+    else:
+        try:
+            root = etree.fromstring(re.sub(r'^\s*<\?xml[^>]*\?>', '', doc.get('data') or '').encode('utf-8'))
+            old = index_fields(root) or []
+        except etree.XMLSyntaxError:
+            old = []
+    if not old:
+        return {'xslt': doc.get('name'), 'note': "No fields read from it: not an indexing XSLT this server can read."}
+
+    def plain(source: str) -> str:
+        return source.split(' ! ')[0].strip()
+
+    def covered(source: str) -> bool:
+        return any(f.source == source or source_matches(f.source, source) or source_matches(source, f.source)
+                   for f in plan.fields)
+    missing = []
+    for f in old:
+        source = plain(f.get('source') or '')
+        if not source or covered(source):
+            continue
+        if re.fullmatch(r"[\w@*./:\[\]='\"-]+", source):
+            share = population_of(source, populated)
+            said = f"{share:.0f}%" if share else 'not in the sample'
+        else:
+            said = 'unknown (an expression)'
+        missing.append({'field': f['field'], 'source': f['source'], 'populated': said})
+    return {'xslt': doc.get('name'), 'fields': len(old), 'not_in_draft': missing,
+            **({'hint': "Ask the user about each field the old index wrote that this draft doesn't: add it (under "
+                        "which name: an ECS field, get_field_conventions name=ecs ecs_fields=<set>) with "
+                        "extra_fields and draft again, or leave it out. Those not in the sample hold nothing to "
+                        "index from it."} if missing else {})}
 
 
 async def set_index_fields(

@@ -28,6 +28,11 @@ field, then, field by field, whether to keep their edit or use the proposed fiel
 with the questions to ask them exactly, answered by calling again with `hand_edit_choices={'*': 'overwrite'}` or
 `{field: 'keep' or 'overwrite'}`. Never answer for them. If they keep it, leave your change to that field out and carry their edit.
 
+Replacing an index (its fields renamed to ECS, say): draft with `replaces=` the old indexing XSLT or its
+pipeline. The reply's `replaced.not_in_draft` lists what the old index wrote that the draft doesn't (by source, so
+a field renamed but read from the same place is covered), with how often the sample populates each: ask the user
+about those. There's no need to read the old XSLT; `describe_document` gives an indexing XSLT by its fields.
+
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
 index's mapping) and the component templates it is composed of. Give it to `draft_index_mapping` as well as to
 `propose_index_template`: the plan's field names then follow it (the example's `User.Id` for the user and `TypeId`

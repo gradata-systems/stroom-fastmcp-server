@@ -49,7 +49,7 @@ from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from utils.mappingstore import read_agreed_template, read_mapping  # noqa: E402
-from tools import builds, indexing, processing_writes, stepping, templates, translation  # noqa: E402
+from tools import builds, explorer, indexing, processing_writes, stepping, templates, translation  # noqa: E402
 from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
@@ -430,6 +430,28 @@ async def main():
         after = (await stroom.get_doc('XSLT', xslt['uuid']))['data']
         e2e.check('key="created_at"' in after and 'key="created"' not in after,
                   'the rename carried into the plan: saved, written as event.created_at')
+
+        print("\n### a draft replacing an index says what the old one wrote that it doesn't (no reading its XSLT)")
+        # Seen in VS Code: the agent compared its draft with the old XSLT by reading describe_document's output from
+        # a file, and its model fell into a loop.
+        fresh = await e2e.agreed(indexing.draft_index_mapping, ctx=ctx, backend='elasticsearch', index_name=index,
+                                 convention='ecs', events_stream_ids=events, without_example=True,
+                                 replaces=pipeline['uuid'])
+        replaced = fresh['replaced']
+        print(f"    {replaced['xslt']}: {replaced['fields']} fields; not in the draft: {replaced['not_in_draft']}")
+        # Covered by source, whatever the name: event.created_at reads the Outcome the draft writes as event.outcome.
+        e2e.check(replaced['fields'] >= 10 and replaced['not_in_draft'] == [],
+                  "every field the old index wrote is covered by the draft (by its source, renamed or not)")
+        fresh_plan = FieldPlan.model_validate(fresh['plan'])
+        dropped = next(f for f in fresh_plan.fields if f.name == 'host.name')
+        less = fresh_plan.model_copy(update={'fields': [f for f in fresh_plan.fields if f is not dropped]})
+        narrower = await indexing._replaced(ctx, pipeline['uuid'], less, {dropped.source: 100.0})
+        e2e.check([(m['field'], m['source'], m['populated']) for m in narrower['not_in_draft']]
+                  == [('host.name', dropped.source, '100%')],
+                  f"a field the draft leaves out is listed, with its source and population: {narrower['not_in_draft']}")
+        described = await explorer.describe_document(ctx, 'XSLT', xslt['uuid'])
+        e2e.check(any(f['field'] == 'event.created_at' for f in described['translation']['index_fields']),
+                  'describe_document gives the indexing XSLT by its fields, not its JSON elements')
         if '--live' in sys.argv:
             await live(ctx, stroom, csv, events, es_template, stamp)
             await live_structure(ctx, stroom, es_template, stamp)
