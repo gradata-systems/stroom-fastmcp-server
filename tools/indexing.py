@@ -1557,7 +1557,9 @@ async def propose_index_template(
                                                    else list(component_templates))
         except ValueError as e:
             raise ToolError(str(e)) from e
-        body, notes = from_example(body, example, components, discovery=plan.discovery is not None)
+        # Every planned field: the example says what it is composed of, and so which fields are left to that.
+        full = plan.model_copy(update={'index_name': index}).elastic_template(name, priority, leave_to_component=False)
+        body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None)
         if kept_note:
             notes.insert(0, kept_note)
         if plan.convention == 'ecs' and ECS_COMPONENT not in (body.get('composed_of') or []):

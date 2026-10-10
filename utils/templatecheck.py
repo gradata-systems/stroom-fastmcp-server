@@ -96,12 +96,13 @@ def compose(body: dict[str, Any], components: dict[str, dict[str, Any]]) -> tupl
     """(body, missing): the index template with its component templates' mappings merged in as Elasticsearch composes
     them (each of composed_of in order, then the template's own mappings over them), and those of composed_of not
     given."""
+    from utils import ecs
     merged: dict[str, Any] = {}
     missing = []
     for name in body.get('composed_of') or []:
         if name in components:
             _merge(merged, ((components[name].get('template') or {}).get('mappings')) or {})
-        else:
+        elif name != ecs.COMPONENT:     # built in: what it maps is known here (utils.ecs.component_type)
             missing.append(name)
     _merge(merged, ((body.get('template') or {}).get('mappings')) or {})
     return {**body, 'template': {**(body.get('template') or {}), 'mappings': merged}}, missing
@@ -460,7 +461,7 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     for name in composed_of:
         if name in components:
             from_components.update(read_mapping(((components[name].get('template') or {}).get('mappings')) or {}).fields)
-    missing = [n for n in composed_of if n not in components]
+    missing = [n for n in composed_of if n not in components and n != 'ecs@mappings']     # built in: known here
     in_example = read_mapping(own).fields
     plan_fields = read_mapping(((planned.get('template') or {}).get('mappings')) or {}).fields
     # The plan's values: not its object nodes (with subobjects: false, time and time.min are both values).
@@ -475,9 +476,14 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
             objects.update(object_nodes(((components[name].get('template') or {}).get('mappings')) or {}))
     objects.update(object_nodes(own))
     typed = bool(objects) and sum('type' in o for o in objects.values()) * 2 > len(objects)
+    from utils import ecs
+    # The example composes Elastic's ECS component, mapping as documents bring them: the ECS fields it maps as ECS
+    # says are left to it, as an ECS plan's own template leaves them (asked for by the user).
+    by_component = ecs.COMPONENT in composed_of and str(own.get('dynamic', True)).lower() == 'true'
     final, left, kept, new, styled, aliased = {}, [], [], [], [], []
     for path, spec in leaves.items():
-        if path in from_components:
+        if path in from_components or (by_component and path not in in_example
+                                        and ecs.left_to_component(path, spec.get('type', ''))):
             left.append(path)
         elif path in in_example and in_example[path].get('type') == 'alias':
             # Seen in VS Code: the example's User.Id was an alias of User.Name. Copied, the new index had an alias of a
@@ -505,7 +511,7 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
         mappings.update({k: copy.deepcopy(own[k]) for k in ('_source', '_routing') if k in own})
     else:
         mappings = {k: copy.deepcopy(own[k]) for k in _MAPPING_PARAMS if k in own}
-        mappings.setdefault('dynamic', planned_mappings.get('dynamic', False))
+        mappings.setdefault('dynamic', True if by_component else planned_mappings.get('dynamic', False))
     # subobjects: false keeps each dotted name a field of its own (time beside time.min): no objects to nest.
     mappings['properties'] = ({path: copy.deepcopy(spec) for path, spec in final.items()}
                               if mappings.get('subobjects') is False else _nest(final, objects, typed))
@@ -644,7 +650,9 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
         changes.append({'field': None, 'problem': f"template does not cover index '{index_name}'",
                         'change': f"change index_patterns to include '{index_name}*', or set the indexing pipeline's "
                                   f"indexName to an index they match"})
+    from utils import ecs
     mapping = read_mapping((body.get('template') or {}).get('mappings') or {})
+    by_component = ecs.COMPONENT in (body.get('composed_of') or [])
     for path, spec in mapping.fields.items():
         target = spec.get('path')
         if spec.get('type') == 'alias' and (not target or mapping.fields.get(target, {}).get('type') in (None, 'alias', 'object')):
@@ -679,6 +687,9 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                             'change': f"map '{path}' as a field in the template (as '{spec.get('path')}' is mapped), or "
                                       f"stop writing it in the indexing XSLT"})
             continue
+        if spec is None and by_component and mapping.dynamic_for(path) == 'true' and ecs.component_type(path):
+            # Left to ecs@mappings, which maps it as the document brings it: checked as it maps it.
+            spec = {'type': ecs.component_type(path)}
         if spec is None:
             parent = next((p for p in _parents(path) if p in mapping.fields
                            and mapping.fields[p].get('type', 'object') not in OBJECT), None)
@@ -711,7 +722,15 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
             if dynamic == 'strict':
                 blocking.append(f"{path}: not in the template and dynamic is strict, so documents are rejected")
             continue
-        if dynamic == 'strict':
+        if by_component and dynamic != 'true' and ecs.component_type(path):
+            # An ECS field left to ecs@mappings, which maps only as documents bring fields: off, it maps nothing.
+            (blocking if dynamic == 'strict' else notes).append(
+                f"{path}: an ECS field left to {ecs.COMPONENT}, but dynamic is {dynamic}, so it isn't mapped"
+                + (" and documents are rejected" if dynamic == 'strict' else " (kept in _source, not searchable)"))
+            changes.append({'field': path, 'problem': f'left to {ecs.COMPONENT}, but dynamic: {dynamic}',
+                            'change': f"set the template's dynamic back to true, so {ecs.COMPONENT} maps it as ECS "
+                                      f"says, or map '{path}' in the template"})
+        elif dynamic == 'strict':
             blocking.append(f"{path}: not in the template and dynamic is strict, so documents are rejected")
             changes.append({'field': path, 'problem': 'not mapped (dynamic: strict)',
                             'change': f"add '{path}' to the template, or stop writing it in the indexing XSLT"})

@@ -221,11 +221,20 @@ class FieldPlan(BaseModel):
         return [{'fldName': f.name, 'fldType': LUCENE[f.type][0], 'analyzerType': LUCENE[f.type][1],
                  'indexed': True, 'stored': True, 'caseSensitive': False} for f in self.fields]
 
-    def elastic_template(self, template_name: str, priority: int = 200) -> dict[str, Any]:
+    def elastic_template(self, template_name: str, priority: int = 200,
+                         leave_to_component: bool = True) -> dict[str, Any]:
+        """The index template for the plan. Following ECS, it is composed of Elastic's ecs@mappings, and the ECS
+        fields that maps as ECS says are left to it: only the rest are mapped here (asked for by the user), with
+        dynamic mapping on, as the component's mapping is dynamic. leave_to_component=False maps every field (for
+        a template built from the user's example, which says itself what it is composed of)."""
         if self.discovery:
             return {'name': template_name, 'body': self._discovery_template(priority)}
+        from utils import ecs
+        component = self.convention == 'ecs' and leave_to_component
         properties: dict[str, Any] = {}
         for f in self.fields:
+            if component and ecs.left_to_component(f.name, f.type):
+                continue
             if not self.subobjects:     # each dotted name is a field of its own
                 properties[f.name] = {'type': ELASTIC[f.type]}
                 continue
@@ -234,13 +243,14 @@ class FieldPlan(BaseModel):
             for part in parts[:-1]:
                 node = node.setdefault(part, {'properties': {}})['properties']
             node[parts[-1]] = {'type': ELASTIC[f.type]}
-        mappings: dict[str, Any] = {'dynamic': False, **({} if self.subobjects else {'subobjects': False}),
+        # ecs@mappings is dynamic templates: they map a field only as a document brings it, so dynamic mapping is on.
+        # With it off, as before, the component mapped nothing, and every field had to be mapped here.
+        mappings: dict[str, Any] = {'dynamic': component, **({} if self.subobjects else {'subobjects': False}),
                                     'properties': properties}
         body: dict[str, Any] = {'index_patterns': [f'{self.index_name}*'], 'priority': priority}
         if self.convention == 'ecs':
             # Elastic's recommended base for an ECS index template: its built-in component template, mapping ECS
-            # fields by name. The plan's own properties still set each planned field's type (an index template's
-            # mappings override its components').
+            # fields by name. A field mapped here (not ECS's, or typed otherwise) overrides it.
             body['composed_of'] = [ECS_COMPONENT]
         return {'name': template_name, 'body': {**body, 'template': {'mappings': mappings}}}
 

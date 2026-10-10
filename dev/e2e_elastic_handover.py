@@ -53,7 +53,7 @@ from tools import builds, indexing, processing_writes, stepping, templates, tran
 from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
-from utils.templatecheck import compose  # noqa: E402
+from utils.templatecheck import compose, read_mapping_fields  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
 from searching import paired  # noqa: E402
@@ -141,11 +141,12 @@ async def fixtures(stroom: StroomGateway) -> tuple[dict, dict]:
 
 
 def change_template(body: dict) -> dict:
-    """What a user might send back: user.name renamed to user.id, host.name made an ip, dynamic strict."""
+    """What a user might send back: user.id mapped where the pipeline writes user.name, host.name mapped as an ip, and
+    dynamic strict (so ecs@mappings, which the ECS fields were left to, maps nothing)."""
     changed = json.loads(json.dumps(body))
     props = changed['template']['mappings']['properties']
-    props['user']['properties']['id'] = props['user']['properties'].pop('name')
-    props['host']['properties']['name'] = {'type': 'ip'}
+    props.setdefault('user', {'properties': {}})['properties']['id'] = {'type': 'keyword'}
+    props.setdefault('host', {'properties': {}})['properties']['name'] = {'type': 'ip'}
     changed['template']['mappings']['dynamic'] = 'strict'
     return changed
 
@@ -222,6 +223,15 @@ async def main():
         e2e.check(proposal['self_check']['compatible'] and proposal['self_check']['documents_checked'] == 3,
                  f"proposal fits the {proposal['self_check']['documents_checked']} documents the pipeline writes: "
                  f"{proposal['self_check']['blocking']}")
+        # Asked by the user: the standard ECS fields left to ecs@mappings, only the rest mapped here.
+        mapped = sorted(read_mapping_fields(proposal['template']))
+        from utils import ecs
+        e2e.check(proposal['template']['composed_of'] == ['ecs@mappings']
+                  and proposal['template']['template']['mappings']['dynamic'] is True
+                  and not any(ecs.left_to_component(f.name, f.type) and f.name in mapped for f in plan.fields)
+                  and {'StreamId', 'EventId'} <= set(mapped)
+                  and not any('not mapped' in n for n in proposal['self_check']['notes']),
+                  f"ECS fields left to ecs@mappings: only {mapped} mapped here, the documents checked against the rest")
 
         print("\n### the user's changed template")
         changed = change_template(proposal['template'])

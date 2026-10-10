@@ -94,14 +94,86 @@ def test_outcome_is_written_as_ecs_has_it_and_left_out_with_none():
     assert outcomes == ['failure', 'success', None]
 
 
-def test_an_ecs_plans_index_template_composes_elastics_ecs_mappings():
-    # Asked by the user: the recommended way of composing an ECS index template. The plan's own properties stay,
-    # setting each planned field's type over the component's.
-    fields = [PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')]
+def test_an_ecs_plans_index_template_leaves_ecs_fields_to_elastics_ecs_mappings():
+    # Asked by the user: composed of ecs@mappings (the recommended way), and relying on it for the standard ECS fields,
+    # mapping only those it doesn't. It maps as documents bring fields, so dynamic mapping is on.
+    fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
+              PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+              PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress'),
+              PlannedField(name='message', type='text', source='EventDetail/Description'),
+              PlannedField(name='source.port', type='keyword', source='EventSource/Client/Port'),   # not ECS's type
+              PlannedField(name='gen_ai.usage.input_tokens', type='long', source='Data'),         # it maps integer
+              PlannedField(name='acme.ticket', type='keyword', source='EventDetail/TypeId')]       # the user's own
     ecs_plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', fields=fields,
                          convention='ecs')
     body = ecs_plan.elastic_template('ecs-acme-v1')['body']
-    assert body['composed_of'] == ['ecs@mappings']
-    assert body['template']['mappings']['properties']['source']['properties']['ip'] == {'type': 'ip'}
+    mappings = body['template']['mappings']
+    assert body['composed_of'] == ['ecs@mappings'] and mappings['dynamic'] is True
+    properties = mappings['properties']
+    assert set(properties) == {'StreamId', 'source', 'gen_ai', 'acme'}
+    assert properties['source']['properties'] == {'port': {'type': 'keyword'}}
+    assert properties['gen_ai']['properties']['usage']['properties']['input_tokens'] == {'type': 'long'}
+    # Every field mapped, for a template built from the user's example (which says what it is composed of).
+    full = ecs_plan.elastic_template('ecs-acme-v1', leave_to_component=False)['body']['template']['mappings']
+    assert full['dynamic'] is False and full['properties']['source']['properties']['ip'] == {'type': 'ip'}
     other = ecs_plan.model_copy(update={'convention': 'stroom-flat'}).elastic_template('acme-v1')['body']
-    assert 'composed_of' not in other
+    assert 'composed_of' not in other and other['template']['mappings']['dynamic'] is False
+
+
+def test_the_component_is_measured_and_maps_ecs_fields_as_ecs_says():
+    # dev/ecs_component.py measured it against Elasticsearch: the few it maps otherwise are mapped by the template.
+    assert ecs.component_type('source.ip') == 'ip' and ecs.component_type('message') == 'match_only_text'
+    assert ecs.component_type('gen_ai.usage.input_tokens') == 'integer' and ecs.component_type('acme.ticket') is None
+    assert ecs.left_to_component('url.original', 'keyword') and not ecs.left_to_component('source.port', 'keyword')
+    assert not ecs.left_to_component('data_stream.dataset', 'keyword') and not ecs.left_to_component('StreamId', 'id')
+
+
+def test_documents_are_checked_against_what_the_component_maps():
+    from utils.templatecheck import compare, json_xml_documents
+
+    def docs(ip: str) -> list:
+        return json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">7'
+                                  f'</number><map key="source"><string key="ip">{ip}</string></map></map></array>')
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
+                             PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
+    body = plan.elastic_template('ecs-acme-v1')['body']
+    good = compare(body, docs('10.0.0.1'), 'ecs-acme-v1')
+    assert good['compatible'] and good['notes'] == [] and good['pipeline_changes'] == []
+    bad = compare(body, docs('ws01'), 'ecs-acme-v1')
+    assert not bad['compatible'] and "source.ip is 'ws01', not an IP address" in bad['blocking']
+
+
+def test_an_example_composing_ecs_mappings_leaves_ecs_fields_to_it():
+    from utils.templatecheck import from_example
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
+                             PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress'),
+                             PlannedField(name='host.name', type='keyword', source='EventSource/Device/HostName')])
+    planned = plan.elastic_template('ecs-acme-v2', leave_to_component=False)['body']
+    example = {'index_patterns': ['ecs-acme-v1*'], 'composed_of': ['ecs@mappings'],
+               'template': {'mappings': {'properties': {'host': {'properties': {'name': {'type': 'keyword',
+                                                                                          'ignore_above': 256}}}}}}}
+    body, notes = from_example(planned, example, {})
+    properties = body['template']['mappings']['properties']
+    # source.ip to the component; host.name as the example maps it; nothing said about ecs@mappings not being given.
+    assert 'source' not in properties and properties['host']['properties']['name']['ignore_above'] == 256
+    assert body['template']['mappings']['dynamic'] is True and not any('not given' in n for n in notes)
+    assert any("left to the component templates (they map them): ['source.ip']" in n for n in notes)
+    # An example without it: every field mapped, as before.
+    plain, _ = from_example(planned, {**example, 'composed_of': []}, {})
+    assert plain['template']['mappings']['properties']['source']['properties']['ip'] == {'type': 'ip'}
+
+
+def test_dynamic_off_stops_the_component_and_says_so():
+    from utils.templatecheck import compare, json_xml_documents
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
+    body = plan.elastic_template('ecs-acme-v1')['body']
+    body['template']['mappings']['dynamic'] = 'strict'
+    docs = json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><map key="source">'
+                              '<string key="ip">10.0.0.1</string></map></map></array>')
+    said = compare(body, docs, 'ecs-acme-v1')
+    assert said['blocking'] == ['source.ip: an ECS field left to ecs@mappings, but dynamic is strict, so it isn\'t '
+                                'mapped and documents are rejected']
+    assert 'dynamic back to true' in said['pipeline_changes'][0]['change']

@@ -38,6 +38,34 @@ def field(name: str) -> dict[str, Any] | None:
     return schema()['fields'].get(name)
 
 
+# Elasticsearch's built-in component template for ECS (8.13 and later), and what it maps otherwise than ECS says,
+# measured against a real Elasticsearch by dev/ecs_component.py.
+COMPONENT = 'ecs@mappings'
+_COMPONENT_FILE = _FILE.with_name('ecs_component.json')
+
+
+@lru_cache(maxsize=1)
+def _component() -> dict[str, Any]:
+    return json.loads(_COMPONENT_FILE.read_text(encoding='utf-8'))
+
+
+def component_type(name: str) -> str | None:
+    """What ecs@mappings maps a field as when a document writes it (dynamic mapping on), or None: not an ECS field,
+    or one it doesn't map."""
+    spec = field(name)
+    if not spec:
+        return None
+    kind = _component()['differs'].get(name, spec['type'])
+    return None if kind == 'unmapped' else kind
+
+
+def left_to_component(name: str, plan_type: str) -> bool:
+    """Whether a planned field is mapped by ecs@mappings as ECS says, and the plan agrees with ECS: the index
+    template then leaves it to the component, mapping only the rest (asked for by the user)."""
+    return (name not in _STROOM and name not in _component()['differs'] and component_type(name) is not None
+            and plan_type in _PLAN_TYPES and check(name, plan_type) is None)
+
+
 def plan_type(name: str) -> str | None:
     """The index plan type for an ECS field (None for an object, nested or geo field)."""
     spec = field(name)

@@ -12,7 +12,8 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 
 Following ECS (the `ecs` profile, no example): the server has the full schema. The plan's names are checked against
 it (`ecs_check`: a name in an ECS field set that ECS doesn't define, or a known field of another type), the template
-composes Elastic's `ecs@mappings`, and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
+composes Elastic's `ecs@mappings` and leaves the standard ECS fields to it (mapping only the rest, with dynamic
+mapping on, which the component needs), and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
 name one ECS's way. A field of the user's own goes outside ECS's field sets.
 
 The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
