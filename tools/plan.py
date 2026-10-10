@@ -427,8 +427,11 @@ async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> 
         tool = (nxt.get('call') or {}).get('tool')
         if tool:
             # Seen: create_pipeline hidden in a VS Code tool group; the agent wrote a handoff note and stopped.
-            nxt = {**nxt, 'if_missing': f"{tool} not in your tool list? Call the activate_* tool whose description "
-                                        f"covers it, then {tool}. Never stop, or work around it, for want of it."}
+            # Seen (Qwen3 Coder Next): 360 calls to activate_* names it made up, each refused as not existing.
+            nxt = {**nxt, 'if_missing': f"{tool} not in your tool list? Call the activate_* tool in your list whose "
+                                        f"description names it, then {tool}. Only a name your list shows: the names "
+                                        f"are your client's and a guessed one only fails. If none names it, ask the "
+                                        f"user to enable {tool}. Never work around it."}
         result['next'] = nxt
         if nxt['step'] != 'promoted':
             result['done'] = False
@@ -502,11 +505,16 @@ async def start_onboarding(
                  "build_translation_xslt with the streams and build and name (it saves the XSLT with the mapping), the "
                  "pipeline, step_sample over all streams until clean, process, validate, write_documentation, index. "
                  "build_status shows what remains at any point."),
-        'tools': ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients"
-                  " hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
-                  "one whose description covers it, then the named tool. Never work around a hidden tool with others, and "
-                  "never stop because one seems to be missing."),
+        'tools': HIDDEN_TOOLS,
     }
+
+
+HIDDEN_TOOLS = ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients "
+                "hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
+                "one in your tool list whose description names it, then the named tool. Only names your list shows: "
+                "the client makes them, they differ from session to session, and a guessed one only fails (seen: 360 "
+                "calls to made-up activate_* names). If none names it, ask the user to enable it. Never work around a "
+                "hidden tool with others.")
 
 
 def _build_name(source_name: str, build: str | None) -> str:
@@ -539,10 +547,7 @@ async def _files_first(ctx: Context, source_name: str, files: list[str], build: 
         'standing_instructions': await applicable_instructions(ctx, folders, []),
         'hint': ("Propose the feed name from sibling feeds and create_feed. Don't read the files' text into the "
                  "conversation: the server reads the uploaded streams."),
-        'tools': ("A tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients"
-                  " hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the "
-                  "one whose description covers it, then the named tool. Never work around a hidden tool with others, and "
-                  "never stop because one seems to be missing."),
+        'tools': HIDDEN_TOOLS,
     }
 
 

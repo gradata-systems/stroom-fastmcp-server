@@ -80,6 +80,26 @@ class Lookup(BaseModel):
 Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits', 'unescape_quotes']
 
 
+_CALL = re.compile(r'^\s*(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)\s*\(')
+_TEXT_FUNCTIONS = {'extract', 'regex', 'match', 'matches', 'replace', 'substring', 'substring-before',
+                   'substring-after', 'analyze-string', 'tokenize'}
+
+
+def function_call(name: str) -> str | None:
+    """Why a field name that is a function call isn't one, or None. Seen (Gemma 4 31B): every field given as
+    "extract(EventData/Data, 'Action: \\[([^\\]]+)\\]')", written into the XSLT as XPath; each step failed to compile
+    ("Cannot find a 2-argument function named extract()") until the agent gave up."""
+    found = _CALL.match(name or '')
+    if not found:
+        return None
+    if found.group(1) in _TEXT_FUNCTIONS:
+        return ("is a function call, not an input field. To take values out of a text field with a regular "
+                "expression, add an entry to the mapping's extract list, {\"field\": \"<the text field>\", \"regex\": "
+                "\"<one group per value>\", \"names\": [\"<a name per group>\"]}, and use those names as fields.")
+    return ("is an expression, not an input field: give it as xpath (an XPath expression on the record) instead, or "
+            "name the input field itself.")
+
+
 class FieldMapping(BaseModel):
     """One output value. Give exactly one of field, any_of, value, xpath or lookup."""
     path: str = Field(description="Event-logging path below Event, e.g. 'EventSource/User/Id', "
@@ -132,6 +152,10 @@ class FieldMapping(BaseModel):
                              f"{{\"path\": \"{self.path}\", \"field\": \"<input field>\"}}"
                              + (": any_of alone lists the fields to try, first with a value wins"
                                 if {'field', 'any_of'} <= set(given) else ''))
+        for name in ([self.field] if self.field else []) + list(self.any_of or []):
+            called = function_call(name)
+            if called:
+                raise ValueError(f"'{self.path}': field {name!r} {called}")
         if self.dictionary is not None and self.field is None and self.any_of is None:
             raise ValueError(f"'{self.path}': dictionary needs field (or any_of) as the key")
         if self.transform and self.value is not None:
@@ -207,6 +231,9 @@ class Condition(BaseModel):
     def one_test(self):
         if (self.field is None) == (self.xpath is None):
             raise ValueError("A condition needs exactly one of field or xpath")
+        called = function_call(self.field or '')
+        if called:
+            raise ValueError(f"A condition's field {self.field!r} {called}")
         if sum(x is not None for x in (self.equals, self.one_of, self.matches, self.present, self.in_dictionary)) != 1:
             raise ValueError("A condition needs exactly one of equals, one_of, matches, present or in_dictionary")
         return self

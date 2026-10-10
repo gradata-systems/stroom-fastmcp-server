@@ -192,6 +192,9 @@ async def test_next_says_what_to_do_when_its_tool_is_hidden(monkeypatch):
     monkeypatch.setattr(plan, 'remember_build', lambda ctx, build: None)
     result = await plan.with_next(None, 'b', {'ok': True})
     assert result['next']['if_missing'].startswith('create_pipeline not in your tool list? Call the activate_* tool')
+    # Seen (Qwen3 Coder Next): 360 calls to made-up activate_* names; only listed ones, else ask the user.
+    assert 'Only a name your list shows' in result['next']['if_missing']
+    assert 'ask the user to enable create_pipeline' in result['next']['if_missing']
 
 
 async def test_a_sample_cut_part_way_through_a_record_is_profiled_by_its_whole_records():

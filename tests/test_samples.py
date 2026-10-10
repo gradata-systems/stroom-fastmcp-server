@@ -111,6 +111,7 @@ def test_the_feed_says_how_the_user_sends_a_file_themselves():
     from tools.feeds import sent_by_user
     settings = SimpleNamespace(stroom_url='https://stroom.example', stroom_ui_url=None, datafeed_path='/stroom/datafeed')
     said = sent_by_user(settings, {'uuid': 'f1', 'name': 'FORTIOS-EVENTS-V1.0'})
-    assert 'upload_sample feed=FORTIOS-EVENTS-V1.0 files=[their paths]' in said
-    assert "curl -X POST 'https://stroom.example/stroom/datafeed' -H 'Feed: FORTIOS-EVENTS-V1.0'" in said
+    assert said.startswith('Next: upload_sample feed=FORTIOS-EVENTS-V1.0 files=[their paths]')
+    # Seen (Qwen3 Coder Next): the user's curl, token placeholder and all, run from the agent's terminal three times.
+    assert 'curl' not in said and 'Bearer' not in said and "Never send files to Stroom's datafeed yourself" in said
     assert 'docType=Feed&docUuid=f1' in said and 'find_streams feed=FORTIOS-EVENTS-V1.0' in said

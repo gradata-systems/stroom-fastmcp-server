@@ -207,7 +207,8 @@ async def build_translation_xslt(
     Write the event-logging translation XSLT from a field mapping instead of by hand. Give the input kind
     (data_splitter, json or xml), fields every event shares (time, System, Device...), and one rule per
     kind of event with its conditions and fields. Text fields that hold several values (a message string with
-    a time, user and action) are parsed with extract: a regular expression whose groups become fields; no
+    a time, user and action) are parsed by the mapping's extract list, not a function: entries {field, regex,
+    names}, whose regex groups become fields named by names, used then like any input field; no
     substring-before/after chains. JSON held in a string is read with an xpath using json-to-xml(). Paths are
     checked against the schema: unknown paths come back with suggestions, constants are checked against
     allowed values, and elements are written in schema order with empty inputs left out. Fix any problems and call

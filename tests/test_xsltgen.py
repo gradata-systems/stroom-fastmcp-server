@@ -672,3 +672,21 @@ def test_data_values_interpolated_and_data_names_in_a_style():
     # The defaults are unchanged.
     plain = generate(mapping(), SCHEMA, '4.1.0')['xslt']
     assert '<xsl:attribute name="Value"' in plain and 'Name="session"' in plain
+
+
+@pytest.mark.parametrize('entry, message', [
+    ({'path': 'EventDetail/Authenticate/Action', 'field': "extract(EventData/Data, 'Action: \[([^\]]+)\]')"},
+     "is a function call, not an input field. To take values out of a text field with a regular expression, add an "
+     "entry to the mapping's extract list"),
+    ({'path': 'EventSource/User/Id', 'field': "stroom:extract(EventData/Data, 'User: (\S+)')"}, "mapping's extract list"),
+    ({'path': 'EventSource/User/Id', 'any_of': ['user', 'lower-case(name)']}, 'is an expression, not an input field: give it as xpath'),
+])
+def test_a_function_call_is_not_taken_as_a_field(entry, message):
+    # Seen (Gemma 4 31B, VS Code): every field an extract() call, written into the XSLT as XPath, and each step failed
+    # to compile until the agent gave up.
+    with pytest.raises(ValueError, match=re.escape(message)):
+        mapping(events=[{'name': 'logon', 'fields': [entry]}])
+    with pytest.raises(ValueError, match='is a function call'):
+        mapping(events=[{'name': 'logon', 'when': [{'field': 'extract(msg, "a")', 'present': True}],
+                         'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}]}])
+    mapping(events=[{'name': 'logon', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'System/Provider/@Name'}]}])

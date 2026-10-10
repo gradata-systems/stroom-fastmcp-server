@@ -21,15 +21,18 @@ Build = Annotated[str, Field(description="Build name; its workspace folder is cr
 
 
 def sent_by_user(settings, feed: dict[str, Any]) -> str:
-    """How the user sends a file the agent can't pass on whole: in the Stroom UI, or with curl, as a source would."""
+    """How sample files reach the feed: upload_sample's commands, or the user in the Stroom UI.
+
+    Seen (Qwen3 Coder Next, VS Code): a curl to Stroom's datafeed given here for the user, with 'Bearer <their token or
+    API key>', was run three times from the agent's terminal (PowerShell's curl alias, then Invoke-WebRequest, then
+    a 401) before it called upload_sample. No such command is given now: the agent has no token for the datafeed."""
     from utils.stroom import doc_link
-    url = settings.stroom_url.rstrip('/') + settings.datafeed_path
-    return (f"Sample files on the user's disk aren't passed through you, whatever their size: upload_sample "
-            f"feed={feed['name']} files=[their paths] gives a command per file to run in the user's terminal, which "
-            f"sends each from their disk whole. Without a terminal, the user sends them: in Stroom, the feed "
-            f"({doc_link(settings, 'Feed', feed['uuid'])}), its Data tab, Upload; or curl -X POST '{url}' -H "
-            f"'Feed: {feed['name']}' -H 'Authorization: Bearer <their token or API key>' --data-binary @<file>, and "
-            f"find_streams feed={feed['name']} gives each stream id. Either way, carry on with stream_ids.")
+    return (f"Next: upload_sample feed={feed['name']} files=[their paths], and run the command it gives for each file in "
+            f"the user's terminal: it sends the file from their disk whole, and prints its stream_id. Never send files "
+            f"to Stroom's datafeed yourself (you have no token for it), and don't pass their text through you. Only if "
+            f"there is no terminal, the user uploads them in Stroom (the feed, "
+            f"{doc_link(settings, 'Feed', feed['uuid'])}, its Data tab, Upload), and find_streams "
+            f"feed={feed['name']} gives each stream id. Either way, carry on with stream_ids.")
 
 
 async def profile_sample(

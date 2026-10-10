@@ -67,6 +67,14 @@ def test_stepping_fatal_errors_are_blocking():
     assert triage([from_stored_error(stored)], RULES, {'translationFilter'})['verdict'] == 'blocking'
 
 
+def test_a_call_to_a_function_nobody_has_points_back_to_the_mapping():
+    # Seen (Gemma 4 31B): a mapping's fields given as extract(...) calls; each step said only "Fatal error".
+    stored = {'severity': 'FATAL_ERROR', 'elementId': {'id': 'translationFilter'}, 'message':
+              'XsltPool - Cannot find a 2-argument function named Q{http://www.w3.org/2005/xpath-functions}extract()'}
+    [group] = triage([from_stored_error(stored)], RULES, {'translationFilter'})['groups']
+    assert group['class'] == 'blocking' and "the mapping's extract list" in group['reason']
+
+
 def test_clean_when_no_markers():
     assert triage([], RULES, set())['verdict'] == 'clean'
 

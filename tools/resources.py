@@ -64,9 +64,10 @@ cannot read the sample. Templates are inherited (create_pipeline), never copied:
 new version or working copy of a source's own pipeline.
 
 Tools: a tool this server names (in `next`, a hint or a refusal) may not be in your tool list yet: some clients
-hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the one whose
-description covers it, then the named tool. Never work around a hidden tool with others, and never stop because one
-seems to be missing.
+hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the one in your
+tool list whose description names it, then the named tool. Only names your list shows: the client makes them up per
+session, and a guessed one only fails. If none names it, ask the user to enable it. Never work around a hidden tool
+with others.
 
 Samples: ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
 create_feed, upload_sample files=[the same paths], and start_onboarding again with the build and stream_ids, which
