@@ -157,3 +157,28 @@ async def test_drift_tells_a_generator_upgrade_from_an_edit_made_by_hand():
     assert await drift(generate(m, SCHEMA, '4.1.0')['xslt'], saved) is None
 
 
+
+
+async def test_a_hand_edit_is_shown_so_it_can_be_carried_into_the_mapping():
+    # Asked for by the user: an XSLT changed by hand to write a new field, or to stop writing one. build_status says
+    # which lines differ from what the mapping generates, so the agent can carry them into the mapping.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from tests.test_xsltgen import SCHEMA, mapping
+    from tools import builds, generation
+    from utils.xsltgen import generate
+    m = mapping()
+    code = generate(m, SCHEMA, '4.1.0')['xslt']
+    from utils.version import SERVER_VERSION
+    saved_by = xsltversion.with_pending('', None, 'pk', 'Created', f'stroom-mcp {SERVER_VERSION}', code=code)
+    payload = {'schema_version': '4.1.0', 'mapping': m.model_dump(exclude_none=True, exclude_defaults=True)}
+    added = code.replace('</Authenticate>', '<Data Name="device_class" Value="{data[@name=\'class\']/@value}"/></Authenticate>', 1)
+    removed = code.replace('<Generator>vpnd</Generator>', '', 1)
+    assert added != code and removed != code
+    for edited, shown in ((added, '+ <Data Name="device_class"'), (removed, '- <Generator>vpnd</Generator>')):
+        kept = {'payload': payload, 'xslt': {'uuid': 'x-1', 'data': edited, 'description': saved_by}}
+        with patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)):
+            drift = await builds._drift(SimpleNamespace(), kept)
+        assert drift.startswith('its XSLT was edited by hand since the server saved it') and 'changes=' in drift
+        what = drift.split('What differs (- what the mapping generates, + the XSLT): ')[1]
+        assert what.startswith(shown) and what.count(' | ') == 0, what     # that line, and only that

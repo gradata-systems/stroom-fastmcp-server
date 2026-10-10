@@ -12,6 +12,8 @@ already calls them. As the agent would:
 2. A translation mapping using the shared templates and still mapping EventSource/Device is refused: Device would
    be written twice. Without it, the XSLT imports and calls both, Stroom steps it clean, and the Events are valid,
    with one Device whose HostName is the header and one Meta holding the GUID.
+2b. Its mapping lost (the Documentation tab cleared): rebuild_mapping reads it back from the XSLT and the shared XSLT
+   it imports, fetched by name: each template, where it is called and the parameter passed, as they were.
 3. The index plan takes stroom.feed from the shared indexing XSLT itself; the indexing XSLT calls the shared
    template instead of writing it, and the documents get one stroom object.
 """
@@ -32,7 +34,9 @@ import e2e_translation as e2e  # noqa: E402
 from e2e_generator import MAPPINGS  # noqa: E402
 from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import feeds, generation, indexing, pipeline_writes, processing_writes, stepping, templates, translation  # noqa: E402
+from tools import (feeds, generation, indexing, pipeline_writes, processing_writes, rebuild, stepping, templates,  # noqa: E402
+                   translation)
+from utils.mappingstore import read_mapping  # noqa: E402
 from tools.pipeline_writes import PropertyValue  # noqa: E402
 from tools import validation  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
@@ -252,6 +256,21 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
              "one Device, from the shared template: the header's host name and the record's IP")
     e2e.check(event.findtext('e:Meta', namespaces=ns) == f'guid-{stamp}' and len(event.findall('e:Meta', ns)) == 1,
              "one Meta, holding the stream's GUID")
+
+    print('\n### 2b. its mapping lost: rebuilt from the XSLT and the shared XSLT it imports, read by name')
+    cleared = await stroom.get_doc('XSLT', saved['saved']['uuid'])
+    cleared['description'] = ''
+    await stroom.put_doc(cleared)
+    restored = await e2e.agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=saved['saved']['uuid'])
+    # The mapping's own xpath entry (TypeId, a concat) is the only one kept as xpath.
+    e2e.check(bool(restored.get('saved')) and restored['mode'] == 'mapping lost' and 'differences' not in restored
+              and all('TypeId' in x for x in restored['rebuilt'].get('kept_as_xpath') or []),
+              f"rebuilt, proven on {restored['proven_on']['records']} records of {restored['proven_on']['which']}")
+    back = read_mapping((await stroom.get_doc('XSLT', saved['saved']['uuid']))['description'])[1]['mapping']
+    e2e.check([{k: v for k, v in s.items() if v} for s in back.get('shared') or []] == uses,
+              f"each shared template, where it is called and the parameter passed: {back.get('shared')}")
+    again = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    e2e.check(again['verdict'] == 'clean', 'the XSLT saved from the rebuilt mapping steps clean')
 
     print('\n### 3. the index: the shared indexing template called, its fields planned from it')
     await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'], stream_ids=[raw])

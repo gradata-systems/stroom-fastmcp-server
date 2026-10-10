@@ -28,7 +28,8 @@ hidden, is what the server keeps for the XSLT (its mapping, pending changes): a 
 XSLT, which `build_translation_xslt` stores when it saves (`build=`, `name=`), or `save_xslt` when given
 `index_plan=`, steps it over the
 `stream_ids` you pass (the sample raw streams for an events pipeline, the Events streams for an indexing
-pipeline), and puts the result in place of whatever the markdown has under `## Field mapping`. So:
+pipeline), and puts the result in place of whatever the markdown has under `## Field mapping`. Up to 200 records
+are stepped, spread evenly over the streams given, so pass all the sample streams: each adds the kinds it holds. So:
 
 - Save every generated XSLT with its mapping (`build_translation_xslt build=... name=...`, or `save_xslt
   index_plan=...` for an indexing XSLT). Without it, an events pipeline's doc

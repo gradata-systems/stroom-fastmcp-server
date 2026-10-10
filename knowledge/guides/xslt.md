@@ -247,4 +247,10 @@ changes, regenerates it from that mapping as the generator writes it now: after 
 defaults, this is how an XSLT is brought up to them. Never send the kept mapping back whole; `describe_document`
 summarises it (`mapping=true` shows it, to read). `build_status` says when an XSLT was written by an earlier generator
 (and is unchanged since), as against edited by hand: a hand edit is carried into the mapping (`changes=`) first, or it
-is lost when the XSLT is regenerated.
+is lost when the XSLT is regenerated. For a hand edit it shows what differs (`-` what the mapping generates, `+` what
+the XSLT has). `rebuild_mapping uuid=<xslt>` carries a hand edit into the mapping, or reads a lost mapping back from
+the XSLT alone (its Documentation tab cleared; lookups, dictionaries and imported XSLTs' templates and functions too):
+it keeps every entry that still reads as it generates, reads the rest from the XSLT, regenerates the XSLT from the
+result and steps both over the pipeline's original sample streams (`stream_ids` for others), and saves only when every record's output is the same (the user confirms). An edit a mapping can't express (an element
+written even when its value is empty) shows as a difference: nothing is saved unless the user accepts it
+(`accept_differences=true`). Small changes can still be made by hand in the mapping with `changes=`.

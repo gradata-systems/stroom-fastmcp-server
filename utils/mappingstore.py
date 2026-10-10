@@ -121,3 +121,24 @@ def with_agreed_template(description: str | None, agreed: dict[str, Any]) -> str
 
 def read_agreed_template(description: str | None) -> dict[str, Any] | None:
     return read_block(description, 'agreed index template')
+
+
+def code_diff(expected: str, actual: str, limit: int = 12) -> list[str]:
+    """What an XSLT has that the expected code hasn't (+) and the reverse (-), element by element: both
+    pretty-printed alike, so only real differences show. For a hand edit: what to carry into the mapping."""
+    import difflib
+    from lxml import etree
+
+    def lines(code: str) -> list[str]:
+        from utils.xsltversion import strip
+        try:
+            root = etree.fromstring(strip(code).encode('utf-8'), etree.XMLParser(remove_blank_text=True,
+                                                                                  remove_comments=True))
+            text = etree.tostring(root, pretty_print=True, encoding='unicode')
+        except etree.XMLSyntaxError:
+            text = strip(code)
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    changed = [f'{line[0]} {line[1:]}' for line in difflib.unified_diff(lines(expected), lines(actual), lineterm='', n=0)
+               if line[:1] in '+-' and not line.startswith(('+++', '---'))]
+    shown = [line if len(line) <= 160 else line[:160] + '…' for line in changed[:limit]]
+    return shown + ([f"... and {len(changed) - limit} more lines"] if len(changed) > limit else [])

@@ -617,6 +617,97 @@ def transform_expr(t: str | None, one: str) -> str:
     return one
 
 
+# How the generator writes each kind of expression, one function each: utils/xsltread reads an XSLT back with
+# patterns made by calling these same functions with slots, so the reader follows whatever the generator writes
+# (asked for by the user: one definition, not two that drift apart).
+
+def key_text(src: str) -> str:
+    """A key for a lookup or a dictionary: the input's first value, as a string."""
+    return f"string(({src})[1])"
+
+
+def lookup_text(map_name: str, key: str, path: str | None = None) -> str:
+    """A reference data lookup, and the path below the value it finds (its elements are in no namespace)."""
+    found = f"stroom:lookup({literal(map_name)}, {key})"
+    if not path:
+        return found
+    steps = [s if (':' in s or s.startswith('@') or s in ('.', '*')) else f'*:{s}' for s in path.strip('/').split('/') if s]
+    return f"{found}//{'/'.join(steps)}"
+
+
+def dictionary_lookup_text(variable: str, key: str) -> str:
+    """A value looked up in a dictionary of key=value lines (read into the stylesheet variable)."""
+    return f"${variable}?({key})"
+
+
+def dictionary_text(name: str, kind: str) -> str:
+    """The stylesheet variable holding a Dictionary: a map of its key=value lines, or the list of its lines."""
+    lines = f"tokenize(stroom:dictionary({literal(name)}), '\\r?\\n')"
+    if kind == 'map':
+        return (f"map:merge(for $line in {lines}[contains(., '=')] return map{{normalize-space("
+                f"substring-before($line, '=')): normalize-space(substring-after($line, '='))}})")
+    return f"{lines} ! normalize-space(.)"
+
+
+def has_value_text(src: str) -> str:
+    """A single-valued input where only whether it has a value matters (a test, a map key): the input, trimmed. Told
+    from the trim transform by its [1]: that reads the input's first value, this the input itself."""
+    return f"normalize-space({src})"
+
+
+def any_of_text(sources: list[str]) -> str:
+    """The first of several inputs with a value."""
+    return f"({', '.join(sources)})[normalize-space(.)][1]"
+
+
+def map_lookup_text(map_ref: str, key: str, default: str | None) -> str:
+    """A value looked up in an xsl:map (an empty input gives no value, not an error), else the default."""
+    lookup = f"{map_ref}?({key})"
+    return f"({lookup}, {literal(default)})[1]" if default is not None else f"{lookup}[1]"
+
+
+def map_step_text(key: str, match: str, out: str, otherwise: str) -> str:
+    """One key of a value map written inline: if the input is the key, its value, else what follows."""
+    return f"if ({key} = {literal(match)}) then {literal(out)} else {otherwise}"
+
+
+def default_text(has: str, expr: str, default: str) -> str:
+    """A value, or the default when the input has none."""
+    return f"if ({has}) then {expr} else {literal(default)}"
+
+
+def parts_text(text: str, regex: str, flags: str | None) -> str:
+    """An extraction's analyze-string() of the text it reads."""
+    return f"analyze-string(string({text}[1]), {literal(regex)}{f', {literal(flags)}' if flags else ''})"
+
+
+def group_text(parts: str, nr: int | str) -> str:
+    """One regex group of an extraction's analyze-string() result."""
+    return f"{parts}/fn:match//fn:group[@nr={nr}]"
+
+
+def keyed_text(before: str, after: str, flags: str | None) -> str:
+    """The body of a key=value function: the first group of the regex, the key put between before and after."""
+    return (f"for $g in (analyze-string(string($text[1]), concat({literal(before)}, $key, {literal(after)})"
+            f"{f', {literal(flags)}' if flags else ''})//fn:group[@nr=1])[1] return string($g)")
+
+
+def equals_text(src: str, value: str) -> str:
+    return f"{src} = {literal(value)}"
+
+
+def one_of_text(src: str, values: list[str]) -> str:
+    return f"{src} = ({', '.join(literal(v) for v in values)})"
+
+
+def matches_text(src: str, regex: str) -> str:
+    return f"exists({src}[matches(., {literal(regex)})])"
+
+
+def in_dictionary_text(src: str, variable: str) -> str:
+    return f"{src} = ${variable}"
+
+
 def time_expr(fmt: str, tz: str | None, one: str) -> str:
     """One value in a time format, as Stroom's ISO 8601 time."""
     if fmt == 'epoch_ms':
@@ -873,9 +964,7 @@ class _Generator:
                                                    f"its first group")))
             etree.SubElement(function, f'{{{XSL}}}param', name='text', **{'as': 'item()*'})
             etree.SubElement(function, f'{{{XSL}}}param', name='key', **{'as': 'xs:string'})
-            etree.SubElement(function, f'{{{XSL}}}sequence', select=(
-                f"for $g in (analyze-string(string($text[1]), concat({literal(shape[4])}, $key, {literal(shape[5])})"
-                f"{flags})//fn:group[@nr=1])[1] return string($g)"))
+            etree.SubElement(function, f'{{{XSL}}}sequence', select=keyed_text(shape[4], shape[5], shape[3]))
             out.append(function)
         for conversion, name in self._own_functions.items():
             body = transform_expr(conversion[1], '$value') if conversion[0] == 'transform' \
@@ -981,8 +1070,7 @@ class _Generator:
         # string((*[@key='body'])[1]) written out for each of four.
         text = self.ref(ex.field, ex.xpath, 'text', ex.scope)
         self._extracted_texts.add(text[1:])
-        flags = f", {literal(ex.flags)}" if ex.flags else ''
-        self._scope[name] = f"analyze-string(string({text}[1]), {literal(ex.regex)}{flags})"
+        self._scope[name] = parts_text(text, ex.regex, ex.flags)
 
     # --- input addressing ---
     def source(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
@@ -996,7 +1084,7 @@ class _Generator:
             # Declared in the template being written, whatever reads it (a variable, any_of, a lookup or dictionary
             # key, a repeat): a named template shared between rules has its own scope.
             self.declare_parts(ex)
-            return f"${self.parts_name(ex)}/fn:match//fn:group[@nr={nr}]"
+            return group_text(f"${self.parts_name(ex)}", nr)
         held = next((j for j in sorted(self.m.json_fields, key=len, reverse=True)
                      if field_name and field_name.startswith(j + '.')), None) if xpath is None else None
         if held:
@@ -1044,7 +1132,7 @@ class _Generator:
         return self._dicts[(name, kind)]
 
     def key_expr(self, field_name: str | None, xpath: str | None, scope: str | None = None) -> str:
-        return f"string(({self.source(field_name, xpath, scope)})[1])"
+        return key_text(self.source(field_name, xpath, scope))
 
     def src_of(self, entry: FieldMapping) -> tuple[str | None, str | None, str | None]:
         """The entry's input as (field, xpath, scope): a field as it is; any_of, lookup and dictionary as the XPath
@@ -1062,22 +1150,16 @@ class _Generator:
                                           f"it describes; User/Groups is for the security groups an account belongs "
                                           f"to.")
             key = self.key_expr(entry.lookup.field, entry.lookup.xpath, scope)
-            found = f"stroom:lookup({literal(entry.lookup.map)}, {key})"
-            if not entry.lookup.path:
-                return None, found, None
             # The value's elements are in no namespace, while the stylesheet's default XPath namespace is the
             # input's: *:name selects them whatever that is, at any depth below the value.
-            steps = [s if (':' in s or s.startswith('@') or s in ('.', '*')) else f'*:{s}'
-                     for s in entry.lookup.path.strip('/').split('/') if s]
-            return None, f"{found}//{'/'.join(steps)}", None
+            return None, lookup_text(entry.lookup.map, key, entry.lookup.path), None
         if entry.any_of:
-            first = ', '.join(self.source(f, None, scope) for f in entry.any_of)
-            key_src = f"({first})[normalize-space(.)][1]"
+            key_src = any_of_text([self.source(f, None, scope) for f in entry.any_of])
         else:
             key_src = None
         if entry.dictionary:
-            key = f"string(({key_src or self.source(entry.field, None, scope)})[1])"
-            return None, f"${self.dict_var(entry.dictionary, 'map')}?({key})", None
+            key = key_text(key_src or self.source(entry.field, None, scope))
+            return None, dictionary_lookup_text(self.dict_var(entry.dictionary, 'map'), key), None
         if entry.any_of:
             return None, key_src, None
         return entry.field, entry.xpath, scope
@@ -1119,15 +1201,15 @@ class _Generator:
         src = (c.field if c.field in self.derived else self.source(c.field, c.xpath, c.scope)) if raw \
             else self.ref(c.field, c.xpath, 'condition', c.scope)
         if c.equals is not None:
-            return f"{src} = {literal(c.equals)}"
+            return equals_text(src, c.equals)
         if c.one_of is not None:
-            return f"{src} = ({', '.join(literal(v) for v in c.one_of)})"
+            return one_of_text(src, c.one_of)
         if c.matches is not None:
-            return f"exists({src}[matches(., {literal(c.matches)})])"
+            return matches_text(src, c.matches)
         if c.in_dictionary is not None:
             if raw:
                 return f"{src} in dictionary {literal(c.in_dictionary)}"
-            return f"{src} = ${self.dict_var(c.in_dictionary, 'set')}"
+            return in_dictionary_text(src, self.dict_var(c.in_dictionary, 'set'))
         test = f"exists({src}[normalize-space(.)])" if raw else self.has(c.field, c.xpath, 'condition', c.scope)
         return test if c.present else f"not({test})"
 
@@ -1177,8 +1259,7 @@ class _Generator:
         key = self.scalar(entry, src) if entry.transform else src
         if entry.map and self.as_xsl_map(entry):
             # The lookup operator takes any number of keys, so an empty input gives no value rather than an error.
-            lookup = f"{self.map_ref(entry, src)}?({key})"
-            return f"({lookup}, {literal(entry.default)})[1]" if entry.default is not None else f"{lookup}[1]"
+            return map_lookup_text(self.map_ref(entry, src), key, entry.default)
         if entry.map:
             items = list(entry.map.items())
             if entry.default is not None:
@@ -1189,7 +1270,7 @@ class _Generator:
                 *items, (_, last) = items
                 expr = literal(last)
             for k, out in reversed(items):
-                expr = f"if ({key} = {literal(k)}) then {literal(out)} else {expr}"
+                expr = map_step_text(key, k, out, expr)
             return expr
         fmt, tz = entry.time_format, entry.timezone
         one = self.scalar(entry, src) if entry.transform else f"{src}[1]"
@@ -1200,7 +1281,7 @@ class _Generator:
         else:
             expr = one if entry.transform else src
         if entry.default is not None:
-            return f"if ({self.entry_has(entry)}) then {expr} else {literal(entry.default)}"
+            return default_text(self.entry_has(entry), expr, entry.default)
         return expr
 
     def write_value(self, element: etree._Element, entry: FieldMapping) -> None:
@@ -1695,7 +1776,7 @@ class _Generator:
                 # would refuse, so those keep the predicate.
                 single = (name not in self._xpath_names and self.m.input in ('data_splitter', 'json')
                           and not self.m.nil_values)
-                has_value = f'normalize-space({raw[name]})' if single else select
+                has_value = has_value_text(raw[name]) if single else select
 
                 def inline(m: re.Match) -> str:
                     # Only a test of whether the field has a value needs blank values left out. A value
@@ -1971,13 +2052,7 @@ class _Generator:
                 etree.SubElement(entries, f'{{{XSL}}}map-entry', key=literal(key), select=literal(out))
             sheet.insert(n, variable)
         for n, ((name, kind), var) in enumerate(self._dicts.items(), len(self._maps)):
-            lines = f"tokenize(stroom:dictionary({literal(name)}), '\\r?\\n')"
-            if kind == 'map':
-                select = (f"map:merge(for $line in {lines}[contains(., '=')] return map{{normalize-space("
-                          f"substring-before($line, '=')): normalize-space(substring-after($line, '='))}})")
-            else:
-                select = f"{lines} ! normalize-space(.)"
-            sheet.insert(n, etree.Element(f'{{{XSL}}}variable', name=var, select=select))
+            sheet.insert(n, etree.Element(f'{{{XSL}}}variable', name=var, select=dictionary_text(name, kind)))
         if self.reference_maps:
             self._note(self.warnings, f"Lookups read reference map(s) {sorted(self.reference_maps)}: the pipeline needs "
                                       f"the feed that loads each as a pipeline reference (create_pipeline references, or "

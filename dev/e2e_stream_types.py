@@ -9,7 +9,8 @@ no children: found only by what they are.
    their stage; start_onboarding names 'json-in v3' for a JSON sample; a source is onboarded through it.
 2. Raw Reference: the reference-data template and the loaders are found by what they are; a Raw Reference feed's
    whole-feed filter takes the feed's stream type; the wait takes the pipeline's output type (Reference); an events
-   pipeline's reference names no loader, and the lookup fills the events.
+   pipeline's reference names no loader, and the lookup fills the events. Its mapping lost, rebuild_mapping reads the
+   lookup back from the XSLT as the entry that wrote it, and the events are filled as before.
 3. Records: a pipeline writing Records, from 'csv records v1'; its wait takes Records from the pipeline; the Records
    stream is refused as Events to plan an index from, and indexed as records (records:2 data) into Elasticsearch.
 """
@@ -33,11 +34,12 @@ from fastmcp.exceptions import ToolError  # noqa: E402
 from format_samples import SAMPLES  # noqa: E402
 from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import (feeds, generation, indexing, pipeline_writes, plan, processing_writes, reference, stepping,  # noqa: E402
+from tools import (feeds, generation, indexing, pipeline_writes, plan, processing_writes, rebuild, reference, stepping,  # noqa: E402
                    templates, translation)
 from tools.pipeline_writes import PipelineReference  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import Discovery, FieldPlan  # noqa: E402
+from utils.mappingstore import read_mapping  # noqa: E402
 from utils.refgen import ReferenceMapping  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
@@ -165,6 +167,19 @@ async def reference_data(ctx, stroom: StroomGateway, stamp: str) -> None:
     output = (await stepping.step_pipeline(ctx, events['uuid'], events_raw, 0))['elements']['translationFilter']['output']
     name = etree.fromstring(output.encode()).findtext('.//{event-logging:3}EventSource/{event-logging:3}User/{event-logging:3}Name')
     e2e.check(name == 'Alice Anderson', f"the lookup, through the loader resolved with none named, fills the event: {name}")
+    # Its mapping lost: the lookup read back from the XSLT (asked for by the user: reference data as generation has it).
+    cleared = await stroom.get_doc('XSLT', saved['saved']['uuid'])
+    cleared['description'] = ''
+    await stroom.put_doc(cleared)
+    restored = await e2e.agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=saved['saved']['uuid'])
+    back = read_mapping((await stroom.get_doc('XSLT', saved['saved']['uuid']))['description'])[1]['mapping']
+    lookups = [f for f in back.get('common', []) + [f for r in back['events'] for f in r.get('fields', [])] if f.get('lookup')]
+    e2e.check(bool(restored.get('saved')) and 'differences' not in restored
+              and [f['lookup'] for f in lookups] == [BADGE_MAPPING['common'][-1]['lookup']],
+              f"its mapping lost, rebuild_mapping reads the lookup back as written: {[f['lookup'] for f in lookups]}")
+    output = (await stepping.step_pipeline(ctx, events['uuid'], events_raw, 0))['elements']['translationFilter']['output']
+    name = etree.fromstring(output.encode()).findtext('.//{event-logging:3}EventSource/{event-logging:3}User/{event-logging:3}Name')
+    e2e.check(name == 'Alice Anderson', f"the XSLT saved from the rebuilt mapping fills the event the same: {name}")
 
 
 async def records(ctx, stroom: StroomGateway, template: dict, stamp: str) -> None:

@@ -19,6 +19,9 @@ from utils.stroom import StroomGateway, explorer_filter
 MANAGED = 'mcp-managed'
 # On everything the server creates, for good: find it in Stroom by this tag, promoted or not.
 GENERATED = 'mcp-generated'
+# On an XSLT saved with the mapping (or plan) it is generated from, kept in its description: outside the
+# description, so a mapping deleted from its Documentation tab is known to have been there.
+KEPT_MAPPING = 'mcp-kept-mapping'
 logger = logging.getLogger(__name__)
 _BUILD = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
 

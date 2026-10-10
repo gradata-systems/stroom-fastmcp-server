@@ -46,30 +46,28 @@ async def _stepped(ctx: Context, pipeline_uuid: str, stream_ids: list[int], elem
                    cap: int) -> tuple[list[str], list[etree._Element], str, dict[str, str]]:
     """The CEF lines a pipeline writes from these Events streams, the Events they came from (in order), the element
     read, and how it sends them ({'output': kafka or text, 'topic': ...})."""
-    from tools.stepping import _Pipeline, _step
+    from tools.stepping import _Pipeline, step_spread
     stroom = gateway_from(ctx)
     pipeline = await _Pipeline.load(stroom, pipeline_uuid)
     element = element or pipeline.default_outputs()[0]
     lines: list[str] = []
     events: list[etree._Element] = []
     sent = {'output': 'text'}
-    for stream_id in stream_ids:
-        result = await _step(stroom, pipeline, stream_id, 'FIRST', None, None)
-        while result.get('foundRecord') and len(lines) < cap:
-            elements = (result.get('stepData') or {}).get('elementMap') or {}
-            step = elements.get(element) or {}
-            made = cef.lines_in(step.get('output') or '')
-            if '<kafkaRecord' in (step.get('output') or ''):
-                topic = re.search(r'<(?:\w+:)?kafkaRecord[^>]*topic="([^"]*)"', step['output'])
-                sent = {'output': 'kafka', **({'topic': topic.group(1)} if topic else {})}
-            try:
-                given = cef.events_of(step.get('input') or '') if step.get('input') else []
-            except etree.XMLSyntaxError:
-                given = []
-            lines += made
-            events += given[:len(made)] + [None] * (len(made) - len(given[:len(made)]))
-            result = await _step(stroom, pipeline, stream_id, 'FORWARD', result['foundLocation'], None)
-    return lines, events, element, sent
+    # One Event a record: the records spread over the streams and stepped side by side (step_spread).
+    for _, _, result in await step_spread(stroom, pipeline, stream_ids, None, cap):
+        elements = (result.get('stepData') or {}).get('elementMap') or {}
+        step = elements.get(element) or {}
+        made = cef.lines_in(step.get('output') or '')
+        if '<kafkaRecord' in (step.get('output') or ''):
+            topic = re.search(r'<(?:\w+:)?kafkaRecord[^>]*topic="([^"]*)"', step['output'])
+            sent = {'output': 'kafka', **({'topic': topic.group(1)} if topic else {})}
+        try:
+            given = cef.events_of(step.get('input') or '') if step.get('input') else []
+        except etree.XMLSyntaxError:
+            given = []
+        lines += made
+        events += given[:len(made)] + [None] * (len(made) - len(given[:len(made)]))
+    return lines[:cap], events[:cap], element, sent
 
 
 async def _events(ctx: Context, stream_ids: list[int]) -> list[etree._Element]:
@@ -107,7 +105,7 @@ def _apply(plan: cef.CefPlan, overrides: list[cef.Override]) -> tuple[cef.CefPla
     return cef.CefPlan.model_validate(data), done
 
 
-async def _templates(ctx: Context, said: dict[str, Any]) -> dict[str, Any]:
+async def _templates(ctx: Context, said: dict[str, Any], folders: list[str] = ()) -> dict[str, Any]:
     """Where the pipeline comes from: a template the standing instructions name (they decide), forwarding templates,
     and the CEF pipelines there are already, with the templates they inherit from."""
     stroom = gateway_from(ctx)
@@ -133,12 +131,30 @@ async def _templates(ctx: Context, said: dict[str, Any]) -> dict[str, Any]:
 
     def draft(path: Any) -> bool:
         return (_path(path) + '/').startswith(drafts)
+
+    # Nearest first: those in or beside the folders the pipeline is for are the examples that matter (seen: a dozen
+    # promoted CEF pipelines elsewhere crowded out the one in the user's own folder).
+    wanted = [[p for p in _path(f).split('/') if p] for f in folders or []]
+
+    def nearness(path: Any) -> int:
+        parts = [p for p in _path(path).split('/') if p]
+        best = 0
+        for target in wanted:
+            shared = 0
+            for a, b in zip(parts, target):
+                if a != b:
+                    break
+                shared += 1
+            best = max(best, shared)
+        return -best
     existing = {}
     for pattern in ('*CEF*', '*ArcSight*', '*Arcsight*'):
         for v in (await stroom.find_documents(pattern, ['Pipeline'], 200)).get('values') or []:
             if v['docRef'].get('type') == 'Pipeline' and not draft(v.get('path')):
                 existing[v['docRef']['uuid']] = {'uuid': v['docRef']['uuid'], 'name': v['docRef']['name'],
                                                  'path': v.get('path')}
+    ranked = sorted(existing.values(), key=lambda e: (nearness(e.get('path')), e['name']))
+    existing = {e['uuid']: e for e in ranked}
     for entry in list(existing.values())[:20]:
         try:
             parent = (await stroom.get(f"/pipeline/v1/{entry['uuid']}")).get('parentPipeline') or {}
@@ -152,8 +168,9 @@ async def _templates(ctx: Context, said: dict[str, Any]) -> dict[str, Any]:
         body = await stroom.post('/explorer/v2/findInContent', {
             'filter': {'matchType': 'CONTAINS', 'pattern': 'CEF:0', 'caseSensitive': False},
             'pageRequest': {'offset': 0, 'length': 200}})
-        xslts = [(v.get('docContentMatch') or {}).get('docRef') or {} for v in (body or {}).get('values') or []
-                 if not draft(v.get('path'))]
+        found = sorted([v for v in (body or {}).get('values') or [] if not draft(v.get('path'))],
+                       key=lambda v: nearness(v.get('path')))
+        xslts = [(v.get('docContentMatch') or {}).get('docRef') or {} for v in found]
         xslts = [{'uuid': r.get('uuid'), 'name': r.get('name')} for r in xslts if r.get('type') == 'XSLT']
         if xslts:
             out['xslts_writing_cef'] = xslts[:10]
@@ -274,7 +291,16 @@ async def draft_cef_mapping(
         events = await _events(ctx, stream_ids)
         if uuid:
             from utils.mappingstore import read_mapping
-            kept = read_mapping((await stroom.get_doc('XSLT', uuid)).get('description'))
+            xslt_doc = await stroom.get_doc('XSLT', uuid)
+            kept = read_mapping(xslt_doc.get('description'))
+            if not kept:
+                from tools.translation import lost_mapping
+                lost = await lost_mapping(ctx, {'type': 'XSLT', 'uuid': uuid, 'name': xslt_doc.get('name')},
+                                          xslt_doc.get('description'))
+                if lost:
+                    raise ToolError(lost +
+                                    " For a CEF XSLT: draft_cef_mapping pipeline_uuid=<its pipeline> reviews what it "
+                                    "writes, and a draft without uuid saves a new plan.")
             if not kept or kept[0] != 'cef':
                 raise ToolError(f"XSLT {uuid} keeps no CEF plan: draft without uuid, or review its pipeline "
                                 f"(pipeline_uuid)")
@@ -284,7 +310,7 @@ async def draft_cef_mapping(
         else:
             choice = output
             if choice is None:
-                templates = await _templates(ctx, said)
+                templates = await _templates(ctx, said, list(folders))
                 kinds = {t.get('backend') for t in templates.get('forwarding_templates') or []}
                 choice = 'text' if kinds == {'text'} else 'kafka'
                 result['templates'] = templates
@@ -315,7 +341,7 @@ async def draft_cef_mapping(
             except Exception as e:      # the check is advice; the plan stands on its own problems
                 result['sample_check_error'] = str(e)[:300]
     if 'templates' not in result and not pipeline_uuid:
-        result['templates'] = await _templates(ctx, said)
+        result['templates'] = await _templates(ctx, said, list(folders))
     problems = plan.problems()
     result.update({
         'custom_keys': allowed,

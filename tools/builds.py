@@ -9,7 +9,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from security.guard import GENERATED, MANAGED, build_tag, folder_parts, guard_from, copy_of_tag
+from security.guard import GENERATED, KEPT_MAPPING, MANAGED, build_tag, folder_parts, guard_from, copy_of_tag
 from tools.instructions import applicable_instructions
 from tools.processing_writes import agreement_problem, create_promotion_filters, elastic_destination, promotion_processing
 from tools.pipelines import translation_docs
@@ -81,6 +81,26 @@ async def kept_mapping(ctx: Context, pipeline_uuid: str) -> dict[str, Any] | Non
     return None
 
 
+async def lost_mappings(ctx: Context, pipeline_uuid: str) -> list[str]:
+    """For each of the pipeline's own XSLTs saved with a mapping that its Documentation tab no longer holds: why."""
+    from tools.translation import lost_mapping
+    stroom = gateway_from(ctx)
+    out = []
+    try:
+        layers = await stroom.pipeline_layers(pipeline_uuid)
+    except Exception:       # a safeguard: nothing to say rather than a failed call
+        return []
+    for entry in translation_docs(pipeline_uuid, layers):
+        if entry['inherited_from_template'] or entry['doc']['type'] != 'XSLT':
+            continue
+        xslt = await stroom.get_doc('XSLT', entry['doc']['uuid'])
+        lost = await lost_mapping(ctx, {'type': 'XSLT', 'uuid': xslt.get('uuid'), 'name': xslt.get('name')},
+                                  xslt.get('description'))
+        if lost:
+            out.append(lost)
+    return out
+
+
 async def _shape_stage(stroom, pipeline_uuid: str) -> str:
     from tools.templates import _shape
     return (await _shape(stroom, pipeline_uuid))['stage']
@@ -130,6 +150,8 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
                                 f"current code (create_processor_filter, wait_for_processing, verify_index)")
         kept = await kept_mapping(ctx, doc['uuid'])
         if not kept:
+            for lost in await lost_mappings(ctx, doc['uuid']):
+                problems.append(f"Pipeline '{doc['name']}': {lost}")
             continue
         if kept['kind'] == 'translation':
             drift = await _drift(ctx, kept)
@@ -164,13 +186,22 @@ async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
             return (f"its XSLT was written by an earlier generator ({by}) and is unchanged since; the generator now "
                     f"writes its mapping differently (e.g. its style defaults). {regenerate}, as the generator writes "
                     f"it now")
+        from utils.mappingstore import code_diff
+        # What differs, so the edit can be carried into the mapping (- what the mapping generates, + the XSLT).
+        differs = ' What differs (- what the mapping generates, + the XSLT): ' + ' | '.join(
+            code_diff(regenerated['xslt'], xslt.get('data') or ''))
+        by = (last_saved(xslt.get('description'), xslt.get('data')) or {}).get('by') or ''
+        from utils.version import SERVER_VERSION
         if same is False:
+            later = ('' if not by or f'stroom-mcp {SERVER_VERSION}' in by else
+                     f" (saved by {by.split(',')[0]}: the generator's own changes since may show too)")
             return (f"its XSLT was edited by hand since the server saved it, and differs from what its mapping "
-                    f"generates: carry the edit into the mapping, then {regenerate}; or accept that the documentation "
-                    f"says so")
+                    f"generates: carry the edit into the mapping (rebuild_mapping uuid='{xslt.get('uuid')}' "
+                    f"stream_ids=<the sample streams> does it, proven on the sample; or build_translation_xslt "
+                    f"changes=), or accept that the documentation says so.{differs}{later}")
         return (f"its XSLT differs from what its mapping generates: edited by hand, or written by an earlier version "
                 f"of the generator (it was saved before the server recorded which). {regenerate}; carry any hand edit "
-                f"into the mapping first")
+                f"into the mapping first.{differs}")
     return None
 
 
@@ -459,6 +490,9 @@ async def write_documentation(
     elif '## Field mapping' not in body:
         from tools.templates import _shape
         if (await _shape(stroom, pipeline_uuid))['stage'] == 'translation':
+            lost = await lost_mappings(ctx, pipeline_uuid)
+            if lost:
+                raise ToolError(' '.join(lost))
             raise ToolError("An events pipeline's documentation needs a '## Field mapping' section. Its XSLT keeps no "
                             "mapping (it was not saved by build_translation_xslt), so write the section from "
                             "describe_document and a stepped sample, or save the XSLT again from its mapping "
@@ -851,6 +885,9 @@ async def promote_build(
                 if key in copy_doc:
                     original[key] = copy_doc[key]
             await stroom.put_doc(original)
+            if KEPT_MAPPING in await guard.tags({k: doc[k] for k in ('type', 'uuid', 'name')}):
+                # Its description now holds the mapping: the safeguard that notices it deleted goes with it.
+                await guard.tag([{'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']}], [KEPT_MAPPING])
             await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
             done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
     if await guard.remove_build_folder_if_empty(build):

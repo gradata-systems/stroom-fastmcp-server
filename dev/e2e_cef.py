@@ -175,7 +175,7 @@ async def environment(ctx, stroom: StroomGateway, stamp: str, build: str, events
     e2e.check(reviewed['plan_from'].startswith('the mapping its lines imply'), reviewed['plan_from'][:80])
     e2e.check('unescaped |' in found and "'myCustomField1' is not in ArcSight's CEF dictionary" in found
               and "aren't allowed" in found, f"the review finds the hand-written faults: {found[:200]}")
-    drafted = await cef.draft_cef_mapping(ctx, [events_id], custom_keys=False)
+    drafted = await cef.draft_cef_mapping(ctx, [events_id], custom_keys=False, folders=[folder_path])
     existing = [p['name'] for p in drafted['templates'].get('existing_cef_pipelines') or []]
     writing = [x['name'] for x in drafted['templates'].get('xslts_writing_cef') or []]
     e2e.check(template_name in existing and hand['name'] in writing,

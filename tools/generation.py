@@ -151,10 +151,14 @@ async def _mapping_to_change(ctx: Context, target: str, uuid: str | None) -> dic
     if sent:
         return sent
     if uuid:
-        kept = read_mapping((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'))
+        doc = await gateway_from(ctx).get_doc('XSLT', uuid)
+        kept = read_mapping(doc.get('description'))
         if kept and kept[0] == 'translation' and (kept[1] or {}).get('mapping'):
             return kept[1]['mapping']
-        raise ToolError(f"XSLT {uuid} keeps no translation mapping to change: give the whole mapping")
+        from tools.translation import lost_mapping
+        raise ToolError(await lost_mapping(ctx, {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')},
+                                           doc.get('description'))
+                        or f"XSLT {uuid} keeps no translation mapping to change: give the whole mapping")
     raise ToolError("changes needs the XSLT they apply to: uuid= the saved XSLT, or the same build and name as the "
                     "mapping sent before. Nothing was sent for those yet: give the whole mapping.")
 
@@ -163,11 +167,15 @@ async def _kept_mapping(ctx: Context, target: str, uuid: str | None) -> tuple[di
     """The mapping to regenerate from, and the schema version it was saved for: the one kept with the XSLT (uuid),
     else the one last sent for the build and name."""
     if uuid:
-        kept = read_mapping((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'))
+        doc = await gateway_from(ctx).get_doc('XSLT', uuid)
+        kept = read_mapping(doc.get('description'))
         if kept and kept[0] == 'translation' and (kept[1] or {}).get('mapping'):
             return kept[1]['mapping'], kept[1].get('schema_version')
-        raise ToolError(f"XSLT {uuid} keeps no translation mapping to regenerate from: give the whole mapping "
-                        f"(draft_translation_mapping drafts one)")
+        from tools.translation import lost_mapping
+        raise ToolError(await lost_mapping(ctx, {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')},
+                                           doc.get('description'))
+                        or f"XSLT {uuid} keeps no translation mapping to regenerate from: give the whole mapping "
+                           f"(draft_translation_mapping drafts one)")
     return await _mapping_to_change(ctx, target, None), None
 
 

@@ -190,6 +190,41 @@ IndexPlan = Annotated[FieldPlan | None, Field(
                 "documentation.")]
 
 
+LOST = ("{type} '{name}' was saved by stroom-mcp with the {what} it is generated from, kept in its Documentation tab "
+        "(hidden, after a note asking that it be left), and it is gone: deleted, or edited so it no longer reads. Until it "
+        "is back the server treats the XSLT as written by hand (no regenerating, no changes=, no generated Field mapping "
+        "section), and its version history went with it. Tell the user. To recover: rebuild_mapping uuid='{uuid}' "
+        "stream_ids=<the sample streams> reads the mapping back from the XSLT and proves it on the sample before "
+        "saving it.")
+
+
+async def lost_mapping(ctx: Context, ref: dict[str, Any], description: str | None) -> str | None:
+    """Why an XSLT has no kept mapping, when it should have one: tagged as saved with one, and none reads now."""
+    from security.guard import KEPT_MAPPING
+    from utils.mappingstore import read_mapping
+    if read_mapping(description):
+        return None
+    try:
+        tags = await guard_from(ctx).tags(ref)
+    except Exception:
+        return None
+    if KEPT_MAPPING not in tags:
+        return None
+    return LOST.format(type=ref.get('type', 'XSLT'), name=ref.get('name'), uuid=ref.get('uuid'),
+                       what='mapping (or plan)')
+
+
+async def _tag_kept(ctx: Context, saved: dict[str, Any], kept: bool) -> None:
+    """Tag an XSLT saved with its mapping, so a mapping later deleted from its Documentation tab is noticed."""
+    if not kept:
+        return
+    from security.guard import KEPT_MAPPING
+    try:
+        await guard_from(ctx).tag([{k: saved.get(k) for k in ('type', 'uuid', 'name')}], [KEPT_MAPPING])
+    except Exception:   # a tag is a safeguard: the save stands without it
+        pass
+
+
 async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: TranslationMapping | None,
                      index_plan: FieldPlan | None, cef_plan: Any = None) -> dict[str, Any]:
     """The doc with its description carrying the mapping or plan the code came from, and whether the code is
@@ -239,8 +274,10 @@ async def create_xslt(
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
     doc['description'] = _pending(ctx, doc.get('description'), None, change or 'Created', doc['data'])
     doc['description'] = _previewed(doc)
+    saved = await stroom.put_doc(doc)
+    await _tag_kept(ctx, saved, mapping is not None or index_plan is not None or cef_plan is not None)
     from tools.plan import with_next
-    return await with_next(ctx, build, {**_summary(await stroom.put_doc(doc)), **extra})
+    return await with_next(ctx, build, {**_summary(saved), **extra})
 
 
 async def update_xslt(
@@ -270,7 +307,9 @@ async def update_xslt(
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
     doc['description'] = _pending(ctx, doc.get('description'), previous, change or 'Changed', doc['data'])
     doc['description'] = _previewed(doc)
-    return {**_summary(await stroom.put_doc(doc, version)), **extra}
+    saved = await stroom.put_doc(doc, version)
+    await _tag_kept(ctx, saved, mapping is not None or index_plan is not None or cef_plan is not None)
+    return {**_summary(saved), **extra}
 
 
 async def create_dictionary(

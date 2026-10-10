@@ -1,4 +1,5 @@
 """Tools that step pipelines record by record, optionally with draft (unsaved) code."""
+import asyncio
 import hashlib
 import json
 import logging
@@ -699,17 +700,49 @@ def _field_values(xml: str) -> dict[str, list[str]]:
     return {k.lstrip('/'): v for k, v in values.items()}
 
 
+STEP_STREAMS_AT_ONCE = 4
+
+
+async def step_spread(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[int], code: dict[str, str] | None,
+                      cap: int) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """Up to cap records stepped, (stream, location, the step's result) each: an even share from each stream, the
+    streams stepped side by side, then what a short stream left over taken from those with more. In stream order,
+    then record order.
+
+    Stroom reads a stream from its start for every step, so a step costs more the further in its record is (seen in
+    production: 0.15 s near the start, 1.1 s at the 151st record), and 200 records from one stream took 132 s of a
+    write_documentation call. Fifty from each of four, four at a time, are a fraction of that, and a better sample:
+    kinds that only the later streams hold are in it."""
+    states: dict[int, dict[str, Any]] = {sid: {'steps': [], 'result': None, 'done': False} for sid in stream_ids}
+    gate = asyncio.Semaphore(STEP_STREAMS_AT_ONCE)
+
+    async def take(stream_id: int, budget: int) -> None:
+        state = states[stream_id]
+        async with gate:
+            if state['result'] is None:
+                state['result'] = await _step(stroom, pipeline, stream_id, 'FIRST', None, code)
+            while budget > 0 and state['result'].get('foundRecord'):
+                location = state['result']['foundLocation']
+                state['steps'].append((stream_id, location, state['result']))
+                budget -= 1
+                state['result'] = await _step(stroom, pipeline, stream_id, 'FORWARD', location, code)
+            state['done'] = not state['result'].get('foundRecord')
+
+    await asyncio.gather(*[take(sid, -(-cap // max(1, len(stream_ids)))) for sid in stream_ids])
+    while True:
+        left = cap - sum(len(s['steps']) for s in states.values())
+        more = [sid for sid in stream_ids if not states[sid]['done']]
+        if left <= 0 or not more:
+            break
+        await asyncio.gather(*[take(sid, -(-left // len(more))) for sid in more])
+    return [step for sid in stream_ids for step in states[sid]['steps']][:cap]
+
+
 async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[int], element: str,
                    code: dict[str, str] | None, cap: int) -> dict[str, str]:
-    outputs: dict[str, str] = {}
-    for stream_id in stream_ids:
-        result = await _step(stroom, pipeline, stream_id, 'FIRST', None, code)
-        while result.get('foundRecord') and len(outputs) < cap:
-            location = result['foundLocation']
-            elements = (result.get('stepData') or {}).get('elementMap') or {}
-            outputs[record_key(stream_id, location)] = (elements.get(element) or {}).get('output', '')
-            result = await _step(stroom, pipeline, stream_id, 'FORWARD', location, code)
-    return outputs
+    """Each record's output at the element, up to cap records spread over the streams (step_spread)."""
+    return {record_key(sid, location): (((result.get('stepData') or {}).get('elementMap') or {}).get(element) or {})
+            .get('output', '') for sid, location, result in await step_spread(stroom, pipeline, stream_ids, code, cap)}
 
 
 async def compare_outputs(

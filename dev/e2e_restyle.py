@@ -17,6 +17,11 @@ last (past the 300th record, as in production, where they began at the 557th of 
 4. Regenerated with uuid alone (no mapping sent): one function a key=value shape, the parts the Network rules share
    written once, variables just in time, Data values interpolated; smaller; it steps clean, and every record's Event,
    the VPN ones included, is what the old XSLT wrote. build_status has nothing to say about it.
+4b. A hand edit (a Data element added, the Rule no longer written): build_status names both lines and
+   rebuild_mapping; rebuild_mapping carries them into the mapping, proven on 200 records stepped in Stroom, and the
+   Events are those the hand edit wrote. 4c. The XSLT's Documentation tab cleared: the loss named everywhere, and
+   rebuild_mapping reads the mapping back from the XSLT alone (its key=value extractions too). 4d. An edit no mapping
+   can express (a Data element written even when empty): refused with the differences, saved once accepted.
 5. An edit made by hand (a call to a function Stroom doesn't have): build_status says edited by hand; stepping it is
    blocking, naming the missing function. Regenerated again, it is clean.
 6. A function call given as a field is refused, with the extract list named instead.
@@ -36,7 +41,7 @@ import e2e_translation as e2e  # noqa: E402
 from e2e_xslt_style import canonical  # noqa: E402
 from lxml import etree  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import explorer, feeds, generation, pipeline_writes, plan, stepping, templates  # noqa: E402
+from tools import explorer, feeds, generation, pipeline_writes, plan, rebuild, stepping, templates  # noqa: E402
 from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.mappingstore import read_mapping, with_mapping  # noqa: E402
@@ -238,6 +243,91 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     after = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]
     check(after == before, f"every Event the same as the old XSLT wrote ({len(after)}, the VPN ones included)")
     check(await drift_of(ctx, build, pipeline['name']) == '', 'build_status: nothing to say about the XSLT')
+
+    print('\n### 4b. a hand edit: a new Data element, and the Rule no longer written; carried into the mapping')
+    # Asked for by the user: someone changes the XSLT in Stroom's editor, to write a new field or to stop writing one.
+    edited = await stroom.get_doc('XSLT', xslt['uuid'])
+    deny = edited['data'].index('mode="event_type_traffic_deny"')
+    end = edited['data'].index('</Deny>', deny)
+    body = edited['data'][deny:end]
+    rule_call = '<xsl:apply-templates select="." mode="rule"/>'
+    check(rule_call in body, 'the Deny rule writes its Rule through the shared template')
+    body = body.replace(rule_call, '', 1) + '<Data Name="collector" Value="{*[@key=\'hostname\']}"/>\n          '
+    edited['data'] = edited['data'][:deny] + body + edited['data'][end:]
+    await stroom.put_doc(edited)
+    drift = await drift_of(ctx, build, pipeline['name'])
+    check('edited by hand since the server saved it' in drift and '+ <Data Name="collector"' in drift
+          and f'- {rule_call}' in drift, f"build_status names both changes: {drift[drift.find('What differs'):][:260]}")
+    check((await stepping.step_sample(ctx, pipeline['uuid'], raws))['verdict'] == 'clean', 'the hand edit steps clean')
+    by_hand = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]
+    denied = [e for e in by_hand if b'<TypeId>traffic-deny</TypeId>' in e]
+    check(bool(denied) and all(b'Name="collector"' in e and b'<Rule>' not in e for e in denied),
+          f"its Deny events: the collector written, no Rule ({len(denied)} of them)")
+    check('rebuild_mapping' in drift, 'build_status names rebuild_mapping to carry it in')
+    redone = await agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=xslt['uuid'], stream_ids=raws,
+                          change='Collector for denied traffic, no rule id: a hand edit carried in')
+    summary = redone['rebuilt']
+    check(redone.get('saved') and summary['entries_new'] == ['rule traffic-deny: EventDetail/Network/Deny/Data Data collector']
+          and summary['entries_removed'] == ['rule traffic-deny: EventDetail/Network/Deny/Rule']
+          and summary['entries_kept'] > 50 and 'kept_as_xpath' not in summary,
+          f"rebuild_mapping carried the edit in: {summary.get('entries_new')}, removed {summary.get('entries_removed')}, "
+          f"{summary['entries_kept']} entries kept as they were")
+    check(redone['proven_on']['records'] == 200 and 'differences' not in redone,
+          f"proven on {redone['proven_on']['records']} records stepped in Stroom: the same output")
+    kept = read_mapping((await stroom.get_doc('XSLT', xslt['uuid']))['description'])[1]['mapping']
+    deny = next(r for r in kept['events'] if r['name'] == 'traffic-deny')
+    check({'path': 'EventDetail/Network/Deny/Data', 'data_name': 'collector', 'field': 'hostname'} in deny['fields']
+          and not any(f['path'].endswith('/Rule') for f in deny['fields']),
+          'the kept mapping has the collector, read as a field, and no Rule for denied traffic')
+    check(await drift_of(ctx, build, pipeline['name']) == '', 'build_status: the mapping and the XSLT agree again')
+    check((await stepping.step_sample(ctx, pipeline['uuid'], raws))['verdict'] == 'clean', 'regenerated, it steps clean')
+    carried_events = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]
+    check(carried_events == by_hand, f"the same Events as the hand edit wrote ({len(carried_events)})")
+
+    print("\n### 4c. the XSLT's Documentation tab cleared: the loss is named, and the mapping rebuilt from the XSLT")
+    cleared = await stroom.get_doc('XSLT', xslt['uuid'])
+    cleared['description'] = ''
+    await stroom.put_doc(cleared)
+    drift = await drift_of(ctx, build, pipeline['name'])
+    check('was saved by stroom-mcp with the mapping (or plan) it is generated from' in drift and 'it is gone' in drift,
+          f"build_status says it was lost: {drift[:160]}")
+    try:
+        await generation.build_translation_xslt(ctx, uuid=xslt['uuid'], stream_ids=raws)
+        said = ''
+    except Exception as e:
+        said = str(e)
+    check('it is gone' in said and 'rebuild_mapping' in said, f"regenerating is refused, saying why: {said[:140]}")
+    lost = (await explorer.describe_document(ctx, 'XSLT', xslt['uuid']))['kept_mapping']
+    check('lost' in lost, 'describe_document says so too')
+    restored = await agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=xslt['uuid'])      # no streams: it finds them
+    summary = restored['rebuilt']
+    check(restored.get('saved') and restored['mode'] == 'mapping lost' and summary['entries_kept'] == 0
+          and 'kept_as_xpath' not in summary and 'differences' not in restored,
+          f"rebuilt from the XSLT alone ({len(summary['entries_new'])} entries, none kept as xpath), proven on "
+          f"{restored['proven_on']['records']} records")
+    check(sorted(restored['proven_on']['streams']) == sorted(raws) and 'newest raw streams' in restored['proven_on']['which'],
+          f"proven on {restored['proven_on']['which']} (stepped, never processed: no sample filters)")
+    back = read_mapping((await stroom.get_doc('XSLT', xslt['uuid']))['description'])[1]['mapping']
+    check(len(back['extract']) == len(MAPPING['extract']) and back['input'] == 'json'
+          and {e['names'][0] for e in back['extract']} == {e['names'][0] for e in MAPPING['extract']},
+          'its key=value extractions read back from the functions that write them')
+    check(await drift_of(ctx, build, pipeline['name']) == '', 'build_status has nothing to say')
+    after_loss = [e for raw, records in checked for e in await events_of(ctx, pipeline['uuid'], raw, records)]
+    check(after_loss == by_hand, f"the same Events as before the loss ({len(after_loss)})")
+
+    print("\n### 4d. an edit no mapping can express: refused with the differences, saved only once accepted")
+    edited = await stroom.get_doc('XSLT', xslt['uuid'])
+    deny = edited['data'].index('mode="event_type_traffic_deny"')
+    end = edited['data'].index('</Deny>', deny)
+    edited['data'] = edited['data'][:end] + '<Data Name="tunnel" Value="{*[@key=\'tunnel\']}"/>\n          ' + edited['data'][end:]
+    await stroom.put_doc(edited)
+    refused = await rebuild.rebuild_mapping(ctx, uuid=xslt['uuid'], stream_ids=raws)
+    paths = [d['path'] for d in refused.get('differences') or []]
+    check(refused.get('saved') is None and any('tunnel' in p for p in paths) and 'accept_differences' in refused['hint'],
+          f"refused: no record has a tunnel, so the XSLT writes it empty and the mapping wouldn't: {paths[:2]}")
+    accepted = await agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=xslt['uuid'], stream_ids=raws, accept_differences=True)
+    check(bool(accepted.get('saved')) and await drift_of(ctx, build, pipeline['name']) == '',
+          'accepted: saved, the mapping and the XSLT in step')
 
     print('\n### 5. an edit made by hand is still called one, and stepping it names the missing function')
     edited = await stroom.get_doc('XSLT', xslt['uuid'])

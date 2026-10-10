@@ -292,3 +292,37 @@ async def test_stepping_waits_for_the_reference_data_a_pipeline_looks_up():
     assert {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Reference'} in terms
     stroom.find_meta.return_value = {'values': [{'meta': {'id': 10, 'status': 'UNLOCKED'}}]}
     await _refuse_unloaded_references(stroom, pipeline)
+
+
+async def test_records_are_stepped_spread_over_the_streams_side_by_side():
+    # Seen in production: 200 records stepped from one stream took 132 s of write_documentation, each step dearer the
+    # further in it was (Stroom reads the stream from its start). An even share from each stream, four at a time, a
+    # short stream's leftover taken from the others, in stream order.
+    import asyncio
+    from unittest.mock import patch
+    from tools import stepping
+    sizes = {1: 300, 2: 10, 3: 300, 4: 300, 5: 300}
+    running, most = 0, 0
+
+    async def step(stroom, pipeline, stream_id, step_type, location, code):
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0)
+        running -= 1
+        at = 0 if step_type == 'FIRST' else location['recordIndex'] + 1
+        if at >= sizes[stream_id]:
+            return {'foundRecord': False}
+        return {'foundRecord': True, 'foundLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': at},
+                'stepData': {'elementMap': {'x': {'output': f'{stream_id}:{at}'}}}}
+    with patch.object(stepping, '_step', step):
+        steps = await stepping.step_spread(None, None, [1, 2, 3, 4, 5], None, 200)
+    taken = [s for s, _, _ in steps]
+    assert len(steps) == 200 and taken == sorted(taken)                  # stream order, then record order
+    counts = {sid: taken.count(sid) for sid in sizes}
+    assert counts[2] == 10 and all(counts[sid] >= 40 for sid in (1, 3, 4, 5))   # its share, then the leftover spread
+    assert max(r['recordIndex'] for _, r, _ in steps) < 60                     # never deep in one stream
+    assert most <= stepping.STEP_STREAMS_AT_ONCE
+    with patch.object(stepping, '_step', step):
+        outputs = await stepping._outputs(None, None, [2], 'x', None, 5)
+    assert list(outputs.values()) == ['2:0', '2:1', '2:2', '2:3', '2:4']

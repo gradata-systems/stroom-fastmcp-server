@@ -130,6 +130,11 @@ async def describe_document(
     elif type == 'XSLT':
         doc['translation'] = await describe_translation(ctx, xslt=doc.get('data') or '')
         _kept_summary(doc, uuid, mapping)
+        if 'kept_mapping' not in doc:
+            from tools.translation import lost_mapping
+            lost = await lost_mapping(ctx, {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')}, doc.get('description'))
+            if lost:
+                doc['kept_mapping'] = {'lost': lost}
     elif type in ('ElasticIndex', 'Index'):
         from tools.indexing import survey_index
         try:

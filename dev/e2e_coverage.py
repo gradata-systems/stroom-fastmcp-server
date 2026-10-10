@@ -185,6 +185,16 @@ async def kept_and_batched(ctx, stroom: StroomGateway, stamp: str, build: str, f
               f"{calls} calls of two Error streams: {sum(g['records'] for g in kept)} pings kept as Unknown, "
               f"{len(unmatched)} unmatched kinds")
     e2e.check(sorted({r for g in kept for r in g['raw_streams']}) == sorted(more), 'one ping in each of the five')
+    # A hand edit carried into the mapping, proven on the pipeline's original samples without naming them.
+    from tools import rebuild
+    edited = await stroom.get_doc('XSLT', xslt['uuid'])
+    edited['data'] = edited['data'].replace('<TypeId>Ping</TypeId>', '<TypeId>HealthPing</TypeId>', 1)
+    await stroom.put_doc(edited)
+    redone = await e2e.agreed(rebuild.rebuild_mapping, ctx=ctx, uuid=xslt['uuid'])
+    e2e.check(bool(redone.get('saved')) and 'original sample streams' in redone['proven_on']['which']
+              and set(samples + more) <= set(redone['proven_on']['streams'])
+              and redone['rebuilt']['entries_new'] == ['rule noise: EventDetail/TypeId'],
+              f"rebuild_mapping, proven on {redone['proven_on']['which']}: {redone['proven_on']['streams']}")
 
 
 async def indexed_through_a_dictionary(ctx, stroom: StroomGateway, stamp: str, build: str, feed: str, pipeline: dict,
