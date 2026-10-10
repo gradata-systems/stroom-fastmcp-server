@@ -11,89 +11,50 @@ variables replaced by what they select and shared templates followed. Then:
   element's expression is read for the generator's idioms (a field, an extracted value, a time format, a transform, a
   value map, a default); anything else is kept as the expression itself (an xpath entry).
 
-Either way the result is only a candidate: tools/rebuild.py regenerates the XSLT from it and steps both over the
-sample, and saves it only when every record's output is the same.
+Expressions are parsed by elementpath (utils/xpathtree.py), not split with regular expressions (asked for by the
+user), and read against shapes made by the generator's own functions called with slots, so the reader follows
+whatever the generator writes. Either way the result is only a candidate: tools/rebuild.py regenerates the XSLT from
+it and steps both over the sample in Stroom, and saves it only when every record's output is the same.
 """
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from elementpath.exceptions import ElementPathError
 from lxml import etree
 
+from utils.xpathtree import (Node, XPathParser, expr_slot, first_of, is_nil_check, items, normal, parser_for, splice,
+                             string_slot, strings, terms, unbracketed, unify)
 from utils.xsltgen import (EVT, INPUT_NAMESPACE, JSON_RECORDS, MCP_NS, XSL, Condition, FieldMapping, TranslationMapping,
-                           any_of_text, default_text, dictionary_lookup_text, dictionary_text, equals_text, group_text,
-                           has_value_text,
-                           in_dictionary_text, key_text, keyed_text, literal, lookup_text, map_lookup_text, map_step_text,
-                           matches_text, one_of_text, parts_text, time_expr, transform_expr)
+                           any_of_text, default_text, dictionary_lookup_text, dictionary_text, equals_text, field_text,
+                           group_text, has_value_text, in_dictionary_text, key_text, keyed_text, literal, lookup_text,
+                           map_lookup_text, map_step_text, matches_text, one_of_text, parts_text, time_expr,
+                           transform_expr)
 from utils.xsltversion import strip
 
 X = f'{{{XSL}}}'
 E = f'{{{EVT}}}'
-_STRING = r"(?:'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\")"
-_GUARD = re.compile(r"\[normalize-space\(\.\)\](?:\[not\(normalize-space\(\.\) = \((?:" + _STRING + r"|, )*\)\)\])?")
-_NIL = re.compile(r"\[not\(normalize-space\(\.\) = \(((?:" + _STRING + r"|, )*)\)\)\]")
+# The generator's own comments (not XPath): a rule's name, a kind left untranslated, one left Unknown on purpose.
 _RULE_HEADER = re.compile(r"^\s*Rule '((?:[^']|'')*)'", re.S)
 _DROPPED = re.compile(r"^\s*(.+?): left untranslated on purpose\s*$", re.S)
 _UNKNOWN = re.compile(r"^\s*(.+?): EventDetail/Unknown on purpose: (.*?)\s*$", re.S)
+_PARSE_ERRORS = (ElementPathError, ValueError, TypeError)
 
 
-def unquote(text: str) -> str:
-    """An XPath string literal's value."""
-    quote = text[0]
-    return text[1:-1].replace(quote * 2, quote)
+def _parse(text: str | None, xp: XPathParser) -> Node | None:
+    """The expression parsed, or None when it isn't one elementpath reads (it is then kept as written)."""
+    if not text or not text.strip():
+        return None
+    try:
+        return xp.parse(text)
+    except _PARSE_ERRORS:
+        return None
 
 
-def _strings(text: str) -> list[str]:
-    return [unquote(m.group(0)) for m in re.finditer(_STRING, text)]
-
-
-def _top_split(text: str, separator: str) -> list[str]:
-    """text split on a separator outside brackets and string literals."""
-    out, depth, start, i = [], 0, 0, 0
-    while i < len(text):
-        ch = text[i]
-        if ch in '\'"':
-            end = text.find(ch, i + 1)
-            while end != -1 and end + 1 < len(text) and text[end + 1] == ch:
-                end = text.find(ch, end + 2)
-            i = len(text) if end == -1 else end + 1
-            continue
-        if ch in '([{':
-            depth += 1
-        elif ch in ')]}':
-            depth -= 1
-        elif depth == 0 and text.startswith(separator, i):
-            out.append(text[start:i])
-            start = i + len(separator)
-            i += len(separator)
-            continue
-        i += 1
-    out.append(text[start:])
-    return [part.strip() for part in out]
-
-
-def _unwrap(text: str) -> str:
-    """Outer brackets that hold the whole expression, taken off."""
-    text = text.strip()
-    while text.startswith('(') and text.endswith(')') and len(_top_split(text[1:-1], '§§')) == 1:
-        inner, depth = text[1:-1], 0
-        for ch in inner:          # '(a) and (b)' starts and ends with brackets that aren't one pair
-            depth += ch == '('
-            depth -= ch == ')'
-            if depth < 0:
-                return text
-        text = inner.strip()
-    return text
-
-
-def canonical(expr: str) -> str:
-    """An expression as it compares: without the generator's has-a-value predicates (which only decide whether an
-    element is written), spaces normalised, brackets around one step taken off."""
-    text = _GUARD.sub('', expr or '')
-    text = re.sub(r'\s+', ' ', text).strip()
-    text = re.sub(r'(?<![\w:?-])\(((?:\*\[@key=' + _STRING + r'\]/?)+(?:\[1\])?|data\[@name=' + _STRING
-                  + r'\]/@value(?:\[1\])?|\$[\w.-]+|QXE\d+QX(?:\[1\])?)\)', r'\1', text)   # not a function call's own
-    return _unwrap(text)
+def _key(text: str | None, xp: XPathParser) -> tuple:
+    """What an expression is, whatever its spacing and the brackets around it: for telling one from another."""
+    node = _parse(text, xp)
+    return normal(node).key if node is not None else ('text', ' '.join((text or '').split()))
 
 
 @dataclass
@@ -109,10 +70,9 @@ class Leaf:
     def key(self) -> tuple[str, str | None]:
         return self.path, self.data_name
 
-    @property
-    def form(self) -> tuple:
+    def form(self, xp: XPathParser) -> tuple:
         return ('value', self.value) if self.value is not None else ('repeat', self.repeat) if self.repeat else \
-            ('expr', canonical(self.expr or ''))
+            ('expr', _key(self.expr, xp))
 
 
 @dataclass
@@ -139,12 +99,15 @@ class Reading:
     functions: dict[str, tuple[list[str], str]]       # the XSLT's own single-expression functions
     maps: dict[str, dict[str, str]]                   # stylesheet-level xsl:map variables
     globals: dict[str, str]                           # other stylesheet-level variables (dictionaries)
+    xp: XPathParser                                   # its expressions' parser (its namespace bindings)
     notes: list[str] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)  # xsl:import hrefs, in order
     prefixes: dict[str, str] = field(default_factory=dict)     # namespaces bound for imported functions
+    keyed: dict[str, tuple[str, str, str]] = field(default_factory=dict)   # key=value functions: before, after, flags
 
 
-# The prefixes the generator binds for itself; any other is an imported XSLT's functions (a mapping's functions).
+# The prefixes the generator binds for itself; any other is an imported XSLT's functions (a mapping's functions),
+# unless the XSLT defines functions with it (a hand edit's own, local:x say).
 _OWN_PREFIXES = {'xsl', 'xsi', 'stroom', 'xs', 'fn', 'map', 'mcp'}
 
 
@@ -169,38 +132,65 @@ def _param_value(param: etree._Element) -> str:
     return ''       # content of elements: not an expression; left unread
 
 
-def _params(template: etree._Element, call: etree._Element, scope: dict[str, str]) -> dict[str, str]:
+def _params(template: etree._Element, call: etree._Element, scope: dict[str, str], xp: XPathParser) -> dict[str, str]:
     """A called template's parameters: what the call passes (read in the caller's scope), else their defaults."""
     out = {p.get('name'): _param_value(p) for p in template.findall(f'{X}param') if p.get('name')}
-    out.update({w.get('name'): resolve(_param_value(w), scope) for w in call.findall(f'{X}with-param') if w.get('name')})
+    out.update({w.get('name'): resolve(_param_value(w), scope, xp)
+                for w in call.findall(f'{X}with-param') if w.get('name')})
     return {k: v for k, v in out.items() if v}
 
 
-def resolve(expr: str, scope: dict[str, str]) -> str:
+def _variables(tree: Node) -> list[Node]:
+    """An expression's variable references ($name): not the variables a for, let, some or every binds."""
+    binding = set()
+    for node in tree.walk():
+        if node.symbol in ('for', 'let', 'some', 'every'):
+            binding.update(id(c) for i, c in enumerate(node.children)
+                           if c.symbol == '$' and i % 2 == 0 and i < len(node) - 1)
+    return [n for n in tree.walk() if n.symbol == '$' and id(n) not in binding]
+
+
+def resolve(expr: str, scope: dict[str, str], xp: XPathParser) -> str:
     """The expression with its variables replaced by what they select (repeatedly: one may read another)."""
     for _ in range(10):
-        found = False
-
-        def swap(m: re.Match) -> str:
-            nonlocal found
-            name = m.group(1)
-            if name in scope:
-                found = True
-                return f'({scope[name]})'
-            return m.group(0)
-        expr = re.sub(r'\$([\w.-]+)(?![\w.-]|\()', swap, expr)
+        if not scope or '$' not in expr:
+            return expr
+        tree = _parse(expr, xp)
+        if tree is None:
+            return expr
+        found = [(n, f'({scope[n.value]})') for n in _variables(tree) if n.value in scope]
         if not found:
-            break
+            return expr
+        expr = splice(expr, found)
     return expr
+
+
+def _nil_values(root: etree._Element, xp: XPathParser) -> list[str]:
+    """The mapping's nil values, from the predicate the generator leaves them out with."""
+    for element in root.iter():
+        if not isinstance(element.tag, str):
+            continue
+        for attribute in ('select', 'test'):
+            text = element.get(attribute) or ''
+            if 'not(normalize-space(.)' not in text:
+                continue
+            tree = _parse(text, xp)
+            for node in tree.walk() if tree is not None else []:
+                if node.symbol == '[' and len(node) == 2 and is_nil_check(node[1]):
+                    return strings(node[1][0][1]) or []
+    return []
 
 
 def read(code: str) -> Reading:
     """The XSLT read the way the generator writes it."""
     root = etree.fromstring(strip(code).encode('utf-8'), etree.XMLParser(remove_blank_text=True))
+    xp = parser_for(root.nsmap)
     namespace = root.get('xpath-default-namespace') or ''
     templates = {t.get('mode') or t.get('name'): t for t in root.findall(f'{X}template') if t.get('mode') or t.get('name')}
     functions: dict[str, tuple[list[str], str]] = {}
+    own_prefixes = set(_OWN_PREFIXES)
     for fn in root.findall(f'{X}function'):
+        own_prefixes.add((fn.get('name') or '').partition(':')[0])
         body = [c for c in fn if isinstance(c.tag, str) and c.tag != f'{X}param']
         if len(body) == 1 and body[0].tag == f'{X}sequence' and body[0].get('select'):
             functions[fn.get('name')] = ([p.get('name') for p in fn.findall(f'{X}param')], body[0].get('select'))
@@ -208,7 +198,11 @@ def read(code: str) -> Reading:
     for var in root.findall(f'{X}variable'):
         entries = var.find(f'{X}map')
         if entries is not None:
-            maps[var.get('name')] = {unquote(e.get('key')): unquote(e.get('select')) for e in entries.findall(f'{X}map-entry')}
+            maps[var.get('name')] = {}
+            for entry in entries.findall(f'{X}map-entry'):
+                key, value = strings(_parse(entry.get('key'), xp)), strings(_parse(entry.get('select'), xp))
+                if key and value:
+                    maps[var.get('name')][key[0]] = value[0]
         elif var.get('select'):
             globals_[var.get('name')] = var.get('select')
     start = next(t for t in root.findall(f'{X}template') if t.get('match') and not t.get('mode'))
@@ -220,12 +214,11 @@ def read(code: str) -> Reading:
     if record_mode == 'event' and record is not None and record.find(f'{X}apply-templates[@mode="item"]') is not None:
         record = templates.get('item')
         notes.append('one record, several events (for_each): each item read as the record')
-    nil = _NIL.search(code)
     reading = Reading(rules=[], namespace=namespace, root=start.get('match'), records=records,
-                      nil_values=_strings(nil.group(1)) if nil else [], unmatched_warn=False, functions=functions,
-                      maps=maps, globals=globals_, notes=notes,
+                      nil_values=_nil_values(root, xp), unmatched_warn=False, functions=functions,
+                      maps=maps, globals=globals_, xp=xp, notes=notes,
                       imports=[i.get('href') for i in root.findall(f'{X}import') if i.get('href')],
-                      prefixes={k: v for k, v in root.nsmap.items() if k and k not in _OWN_PREFIXES})
+                      prefixes={k: v for k, v in root.nsmap.items() if k and k not in own_prefixes})
     if record is None:
         reading.notes.append('no record template: nothing to read')
         return reading
@@ -235,7 +228,7 @@ def read(code: str) -> Reading:
     branches = list(choose) if choose is not None else [record]
     for n, branch in enumerate(b for b in branches if isinstance(b.tag, str)):
         test = branch.get('test') if branch.tag == f'{X}when' else None
-        rule = _branch(branch, n, test, record_scope, templates, headers)
+        rule = _branch(branch, n, test, record_scope, templates, headers, xp)
         if rule is None:
             if any('stroom:log(\'WARN\'' in (s.get('select') or '') for s in branch.iter(f'{X}sequence')):
                 reading.unmatched_warn = True
@@ -250,7 +243,7 @@ def _rule_headers(root: etree._Element) -> dict[str, str]:
     for node in root:
         if isinstance(node, etree._Comment):
             m = _RULE_HEADER.match(node.text or '')
-            name = unquote("'" + m.group(1) + "'") if m else None
+            name = m.group(1).replace("''", "'") if m else None
         elif isinstance(node.tag, str):
             if name and node.tag == f'{X}template':
                 out[node.get('mode') or node.get('name')] = name
@@ -259,12 +252,13 @@ def _rule_headers(root: etree._Element) -> dict[str, str]:
 
 
 def _branch(branch: etree._Element, n: int, test: str | None, scope: dict[str, str],
-            templates: dict[str, etree._Element], headers: dict[str, str]) -> RuleReading | None:
+            templates: dict[str, etree._Element], headers: dict[str, str], xp: XPathParser) -> RuleReading | None:
     for node in branch:
         if isinstance(node, etree._Comment):
             m = _DROPPED.match(node.text or '')
             if m:
-                return RuleReading(key=f'drop-{m.group(1)}', name=m.group(1), test=_resolved_test(test, scope), drop=True)
+                return RuleReading(key=f'drop-{m.group(1)}', name=m.group(1), test=_resolved_test(test, scope, xp),
+                                   drop=True)
     call = next((c for c in branch if isinstance(c.tag, str) and c.tag in (f'{X}apply-templates', f'{X}call-template')), None)
     event = branch.find(f'{E}Event')
     if call is None and event is None:
@@ -273,9 +267,9 @@ def _branch(branch: etree._Element, n: int, test: str | None, scope: dict[str, s
         key = call.get('mode') or call.get('name')
         template = templates.get(key)
         if template is None:
-            return RuleReading(key=key, name=headers.get(key), test=_resolved_test(test, scope),
+            return RuleReading(key=key, name=headers.get(key), test=_resolved_test(test, scope, xp),
                                notes=[f"its template {key} isn't in the XSLT"])
-        rule = RuleReading(key=key, name=headers.get(key), test=_resolved_test(test, scope))
+        rule = RuleReading(key=key, name=headers.get(key), test=_resolved_test(test, scope, xp))
         for node in template:
             if isinstance(node, etree._Comment):
                 m = _UNKNOWN.match(node.text or '')
@@ -284,7 +278,7 @@ def _branch(branch: etree._Element, n: int, test: str | None, scope: dict[str, s
         event = template.find(f'{E}Event')
         own = _scope(template)
     else:
-        rule = RuleReading(key=f'inline-{n}', name=None, test=_resolved_test(test, scope))
+        rule = RuleReading(key=f'inline-{n}', name=None, test=_resolved_test(test, scope, xp))
         for node in branch:
             if isinstance(node, etree._Comment):
                 m = _UNKNOWN.match(node.text or '')
@@ -294,86 +288,85 @@ def _branch(branch: etree._Element, n: int, test: str | None, scope: dict[str, s
     if event is None:
         rule.notes.append('no Event written')
         return rule
-    _walk(event, [], {**scope, **own}, templates, rule)
+    _walk(event, [], {**scope, **own}, templates, rule, xp)
     return rule
 
 
-def _resolved_test(test: str | None, scope: dict[str, str]) -> str | None:
-    return resolve(test, scope) if test else None
+def _resolved_test(test: str | None, scope: dict[str, str], xp: XPathParser) -> str | None:
+    return resolve(test, scope, xp) if test else None
 
 
 def _walk(node: etree._Element, path: list[str], scope: dict[str, str], templates: dict[str, etree._Element],
-          rule: RuleReading) -> None:
+          rule: RuleReading, xp: XPathParser) -> None:
     for child in node:
         if not isinstance(child.tag, str):
             continue
-        tag = child.tag
         written = len(rule.leaves)
-        _read_child(child, tag, path, scope, templates, rule)
+        _read_child(child, child.tag, path, scope, templates, rule, xp)
         for leaf in rule.leaves[written:]:
             if leaf.guard is None and rule.guards:
                 leaf.guard = rule.guards[-1]
 
 
 def _read_child(child: etree._Element, tag: str, path: list[str], scope: dict[str, str],
-                templates: dict[str, etree._Element], rule: RuleReading) -> None:
-    if True:
-        if tag.startswith(E):
-            name = tag[len(E):]
-            if name == 'Data':
-                _data_element(child, path, scope, rule)
-                return
-            here = path + [name]
-            for attribute, value in child.attrib.items():
-                if '}' not in attribute:
-                    leaf = Leaf('/'.join(here + ['@' + attribute]))
-                    _set_value(leaf, value, scope)
-                    rule.leaves.append(leaf)
-            text = (child.text or '').strip()
-            if text and not any(isinstance(c.tag, str) for c in child):
-                rule.leaves.append(Leaf('/'.join(here), value=text))
-            else:
-                _walk(child, here, scope, templates, rule)
-        elif tag in (f'{X}if', f'{X}choose', f'{X}when', f'{X}otherwise'):
-            if tag == f'{X}choose':
-                rule.notes.append(f"{'/'.join(path) or 'Event'}: an xsl:choose inside the event, read as all its branches")
-            if tag == f'{X}if':
-                rule.guards.append(resolve(child.get('test') or '', scope))
-            _walk(child, path, scope, templates, rule)
-            if tag == f'{X}if':
-                rule.guards.pop()
-        elif tag == f'{X}value-of':
-            rule.leaves.append(Leaf('/'.join(path), expr=resolve(child.get('select') or '', scope)))
-        elif tag == f'{X}attribute':
-            leaf = Leaf('/'.join(path + ['@' + child.get('name')]), expr=resolve(child.get('select') or '', scope))
-            rule.leaves.append(leaf)
-        elif tag in (f'{X}apply-templates', f'{X}call-template'):
-            key = child.get('mode') or child.get('name')
-            template = templates.get(key)
-            if template is None and tag == f'{X}call-template':
-                # A named template of an imported XSLT (a mapping's shared entry): what it writes is in that XSLT.
-                rule.calls.append(SharedCall('/'.join(path), key, {
-                    w.get('name'): _param_value(w) for w in child.findall(f'{X}with-param') if w.get('name')}))
-            elif template is None:
-                rule.notes.append(f"{'/'.join(path)}: template {key} isn't in the XSLT")
-            else:
-                # The XSLT's own template (the generator's, or one added by hand): followed in place, its
-                # parameters bound to what the call passes.
-                _walk(template, path, {**scope, **_scope(template), **_params(template, child, scope)}, templates, rule)
-        elif tag == f'{X}sequence':
-            select = child.get('select') or ''
-            if select.startswith('mcp:') and '(' in select and _is_data_call(select):
-                name, expr = _data_call(select)
-                rule.leaves.append(Leaf('/'.join(path + ['Data']), data_name=name, expr=resolve(expr, scope)))
-            elif not select.startswith('stroom:log('):
-                rule.notes.append(f"{'/'.join(path)}: xsl:sequence {select[:80]} not read")
-        elif tag == f'{X}for-each':
-            rule.leaves.append(Leaf('/'.join(path + [_first_element(child)]), repeat=canonical(
-                etree.tostring(child, encoding='unicode'))))
-        elif tag == f'{X}variable':
+                templates: dict[str, etree._Element], rule: RuleReading, xp: XPathParser) -> None:
+    if tag.startswith(E):
+        name = tag[len(E):]
+        if name == 'Data':
+            _data_element(child, path, scope, rule, xp)
             return
+        here = path + [name]
+        for attribute, value in child.attrib.items():
+            if '}' not in attribute:
+                leaf = Leaf('/'.join(here + ['@' + attribute]))
+                _set_value(leaf, value, scope, xp)
+                rule.leaves.append(leaf)
+        text = (child.text or '').strip()
+        if text and not any(isinstance(c.tag, str) for c in child):
+            rule.leaves.append(Leaf('/'.join(here), value=text))
         else:
-            rule.notes.append(f"{'/'.join(path)}: {etree.QName(tag).localname} not read")
+            _walk(child, here, scope, templates, rule, xp)
+    elif tag in (f'{X}if', f'{X}choose', f'{X}when', f'{X}otherwise'):
+        if tag == f'{X}choose':
+            rule.notes.append(f"{'/'.join(path) or 'Event'}: an xsl:choose inside the event, read as all its branches")
+        if tag == f'{X}if':
+            rule.guards.append(resolve(child.get('test') or '', scope, xp))
+        _walk(child, path, scope, templates, rule, xp)
+        if tag == f'{X}if':
+            rule.guards.pop()
+    elif tag == f'{X}value-of':
+        rule.leaves.append(Leaf('/'.join(path), expr=resolve(child.get('select') or '', scope, xp)))
+    elif tag == f'{X}attribute':
+        leaf = Leaf('/'.join(path + ['@' + child.get('name')]), expr=resolve(child.get('select') or '', scope, xp))
+        rule.leaves.append(leaf)
+    elif tag in (f'{X}apply-templates', f'{X}call-template'):
+        key = child.get('mode') or child.get('name')
+        template = templates.get(key)
+        if template is None and tag == f'{X}call-template':
+            # A named template of an imported XSLT (a mapping's shared entry): what it writes is in that XSLT.
+            rule.calls.append(SharedCall('/'.join(path), key, {
+                w.get('name'): _param_value(w) for w in child.findall(f'{X}with-param') if w.get('name')}))
+        elif template is None:
+            rule.notes.append(f"{'/'.join(path)}: template {key} isn't in the XSLT")
+        else:
+            # The XSLT's own template (the generator's, or one added by hand): followed in place, its
+            # parameters bound to what the call passes.
+            _walk(template, path, {**scope, **_scope(template), **_params(template, child, scope, xp)}, templates,
+                  rule, xp)
+    elif tag == f'{X}sequence':
+        select = child.get('select') or ''
+        data = _data_call(select, xp)
+        if data:
+            rule.leaves.append(Leaf('/'.join(path + ['Data']), data_name=data[0], expr=resolve(data[1], scope, xp)))
+        elif not select.startswith('stroom:log('):
+            rule.notes.append(f"{'/'.join(path)}: xsl:sequence {select[:80]} not read")
+    elif tag == f'{X}for-each':
+        rule.leaves.append(Leaf('/'.join(path + [_first_element(child)]),
+                                repeat=' '.join(etree.tostring(child, encoding='unicode').split())))
+    elif tag == f'{X}variable':
+        return
+    else:
+        rule.notes.append(f"{'/'.join(path)}: {etree.QName(tag).localname} not read")
 
 
 def _first_element(loop: etree._Element) -> str:
@@ -381,31 +374,34 @@ def _first_element(loop: etree._Element) -> str:
     return found.tag[len(E):] if found is not None else '?'
 
 
-def _is_data_call(select: str) -> bool:
-    return bool(re.match(r'mcp:[\w-]+\(\s*(?:' + _STRING + r')\s*,', select))
+def _data_call(select: str, xp: XPathParser) -> tuple[str, str] | None:
+    """mcp:data('name', value): the generator's Data entry, its name and the expression for its value."""
+    if not select.startswith('mcp:'):
+        return None
+    tree = _parse(select, xp)
+    node = normal(tree) if tree is not None else None
+    if node is None or node.symbol != 'call' or not str(node.value).startswith('mcp:') or len(node) != 2 \
+            or normal(node[0]).symbol != '(string)':
+        return None
+    return str(normal(node[0]).value), node[1].text
 
 
-def _data_call(select: str) -> tuple[str, str]:
-    inner = select[select.index('(') + 1:select.rindex(')')]
-    name, expr = _top_split(inner, ',')[0], ','.join(_top_split(inner, ',')[1:])
-    return unquote(name), expr.strip()
-
-
-def _data_element(element: etree._Element, path: list[str], scope: dict[str, str], rule: RuleReading) -> None:
+def _data_element(element: etree._Element, path: list[str], scope: dict[str, str], rule: RuleReading,
+                  xp: XPathParser) -> None:
     leaf = Leaf('/'.join(path + ['Data']), data_name=element.get('Name'))
     attribute = element.find(f'{X}attribute[@name="Value"]')
     if attribute is not None:
-        leaf.expr = resolve(attribute.get('select') or '', scope)
+        leaf.expr = resolve(attribute.get('select') or '', scope, xp)
     else:
-        _set_value(leaf, element.get('Value') or '', scope)
+        _set_value(leaf, element.get('Value') or '', scope, xp)
     rule.leaves.append(leaf)
 
 
-def _set_value(leaf: Leaf, template_text: str, scope: dict[str, str]) -> None:
-    """An attribute value template: a constant (braces doubled), or one expression in braces."""
+def _set_value(leaf: Leaf, template_text: str, scope: dict[str, str], xp: XPathParser) -> None:
+    """An attribute value template (XSLT, not XPath): a constant (braces doubled), or one expression in braces."""
     whole = re.fullmatch(r'\{(?!\{)(.*)\}', template_text, re.S)
     if whole and '{' not in whole.group(1).replace('{{', '') and '}' not in whole.group(1).replace('}}', ''):
-        leaf.expr = resolve(whole.group(1), scope)
+        leaf.expr = resolve(whole.group(1), scope, xp)
     else:
         leaf.value = template_text.replace('{{', '{').replace('}}', '}')
 
@@ -430,37 +426,25 @@ class Rebuilt:
                 if v or k == 'entries_kept'}
 
 
-def _e(n: int) -> str:
-    """A slot for an expression, in what a renderer writes."""
-    return f'QXE{n}QX'
+# Shapes: what the generator's functions write, called with slots (expr_slot for an expression, string_slot for a
+# string) and parsed. Read against them with unify(), the reader follows the generator: one definition, not two
+# that drift apart (asked for by the user).
+_e, _l = expr_slot, string_slot
+_SHAPE_PARSER = parser_for({'stroom': 'stroom', 'mcp': MCP_NS, 'fn': 'http://www.w3.org/2005/xpath-functions',
+                            'map': 'http://www.w3.org/2005/xpath-functions/map', 'xs': 'http://www.w3.org/2001/XMLSchema'})
 
 
-def _l(n: int) -> str:
-    """A slot for a string, which the renderer writes as a literal."""
-    return f'QXL{n}QX'
+def shape(rendered: str) -> Node:
+    return normal(_SHAPE_PARSER.parse(rendered))
 
 
-_SLOT = re.compile(r"'QXL(\d+)QX'|QXE(\d+)QX")
-
-
-def shape(rendered: str) -> re.Pattern:
-    """A pattern for what a generator function writes, made by calling it with slots and normalising the result as
-    the XSLT's expressions are (canonical): a group E<n> for each expression slot (the last as long as it can be, the
-    others as short), L<n> for each string. So the reader follows the generator: the shapes come from its own code."""
-    text = canonical(rendered)
-    slots = list(_SLOT.finditer(text))
-    out, at = '', 0
-    for n, m in enumerate(slots):
-        out += re.escape(text[at:m.start()])
-        out += (f'(?P<L{m.group(1)}>{_STRING})' if m.group(1) else
-                f"(?P<E{m.group(2)}>.*{'' if n == len(slots) - 1 else '?'})")
-        at = m.end()
-    return re.compile(out + re.escape(text[at:]), re.S)
+def canonical(expr: str, namespaces: dict[str, str] | None = None) -> str:
+    """An expression as the reader compares it (normal()), as written: for showing, and for tests."""
+    return normal((parser_for(namespaces) if namespaces else _SHAPE_PARSER).parse(expr)).text
 
 
 SHAPES = {
     'lookup': shape(lookup_text(_l(1), key_text(_e(1)))),
-    'lookup below': shape(lookup_text(_l(1), key_text(_e(1)), _e(2))),
     'dictionary': shape(dictionary_lookup_text(_e(1), key_text(_e(2)))),
     'dictionary map': shape(dictionary_text(_l(1), 'map')),
     'dictionary list': shape(dictionary_text(_l(1), 'list')),
@@ -475,7 +459,6 @@ SHAPES = {
     'keyed': shape(keyed_text(_l(1), _l(2), None)),
     'keyed, flags': shape(keyed_text(_l(1), _l(2), _l(3))),
     'equals': shape(equals_text(_e(1), _l(1))),
-    'one of': shape(one_of_text(_e(1), [_l(1)])),
     'matches': shape(matches_text(_e(1), _l(1))),
     'in dictionary': shape(in_dictionary_text(_e(1), _e(2))),
     'time': shape(time_expr(_l(1), None, f'{_e(1)}[1]')),
@@ -483,13 +466,33 @@ SHAPES = {
     'epoch_ms': shape(time_expr('epoch_ms', None, f'{_e(1)}[1]')),
     'epoch_s': shape(time_expr('epoch_s', None, f'{_e(1)}[1]')),
 }
-# one_of_text's shape, its list of keys any length: the guard of a value map written without a default.
-KEYS = re.compile(SHAPES['one of'].pattern.replace(f'(?P<L1>{_STRING})', f'(?P<L1>{_STRING}(?:, {_STRING})*)'), re.S)
+# one_of_text, its values any number of strings: its shape with one value, the value's place taking any expression.
+_ONE = shape(one_of_text(_e(1), [_l(1)]))
+SHAPES['one of'] = Node(_ONE.symbol, _ONE.value, [_ONE[0], shape(_e(2))])
+# A lookup below the value it finds, one to four steps down (lookup_text writes each step *:name).
+LOOKUP_BELOW = [shape(lookup_text(_l(1), key_text(_e(1)), '/'.join(_e(n) for n in range(2, depth + 2))))
+                for depth in range(1, 5)]
 TRANSFORMS = {t: shape(transform_expr(t, f'{_e(1)}[1]')) for t in ('lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits')}
+# An input field, one to six levels deep (field_text): its names, joined as the mapping writes them.
+FIELDS = {kind: [shape(field_text(kind, separator.join(_l(n) for n in range(1, depth + 1)))) for depth in range(1, 7)]
+          for kind, separator in (('data_splitter', '/'), ('json', '.'))}
+SEPARATOR = {'data_splitter': '/', 'json': '.'}
 
 
-def match(name: str, text: str) -> re.Match | None:
-    return SHAPES[name].fullmatch(canonical(text))
+def _regex_groups(regex: str) -> int:
+    """How many groups a regular expression has (Stroom's are Java's; Python reads the ones the generator writes)."""
+    try:
+        return max(1, re.compile(regex).groups)
+    except re.error:
+        return 1
+
+
+def _call(node: Node, *names: str) -> Node | None:
+    """name(x): x as written, when node is a call of one of these functions with one argument."""
+    node = unbracketed(node)
+    if node.symbol == 'call' and node.value in names and len(node) == 1:
+        return node[0]
+    return None
 
 
 class _Idioms:
@@ -497,51 +500,49 @@ class _Idioms:
     input it reads, and how."""
 
     def __init__(self, reading: Reading, kind: str, extracts: list[dict[str, Any]]):
-        self.r, self.kind = reading, kind
+        self.r, self.kind, self.xp = reading, kind, reading.xp
         self.extracts = extracts            # the mapping's extract list, added to as extracted values are read
         # Dictionaries: the stylesheet variables holding them, by kind.
         self.dictionaries: dict[str, tuple[str, str]] = {}
         for name, select in reading.globals.items():
+            node = _parse(select, self.xp)
             for kind_ in ('map', 'list'):
-                m = match(f'dictionary {kind_}', select)
+                m = unify(SHAPES[f'dictionary {kind_}'], node) if node is not None else None
                 if m:
-                    self.dictionaries[name] = (unquote(m.group('L1')), kind_)
+                    self.dictionaries[name] = (m.string(1), kind_)
 
     # Inputs
-    def field_of(self, expr: str) -> str | None:
-        text = re.sub(r'\[1\]$', '', canonical(expr))
-        if self.kind == 'json':
-            m = re.fullmatch(r'((?:\*\[@key=' + _STRING + r'\]/?)+)', text)
+    def field_of(self, node: Node) -> str | None:
+        node = normal(node)
+        node = first_of(node) or node
+        for depth, pattern in enumerate(FIELDS.get(self.kind, []), 1):
+            m = unify(pattern, node)
             if m:
-                return '.'.join(unquote(k) for k in re.findall(_STRING, m.group(1)))
-        elif self.kind == 'data_splitter':
-            m = re.fullmatch(r'data\[@name=(' + _STRING + r')\]/@value', text)
-            if m:
-                return unquote(m.group(1))
-        return self.extracted(text)
+                return SEPARATOR[self.kind].join(m.string(n) for n in range(1, depth + 1))
+        return self.extracted(node)
 
-    def extracted(self, text: str) -> str | None:
+    def extracted(self, node: Node) -> str | None:
         """A value an extraction gives: a key=value function's (key="..." in a text field) or an analyze-string group."""
-        m = re.fullmatch(r'mcp:([\w-]+)\((.*), (' + _STRING + r')\)', text)
-        if m and m.group(1) in getattr(self.r, 'keyed', {}):
-            before, after, flags = self.r.keyed[m.group(1)]
+        function = str(node.value)[4:] if node.symbol == 'call' and str(node.value).startswith('mcp:') else None
+        if function in self.r.keyed and len(node) == 2 and normal(node[1]).symbol == '(string)':
+            before, after, flags = self.r.keyed[function]
             # A rule's condition passes the text as normalize-space(...) when the mapping has no nil values (the
             # generator's own form there, which regenerating writes again).
-            plain = re.fullmatch(r'normalize-space\((.*)\)', m.group(2).strip())
-            source = self.field_of(plain.group(1) if plain else m.group(2))
+            text = _call(node[0], 'normalize-space') or node[0]
+            source = self.field_of(text)
             if source:
-                key = unquote(m.group(3))
+                key = str(normal(node[1]).value)
                 return self._extraction(source, before + key + after, flags, [key])[0]
         for name in ('group, flags', 'group'):
-            g = SHAPES[name].fullmatch(text)
-            if g and g.group('E2').isdigit():
-                source = self.field_of(g.group('E1'))
+            m = unify(SHAPES[name], node)
+            if m and normal(m.expr(2)).symbol == '(integer)':
+                source = self.field_of(m.expr(1))
                 if source:
-                    regex, flags = unquote(g.group('L1')), unquote(g.group('L2')) if name == 'group, flags' else None
-                    groups = max(1, len(re.findall(r'\((?!\?)', regex)))
+                    regex, flags = m.string(1), m.string(2) if name == 'group, flags' else None
                     base = re.sub(r'\W+', '_', source).strip('_') or 'text'
-                    names = self._extraction(source, regex, flags, [f'{base}_{n}' for n in range(1, groups + 1)])
-                    nr = int(g.group('E2'))
+                    names = self._extraction(source, regex, flags,
+                                             [f'{base}_{n}' for n in range(1, _regex_groups(regex) + 1)])
+                    nr = int(normal(m.expr(2)).value)
                     while len(names) < nr:
                         names.append(f"{names[0]}_{len(names) + 1}")
                     return names[nr - 1] or None
@@ -555,39 +556,38 @@ class _Idioms:
             self.extracts.append(entry)
         return entry['names']
 
-    def source_of(self, expr: str) -> dict[str, Any] | None:
+    def source_of(self, node: Node) -> dict[str, Any] | None:
         """An input, as a mapping entry gives it: a field, the first of several (any_of), a reference data lookup, a
         dictionary value."""
-        field_name = self.field_of(expr)
+        field_name = self.field_of(node)
         if field_name:
             return {'field': field_name}
         # A single-valued input written where only its having a value matters (a map key, say): the input itself.
-        m = match('has value', expr)
-        if m and not m.group('E1').endswith('[1]') and self.kind in ('data_splitter', 'json') and not self.r.nil_values:
-            field_name = self.field_of(m.group('E1'))
+        m = unify(SHAPES['has value'], node)
+        if m and first_of(m.expr(1)) is None and self.kind in ('data_splitter', 'json') and not self.r.nil_values:
+            field_name = self.field_of(m.expr(1))
             if field_name:
                 return {'field': field_name}
-        m = match('any of', expr)
+        m = unify(SHAPES['any of'], node)
         if m:
-            parts = _top_split(_unwrap(m.group('E1')), ',')
+            parts = items(m.expr(1))
             fields = [self.field_of(p) for p in parts]
             if len(parts) > 1 and all(fields):
                 return {'any_of': fields}
-        for name in ('lookup below', 'lookup'):
-            m = match(name, expr)
+        for depth, pattern in [(0, SHAPES['lookup'])] + list(enumerate(LOOKUP_BELOW, 1)):
+            m = unify(pattern, node)
             if m:
-                key = self.field_of(m.group('E1'))
-                lookup: dict[str, Any] = {'map': unquote(m.group('L1')),
-                                          **({'field': key} if key else {'xpath': self.portable(_unwrap(m.group('E1')))})}
-                if name == 'lookup below':
-                    lookup['path'] = '/'.join(step[2:] if step.startswith('*:') else step
-                                              for step in m.group('E2').split('/'))
+                key = self.field_of(m.expr(1))
+                lookup: dict[str, Any] = {'map': m.string(1), **({'field': key} if key else
+                                                                 {'xpath': self.portable(normal(m.expr(1)).text)})}
+                if depth:
+                    lookup['path'] = '/'.join(str(m.expr(n).value) for n in range(2, depth + 2))
                 return {'lookup': lookup}
-        m = match('dictionary', expr)
-        if m and m.group('E1') in self.dictionaries and self.dictionaries[m.group('E1')][1] == 'map':
-            inner = self.source_of(m.group('E2'))
+        m = unify(SHAPES['dictionary'], node)
+        if m and m.expr(1).value in self.dictionaries and self.dictionaries[m.expr(1).value][1] == 'map':
+            inner = self.source_of(m.expr(2))
             if inner and set(inner) <= {'field', 'any_of'}:
-                return {**inner, 'dictionary': self.dictionaries[m.group('E1')][0]}
+                return {**inner, 'dictionary': self.dictionaries[m.expr(1).value][0]}
         return None
 
     # Values
@@ -596,155 +596,171 @@ class _Idioms:
         base: dict[str, Any] = {'path': leaf.path, **({'data_name': leaf.data_name} if leaf.data_name else {})}
         if leaf.value is not None:
             return {**base, 'value': leaf.value}, False
-        expr = self.inline(canonical(leaf.expr or ''))
-        found = self.idiom(expr, leaf.guard)      # first: a map of one key is its value, guarded by the key
+        text = self.inline(leaf.expr or '')
+        node = _parse(text, self.xp)
+        if node is None:
+            return {**base, 'xpath': text}, True
+        found = self.idiom(node, leaf.guard)      # first: a map of one key is its value, guarded by the key
         if found:
             return {**base, **found}, False
-        if re.fullmatch(_STRING, expr):
-            return {**base, 'value': unquote(expr)}, False      # a string, passed as a parameter, say
-        return {**base, 'xpath': self.portable(expr)}, True
+        if normal(node).symbol == '(string)':
+            return {**base, 'value': str(normal(node).value)}, False      # a string, passed as a parameter, say
+        return {**base, 'xpath': self.portable(normal(node).text)}, True
 
-    def idiom(self, expr: str, guard: str | None = None) -> dict[str, Any] | None:
-        found = self.source_of(expr)
+    def idiom(self, node: Node, guard: str | None = None) -> dict[str, Any] | None:
+        found = self.source_of(node)
         if found:
             return found
-        m = match('default', expr)
+        m = unify(SHAPES['default'], node)
         if m:
-            inner = self.idiom(m.group('E2'))
-            has = canonical(m.group('E1'))
-            source = self.source_of(re.sub(r'^(?:normalize-space|exists)\((.*)\)$', r'\1', has))
+            inner = self.idiom(m.expr(2))
+            has = _call(m.expr(1), 'normalize-space', 'exists') or m.expr(1)
+            source = self.source_of(has)
             if inner and source and all(inner.get(k) == v for k, v in source.items()) and 'default' not in inner:
-                return {**inner, 'default': unquote(m.group('L1'))}
-        mapped = self.inline_map(expr, guard)
+                return {**inner, 'default': m.string(1)}
+        mapped = self.inline_map(node, guard)
         if mapped:
             return mapped
         for name in ('map lookup, default', 'map lookup'):
-            m = match(name, expr)
-            if m and m.group('E1') in self.r.maps:
-                inner = self.converted(m.group('E2'))
+            m = unify(SHAPES[name], node)
+            if m and m.expr(1).value in self.r.maps:
+                inner = self.converted(m.expr(2))
                 if inner:
-                    return {**inner, 'map': self.r.maps[m.group('E1')],
-                            **({'default': unquote(m.group('L1'))} if name == 'map lookup, default' else {})}
+                    return {**inner, 'map': self.r.maps[m.expr(1).value],
+                            **({'default': m.string(1)} if name == 'map lookup, default' else {})}
         for name in ('time, zone', 'time', 'epoch_ms', 'epoch_s'):
-            m = match(name, expr)
+            m = unify(SHAPES[name], node)
             if m:
-                inner = self.converted(m.group('E1'))
+                inner = self.converted(m.expr(1))
                 if inner:
-                    fmt = name if name.startswith('epoch') else unquote(m.group('L1'))
-                    return {**inner, 'time_format': fmt, **({'timezone': unquote(m.group('L2'))} if name == 'time, zone' else {})}
-        return self.converted(expr)
+                    fmt = name if name.startswith('epoch') else m.string(1)
+                    return {**inner, 'time_format': fmt, **({'timezone': m.string(2)} if name == 'time, zone' else {})}
+        return self.converted(node)
 
-    def converted(self, expr: str) -> dict[str, Any] | None:
+    def converted(self, node: Node) -> dict[str, Any] | None:
         """An input, transformed or not."""
-        found = self.source_of(expr)
+        found = self.source_of(node)
         if found:
             return found
         for transform, pattern in TRANSFORMS.items():
-            m = pattern.fullmatch(canonical(expr))
+            m = unify(pattern, node)
             if m:
-                inner = self.source_of(m.group('E1'))
+                inner = self.source_of(m.expr(1))
                 if inner and set(inner) <= {'field', 'any_of'}:
                     return {**inner, 'transform': transform}
         return None
 
-    def inline_map(self, expr: str, guard: str | None = None) -> dict[str, Any] | None:
+    def keys_listed(self, node: Node | None) -> tuple[Node, list[str]] | None:
+        """X = ('a', 'b'): the input and the keys (one_of_text)."""
+        m = unify(SHAPES['one of'], node) if node is not None else None
+        listed = strings(m.expr(2)) if m else None
+        return (normal(m.expr(1)), listed) if listed else None
+
+    def inline_map(self, node: Node, guard: str | None = None) -> dict[str, Any] | None:
         """A value map written inline (map_step_text, key after key): its keys, and its default or its last key."""
-        pairs, rest, key = {}, canonical(expr), None
+        pairs, rest, key = {}, normal(node), None
         while True:
-            m = SHAPES['map step'].fullmatch(rest)
+            m = unify(SHAPES['map step'], rest)
             if not m:
                 break
-            this = canonical(m.group('E1'))
-            if key is not None and this != key:
+            this = normal(m.expr(1))
+            if key is not None and this.key != key.key:
                 return None
             key = this
-            pairs[unquote(m.group('L1'))] = unquote(m.group('L2'))
-            rest = canonical(m.group('E2'))
-        if not re.fullmatch(_STRING, rest):
+            pairs[m.string(1)] = m.string(2)
+            rest = normal(m.expr(2))
+        if rest.symbol != '(string)':
             return None
         # Without a default the generator writes the last key's value as the final else, the element guarded by
         # the keys (one_of_text): that guard naming one key more than the steps is the last key, not a default. A
         # map of one key is then no steps at all: the value, guarded by its key.
-        keys = KEYS.fullmatch(canonical(guard or ''))
-        if keys and (key is None or canonical(keys.group('E1')) == key):
-            key, listed = canonical(keys.group('E1')), _strings(keys.group('L1'))
+        keys = self.keys_listed(_parse(guard, self.xp)) if guard else None
+        if keys and (key is None or keys[0].key == key.key):
+            key, listed = keys
             extra = [k for k in listed if k not in pairs]
             inner = self.converted(key)
             if inner and len(extra) == 1 and len(listed) == len(pairs) + 1:
-                return {**inner, 'map': {**pairs, extra[0]: unquote(rest)}}
+                return {**inner, 'map': {**pairs, extra[0]: str(rest.value)}}
         if not pairs:
             return None
         inner = self.converted(key)
-        return {**inner, 'map': pairs, 'default': unquote(rest)} if inner else None
+        return {**inner, 'map': pairs, 'default': str(rest.value)} if inner else None
 
-    def inline(self, expr: str) -> str:
+    def inline(self, text: str) -> str:
         """The XSLT's own single-expression functions replaced by their bodies (mcp:data aside)."""
         for _ in range(5):
-            changed = False
-            for name, (params, body) in self.r.functions.items():
-                at = expr.find(name + '(')
-                while at != -1 and not (at and (expr[at - 1].isalnum() or expr[at - 1] in ':-_')):
-                    end, depth = at + len(name), 0
-                    for i in range(end, len(expr)):
-                        depth += expr[i] == '('
-                        depth -= expr[i] == ')'
-                        if depth == 0:
-                            end = i
-                            break
-                    args = _top_split(expr[at + len(name) + 1:end], ',')
-                    if len(args) != len(params):
-                        break
-                    replaced = body
-                    for param, arg in zip(params, args):
-                        replaced = re.sub(r'\$' + re.escape(param) + r'(?![\w.-])', lambda _m, a=arg: f'({a})', replaced)
-                    expr = expr[:at] + f'({replaced})' + expr[end + 1:]
-                    changed = True
-                    at = expr.find(name + '(')
-            if not changed:
+            tree = _parse(text, self.xp)
+            if tree is None:
+                return text
+            calls = []
+            for node in tree.walk():
+                if node.symbol == 'call' and node.value in self.r.functions:
+                    params, body = self.r.functions[node.value]
+                    if len(params) == len(node):
+                        bound = dict(zip(params, (arg.text for arg in node.children)))
+                        calls.append((node, f'({resolve(body, bound, self.xp)})'))
+            if not calls:
                 break
-        return canonical(expr)
+            text = splice(text, calls)
+        return text
 
-    def portable(self, expr: str) -> str:
+    def portable(self, text: str) -> str:
         """An expression that reads the same in a regenerated XSLT: its stylesheet variables written in, and JSON
         read through json-to-xml() (the generator puts its guarded helper back)."""
-        for name, entries in self.r.maps.items():
-            literal_map = 'map{' + ', '.join(f'{literal(k)}: {literal(v)}' for k, v in entries.items()) + '}'
-            expr = re.sub(r'\$' + re.escape(name) + r'(?![\w.-])', lambda _m: literal_map, expr)
-        expr = resolve(expr, self.r.globals)
-        return expr.replace('mcp:json-to-xml(', 'json-to-xml(')
+        tree = _parse(text, self.xp)
+        if tree is not None:
+            maps = [(n, 'map{' + ', '.join(f'{literal(k)}: {literal(v)}' for k, v in self.r.maps[n.value].items()) + '}')
+                    for n in _variables(tree) if n.value in self.r.maps]
+            text = splice(text, maps) if maps else text
+        text = resolve(text, self.r.globals, self.xp)
+        tree = _parse(text, self.xp)
+        if tree is not None:
+            helper = [(n, n.text[len('mcp:'):]) for n in tree.walk()
+                      if n.symbol == 'call' and n.value == 'mcp:json-to-xml']
+            text = splice(text, helper) if helper else text
+        return text
 
     # Conditions
     def conditions(self, test: str) -> tuple[list[dict[str, Any]], bool]:
+        tree = _parse(test, self.xp)
+        if tree is None:
+            return [{'xpath': f'self::*[{test}]', 'present': True}], True
         out, raw = [], False
-        for part in _top_split(_unwrap(test), ' and '):
-            part = canonical(part)
-            negated = re.fullmatch(r'not\((.*)\)', part)
-            body = canonical(negated.group(1)) if negated else part
+        for part in terms(tree, 'and'):
+            negated = _call(part, 'not')
+            body = unbracketed(negated) if negated is not None else part
             found = None
-            if not negated:
-                m = KEYS.fullmatch(body)
-                if m and self.field_of(m.group('E1')):
-                    found = {'field': self.field_of(m.group('E1')), 'one_of': _strings(m.group('L1'))}
-            for name in ('equals', 'matches', 'in dictionary'):
-                m = None if found or negated else SHAPES[name].fullmatch(body)
-                if m and self.field_of(m.group('E1')):
-                    if name == 'equals':
-                        found = {'field': self.field_of(m.group('E1')), 'equals': unquote(m.group('L1'))}
-                    elif name == 'matches':
-                        found = {'field': self.field_of(m.group('E1')), 'matches': unquote(m.group('L1'))}
-                    elif m.group('E2').lstrip('$') in self.dictionaries:
-                        found = {'field': self.field_of(m.group('E1')),
-                                 'in_dictionary': self.dictionaries[m.group('E2').lstrip('$')][0]}
+            if negated is None:
+                found = self.comparison(body)
             if not found:
-                m = re.fullmatch(r'exists\((.*)\)', body) or re.fullmatch(r'normalize-space\((.*)\)', body)
-                inner = m.group(1) if m else body
+                inner = _call(body, 'exists', 'normalize-space') or body
                 if self.field_of(inner):
-                    found = {'field': self.field_of(inner), 'present': not negated}
+                    found = {'field': self.field_of(inner), 'present': negated is None}
             if not found:
-                found = {'xpath': f'self::*[{self.portable(part)}]', 'present': True}
+                found = {'xpath': f'self::*[{self.portable(part.text)}]', 'present': True}
                 raw = True
             out.append(found)
         return out, raw
+
+    def comparison(self, node: Node) -> dict[str, Any] | None:
+        """A condition on one field: equal to a value (equals_text), one of several (one_of_text, its values in
+        brackets), matching a regex, or in a dictionary."""
+        m = unify(SHAPES['in dictionary'], node)
+        if m and self.field_of(m.expr(1)) and m.expr(2).value in self.dictionaries:
+            return {'field': self.field_of(m.expr(1)), 'in_dictionary': self.dictionaries[m.expr(2).value][0]}
+        m = unify(SHAPES['matches'], node)
+        if m and self.field_of(m.expr(1)):
+            return {'field': self.field_of(m.expr(1)), 'matches': m.string(1)}
+        # equals_text and one_of_text differ only by the brackets around the values: told apart as written.
+        written = unbracketed(node)
+        bracketed = written.symbol == '=' and len(written) == 2 and written[1].symbol == '('
+        m = None if bracketed else unify(SHAPES['equals'], node)
+        if m and self.field_of(m.expr(1)):
+            return {'field': self.field_of(m.expr(1)), 'equals': m.string(1)}
+        keys = self.keys_listed(node)
+        if keys and self.field_of(keys[0]):
+            return {'field': self.field_of(keys[0]), 'one_of': keys[1]}
+        return None
 
 
 def _effective(mapping: TranslationMapping) -> list[dict[tuple[str, str | None], FieldMapping]]:
@@ -757,7 +773,7 @@ def _effective(mapping: TranslationMapping) -> list[dict[tuple[str, str | None],
     return out
 
 
-def _keyed_shapes(code: str) -> dict[str, tuple[str, str, str]]:
+def _keyed_shapes(code: str, xp: XPathParser) -> dict[str, tuple[str, str, str]]:
     """The XSLT's key=value functions (keyed_text): name -> (regex before the key, after it, flags)."""
     out = {}
     root = etree.fromstring(strip(code).encode('utf-8'))
@@ -765,11 +781,11 @@ def _keyed_shapes(code: str) -> dict[str, tuple[str, str, str]]:
         body = fn.find(f'{X}sequence')
         if body is None or not (fn.get('name') or '').startswith('mcp:'):
             continue
+        node = _parse(body.get('select'), xp)
         for name in ('keyed, flags', 'keyed'):
-            m = SHAPES[name].fullmatch(canonical(body.get('select') or ''))
+            m = unify(SHAPES[name], node) if node is not None else None
             if m:
-                out[fn.get('name')[4:]] = (unquote(m.group('L1')), unquote(m.group('L2')),
-                                           unquote(m.group('L3')) if name == 'keyed, flags' else '')
+                out[fn.get('name')[4:]] = (m.string(1), m.string(2), m.string(3) if name == 'keyed, flags' else '')
                 break
     return out
 
@@ -788,7 +804,7 @@ def _imported(reading: Reading, imported: dict[str, str]) -> tuple[list[dict[str
 
     def home_of(template: str) -> tuple[str | None, etree._Element | None]:
         for href, root in parsed.items():
-            found = root.find(f"{X}template[@name='{template}']")
+            found = next((t for t in root.findall(f'{X}template') if t.get('name') == template), None)
             if found is not None:
                 return href, found
         return (reading.imports[0], None) if len(reading.imports) == 1 else (None, None)
@@ -823,8 +839,9 @@ def _imported(reading: Reading, imported: dict[str, str]) -> tuple[list[dict[str
 
 def _calls_imported(xpath: str | None, reading: Reading) -> bool:
     """Whether an expression calls a function of an XSLT it imports (one of the prefixes bound for them)."""
-    return bool(xpath) and any(re.search(r'(?<![\w.-])' + re.escape(prefix) + r':[\w.-]+\(', xpath)
-                               for prefix in reading.prefixes)
+    tree = _parse(xpath, reading.xp)
+    return tree is not None and any(n.symbol == 'call' and str(n.value).partition(':')[0] in reading.prefixes
+                                    and ':' in str(n.value) for n in tree.walk())
 
 
 def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
@@ -832,7 +849,7 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
     """A mapping for this XSLT: the kept mapping where the XSLT still reads as it generates (kept_code, what it
     generates now), the generator's idioms read from the XSLT elsewhere."""
     reading = read(code)
-    reading.keyed = _keyed_shapes(code)                       # type: ignore[attr-defined]
+    reading.keyed = _keyed_shapes(code, reading.xp)
     # Key=value functions are read as extractions, not written into the expression.
     for name in reading.keyed:
         reading.functions.pop(f'mcp:{name}', None)
@@ -843,8 +860,10 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
     extracts = [e.model_dump(exclude_none=True, exclude_defaults=True) for e in kept.extract] if kept else []
     idioms = _Idioms(reading, kind, extracts)
     before: dict[str, tuple[RuleReading, Any, dict]] = {}
+    base_xp = reading.xp
     if kept and kept_code:
         base = read(kept_code)
+        base_xp = base.xp
         effective = _effective(kept)
         for n, rule in enumerate(base.rules):
             if n < len(kept.events):
@@ -856,7 +875,7 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
         old = before.get(rule.key)
         name = (old[1].name if old else None) or rule.name or re.sub(r'^event[_-]type[_-]', '', rule.key).replace('_', '-')
         spec: dict[str, Any] = {'name': name}
-        if old and _same_test(old[0].test, rule.test):
+        if old and _same_test(old[0].test, rule.test, base_xp, reading.xp):
             spec['when'] = [c.model_dump(exclude_none=True) for c in old[1].when]
         elif rule.test:
             spec['when'], raw = idioms.conditions(rule.test)
@@ -880,8 +899,9 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
         old_leaves = {leaf.key: leaf for leaf in old[0].leaves} if old else {}
         for leaf in rule.leaves:
             previous = old_leaves.get(leaf.key)
-            if previous is not None and previous.form == leaf.form and leaf.key in old[2]:
-                entries.append(((leaf.key, leaf.form), old[2][leaf.key].model_dump(exclude_none=True)))
+            form = leaf.form(reading.xp)
+            if previous is not None and previous.form(base_xp) == form and leaf.key in old[2]:
+                entries.append(((leaf.key, form), old[2][leaf.key].model_dump(exclude_none=True)))
                 reused.add(len(entries) - 1)
                 out.reused += 1
                 continue
@@ -889,7 +909,7 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
                 out.problems.append(f"rule {name}: {leaf.path} repeats (xsl:for-each) in a way no entry it had writes")
                 continue
             entry, raw = idioms.entry(leaf)
-            entries.append(((leaf.key, leaf.form), entry))
+            entries.append(((leaf.key, form), entry))
             where = f"rule {name}: {leaf.path}" + (f" Data {leaf.data_name}" if leaf.data_name else '')
             out.new.append(where)
             if raw:
@@ -957,8 +977,8 @@ def rebuild(code: str, kept: TranslationMapping | None, kept_code: str | None,
     return out
 
 
-def _same_test(a: str | None, b: str | None) -> bool:
-    return (a is None and b is None) or (a is not None and b is not None and canonical(a) == canonical(b))
+def _same_test(a: str | None, b: str | None, xp_a: XPathParser, xp_b: XPathParser) -> bool:
+    return (a is None and b is None) or (a is not None and b is not None and _key(a, xp_a) == _key(b, xp_b))
 
 
 __all__ = ['Leaf', 'Reading', 'Rebuilt', 'RuleReading', 'canonical', 'read', 'rebuild', 'resolve', 'MCP_NS',

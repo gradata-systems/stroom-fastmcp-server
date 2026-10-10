@@ -621,6 +621,16 @@ def transform_expr(t: str | None, one: str) -> str:
 # patterns made by calling these same functions with slots, so the reader follows whatever the generator writes
 # (asked for by the user: one definition, not two that drift apart).
 
+def field_text(kind: str, field_name: str) -> str:
+    """An input field, as the parser presents it: a Data Splitter's data element (its value), a JSON key (a dotted
+    path of keys), or an XML path as given."""
+    if kind == 'data_splitter':
+        return '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
+    if kind == 'json':
+        return '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
+    return field_name
+
+
 def key_text(src: str) -> str:
     """A key for a lookup or a dictionary: the input's first value, as a string."""
     return f"string(({src})[1])"
@@ -1097,12 +1107,8 @@ class _Generator:
             # JSON held in a field, read safely: an empty value, or one that isn't JSON, gives nothing rather than
             # stopping the pipeline ("empty sequence" fatal errors, seen in a test environment).
             selector = JSON_CALL.sub('mcp:json-to-xml(', xpath)
-        elif self.m.input == 'data_splitter':
-            selector = '/'.join(f"data[@name={literal(p)}]" for p in field_name.split('/')) + '/@value'
-        elif self.m.input == 'json':
-            selector = '/'.join(f"*[@key={literal(p)}]" for p in field_name.split('.'))
         else:
-            selector = field_name
+            selector = field_text(self.m.input, field_name)
         if self._item_mode and scope == 'record':
             self.uses_record = True
             return f"$record/({selector})" if xpath is not None else f"$record/{selector}"

@@ -4,6 +4,7 @@ version = "0.16.47"
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=44",
+    "elementpath>=5.1.4",
     "fastmcp>=4.0.3",
     "httpx>=0.28",
     "lxml>=6.0",
