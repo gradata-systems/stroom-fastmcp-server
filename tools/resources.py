@@ -85,6 +85,9 @@ that read its Events (indexing, CEF): review_coverage reviews them too, and they
 with it. Each save records its change (change=) for the XSLT's version history and the doc's version control, as one
 entry when the build is promoted.
 
+Questions about the data (what a feed holds, what a field means, how to search it): describe_feed, read only,
+from the generated documentation and the indexes' fields. Answer in plain words and give the documentation links.
+
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
 XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an

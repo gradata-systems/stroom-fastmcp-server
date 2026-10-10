@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 from config import Settings  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import (diagnosis, explorer, generation, instructions, pipelines, processing, sampling,  # noqa: E402
+from tools import (describe, diagnosis, explorer, generation, instructions, pipelines, processing, sampling,  # noqa: E402
                    stepping, streams, templates, translation, validation, indexing, feeds)
 from utils.consent import ConsentStore  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
@@ -32,17 +32,17 @@ from utils.xsltgen import TranslationMapping  # noqa: E402
 READ_POSTS = re.compile(r'^/(explorer/v2/(find|fetchExplorerNodes|getFromDocRef|info)|meta/v1/find\w*|data/v1/fetch'
                         r'|stepping/v1/(step|terminateStepping)|processorFilter/v1/find|processorTask/v1/find\w*'
                         r'|elasticIndex/v1/testIndex|elasticCluster/v1/testCluster|pipeline/v1/fetchPipelineLayers'
-                        r'|[a-zA-Z]+/v1/find\w*)$')
+                        r'|index/v2/findFields|[a-zA-Z]+/v1/find\w*)$')
 
 
 class ReadOnlyGateway(StroomGateway):
     refused: list[str] = []
 
-    async def request(self, method, path, body=None):
+    async def request(self, method, path, body=None, **kwargs):
         if method != 'GET' and not (method == 'POST' and READ_POSTS.match(path.split('?')[0])):
             self.refused.append(f'{method} {path}')
             raise ToolError(f'read-only run: refused {method} {path}')
-        return await super().request(method, path, body)
+        return await super().request(method, path, body, **kwargs)
 
     async def datafeed(self, *args, **kwargs):
         self.refused.append('datafeed upload')
@@ -94,6 +94,10 @@ async def main(feed: str):
                                    f"{len(r.get('shared', []))} shared"))
             await check('list_template_children', templates.list_template_children(ctx, first),
                         lambda r: (True, f"{len(r.get('children') or [])} children"))
+        await check('describe_feed', describe.describe_feed(ctx, feed),
+                    lambda r: (True, f"{len(r['pipelines'])} pipelines ({', '.join(p['kind'] for p in r['pipelines'])}), "
+                                     f"{len(r.get('indexes') or [])} indexes, "
+                                     f"{sum(1 for p in r['pipelines'] if p.get('documentation'))} documented"))
         docs = await check('find_documents pipeline', explorer.find_documents(ctx, f'{feed}*', ['Pipeline'], 20),
                            lambda r: (bool(r.get('documents') or r.get('values')), f"{len(r.get('documents') or r.get('values') or [])} found"))
         pipe = next((d for d in (docs or {}).get('documents') or [] if d.get('name') == f'{feed}-Events'), None)

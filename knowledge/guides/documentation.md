@@ -96,3 +96,11 @@ the section, in a block the server reads. From then on triage reports that kind 
 with the user's reason, in stepping, Error stream summaries and evaluations, so it is not raised again. The block is
 kept when the doc is rewritten, and travels with the doc when it is promoted.
 
+## Who else reads it
+
+The documentation is also how the feed is explained to the people who search it. `describe_feed` answers their
+questions (what a feed holds, what a field means, how to search it) from the promoted docs, found by their
+`mcp-generated` tag: Purpose and data for the overview, the Field mapping tables for a field. So write Purpose and
+data for someone who never saw the build (the source system, what its records are, the kinds of event), and give
+index fields descriptions that say what the value is, e.g. "The domain of the user's account" rather than
+"user domain".

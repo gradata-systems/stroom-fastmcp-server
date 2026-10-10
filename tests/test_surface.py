@@ -11,7 +11,7 @@ from tools import explorer, indexing, pipeline_writes, plan, streams, translatio
 
 def test_the_surface_is_smaller_and_every_core_tool_names_its_plan_step():
     tools = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
-    assert len(tools) <= 54, sorted(tools)     # 53: draft_cef_mapping (CEF for ArcSight); 54: review_coverage
+    assert len(tools) <= 55, sorted(tools)     # 53: draft_cef_mapping (CEF for ArcSight); 54: review_coverage; 55: describe_feed
     for gone in ('list_build', 'get_document', 'describe_pipeline', 'validate_events', 'create_xslt', 'update_xslt',
                  'set_pipeline_property', 'run_test_searches', 'summarise_events'):
         assert gone not in tools

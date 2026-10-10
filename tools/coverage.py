@@ -163,26 +163,77 @@ async def _sampled_unknown(stroom: StroomGateway, pipeline: dict[str, Any], stre
     return kinds, examples, raws
 
 
+def filter_terms(expression: dict[str, Any]) -> list[dict[str, Any]]:
+    """A processor filter expression's terms, at any depth."""
+    out = []
+    for child in (expression or {}).get('children') or []:
+        out += filter_terms(child) if child.get('type') == 'operator' else [child]
+    return out
+
+
+async def filter_feeds(stroom: StroomGateway, terms: list[dict[str, Any]], known: dict[Any, Any]) -> set[str]:
+    """The feeds a processor filter reads, lower-cased: Feed EQUALS (one, or several between commas), IS_DOC_REF (the
+    feed doc: its name is in the reference, with no value), IN_DICTIONARY (the feeds a Dictionary lists, and its
+    imports'), or with no Feed term, the feed of the first stream its Id terms pick (the server's filters on sample
+    streams). Seen on a production Stroom: 34 filters named their feed by IS_DOC_REF and 6 by a dictionary, which
+    reading the value alone missed. known caches dictionaries and streams across one walk of the filters."""
+    feeds: set[str] = set()
+    for t in terms:
+        if t.get('field') != 'Feed':
+            continue
+        ref = t.get('docRef') or {}
+        if t.get('condition') == 'IS_DOC_REF':
+            name = ref.get('name') or t.get('value')
+            feeds |= {str(name).lower()} if name else set()
+        elif t.get('condition') == 'IN_DICTIONARY' and ref.get('uuid'):
+            feeds |= await _dictionary_lines(stroom, ref['uuid'], known)
+        else:
+            feeds |= {v.strip().lower() for v in str(t.get('value') or '').split(',') if v.strip()}
+    ids = [t.get('value') for t in terms if t.get('field') == 'Id' and t.get('condition') == 'EQUALS' and t.get('value')]
+    if not feeds and ids:
+        key = ('stream', str(ids[0]))
+        if key not in known:
+            from tools.streams import _meta
+            try:
+                known[key] = (await _meta(stroom, int(ids[0]))).get('feedName')
+            except (ToolError, ValueError):
+                known[key] = None
+        feeds |= {known[key].lower()} if known[key] else set()
+    return feeds
+
+
+async def _dictionary_lines(stroom: StroomGateway, uuid: str, known: dict[Any, Any], depth: int = 0) -> set[str]:
+    """A Dictionary's lines, lower-cased, with those of the dictionaries it imports."""
+    key = ('dictionary', uuid)
+    if key not in known:
+        known[key] = set()      # a dictionary importing itself, or one another imports, read once
+        try:
+            doc = await stroom.get_doc('Dictionary', uuid)
+        except ToolError:
+            return set()
+        lines = {line.strip().lower() for line in (doc.get('data') or '').splitlines() if line.strip()}
+        for imported in (doc.get('imports') or []) if depth < 5 else []:
+            if imported.get('uuid'):
+                lines |= await _dictionary_lines(stroom, imported['uuid'], known, depth + 1)
+        known[key] = lines
+    return known[key]
+
+
 async def follow_on_pipelines(ctx: Context, pipeline: dict[str, Any], events_feeds: set[str]) -> list[dict[str, Any]]:
     """Pipelines reading this pipeline's Events: their filters name it (Pipeline IS_DOC_REF) or its Events feed."""
     stroom = gateway_from(ctx)
     body = await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})
     feeds = {f.lower() for f in events_feeds}
     found: dict[str, dict[str, Any]] = {}
-
-    def terms(expression: dict[str, Any]) -> list[dict[str, Any]]:
-        out = []
-        for child in (expression or {}).get('children') or []:
-            out += terms(child) if child.get('type') == 'operator' else [child]
-        return out
+    known: dict[Any, Any] = {}
     for row in (body or {}).get('values') or []:
         f = row.get('processorFilter') or {}
         if f.get('deleted') or not f.get('pipelineUuid') or f['pipelineUuid'] == pipeline['uuid']:
             continue
-        ts = terms((f.get('queryData') or {}).get('expression'))
+        ts = filter_terms((f.get('queryData') or {}).get('expression'))
         names_it = any(t.get('field') == 'Pipeline' and (t.get('docRef') or {}).get('uuid') == pipeline['uuid'] for t in ts)
-        reads_feed = any(t.get('field') == 'Feed' and str(t.get('value', '')).lower() in feeds for t in ts) and \
-            any(t.get('field') == 'Type' and t.get('value') == 'Events' for t in ts)
+        reads_feed = any(t.get('field') == 'Type' and t.get('value') == 'Events' for t in ts) and \
+            bool(await filter_feeds(stroom, ts, known) & feeds)
         if names_it or reads_feed:
             found.setdefault(f['pipelineUuid'], {'uuid': f['pipelineUuid'], 'name': f.get('pipelineName'),
                                                  'filters': []})['filters'].append(f.get('id'))

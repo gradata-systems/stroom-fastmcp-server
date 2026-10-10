@@ -121,11 +121,11 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
   Dev Tools request, and the form after it is a short summary to confirm.
 - Standing instructions from `AGENTS` docs in Stroom apply whoever connects; a workspace `AGENTS.md` can add
   your own on top.
-- The server has 52 tools. A chat request can carry at most 128, and with VS Code's own tools and other servers,
+- The server has 55 tools. A chat request can carry at most 128, and with VS Code's own tools and other servers,
   Copilot Chat groups many of them behind `activate_*` tools that the model has to call before it sees what is
   inside (virtual tools, `github.copilot.chat.virtualTools.threshold`). The server tells the model to do that
-  when a tool it names is missing, but a small model can still stop instead (seen with Haiku 4.5: 18 of the 52
-  offered, the rest in 8 groups, and onboarding gave up at the text converter). To keep every Stroom tool in
+  when a tool it names is missing, but a small model can still stop instead (seen with Haiku 4.5, when it had 52: 18 of
+  them offered, the rest in 8 groups, and onboarding gave up at the text converter). To keep every Stroom tool in
   view, switch off tools you don't need for this work in the tools picker (browser, notebook and terminal
   tools, other servers), or raise the threshold.
 

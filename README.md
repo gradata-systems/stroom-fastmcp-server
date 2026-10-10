@@ -6,7 +6,7 @@ pipeline, stepped and verified before anything is promoted. It works with any MC
 in; it includes no agent or model of its own. See [docs/DESIGN.md](docs/DESIGN.md).
 
 Status: 0.16.42, released as a container image and a Helm chart ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
-The server has 52 tools:
+The server has 55 tools:
 
 | Group | Tools |
 | --- | --- |
@@ -27,6 +27,7 @@ The server has 52 tools:
 | Indexing | `get_field_conventions`, `draft_index_mapping` (a field plan from the user's example index template, an existing index in Stroom or a convention, or a discovery plan), `create_index_doc`* (with the plan's fields), `create_indexing_pipeline`*, `verify_index`* (a dashboard of the columns the user confirms, opening on the time field from the sample through today, with a stepping text pane; searches through Stroom, each hit traced back to its record) |
 | Elasticsearch | `find_elastic_clusters`, `propose_index_template`* (built from the user's example, shown in the chat, then agreed by the user), `check_index_template`* (the user's correction, agreed when it fits), `create_index_doc` |
 | Plan | `start_onboarding` (profile every file, create the build, return the plan), `build_status` (each step's state from the build; every write tool's result carries `next`) |
+| Questions about the data | `describe_feed` (what a feed holds and what one of its fields means, where it comes from and how to search it: from the generated documentation, found by its tag, and the indexes' own field types; read only, for chat clients such as OpenWebUI or Stroom's own assistant) |
 | Builds | `start_build`, `build_status`, `write_documentation` (a pipeline's, with a generated Errors section and errors the user accepts as benign*; or an existing index's*, from a survey), `promote_build`** |
 
 \* needs the user's confirmation, \*\* needs approval. The user answers these in a form the client shows, so the
@@ -35,7 +36,7 @@ model never holds the answer; a client without forms gets an id to pass back onc
 Resources: `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}`. Prompts (the workflows, e.g. as
 slash commands): `onboard_data_source`, `update_events_pipeline`, `update_indexing_pipeline`, `index_event_data`,
 `create_discovery_index`, `evaluate_events_pipeline`, `onboard_existing_feed`, `fix_pipeline_issue`,
-`document_index`. Each is diagrammed
+`document_index`, `check_feed_coverage`, `forward_events_as_cef`, `review_cef_pipeline`. Each is diagrammed
 in [docs/DESIGN.md](docs/DESIGN.md#workflows), with which one fits what the user has and wants.
 
 ## Clients
@@ -44,6 +45,11 @@ Any MCP client that speaks streamable HTTP and OAuth can use the server: a chat 
 framework. The rules that must hold (the workspace, confirmations and approvals, processing limits, the
 Elasticsearch hand-over, checks before promotion) are enforced by the server, not by prompts, so every client gets
 them. What a client needs is in [docs/DESIGN.md](docs/DESIGN.md#clients).
+
+A client for the people who search the data rather than build pipelines (OpenWebUI, or Stroom's own assistant in
+later builds) needs only `describe_feed`: what a feed holds, what a field means, where it comes from and how to search
+it, from the documentation the server generated and the indexes' own field types. It only reads, as the signed-in
+user.
 
 Setting up VS Code (the identity provider's client, Stroom trusting the provider, `mcp.json`) is described in
 [docs/VSCODE.md](docs/VSCODE.md); other clients need the same kind of client and token audiences. Any OpenID Connect provider
@@ -90,6 +96,10 @@ Design decisions (see [docs/DESIGN.md](docs/DESIGN.md#open-questions-risks-and-d
   specs and mappings; a mapping is checked against the schema and against every sample file (fields no record has,
   time formats the values do not fit) before anything is stepped. Several sample files of one source are profiled
   together, uploaded one stream each, and all stepped.
+- Generated XSLT is written to be read: a template rule per kind of event, parts several rules write the same way
+  (EventSource, a Network action's Source and Destination) written once, variables declared just before their first
+  use, `Data` values as `Value="{...}"`, and key=value extractions as one function called with the key. A style guide
+  in an `AGENTS` doc can change each (`stroom://guide/xslt`).
 - Reference data and dictionaries are first-class: `lookup` and `dictionary` sources in the mapping, the Reference
   Data pipeline built from a mapping, and the events pipeline naming the feed as a pipeline reference.
 - One record may hold several events (`for_each`), a value may repeat (`repeat`), and records the user wants left
@@ -163,6 +173,7 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_fragments.py` | XML fragments end to end (the parser replaced, the wrapper set: the environment's own if it has one), and regexes: a '-' for the text's en dash refused at once with where it stops |
 | `dev/e2e_records_source.py` | A source whose own XML is `<records><record>`: profiled, translated, validated and indexed as the source's XML, not a Data Splitter's `records:2` |
 | `dev/e2e_stream_types.py` | Templates found by what they are, under names no standard template has; Raw Reference (the reference template and loader by structure, a lookup through a loader resolved with none named) and Records (a pipeline writing Records, indexed as records) |
+| `dev/e2e_describe.py` | A feed onboarded, indexed and promoted, then asked about: its pipelines and generated docs, its index, a field traced from the index doc to its event-logging path and source, with how to search it |
 | `dev/e2e_coverage.py` | Kinds the sample missed: found across the whole feed in the later stream alone, a rule added, only that stream reprocessed, the CEF pipeline that follows reviewed |
 | `dev/e2e_cef.py` | CEF for ArcSight through Kafka: the question about keys outside the CEF dictionary, a draft and an override, the XSLT saved with its plan, a pipeline of its own with no template, stepped, reviewed and documented |
 | `dev/e2e_xslt_style.py` | How generated XSLT is written: each layout giving the same Events in Stroom, shared functions found in a sibling and called, the processing gate on replaced code, Unknown agreed with the user |
