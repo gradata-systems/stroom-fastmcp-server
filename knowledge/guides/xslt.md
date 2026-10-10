@@ -181,10 +181,11 @@ The mapping's `style` decides how the XSLT reads. Take it from an XSLT style sec
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `naming` | `snake_case` | Variables, templates, modes and the XSLT's own functions: `client_ip`, `event_source`, `action_to_success`. Also `camelCase`, `PascalCase`, `kebab-case`. |
-| `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable, declared in the one rule that uses it, or at the top when several do. Fewer reads stay inline; text two extractions read is always a variable. 1: always variables. |
+| `variable_min_reads` | 3 | A field read this often in a template (its guard and value are two reads) goes in a variable. Fewer reads stay inline; text two extractions read is always a variable. 1: always variables. |
+| `variables` | `just_in_time` | Where variables are declared: `just_in_time`, immediately before the first element that reads each, inside the innermost element holding every read; `top`, at the start of their template (or of the one rule that uses them). |
 | `inline_map_max_keys` | 3 | A value map used by one element with at most this many keys is written inline as an `if`; longer or shared ones become one `xsl:map`. 0: always `xsl:map`. |
 | `function_min_uses` | 2 | A conversion this many elements use (a time format, or a `strip_domain`, `domain` or `digits` transform) is declared once as an `xsl:function` (`mcp:parse_time`, `mcp:strip_domain`) and called; fewer stay inline. 0: always inline. |
-| `data_values` | `attribute` | How a computed `Data` value is written: `attribute`, `<Data Name="x"><xsl:attribute name="Value" select="..."/></Data>`; `interpolated`, `<Data Name="x" Value="{...}"/>`. An expression holding a brace keeps `xsl:attribute` (or its variable). |
+| `data_values` | `interpolated` | How a computed `Data` value is written: `interpolated`, `<Data Name="x" Value="{...}"/>`; `attribute`, `<Data Name="x"><xsl:attribute name="Value" select="..."/></Data>`. An expression holding a brace keeps `xsl:attribute` (or its variable). |
 | `data_names` | `as_given` | `Data` Names in a style, applied to every `data_name` of the mapping: `server_node` is `ServerNode` in `PascalCase`; a name already in the style is kept (`IPAddress`). Also `snake_case`, `camelCase`, `kebab-case`. The names are the mapping's own from then on, so the documentation and the index fields follow them. |
 | `layout` | `modes` | `modes`: each event kind is a template rule with its own mode (`match="node()" mode="eventTypeLogon"` with `camelCase` naming), applied to the record with `select="."` from the record template's `xsl:choose`; parts several kinds share are mode templates too. `named`: the same with named templates and `xsl:call-template`. `inline`: every kind written in the `xsl:choose`. |
 
@@ -222,3 +223,12 @@ xpaths.
 1. `check_xslt` for well-formedness, namespaces, function names and imports.
 2. `step_pipeline` with `draft_code` for one record, then `step_sample` with `draft_code` for all of
    them. Nothing is saved; errors come back per record and element.
+
+## Less repetition, by the generator
+
+Extractions that differ only by the key they find in one text field (`key="..."` for thirty keys) become one function
+a shape, called with the key: `mcp:quoted_value($body, 'dstintfrole')`, in place of an `analyze-string` variable a key
+declared again in every template that reads it. A part several rules write the same way is written once as a template
+of its own and applied from each (EventSource, and below an action element, a Source, a Destination, a Rule or an
+Outcome: the action element itself, Deny or Permit, Authenticate or View, may differ). These come from the mapping,
+which is what is changed; the XSLT is regenerated from it.

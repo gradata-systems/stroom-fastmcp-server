@@ -130,12 +130,20 @@ def test_variables_only_for_fields_read_often_and_declared_where_used():
     assert all(reads >= 3 for _, reads in variable_reads(xslt)), variable_reads(xslt)
     sheet = etree.fromstring(xslt.encode())
     record = sheet.find(f"{XSL_NS}template[@mode='event']")
-    # action is read by the rules' tests and the other rule: the template's; user only by the logon rule.
+    # action is read by the rules' tests and the other rule: the template's; user only by the logon rule, declared
+    # just before its first use there (asked for by the user: not hoisted to the start).
     assert [v.get('name') for v in record.findall(f'{XSL_NS}variable')] == ['action']
-    assert [v.get('name') for v in record.findall(f'{XSL_NS}choose/{XSL_NS}when/{XSL_NS}variable')] == ['user']
-    # A field read only by its own element stays where it is used, with a short guard.
+    [user] = record.findall(f'{XSL_NS}choose/{XSL_NS}when//{XSL_NS}variable')
+    assert user.get('name') == 'user' and user.getparent().tag != f'{XSL_NS}when'
+    following = etree.tostring(user.getnext()).decode()
+    assert '$user' in following                      # the next element is the first to read it
+    # A field read only by its own element stays where it is used, with a short guard, its value interpolated.
     assert """<xsl:if test="normalize-space(data[@name='sid']/@value)">""" in xslt
-    assert """<xsl:attribute name="Value" select="data[@name='sid']/@value"/>""" in xslt
+    assert '''Value="{data[@name='sid']/@value}"''' in xslt
+    # Declared at the start of the rule instead, for a style guide that says so.
+    top = generate(mapping(events=rules, style={'layout': 'inline', 'variables': 'top'}), SCHEMA, '4.1.0')['xslt']
+    rule = etree.fromstring(top.encode()).find(f"{XSL_NS}template[@mode='event']")
+    assert [v.get('name') for v in rule.findall(f'{XSL_NS}choose/{XSL_NS}when/{XSL_NS}variable')] == ['user']
     events = transform(xslt, RECORDS)
     assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
     assert events.find(".//{event-logging:3}Data[@Name='account']").get('Value') == "o'neil"
@@ -679,9 +687,11 @@ def test_data_values_interpolated_and_data_names_in_a_style():
     assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
     data = {d.get('Name'): d.get('Value') for d in events.iter('{event-logging:3}Data')}
     assert data['ServerNode'] == 'ws09' and data['IPAddress'] == 'a{b}' and data['FirstTwo'] == "o'" and data['Session'] == 's1'
-    # The defaults are unchanged.
+    # Interpolated is the default now (asked for by the user); attribute is there for a style guide that wants it.
     plain = generate(mapping(), SCHEMA, '4.1.0')['xslt']
-    assert '<xsl:attribute name="Value"' in plain and 'Name="session"' in plain
+    assert '<Data Name="session" Value="{' in plain and '<xsl:attribute name="Value"' not in plain
+    old = generate(mapping(style={'data_values': 'attribute'}), SCHEMA, '4.1.0')['xslt']
+    assert '<xsl:attribute name="Value"' in old and 'Name="session"' in old
 
 
 @pytest.mark.parametrize('entry, message', [
@@ -700,3 +710,60 @@ def test_a_function_call_is_not_taken_as_a_field(entry, message):
         mapping(events=[{'name': 'logon', 'when': [{'field': 'extract(msg, "a")', 'present': True}],
                          'fields': [{'path': 'EventDetail/TypeId', 'value': 'x'}]}])
     mapping(events=[{'name': 'logon', 'fields': [{'path': 'EventDetail/TypeId', 'field': 'System/Provider/@Name'}]}])
+
+
+FIREWALL = """<records xmlns="records:2">
+<record><data name="time" value="2026-09-28T10:00:00.000Z"/><data name="action" value="deny"/>
+<data name="msg" value='srcip="10.0.0.1" dstip="10.0.0.2" dstintfrole="wan" proto=6 user="bob"'/></record>
+<record><data name="time" value="2026-09-28T10:01:00.000Z"/><data name="action" value="accept"/>
+<data name="msg" value='srcip="10.0.0.3" dstip="10.0.0.4" dstintfrole="lan" proto=17'/></record>
+</records>"""
+
+
+def firewall_mapping(**style) -> TranslationMapping:
+    """A key=value message read through one extraction per key, and two Network rules writing the same Source,
+    Destination and Data: the shape of the FortiGate translation that came to 93 KB."""
+    def kv(key, quoted=True):
+        return {'field': 'msg', 'regex': f'(?:^|\s){key}="([^"]*)"' if quoted else f'(?:^|\s){key}=(\S+)', 'names': [key]}
+    network = [{'path': 'Source/Device/IPAddress', 'field': 'srcip'}, {'path': 'Destination/Device/IPAddress', 'field': 'dstip'},
+               {'path': 'Data', 'data_name': 'dstintfrole', 'field': 'dstintfrole'}, {'path': 'Data', 'data_name': 'proto', 'field': 'proto'}]
+    rules = [{'name': name, 'when': [{'field': 'action', 'equals': action}],
+              'fields': [{'path': 'EventDetail/TypeId', 'value': name}]
+              + [{**f, 'path': f'EventDetail/Network/{element}/{f["path"]}'} for f in network]}
+             for name, action, element in (('deny', 'deny', 'Deny'), ('permit', 'accept', 'Permit'))]
+    return TranslationMapping.model_validate({
+        'input': 'data_splitter', 'unmatched': 'skip', 'common': BASE[:5] + [{'path': 'EventSource/User/Id', 'field': 'user'}],
+        'extract': [kv('srcip'), kv('dstip'), kv('dstintfrole'), kv('proto', quoted=False), kv('user')],
+        'events': rules, **({'style': style} if style else {})})
+
+
+def test_key_value_extractions_are_one_function_a_shape_and_blocks_are_shared_across_actions():
+    # Asked for by the user: the FortiGate translation declared ~30 analyze-string variables in each of four rules,
+    # and wrote the same Source, Destination and Data four times.
+    result = generate(firewall_mapping(), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    xslt = result['xslt']
+    # Four quoted keys: one function, called with the key; one bare key (proto) keeps its own extraction.
+    assert xslt.count('<xsl:function name="mcp:quoted_value"') == 1 and "mcp:quoted_value($msg, 'dstintfrole')" in xslt
+    assert 'dstintfrole_parts' not in xslt and 'proto_parts' in xslt
+    # Deny's and Permit's Source and Destination are written once, applied from each.
+    sheet = etree.fromstring(xslt.encode())
+    modes = [t.get('mode') for t in sheet.findall(f'{XSL_NS}template')]
+    assert 'source' in modes and 'destination' in modes
+    # EventSource's User stays its own: the action-free key leaves paths outside an action alone.
+    events = transform(xslt, FIREWALL)
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    deny, permit = events.findall('e:Event', {'e': 'event-logging:3'})
+    ns = {'e': 'event-logging:3'}
+    assert deny.findtext('.//e:Deny/e:Source/e:Device/e:IPAddress', namespaces=ns) == '10.0.0.1'
+    assert permit.findtext('.//e:Permit/e:Destination/e:Device/e:IPAddress', namespaces=ns) == '10.0.0.4'
+    assert {d.get('Name'): d.get('Value') for d in permit.iter('{event-logging:3}Data')} == {'dstintfrole': 'lan', 'proto': '17'}
+    assert deny.findtext('.//e:EventSource/e:User/e:Id', namespaces=ns) == 'bob' and permit.find('.//e:EventSource/e:User', ns) is None
+
+
+def test_the_action_free_path_keeps_everything_but_the_action():
+    from utils.xsltgen import action_free
+    assert action_free('EventDetail/Network/Deny/Source/Device') == 'EventDetail/Network/*/Source/Device'
+    assert action_free('EventDetail/Authenticate/Data') == 'EventDetail/*/Data'
+    assert action_free('EventDetail/TypeId') == 'EventDetail/TypeId'
+    assert action_free('EventSource/Client/IPAddress') == 'EventSource/Client/IPAddress'

@@ -357,10 +357,14 @@ class XsltStyle(BaseModel):
         "A conversion (a time format, or a strip_domain, domain or digits transform) used by at least this many "
         "elements is declared once as an xsl:function (mcp:parse_time, mcp:strip_domain) and called where it's "
         "needed; fewer are written inline. 0: always inline."))
-    data_values: Literal['attribute', 'interpolated'] = Field('attribute', description=(
-        "How a computed Data value is written: attribute, <Data Name=\"x\"><xsl:attribute name=\"Value\" "
-        "select=\"...\"/></Data>; interpolated, <Data Name=\"x\" Value=\"{...}\"/> (an attribute value template). "
+    data_values: Literal['attribute', 'interpolated'] = Field('interpolated', description=(
+        "How a computed Data value is written: interpolated (the default), <Data Name=\"x\" Value=\"{...}\"/> (an "
+        "attribute value template); attribute, <Data Name=\"x\"><xsl:attribute name=\"Value\" select=\"...\"/></Data>. "
         "An expression holding a brace keeps xsl:attribute. Set it from an AGENTS style guide."))
+    variables: Literal['just_in_time', 'top'] = Field('just_in_time', description=(
+        "Where variables are declared: just_in_time (the default), immediately before the first element that reads "
+        "each, inside the innermost element holding every read; top, all at the start of their template. Set it "
+        "from an AGENTS style guide."))
     data_names: Literal['as_given', 'snake_case', 'camelCase', 'PascalCase', 'kebab-case'] = Field(
         'as_given', description=(
             "Data element Names in this style (server_node becomes ServerNode in PascalCase), applied to every "
@@ -628,6 +632,65 @@ KEPT_UNKNOWN = "Kept as Unknown by rule '{rule}': record "
 LOGGED_FIELDS = 4
 
 
+_NO_VARIABLES = {f'{{{XSL}}}{n}' for n in ('choose', 'apply-templates', 'call-template', 'analyze-string')}
+
+
+def just_in_time(template: etree._Element) -> None:
+    """Each of the template's variables declared just before the first element that reads it, inside the innermost
+    element holding every read (asked for by the user: hoisted to the template's start, thirty of them, the XSLT was
+    hard to read against their use). Last first, so a variable another reads is placed before that one."""
+    for variable in reversed(list(template.iter(f'{{{XSL}}}variable'))):
+        pattern = re.compile(r'\$' + re.escape(variable.get('name') or '') + r'(?![\w.-])')
+        reads = [el for el in template.iter() if el is not variable and isinstance(el.tag, str)
+                 and any(pattern.search(v or '') for v in el.attrib.values())]
+        if not reads:
+            continue
+
+        def chain(el: etree._Element) -> list[etree._Element]:
+            out = []
+            while el is not None:
+                out.append(el)
+                if el is template:
+                    break
+                el = el.getparent()
+            return out[::-1]
+        chains = [chain(r) for r in reads]
+        common = template
+        for level in zip(*chains):
+            if all(x is level[0] for x in level):
+                common = level[0]
+            else:
+                break
+        # The first read in document order as it is now (a variable moved already reads from where it went). Not by
+        # id(): lxml makes element proxies afresh, so ids taken from one walk don't match another's.
+        first = next(el for el in template.iter() if any(el is r for r in reads))
+        path = chain(first)
+        if common is first or len(path) <= path.index(common) + 1:
+            parent, child = first.getparent(), first
+        else:
+            parent, child = common, path[path.index(common) + 1]
+        while parent is not template and parent.tag in _NO_VARIABLES:
+            parent, child = parent.getparent(), parent
+        if parent is None:
+            continue
+        variable.getparent().remove(variable)
+        parent.insert(parent.index(child), variable)
+
+
+def action_free(path: str) -> str:
+    """A path with its action element as '*' (Network's own action too): EventDetail/Network/Deny/Source ->
+    EventDetail/Network/*/Source, EventDetail/Authenticate/Data -> EventDetail/*/Data."""
+    steps = path.strip('/').split('/')
+    at = steps.index('EventDetail') if 'EventDetail' in steps else -1
+    if at < 0 or len(steps) <= at + 1 or steps[at + 1] in ('TypeId', 'Description', 'Classification', 'Purpose'):
+        return path
+    network = steps[at + 1] == 'Network'
+    steps[at + 1] = 'Network' if network else '*'
+    if network and len(steps) > at + 2:
+        steps[at + 2] = '*'
+    return '/'.join(steps)
+
+
 def literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
@@ -704,6 +767,7 @@ class _Generator:
                           if len(used) > 1 or len(items) > mapping.style.inline_map_max_keys}
         self._check_functions()
         self._own_functions = self._choose_functions()
+        self._keyed, self._keyed_functions = self._choose_keyed()
 
     @staticmethod
     def conversions(entry: FieldMapping) -> list[tuple]:
@@ -732,9 +796,53 @@ class _Generator:
             names[conversion] = unique_name(style_name(base, naming), set(names.values()) | {'json-to-xml'}, naming)
         return names
 
+    def _choose_keyed(self) -> tuple[dict[int, tuple[str, str]], dict[tuple, str]]:
+        """Extractions that differ only by the key they find in one text field (key="..." for each of thirty keys):
+        one function a shape, called with the key, in place of a variable a key, declared again in every template
+        that reads it (seen: 52 of them, each declared in four rules, in 93 KB of XSLT).
+        {id(extraction): (function, key)}, {(field, xpath, scope, flags, prefix, suffix): function}."""
+        shapes: dict[tuple, list[tuple[Extraction, str]]] = {}
+        for ex in self.m.extract:
+            names = [n for n in ex.names if n]
+            if len(ex.names) != 1 or not names or ex.field in self.derived:
+                continue
+            key = names[0]
+            found = [m.start() for m in re.finditer(r'(?<![\w\\])' + re.escape(key) + r'(?!\w)', ex.regex)]
+            if not re.fullmatch(r'[A-Za-z0-9_]+', key) or len(found) != 1:
+                continue
+            at = found[0]
+            shape = (ex.field, ex.xpath, ex.scope, ex.flags, ex.regex[:at], ex.regex[at + len(key):])
+            shapes.setdefault(shape, []).append((ex, key))
+        keyed: dict[int, tuple[str, str]] = {}
+        functions: dict[tuple, str] = {}
+        naming = self.m.style.naming
+        taken = set(self._own_functions.values()) | {'json-to-xml'}
+        for shape, members in shapes.items():
+            if len(members) < 3:
+                continue
+            base = ('quoted-value' if shape[5].startswith('="') or shape[5].startswith('=\\"') else
+                    'value' if shape[5].startswith('=') else 'keyed-value')
+            name = unique_name(style_name(base, naming), taken, naming)
+            taken.add(name)
+            functions[shape] = name
+            for ex, key in members:
+                keyed[id(ex)] = (name, key)
+        return keyed, functions
+
     def own_functions(self) -> list[etree._Element]:
         """The XSLT's own functions, one per repeated conversion: a value in, the converted value out."""
         out = []
+        for shape, name in self._keyed_functions.items():
+            flags = f", {literal(shape[3])}" if shape[3] else ''
+            function = etree.Element(f'{{{XSL}}}function', name=f'mcp:{name}', **{'as': 'xs:string?'})
+            function.append(etree.Comment(_comment(f"The value of a key in the text: the regex {shape[4]}<key>{shape[5]}, "
+                                                   f"its first group")))
+            etree.SubElement(function, f'{{{XSL}}}param', name='text', **{'as': 'item()*'})
+            etree.SubElement(function, f'{{{XSL}}}param', name='key', **{'as': 'xs:string'})
+            etree.SubElement(function, f'{{{XSL}}}sequence', select=(
+                f"for $g in (analyze-string(string($text[1]), concat({literal(shape[4])}, $key, {literal(shape[5])})"
+                f"{flags})//fn:group[@nr=1])[1] return string($g)"))
+            out.append(function)
         for conversion, name in self._own_functions.items():
             body = transform_expr(conversion[1], '$value') if conversion[0] == 'transform' \
                 else time_expr(conversion[1], conversion[2], '$value')
@@ -828,6 +936,8 @@ class _Generator:
     def declare_parts(self, ex: Extraction) -> None:
         """Declare the variable holding the extraction's analyze-string() result in the template being written,
         before anything that reads it (an extraction of an extracted field declares its source's first)."""
+        if id(ex) in self._keyed:
+            return      # read through its shape's function, no variable of its own
         name = self.parts_name(ex)
         if name in self._scope:
             return
@@ -846,6 +956,9 @@ class _Generator:
         scope 'record' reads the record through $record instead."""
         if field_name in self.derived:
             ex, nr = self.derived[field_name]
+            if id(ex) in self._keyed:
+                function, key = self._keyed[id(ex)]
+                return f"mcp:{function}({self.ref(ex.field, ex.xpath, 'text', ex.scope)}, {literal(key)})"
             # Declared in the template being written, whatever reads it (a variable, any_of, a lookup or dictionary
             # key, a repeat): a named template shared between rules has its own scope.
             self.declare_parts(ex)
@@ -1397,11 +1510,14 @@ class _Generator:
     def key(self, node: _Node) -> str:
         """The node's path and the node written out in full with its guard, so equal keys mean the same element
         with the same output for any record. Only the same path is shared: an EventSource/Client/IPAddress and a
-        Destination/Device/IPAddress read from one field stay apart, as they mean different things."""
+        Destination/Device/IPAddress read from one field stay apart, as they mean different things. The action element
+        alone may differ (Network's Deny and Permit, Authenticate and View): a Source, a Destination or a Data list
+        below it means the same whichever it is (seen: four Network rules each writing the same Source, Destination
+        and thirty Data, 93 KB of XSLT)."""
         if id(node) not in self._keys:
             holder = etree.Element('fragment')
             self.in_scope(holder, lambda: self.emit_element(holder, node, None, inline=True))
-            self._keys[id(node)] = node.path + '\n' + etree.tostring(holder, encoding='unicode')
+            self._keys[id(node)] = action_free(node.path) + '\n' + etree.tostring(holder, encoding='unicode')
         return self._keys[id(node)]
 
     def tidy_variables(self, template: etree._Element) -> None:
@@ -1450,6 +1566,11 @@ class _Generator:
 
                 for el, attr in reads:
                     el.set(attr, pattern.sub(inline, el.get(attr)))
+                # A variable still to be inlined may read this one: its selector reads the input itself from now on,
+                # or inlining it would bring back a variable no longer declared (seen: $msg, the text a key=value
+                # function parses, read by $srcip and inlined first).
+                for other in list(raw):
+                    raw[other] = pattern.sub(lambda _m: plain, raw[other])
                 continue
             rules = {homes.get(el) for el, _ in reads}
             if len(rules) == 1 and None not in rules:
@@ -1598,7 +1719,7 @@ class _Generator:
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
         uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
-            or bool(self._own_functions)     # the mcp prefix: the guarded JSON helper and the XSLT's own functions
+            or bool(self._own_functions) or bool(self._keyed_functions)     # the mcp prefix: its own functions
         bound = {f.prefix: f.namespace for f in m.functions}
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
                  **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {}), **bound}
@@ -1687,6 +1808,10 @@ class _Generator:
         self.tidy_variables(record_template)
         for template in [t for _, t in self._rule_templates] + [t for _, t in self._templates.values()]:
             self.tidy_variables(template)
+        if self.m.style.variables == 'just_in_time':
+            for template in [record_template] + [t for _, t in self._rule_templates] \
+                    + [t for _, t in self._templates.values()]:
+                just_in_time(template)
         if self.uses_record:
             for template in [record_template] + [t for _, t in self._rule_templates] \
                     + [t for _, t in self._templates.values()]:
