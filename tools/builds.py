@@ -182,6 +182,17 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
         drift = await _drift(ctx, kept)
         if drift:
             section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
+    elif kept['kind'] == 'cef':
+        # The plan's tables, with the values the pipeline writes for the sample Events (stepping sends nothing).
+        from tools.cef import _stepped
+        from utils.cef import CefPlan, examples_from
+        plan = CefPlan.model_validate(kept['payload'])
+        lines, events, _, _ = await _stepped(ctx, pipeline['uuid'], stream_ids, kept['element'], 200)
+        if not lines:
+            raise ToolError(f"Field mapping not written: stepping pipeline '{pipeline.get('name')}' over streams "
+                            f"{stream_ids} gave no CEF lines. Its stream_ids are the Events streams it sends "
+                            f"(wait_for_processing on the events pipeline lists them).")
+        section = plan.markdown(examples_from(plan, lines, [e for e in events if e is not None]))
     else:
         plan = FieldPlan.model_validate(kept['payload'])
         if plan.discovery:
@@ -214,6 +225,68 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             schema = None
         section = index_field_mapping_markdown(plan, population, documents, schema) + _agreed_line(pipeline)
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
+
+
+def _with_change(ctx: Context, text: str, old: str, change: str, kept: dict[str, Any] | None) -> str:
+    """The doc's new text: its version control rows as they were, and this change pending until the build is
+    promoted, when the build's changes become one row."""
+    from tools.plan import _user
+    from utils.versionlog import code_of, with_pending
+    from utils.xsltversion import agent_line
+    by = f"{_user(ctx)} (agent: {agent_line(ctx)})"
+    return with_pending(text, old, change, by, code_of(kept))
+
+
+async def consolidate_versions(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
+    """A build's pending changes, as one new line of each XSLT's version history and one new row of each doc's
+    version control: called when the build is promoted."""
+    from utils import versionlog, xsltversion
+    stroom = gateway_from(ctx)
+    done = []
+    for ref in docs:
+        if ref['type'] == 'XSLT':
+            doc = await stroom.get_doc('XSLT', ref['uuid'])
+            pending = xsltversion.pending_of(doc.get('description'))
+            if pending:
+                doc['data'] = xsltversion.consolidate(doc.get('data') or '', pending)
+                doc['description'] = xsltversion.without_pending(doc.get('description'))
+                await stroom.put_doc(doc)
+                done.append(f"recorded the build's changes as version {len(xsltversion.rows(doc['data']))} of XSLT "
+                            f"'{ref['name']}'")
+        elif ref['type'] == 'Documentation':
+            doc = await stroom.get_doc('Documentation', ref['uuid'])
+            text = versionlog.consolidate(body_text(doc))
+            if text is not None:
+                set_body_text(doc, text)
+                await stroom.put_doc(doc)
+                done.append(f"recorded the build's changes as version {len(versionlog.rows_of(text))} of "
+                            f"documentation '{ref['name']}'")
+    return done
+
+
+async def cef_written_section(ctx: Context, pipeline_uuid: str, stream_ids: list[int]) -> str:
+    """The Field mapping section of a CEF pipeline whose XSLT keeps no plan: what its lines carry, from the Events
+    they were made from, and what is wrong with them."""
+    from tools.cef import _stepped
+    from utils import cef
+    lines, events, _, sent = await _stepped(ctx, pipeline_uuid, stream_ids, None, 200)
+    if not lines:
+        raise ToolError(f"Field mapping not written: stepping the pipeline over streams {stream_ids} gave no CEF lines")
+    given = [e for e in events if e is not None]
+    reviewed = cef.review(lines, given, None)
+    header = cef.parse(lines[0])['header']
+    plan = cef.CefPlan(output=sent['output'], topic=sent.get('topic'), custom_keys=True,
+                       **{n: cef.CefValue(value=v) for (n, _, _), v in zip(cef.HEADER, header[1:])},
+                       events={k: [cef.CefField(**{x: m[x] for x in ('path', 'key', 'label') if x in m}) for m in maps]
+                               for k, maps in reviewed['implied_mapping'].items()},
+                       not_sent=[{'path': n['path'], 'event_type': n['event_type'], 'why': f"in none of its lines "
+                                  f"({n['events']} events)"} for n in reviewed['not_sent']])
+    section = ("Its XSLT keeps no CEF plan: this is the mapping its lines imply, each key matched to the Event value it "
+               "carries in the sample, and the header as the first line has it.\n\n"
+               + plan.markdown(cef.examples_from(plan, lines, given)))
+    if reviewed['problems']:
+        section += "\n### Problems in its lines\n\n" + '\n'.join(f"- {p}" for p in reviewed['problems']) + '\n'
+    return section
 
 
 def _agreed_line(pipeline: dict[str, Any]) -> str:
@@ -275,9 +348,11 @@ async def write_documentation(
                                                    "stroom://guide/documentation (Purpose and data, Processing, Field "
                                                    "mapping, Output, Conformance, Open items). The Field mapping section "
                                                    "is generated here from the mapping kept with the XSLT (or the index "
-                                                   "plan); only an XSLT written by hand needs it written. The change log "
-                                                   "is added by the tool.")] = '',
-        change: Annotated[str, Field(description="One line for the change log, e.g. 'Created' or 'Mapped CODE_TO_TOKEN'.")] = '',
+                                                   "plan); only an XSLT written by hand needs it written. The version "
+                                                   "control block is added by the tool.")] = '',
+        change: Annotated[str, Field(description=(
+            "What changed and why, in a line, e.g. 'Created' or 'Mapped CODE_TO_TOKEN': kept pending, and with the "
+            "build's other changes one row of the doc's version control when the build is promoted."))] = '',
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="The pipeline's sample streams (raw streams for an events pipeline, Events streams for an "
                         "indexing pipeline): the Field mapping section is generated from the mapping kept with the XSLT, "
@@ -303,8 +378,9 @@ async def write_documentation(
     agrees with the XSLT. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
     section. The Errors section is generated too: every kind of error processing the streams produced (from their
     Error streams), with counts and an example, and the errors the user accepted as benign, with their reasons; those
-    are kept with the doc, so triage does not raise them again. An update replaces the body and keeps the change log
-    and the accepted errors, adding a line. Promoted with the pipeline.
+    are kept with the doc, so triage does not raise them again. An update replaces the body and keeps the version
+    control rows and the accepted errors; its change waits, with the build's others, for one row when the build is
+    promoted. Promoted with the pipeline.
     """
     given = [AcceptedError.model_validate(x) if isinstance(x, dict) else x for x in accept_errors]
     if any('EventDetail/Unknown' in f"{a.example} {a.matches or ''}" for a in given):
@@ -313,7 +389,8 @@ async def write_documentation(
         raise ToolError("Events written as EventDetail/Unknown aren't an error to accept as benign. Unknown is agreed "
                         "with the user per rule in build_translation_xslt (allow_unknown), whose form shows what the "
                         "records hold; or map them to their action element. Save the XSLT from its mapping there.")
-    body = markdown.split('## Change log')[0].rstrip()
+    from utils.versionlog import body_of
+    body = body_of(markdown)
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
     change = change.strip()     # a new doc's is 'Created'; an update needs its own line (checked below)
@@ -337,9 +414,9 @@ async def write_documentation(
         if not stream_ids:
             # Documentation goes down to the field, with the values the sample gave: it needs the sample.
             what = ("sample raw streams" if kept['kind'] == 'translation' or (kept['payload'] or {}).get('discovery')
-                    else "Events streams it indexes")
+                    else "Events streams it sends" if kept['kind'] == 'cef' else "Events streams it indexes")
             raise ToolError(f"Give stream_ids (the pipeline's {what}): the Field mapping section is generated from the "
-                            f"{'mapping' if kept['kind'] == 'translation' else 'index plan'} kept with the XSLT by "
+                            f"{'mapping' if kept['kind'] == 'translation' else 'CEF plan' if kept['kind'] == 'cef' else 'index plan'} kept with the XSLT by "
                             f"stepping them, each field with the values the sample gave")
         generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids)
         if kept['kind'] == 'translation':
@@ -355,6 +432,13 @@ async def write_documentation(
             raise ToolError("Give stream_ids (the Events streams the pipeline indexes): the Field mapping section is "
                             "generated from the documents it writes from them, each field with the values the sample gave")
         generated_section = await written_fields_section(stroom, pipeline_uuid, stream_ids)
+        body = replace_section(body, 'Field mapping', generated_section)
+    elif (await _shape_stage(stroom, pipeline_uuid)) == 'forwarding':
+        # A CEF pipeline written by hand keeps no plan: the section is the mapping its lines imply.
+        if not stream_ids:
+            raise ToolError("Give stream_ids (the Events streams the pipeline sends): the Field mapping section is "
+                            "generated from the CEF lines it writes from them")
+        generated_section = await cef_written_section(ctx, pipeline_uuid, stream_ids)
         body = replace_section(body, 'Field mapping', generated_section)
     elif '## Field mapping' not in body:
         from tools.templates import _shape
@@ -380,11 +464,10 @@ async def write_documentation(
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', ref['uuid'])
         old = body_text(doc)
-        log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
         accepted = merge_accepted(read_accepted(old), new_entries)
         # Only the generated section: the agent's own sections on errors (an evaluation's analysis) stay as written.
         text = replace_section(body, 'Errors', _errors_section(errors_markdown, accepted), exact=True)
-        set_body_text(doc, f"{text}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
+        set_body_text(doc, _with_change(ctx, text, old, change, kept))
         return await stroom.put_doc(doc)
 
     name, beside = pipeline['name'], None
@@ -401,8 +484,8 @@ async def write_documentation(
                      if d['type'] == 'Documentation' and d['name'] == name), None)
     if not change:
         if existing or beside:
-            raise ToolError("This updates the pipeline's documentation: give change, one line for the change log on "
-                            "what changed, e.g. 'Mapped CODE_TO_TOKEN'")
+            raise ToolError("This updates the pipeline's documentation: give change, one line for its version "
+                            "control on what changed and why, e.g. 'Mapped CODE_TO_TOKEN'")
         change = 'Created'
     if existing:
         doc = await write(existing)
@@ -497,8 +580,7 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     async def write(target: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', target['uuid'])
         old = body_text(doc)
-        log = old[old.index('## Change log'):] if '## Change log' in old else '## Change log\n'
-        set_body_text(doc, f"{text}\n\n{log.rstrip()}\n- {stamp}: {change}\n")
+        set_body_text(doc, _with_change(ctx, text, old, change, None))
         return await stroom.put_doc(doc)
 
     guard = guard_from(ctx)
@@ -696,12 +778,15 @@ async def promote_build(
         return gate
 
     started_ms = int(time.time() * 1000)
+    # The build is done: its changes become one line of each XSLT's version history and one row of each doc's.
+    versioned = await consolidate_versions(ctx, docs)
     done = []
     for path in creating:
         parent, name = path.rsplit('/', 1)
         # Production folders, so not managed: only generated, to show the server made them.
         folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
         done.append(f"created folder {path}")
+    done += versioned
     from tools.processing_writes import development_batch
     for step in plan:
         if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(

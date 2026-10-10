@@ -62,7 +62,7 @@ def test_the_guide_index_lists_every_guide():
 # so a release can't go out with the docs behind (dev/release.py runs these).
 PROMPT_NAMES = {'onboard_data_source', 'onboard_existing_feed', 'update_events_pipeline', 'update_indexing_pipeline',
                 'index_event_data', 'create_discovery_index', 'evaluate_events_pipeline', 'fix_pipeline_issue',
-                'document_index'}
+                'document_index', 'forward_events_as_cef', 'review_cef_pipeline', 'check_feed_coverage'}
 DESIGN = (ROOT / 'docs' / 'DESIGN.md').read_text(encoding='utf-8')
 
 

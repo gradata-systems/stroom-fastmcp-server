@@ -85,7 +85,9 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     # whole: cut it here too.
     cut = len(text) > chars
     text = text[:chars]
-    return text, cut or bool(total and total > len(text)), parts
+    # Stroom's count can be one more than the text it returns (as raw_text finds): a whole document read as cut had its
+    # last line trimmed by sample_format, and an XML sample's closing tag with it (e2e: profiled as unknown text).
+    return text, cut or bool(total and total > len(text) + 1), parts
 
 
 async def survey_feed(

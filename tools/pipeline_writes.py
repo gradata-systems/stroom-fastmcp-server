@@ -3,7 +3,7 @@ import copy
 import json
 import logging
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastmcp import Context
@@ -227,8 +227,15 @@ async def _value(stroom: StroomGateway, prop: PropertyValue, key: str | None = N
     if prop.doc_uuid:
         if not prop.doc_type:
             raise ToolError(f"{prop.element}.{prop.name}: give doc_type with doc_uuid")
-        doc = await stroom.get_doc(prop.doc_type, prop.doc_uuid)
-        return {'entity': {'type': prop.doc_type, 'uuid': prop.doc_uuid, 'name': doc.get('name')}}
+        try:
+            name = (await stroom.get_doc(prop.doc_type, prop.doc_uuid)).get('name')
+        except ToolError:
+            # A type this server doesn't read (a KafkaConfig, say): its name from the explorer.
+            node = await stroom.post('/explorer/v2/getFromDocRef', {'type': prop.doc_type, 'uuid': prop.doc_uuid})
+            if not node:
+                raise ToolError(f"{prop.element}.{prop.name}: no {prop.doc_type} {prop.doc_uuid}")
+            name = node.get('name')
+        return {'entity': {'type': prop.doc_type, 'uuid': prop.doc_uuid, 'name': name}}
     if prop.value is None:
         raise ToolError(f"{prop.element}.{prop.name}: give value or doc_uuid")
     if key:     # as Stroom declares the property (typed_properties)
@@ -393,6 +400,11 @@ async def create_pipeline(
             description="Only when the user says to use this template although the build's sample is not in a format "
                         "its parser reads.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+        standalone: Annotated[Literal['kafka'] | None, Field(description=(
+            "Only when no forwarding template exists (find_pipeline_templates stage=forwarding, and the standing "
+            "instructions name none): a pipeline of its own sending Events to Kafka, Source -> xmlParser -> "
+            "splitFilter (one Event a record) -> xsltFilter -> schemaFilter (kafka-records:1) -> standardKafkaProducer; "
+            "set_properties gives xsltFilter.xslt and standardKafkaProducer.kafkaConfig. The user confirms the chain."))] = None,
 ) -> dict[str, Any]:
     """
     Create a new pipeline as a child of a template, setting only what the child supplies. It keeps the
@@ -405,6 +417,11 @@ async def create_pipeline(
     from tools.plan import resolve_build
     stroom = gateway_from(ctx)
     build = resolve_build(ctx, build, 'create_pipeline')
+    if standalone:
+        if template_uuid or template:
+            raise ToolError("standalone is for when there is no template: give it, or a template, not both")
+        return await _standalone_kafka(ctx, build, name, description, list(set_properties), reuse_existing_docs,
+                                       confirmation_id)
     template_uuid = await _template_uuid(stroom, template_uuid or template)
     template = await stroom.get_doc('Pipeline', template_uuid)
     merged = merge_layers(await stroom.pipeline_layers(template_uuid))
@@ -465,6 +482,60 @@ async def create_pipeline(
                                             f"save the translation XSLT (build_translation_xslt build=, name=) and update_pipeline with "
                                             f"set_properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
                                         **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
+
+
+KAFKA_CHAIN = [('Source', 'Source'), ('xmlParser', 'XMLParser'), ('splitFilter', 'SplitFilter'), ('xsltFilter', 'XSLTFilter'),
+               ('schemaFilter', 'SchemaFilter'), ('standardKafkaProducer', 'StandardKafkaProducer')]
+
+
+async def _standalone_kafka(ctx: Context, build: str, name: str, description: str, set_properties: list[PropertyValue],
+                            reuse_existing_docs: bool, confirmation_id: str | None) -> dict[str, Any]:
+    """A pipeline of its own sending Events to Kafka, where the environment has no template for one.
+
+    Built as the environment's own Kafka pipeline is (live: XMLParser, SplitFilter, XSLTFilter, SchemaFilter on
+    kafka-records:1, StandardKafkaProducer), but one Event a record: kafka-records v1.1 takes a single kafkaRecord a
+    document, so a split of 100 (that pipeline's) fails the schema filter whenever a chunk holds more than one."""
+    stroom = gateway_from(ctx)
+    types = dict(KAFKA_CHAIN)
+    given = {(p.element, p.name) for p in set_properties}
+    unknown = sorted({p.element for p in set_properties} - set(types))
+    if unknown:
+        raise ToolError(f"The Kafka pipeline has no element(s) {unknown}; its elements are {[e for e, _ in KAFKA_CHAIN]}")
+    missing = [k for k in (('xsltFilter', 'xslt'), ('standardKafkaProducer', 'kafkaConfig')) if k not in given]
+    if missing:
+        raise ToolError(f"set_properties needs {['.'.join(m) for m in missing]}: the CEF XSLT draft_cef_mapping saved, "
+                        f"and the KafkaConfig the user picks (draft_cef_mapping lists them as kafka_configs)")
+    fixed = (('splitFilter', 'splitCount'), ('schemaFilter', 'namespaceURI'))
+    properties = [PropertyValue(element='splitFilter', name='splitCount', value=1),
+                  PropertyValue(element='schemaFilter', name='namespaceURI', value='kafka-records:1'),
+                  *[p for p in set_properties if (p.element, p.name) not in fixed]]
+    await _own_documents(ctx, build, properties, reuse_existing_docs)
+    keys = await typed_properties(stroom, types, properties)
+    chain = ' -> '.join(e for e, _ in KAFKA_CHAIN)
+    details = {'build': build, 'pipeline name': name, 'template': 'none: a pipeline of its own',
+               'chain': chain, 'sets': [f'{p.element}.{p.name}' for p in properties],
+               'sends': "each Event, once processed, as a Kafka record through the KafkaConfig set here (stepping "
+                        "sends nothing)"}
+    gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_pipeline',
+                                           f"Create pipeline '{name}' with no template: {chain}",
+                                           details, confirmation_id, editable={'name': ('Pipeline name', name)})
+    if gate:
+        return gate
+    name = edited(ctx, 'name', name)
+    ref = await guard_from(ctx).create('Pipeline', name, build)
+    doc = await stroom.get_doc('Pipeline', ref['uuid'])
+    if description:
+        doc['description'] = description
+    data: dict[str, Any] = {
+        'elements': {'add': [{'id': e, 'type': t} for e, t in KAFKA_CHAIN]},
+        'links': {'add': [{'from': x, 'to': y} for (x, _), (y, _) in zip(KAFKA_CHAIN, KAFKA_CHAIN[1:])]}}
+    for prop in properties:
+        _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
+    doc['pipelineData'] = data
+    doc = await stroom.put_doc(doc)
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': None,
+                                        'chain': chain, 'sets': [f'{p.element}.{p.name}' for p in properties]})
 
 
 async def copy_pipeline(

@@ -212,3 +212,16 @@ async def test_a_sample_cut_part_way_through_a_record_is_profiled_by_its_whole_r
             patch('tools.sampling.read_head', AsyncMock(return_value=(head, True, 1))), \
             patch.object(plan, 'gateway_from', lambda ctx: None):
         assert (await plan.sample_format(None, 'b'))['format'] == 'xml fragments'
+
+
+async def test_a_whole_document_is_not_read_as_cut_for_strooms_count_of_one_more():
+    # e2e: Stroom counted 384 characters for a 383-character XML document; read as cut, its closing </records> line
+    # was trimmed and the sample profiled as unknown text, refusing the XMLParser template.
+    from tools.sampling import read_head
+    doc = '<?xml version="1.0"?>\n<records>\n<record><user>alice</user></record>\n</records>\n'
+    stroom = SimpleNamespace(post=AsyncMock(return_value={'data': doc, 'totalCharacterCount': {'count': len(doc) + 1},
+                                                          'totalItemCount': {'count': 1}}))
+    text, cut, _ = await read_head(stroom, 1, 0, 20_000)
+    assert text == doc and cut is False
+    stroom.post.return_value = {'data': doc, 'totalCharacterCount': {'count': len(doc) + 500}}
+    assert (await read_head(stroom, 1, 0, 20_000))[1] is True

@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
-from utils.samples import SampleTexts, check_sample
+from utils.samples import SAMPLE_GUIDE, SampleTexts, check_sample
 from utils.localcheck import check_mapping, sample_records
 from utils.mappingchanges import apply_changes
 from utils.mappingstore import read_mapping
@@ -196,6 +196,13 @@ async def build_translation_xslt(
         include_xslt: Annotated[bool, Field(description="When saving, also return the code (to read it).")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (rules kept "
                                                                  "as Unknown).")] = None,
+        change: Annotated[str | None, Field(description=(
+            "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
+            "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
+            "processed'."))] = None,
+        agent_model: Annotated[str | None, Field(description=(
+            "The model you are, e.g. 'claude-haiku-5-5', for the version history; once given, remembered for the "
+            "session."))] = None,
         changes: Annotated[dict[str, Any] | str | None, Field(description=(
             "Instead of mapping, to fix one: only what changes, merged into the mapping last sent for this XSLT (the "
             "same uuid, or build and name; else the one saved with uuid). events: rules, each replacing the rule of "
@@ -222,6 +229,8 @@ async def build_translation_xslt(
     stepped over the sample streams.
     """
     version = schema_version or gateway_from(ctx).settings.event_logging_version
+    from utils.xsltversion import remember_model
+    remember_model(ctx, agent_model)
     target = uuid or (f"{build}/{name}" if build and name else '')
     applied = None
     if changes is not None:
@@ -396,10 +405,12 @@ async def build_translation_xslt(
             if gate:
                 return gate
         from tools.translation import create_xslt, update_xslt
+        said = change or ('Mapping changes: ' + '; '.join(applied) if applied else
+                          'Saved again from its mapping' if uuid else 'Created from its mapping')
         if uuid:
-            saved = await update_xslt(ctx, uuid, result['xslt'], mapping=mapping)
+            saved = await update_xslt(ctx, uuid, result['xslt'], mapping=mapping, change=said)
         elif name:
-            saved = await create_xslt(ctx, build, name, result['xslt'], mapping=mapping)
+            saved = await create_xslt(ctx, build, name, result['xslt'], mapping=mapping, change=said)
         else:
             raise ToolError("To save the XSLT give name (a new XSLT in the build) or uuid (the one saved before)")
         result['saved'] = {k: saved[k] for k in ('type', 'uuid', 'name', 'version')}
@@ -412,6 +423,13 @@ async def build_translation_xslt(
     if not result['ok']:
         result['hint'] = _fix_hint(uuid, build, name)
     elif saved:
+        if uuid:
+            # A change to an events pipeline reaches the pipelines that read its Events (asked for by the user).
+            result['follow_on'] = ("This changes an events pipeline: once it has written Events with the change (step, or "
+                                   "reprocess_streams in a build), review_coverage pipeline_uuid=<its pipeline> "
+                                   "events_stream_ids=<those Events> reviews the pipelines that read its Events "
+                                   "(indexing, CEF output): what each lacks, their documentation, and for Elasticsearch "
+                                   "what the cluster's admin must do before streams are indexed again.")
         result['hint'] = (f"Saved with its mapping as '{saved['name']}' ({saved['uuid']}). If no pipeline uses it yet, "
                           f"create_pipeline (it takes the build's XSLT); then step_sample over every sample stream. "
                           f"To change it, call again with uuid='{saved['uuid']}' and changes= only the rules or "
@@ -570,8 +588,10 @@ async def build_reference_xslt(
 
 async def draft_translation_mapping(
         ctx: Context,
-        samples: Annotated[SampleTexts | None, Field(description="The sample files' text, by file name or as a list, "
-                                                                                   "not paths: text to tell the format and fields from: the start of each file is enough (your reader may cut it: VS Code's read_file cuts a line at 2,000 characters). Never trimmed further, completed or repaired. The files themselves go to Stroom whole with upload_sample files=[their paths], never as this text.")] = None,
+        samples: Annotated[SampleTexts | None, Field(description="Only for samples that are not files (pasted text): "
+                                                                "their text, by name or as a list, to tell the format and "
+                                                                "fields from: " + SAMPLE_GUIDE + ". Uploaded samples are "
+                                                                "read from their streams (stream_ids).")] = None,
         source_name: Annotated[str, Field(description="The source, e.g. 'Acme door controller': names the system and generator "
                                                       "until the user confirms them.")] = '',
         system_name: Annotated[str | None, Field(description="EventSource/System/Name, if the user has said.")] = None,

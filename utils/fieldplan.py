@@ -107,6 +107,29 @@ XML_FIELDS = '      <xsl:for-each select="@*@@KEEP@@">\n        <xsl:call-templa
 XML_TEMPLATES = '  <!-- XML as JSON: an element with children or attributes is an object, a repeated element an array, an\n       attribute a field, an element holding only text a value. -->\n  <xsl:template name="children">\n    <xsl:param name="of" as="element()*" />\n    <xsl:param name="top" as="xs:boolean" select="false()" />\n    <xsl:for-each-group select="$of" group-by="local-name()">\n      <xsl:variable name="key" select="if ($top) then d:top(current-grouping-key()) else d:key(current-grouping-key())" />\n      <xsl:choose>\n        <xsl:when test="count(current-group()) gt 1">\n          <array key="{$key}">\n            <xsl:apply-templates select="current-group()" mode="xml" />\n          </array>\n        </xsl:when>\n        <xsl:otherwise>\n          <xsl:apply-templates select="." mode="xml">\n            <xsl:with-param name="key" select="$key" />\n          </xsl:apply-templates>\n        </xsl:otherwise>\n      </xsl:choose>\n    </xsl:for-each-group>\n  </xsl:template>\n  <xsl:template match="*" mode="xml">\n    <xsl:param name="key" as="xs:string" select="\'\'" />\n    <xsl:choose>\n      <xsl:when test="not(*) and not(@*) and $key != \'\'">\n        <xsl:call-template name="leaf">\n          <xsl:with-param name="key" select="$key" />\n          <xsl:with-param name="value" select="string(.)" />\n        </xsl:call-template>\n      </xsl:when>\n      <xsl:when test="not(*) and not(@*)">\n        <string><xsl:value-of select="." /></string>\n      </xsl:when>\n      <xsl:otherwise>\n        <map>\n          <xsl:if test="$key != \'\'"><xsl:attribute name="key" select="$key" /></xsl:if>\n          <xsl:for-each select="@*">\n            <string key="{d:key(local-name())}"><xsl:value-of select="." /></string>\n          </xsl:for-each>\n          <xsl:if test="normalize-space(string-join(text(), \'\')) != \'\'">\n            <string key="value"><xsl:value-of select="normalize-space(string-join(text(), \'\'))" /></string>\n          </xsl:if>\n          <xsl:call-template name="children">\n            <xsl:with-param name="of" select="*" />\n          </xsl:call-template>\n        </map>\n      </xsl:otherwise>\n    </xsl:choose>\n  </xsl:template>'
 
 
+_PLAIN = re.compile(r"^[\w@*.:-]+(\[[^\]]*\])?(/[\w@*.:-]+(\[[^\]]*\])?)*$")
+
+
+def _steps(path: str) -> list[str]:
+    """A plain path's steps, a predicate kept with its step (Data[@Name='a/b'] is one step)."""
+    steps, depth, current = [], 0, ''
+    for ch in path:
+        if ch == '/' and depth == 0:
+            steps.append(current)
+            current = ''
+            continue
+        depth += (ch == '[') - (ch == ']')
+        current += ch
+    return steps + [current]
+
+
+def _single(node: dict[str, Any], body: list[str]) -> list[str]:
+    """An object of one field: the field's own test is the object's, so it is not tested twice."""
+    if len(node) == 1 and len(body) == 1 and not isinstance(next(iter(node.values())), dict):
+        return [re.sub(r'<xsl:if test="[^"]*">(.*)</xsl:if>$', r'\1', body[0])]
+    return body
+
+
 def _json_path(dotted: str) -> str:
     """An XPath to a JSONParser field: 'event.created' -> *[@key='event']/*[@key='created']."""
     return '/'.join(f"*[@key={json.dumps(part).replace(chr(34), chr(39))}]" for part in dotted.split('.'))
@@ -318,17 +341,23 @@ class FieldPlan(BaseModel):
 </xsl:stylesheet>
 """
 
-    def _elastic_lines(self) -> list[str]:
-        """The document's fields: dotted names nested as objects (user.id -> <map key="user"><string key="id">),
-        each object written only when one of its fields is present. A name below another field's name (time.min
-        beside time) cannot be nested, so it is written as a flat key: an index with subobjects: false takes it,
-        and otherwise required() reports it."""
-        def leaf(f: Any, key: str, indent: str) -> str:
+    def _elastic_lines(self) -> tuple[list[str], list[str]]:
+        """The document's fields, and the templates for the objects it repeats.
+
+        Dotted names are nested as objects (user.id -> <map key="user"><string key="id">), each object written only
+        when one of its fields is present. A name below another field's name (time.min beside time) cannot be nested,
+        so it is written as a flat key: an index with subobjects: false takes it, and otherwise required() reports
+        it. An object whose fields all lie below one element, with the same shape in more than one place (an
+        action's Outcome, a Resource with its Id and Type, a Source or Destination holding one), is written by a
+        template of its own, applied to that element wherever it occurs, as the translation XSLT writes each kind of
+        event once: the same object the same way everywhere, and one place to change it.
+        """
+        def leaf(f: Any, key: str, indent: str, source: str | None = None) -> str:
             if isinstance(f, SharedTemplate):
                 return _call(f, indent)
             element = _ES_JSON_ELEMENT.get(f.type, 'string')
-            return (f'{indent}<xsl:if test="{f.source}"><{element} key="{key}">'
-                    f'<xsl:value-of select="{f.source}" /></{element}></xsl:if>')
+            at = source or f.source
+            return f'{indent}<xsl:if test="{at}"><{element} key="{key}"><xsl:value-of select="{at}" /></{element}></xsl:if>'
         # A field a shared template writes is not written here: the template is called in its place.
         items: list[Any] = [f for f in self.fields if not self.written_by(f.name)] + list(self.shared)
 
@@ -353,20 +382,99 @@ class FieldPlan(BaseModel):
                     for s in ([None] if isinstance(v, SharedTemplate) else [v.source] if isinstance(v, PlannedField)
                               else sources(v))]
 
-        def render(node: dict[str, Any], indent: str) -> list[str]:
-            out = []
+        def base_of(node: dict[str, Any]) -> list[str] | None:
+            """The element every field of the object lies below, as steps; None when there is none to apply a
+            template to (a shared template inside, or a source that is not a plain path)."""
+            found = sources(node)
+            if None in found or any(not _PLAIN.match(s or '') for s in found):
+                return None
+            # Each field's parent element; an object inside counts from its own element's parent, so a Destination
+            # holding only a Resource is the Destination element, not the Resource.
+            parents = []
+            for value in node.values():
+                if isinstance(value, dict):
+                    inner = base_of(value)
+                    if not inner:
+                        return None
+                    parents.append(inner[:-1])
+                else:
+                    parents.append(_steps(value.source)[:-1])
+            common: list[str] = []
+            for steps in zip(*parents):
+                if len(set(steps)) != 1 or steps[0].startswith('@'):
+                    break
+                common.append(steps[0])
+            return common or None
+
+        def below(inner: list[str] | None, base: list[str] | None) -> bool:
+            return bool(inner) and (not base or (len(inner) > len(base) and inner[:len(base)] == base))
+
+        def shape(node: dict[str, Any], base: list[str]) -> tuple:
+            out: list[tuple] = []
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    inner = base_of(value)
+                    if not below(inner, base):
+                        return ('unshared', id(node))
+                    out.append((key, tuple(inner[len(base):]), shape(value, inner)))
+                else:
+                    out.append((key, value.type, '/'.join(_steps(value.source)[len(base):])))
+            return tuple(out)
+
+        counts: dict[tuple, int] = {}
+
+        def count(node: dict[str, Any], base: list[str] | None = None) -> None:
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    inner = base_of(value)
+                    if below(inner, base):
+                        signature = (key, shape(value, inner))
+                        counts[signature] = counts.get(signature, 0) + 1
+                    count(value, inner if below(inner, base) else base)
+        count(tree)
+        modes: dict[tuple, str] = {}
+        templates: list[str] = []
+
+        def mode_for(key: str, value: dict[str, Any], base: list[str]) -> str | None:
+            signature = (key, shape(value, base))
+            if counts.get(signature, 0) < 2:
+                return None
+            if signature not in modes:
+                name = re.sub(r'[^\w.-]', '-', key)
+                name = name if re.match(r'[A-Za-z_]', name) else f'm-{name}'
+                taken = set(modes.values())
+                modes[signature] = name if name not in taken else next(
+                    f'{name}-{n}' for n in range(2, 999) if f'{name}-{n}' not in taken)
+                body = render(value, '        ', base)
+                tests = ' or '.join(dict.fromkeys('/'.join(_steps(t)[len(base):]) for t in sources(value)))
+                templates.extend([f'  <xsl:template match="*" mode="{modes[signature]}">',
+                                  f'    <xsl:if test="{tests}">', f'      <map key="{key}">', *_single(value, body),
+                                  '      </map>', '    </xsl:if>', '  </xsl:template>'])
+            return modes[signature]
+
+        def render(node: dict[str, Any], indent: str, base: list[str] | None = None) -> list[str]:
+            """The object's fields; with base, relative to its element (inside a template)."""
+            def rel(path: str) -> str:
+                return '/'.join(_steps(path)[len(base):]) if base else path
+            out: list[str] = []
             for key, value in node.items():
                 if not isinstance(value, dict):
-                    out.append(leaf(value, key, indent))
+                    out.append(leaf(value, key, indent, rel(value.source) if base and isinstance(value, PlannedField) else None))
                     continue
-                tests = sources(value)
-                if None in tests:       # a shared template inside: written whatever the event holds
-                    out += [f'{indent}<map key="{key}">', *render(value, indent + '  '), f'{indent}</map>']
-                else:
-                    out += [f'{indent}<xsl:if test="{' or '.join(dict.fromkeys(tests))}">', f'{indent}  <map key="{key}">',
-                            *render(value, indent + '    '), f'{indent}  </map>', f'{indent}</xsl:if>']
+                inner = base_of(value)
+                mode = mode_for(key, value, inner) if below(inner, base) else None
+                if mode:
+                    out.append(f'{indent}<xsl:apply-templates select="({rel("/".join(inner))})[1]" mode="{mode}" />')
+                    continue
+                if None in sources(value):       # a shared template inside: written whatever the event holds
+                    out += [f'{indent}<map key="{key}">', *render(value, indent + '  ', base), f'{indent}</map>']
+                    continue
+                tests = ' or '.join(dict.fromkeys(rel(t) for t in sources(value)))
+                body = render(value, indent + '    ', base)
+                out += [f'{indent}<xsl:if test="{tests}">', f'{indent}  <map key="{key}">',
+                        *_single(value, body), f'{indent}  </map>', f'{indent}</xsl:if>']
             return out
-        return render(tree, '      ')
+        return render(tree, '      '), templates
 
     def xslt(self, version: str = '3.0') -> str:
         """A draft indexing XSLT reading Events (xpath-default-namespace event-logging:3), or for a discovery
@@ -392,7 +500,9 @@ class FieldPlan(BaseModel):
   </xsl:template>
 </xsl:stylesheet>
 """
-        body = '\n'.join(self._elastic_lines())
+        lines, templates = self._elastic_lines()
+        body = '\n'.join(lines)
+        shapes = ('\n'.join(templates) + '\n') if templates else ''
         return f"""<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns="http://www.w3.org/2005/xpath-functions"
     xmlns:stroom="stroom" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="{version}">
@@ -406,5 +516,5 @@ class FieldPlan(BaseModel):
 {body}
     </map>
   </xsl:template>
-</xsl:stylesheet>
+{shapes}</xsl:stylesheet>
 """

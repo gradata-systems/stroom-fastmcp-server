@@ -244,6 +244,13 @@ async def _step(stroom: StroomGateway, pipeline: _Pipeline, stream_id: int, step
 
 
 _ELEMENT = re.compile(r'<[A-Za-z_]')
+_CEF_LINE = re.compile(r'^\s*CEF:\d+\|', re.M)
+
+
+def sends_on(output: str) -> bool:
+    """Output a forwarding pipeline writes on purpose: CEF lines as text, or Kafka records. Not Events, and not a
+    translation whose templates failed to match."""
+    return bool(_CEF_LINE.search(output or '')) or '<kafkaRecord' in (output or '')
 
 
 def _empty_output(result: dict[str, Any], element: str, record: Any) -> list[dict[str, Any]]:
@@ -254,7 +261,7 @@ def _empty_output(result: dict[str, Any], element: str, record: Any) -> list[dic
     """
     output = (((result.get('stepData') or {}).get('elementMap') or {}).get(element) or {}).get('output') or ''
     body = re.sub(r'^\s*<\?xml[^>]*\?>', '', output)
-    if _ELEMENT.search(body):
+    if _ELEMENT.search(body) or sends_on(body):
         return []
     return [{'severity': 'ERROR', 'element': element, 'record': record, 'location': None,
              'message': "Output contains no XML elements: the XSLT's templates did not match the input. "
@@ -626,7 +633,7 @@ async def step_records(
             if events:
                 found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
                               'message': f'The record produced {events} Event(s), but its kind is left untranslated'})
-        elif events == 0 and not found:
+        elif events == 0 and not found and not sends_on(output):
             found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
                           'message': 'The record produced no Event'})
         markers += found

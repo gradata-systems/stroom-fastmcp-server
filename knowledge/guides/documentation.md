@@ -2,8 +2,10 @@
 
 Every pipeline built, changed or evaluated gets a Documentation doc with the pipeline's name, written with
 `write_documentation` in Markdown. The same content is returned in the chat. On an update, revise the sections
-that changed; the tool keeps the change log and adds a line to it (give `change`: what changed; a new doc's line is
-"Created").
+that changed; the tool keeps the `## Version control` block at the end (give `change`: what changed and why; a new
+doc's is "Created"). Changes made while a build is worked on wait there, hidden, and become one row (version, date,
+who, through which agent and model, what changed, the XSLT version) when the build is promoted. Each XSLT the
+server saves carries the same history as a comment at its start, with edits made by hand found and recorded as such.
 
 ## Sections
 
@@ -76,7 +78,7 @@ feeds, their descriptions, the feeding and events pipelines and their docs), the
 and who searches it; say what you do not know. The tool adds a "Data surveyed" summary under your text: the
 documents and time span of the whole index, its source feeds and the pipelines that produced and index them. Give the user the reply's link;
 `promote_build` puts the doc beside the index doc, or where the user chooses. Documenting an index again changes
-the doc beside it (through a working copy, written back with its change log). A wide index is surveyed in groups
+the doc beside it (through a working copy, written back with its version control). A wide index is surveyed in groups
 of columns; past 600 fields the rest are listed as not surveyed. Leave out `stream_ids` and `accept_errors`: they
 are for a pipeline's documentation.
 

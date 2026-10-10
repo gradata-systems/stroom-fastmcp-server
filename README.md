@@ -163,6 +163,8 @@ End-to-end suites, driving the real tools against that stack:
 | `dev/e2e_fragments.py` | XML fragments end to end (the parser replaced, the wrapper set: the environment's own if it has one), and regexes: a '-' for the text's en dash refused at once with where it stops |
 | `dev/e2e_records_source.py` | A source whose own XML is `<records><record>`: profiled, translated, validated and indexed as the source's XML, not a Data Splitter's `records:2` |
 | `dev/e2e_stream_types.py` | Templates found by what they are, under names no standard template has; Raw Reference (the reference template and loader by structure, a lookup through a loader resolved with none named) and Records (a pipeline writing Records, indexed as records) |
+| `dev/e2e_coverage.py` | Kinds the sample missed: found across the whole feed in the later stream alone, a rule added, only that stream reprocessed, the CEF pipeline that follows reviewed |
+| `dev/e2e_cef.py` | CEF for ArcSight through Kafka: the question about keys outside the CEF dictionary, a draft and an override, the XSLT saved with its plan, a pipeline of its own with no template, stepped, reviewed and documented |
 | `dev/e2e_xslt_style.py` | How generated XSLT is written: each layout giving the same Events in Stroom, shared functions found in a sibling and called, the processing gate on replaced code, Unknown agreed with the user |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
 

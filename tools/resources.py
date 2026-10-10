@@ -78,6 +78,13 @@ step them all, and survey_feed with those stream_ids shows every kind of event t
 any_of. To fix a translation mapping, build_translation_xslt changes= only the rules or entries that change (with the
 uuid it saved, or the same build and name), not the whole mapping again.
 
+Whole feed: a sample can miss rare kinds of event. Once a feed has been processed (or indexed) whole, review_coverage
+finds the records no rule matched and the events kept as Unknown, with exactly which raw streams hold them; tell the
+user, add rules, and only those streams need processing again. A change to an events pipeline reaches the pipelines
+that read its Events (indexing, CEF): review_coverage reviews them too, and they and their documentation are changed
+with it. Each save records its change (change=) for the XSLT's version history and the doc's version control, as one
+entry when the build is promoted.
+
 Parsing: profile_sample names the parser. JSON (an array, or one object per line) is parsed by the Event Data
 (JSON) template's JSONParser element with no text converter; a Data Splitter is for text (CSV, syslog, key=value).
 XML fragments (several root elements, e.g. one <Event> per line, no root) take an XMLFragmentParser with an
@@ -127,7 +134,7 @@ def _docs(source_docs: str) -> str:
 def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None:
     @mcp.resource('stroom://guide/{name}', mime_type='text/markdown',
                   description="Working guides: event-logging, xslt, data-splitter, json-input, reference-data, indexing, "
-                              "documentation, agent-instructions.")
+                              "cef, documentation, agent-instructions.")
     def guide(name: str) -> str:
         path = GUIDES / f'{name}.md'
         if not path.is_file() or path.parent != GUIDES:
@@ -267,9 +274,15 @@ Sample:
    for a reported issue, find example records in the production feed (find_streams, read_stream, step_pipeline).
 4. Draft the change and prove it with compare_outputs (draft_code) on the test records and recent production
    records: only the targeted fields may change. step_sample must stay clean.
-5. Save the change on the copy: build_translation_xslt (uuid=...) from the changed mapping, or save_xslt (uuid=...)
-   for code a mapping cannot express; write_documentation noting the change; promote_build (approval).
-   Reprocessing historical data is the user's decision: propose it, do not do it.
+5. Save the change on the copy: build_translation_xslt (uuid=..., change=<what and why>) from the changed mapping, or
+   save_xslt (uuid=..., change=...) for code a mapping cannot express; write_documentation noting the change.
+6. The pipelines that read its Events (indexing, CEF output): review_coverage pipeline_uuid=<the original pipeline>
+   events_stream_ids=<Events with the change> lists them and what each lacks; change them in the same build (working
+   copies) and write_documentation for each. Elasticsearch: a template change goes through check_index_template (the
+   user confirms, the cluster's admin commits), and the admin deletes the affected streams' documents before they are
+   indexed again (review_coverage gives the request).
+7. promote_build (approval): each XSLT and doc gains one version entry for the build. Reprocessing historical data is
+   the user's decision: propose it (only the affected streams), do not do it.
 
 {_RULES}{_docs(source_docs)}{f'''
 
@@ -297,6 +310,70 @@ Samples:
    verify_index with pipeline_uuid = v2 and searches on the new fields.
 5. write_documentation for v2, saying what changed from v1; promote_build. v1 stays running; switching readers to v2,
    and retiring v1, is the user's.
+
+{_RULES}"""
+
+    @mcp.prompt(description="Find kinds of event the sample missed, once the whole feed is processed, and cover them.")
+    def check_feed_coverage(pipeline: str) -> str:
+        return f"""Check the events pipeline "{pipeline}" covers its whole feed, now that the feed has been processed (and indexed).
+
+1. Find it (find_documents). review_coverage pipeline_uuid=<it>: the records no rule matched across the whole feed
+   (from its Error streams) and the events kept as Unknown, grouped by kind with examples, and exactly which raw
+   streams hold them. Tell the user what it found (tell_user): untranslated events, or none.
+2. For each kind found: step_records on an example; agree with the user what it is. Then add a rule for it with
+   build_translation_xslt changes={{events: [...]}} uuid=<its XSLT> and change=<what was found and added>. A pipeline
+   in production: copy_pipeline working_copy=true into a build first, and change the copy.
+3. step_sample over the sample streams and the affected ones; write_documentation with stream_ids = the sample
+   streams plus some affected ones, change = what was found and added (one version row when the build is promoted).
+4. The pipelines that follow it: review_coverage pipeline_uuid=<it> events_stream_ids=<Events with the new kinds>
+   (after reprocess_streams in a build, or a step). For each indexing or CEF pipeline it lists: change it as it says
+   (draft_index_mapping extra_fields and save_xslt index_plan; draft_cef_mapping uuid=... overrides), step it, and
+   write_documentation for it. Elasticsearch: a template change goes through check_index_template, which the user
+   confirms and the cluster's admin commits; before the affected streams are indexed again, the admin deletes what
+   their old Events streams put in the index (review_coverage gives the request).
+5. Processing the affected raw streams again: in a build, reprocess_streams (at most 10 a call); in production it is
+   the user's, exactly the streams review_coverage named, after the admin's delete for Elasticsearch. Warn them that a
+   CEF pipeline sends the reprocessed streams' events again whole.
+6. promote_build: each XSLT's history and each doc's version control gain one entry for the build.
+
+{_RULES}"""
+
+    @mcp.prompt(description="Send a source's Events to ArcSight as CEF (flattened text, usually through Kafka).")
+    def forward_events_as_cef(events_feed: str, topic: str = '') -> str:
+        return f"""Send the events in feed "{events_feed}" to ArcSight as CEF: one flattened CEF line per Event{f', on Kafka topic {topic}' if topic else ''}.
+
+1. Find recent Events streams (find_streams feed={events_feed} stream_type=Events). get_instructions with the feed:
+   its standing instructions may give CEF mappings, the topic, whether keys outside the CEF dictionary are allowed,
+   and the pipeline template to use; they take precedence.
+2. draft_cef_mapping stream_ids=<the Events streams> feeds=[{events_feed}]: it asks the user first whether keys outside
+   ArcSight's CEF dictionary are allowed (unless the instructions say), then drafts the header, the fields every
+   event shares and, per kind of event, the rest. Show the user its tables (documentation) and its not-sent list;
+   their changes go back as overrides. Ask them for the topic and the KafkaConfig (kafka_configs lists them).
+3. Save it: draft_cef_mapping with the same arguments plus build and name (start_build first).
+4. The pipeline, from the template the instructions name, else a forwarding template or the one existing CEF
+   pipelines inherit from (draft_cef_mapping's templates), else create_pipeline standalone='kafka': its XSLT and its
+   standardKafkaProducer.kafkaConfig.
+5. step_sample over the Events streams (sends nothing); draft_cef_mapping pipeline_uuid=<it> stream_ids=... reviews
+   what it writes; write_documentation with the Events stream_ids; promote_build. Processing sends to Kafka: the
+   user decides when, with the filter's approval.
+
+Guide: stroom://guide/cef
+
+{_RULES}"""
+
+    @mcp.prompt(description="Review, or change, an existing CEF output pipeline.")
+    def review_cef_pipeline(pipeline: str, change: str = '') -> str:
+        return f"""Review the CEF pipeline "{pipeline}"{f' and change it: {change}' if change else ''}.
+
+1. Find it (find_documents) and the Events streams it reads (find_streams on its input feed, stream_type=Events).
+2. draft_cef_mapping pipeline_uuid=<it> stream_ids=<a few Events streams>: its lines checked against ArcSight's CEF
+   dictionary (header, severity, keys outside it, unlabelled custom slots, types and lengths), what each Event sends
+   and what it leaves out, and its plan (or the mapping its lines imply). Report the findings to the user.
+3. To change it: copy_pipeline working_copy=true into a build, then draft_cef_mapping uuid=<the copy's XSLT, or
+   build and name for one written by hand> with the change as overrides; step_sample, review again, and
+   write_documentation noting the change; promote_build writes it back (approval).
+
+Guide: stroom://guide/cef
 
 {_RULES}"""
 

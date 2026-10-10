@@ -19,6 +19,14 @@ Version = Annotated[str | None, Field(
     description="The document version from the last read; the save is refused if it changed since.")]
 
 
+def _pending(ctx: Context, description: str | None, previous: dict[str, Any] | None, change: str) -> str:
+    """The description with this change pending: the build's changes become one line of the XSLT's version history
+    when the build is promoted, not a line a save."""
+    from tools.plan import _user
+    from utils.xsltversion import agent_line, with_pending
+    return with_pending(description, previous, _user(ctx), change, agent_line(ctx))
+
+
 def _summary(doc: dict[str, Any]) -> dict[str, Any]:
     return {'type': doc.get('type'), 'uuid': doc.get('uuid'), 'name': doc.get('name'), 'version': doc.get('version')}
 
@@ -174,7 +182,7 @@ IndexPlan = Annotated[FieldPlan | None, Field(
 
 
 async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: TranslationMapping | None,
-                     index_plan: FieldPlan | None) -> dict[str, Any]:
+                     index_plan: FieldPlan | None, cef_plan: Any = None) -> dict[str, Any]:
     """The doc with its description carrying the mapping or plan the code came from, and whether the code is
     what the mapping generates (a hand-edited XSLT is kept, but reported)."""
     extra: dict[str, Any] = {}
@@ -194,6 +202,8 @@ async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: Tran
             pass
     elif index_plan is not None:
         doc['description'] = with_mapping(doc.get('description'), 'index', index_plan.model_dump())
+    elif cef_plan is not None:
+        doc['description'] = with_mapping(doc.get('description'), 'cef', cef_plan.model_dump(exclude_defaults=True))
     return extra
 
 
@@ -204,6 +214,8 @@ async def create_xslt(
         code: Annotated[str, Field(description="The complete XSLT.")],
         mapping: Mapping = None,
         index_plan: IndexPlan = None,
+        cef_plan: Any = None,
+        change: str | None = None,
 ) -> dict[str, Any]:
     """
     Create an XSLT in the build folder. It is checked with check_xslt first and not saved if that fails. Give the
@@ -215,7 +227,8 @@ async def create_xslt(
     ref = await guard_from(ctx).create('XSLT', name, build)
     doc = await stroom.get_doc('XSLT', ref['uuid'])
     doc['data'] = code
-    extra = await _described(ctx, doc, code, mapping, index_plan)
+    extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
+    doc['description'] = _pending(ctx, doc.get('description'), None, change or 'Created')
     from tools.plan import with_next
     return await with_next(ctx, build, {**_summary(await stroom.put_doc(doc)), **extra})
 
@@ -227,6 +240,8 @@ async def update_xslt(
         version: Version = None,
         mapping: Mapping = None,
         index_plan: IndexPlan = None,
+        cef_plan: Any = None,
+        change: str | None = None,
 ) -> dict[str, Any]:
     """
     Replace an XSLT's code, after check_xslt passes. Only XSLTs this server created (including working
@@ -237,8 +252,11 @@ async def update_xslt(
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('XSLT', uuid)
     await guard_from(ctx).check_managed({'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')})
-    doc['data'] = code
-    extra = await _described(ctx, doc, code, mapping, index_plan)
+    previous = dict(doc)
+    from utils.xsltversion import carry
+    doc['data'] = carry(code, previous.get('data'))
+    extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
+    doc['description'] = _pending(ctx, doc.get('description'), previous, change or 'Changed')
     return {**_summary(await stroom.put_doc(doc, version)), **extra}
 
 
@@ -313,6 +331,13 @@ async def save_xslt(
         index_plan: IndexPlan = None,
         uuid: Uuid = None,
         version: Version = None,
+        change: Annotated[str | None, Field(description=(
+            "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
+            "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
+            "processed'."))] = None,
+        agent_model: Annotated[str | None, Field(description=(
+            "The model you are, e.g. 'claude-haiku-5-5', for the version history; once given, remembered for the "
+            "session."))] = None,
 ) -> dict[str, Any]:
     """
     Save an XSLT written by hand, or an indexing XSLT from its plan (index_plan, no code): create it in the build,
@@ -321,11 +346,15 @@ async def save_xslt(
     fails. A translation generated from a mapping is saved by build_translation_xslt (build and name, or uuid),
     which keeps the mapping with it for the documentation.
     """
+    from utils.xsltversion import remember_model
+    remember_model(ctx, agent_model)
+    said = change or (('Saved again' if uuid else 'Created') + (' from its index plan' if index_plan and code is None
+                                                                else ' by hand' if code else ''))
     if code is None:
         code = await _generated(index_plan)
     if uuid:
-        return await update_xslt(ctx, uuid, code, version, None, index_plan)
-    return await create_xslt(ctx, build, name, code, None, index_plan)
+        return await update_xslt(ctx, uuid, code, version, None, index_plan, change=said)
+    return await create_xslt(ctx, build, name, code, None, index_plan, change=said)
 
 
 async def save_dictionary(

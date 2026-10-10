@@ -278,7 +278,7 @@ async def fix(ctx, stroom: StroomGateway, prod: dict, stamp: str) -> None:
     docs = [v['docRef'] for v in (await stroom.find_documents(pipeline['name'], ['Documentation'], 10)).get('values') or []
             if v['docRef']['name'] == pipeline['name']]
     text = (await stroom.get_doc('Documentation', docs[0]['uuid'])).get('data') or '' if len(docs) == 1 else ''
-    e2e.check("Locked accounts' logons are no longer successes" in text and '- ' in text.split('## Change log')[-1],
+    e2e.check("Locked accounts' logons are no longer successes" in text and '## Version control' in text,
               f"the pipeline's own documentation (one doc, beside it) has the change in its change log: {len(docs)} doc(s)")
 
 

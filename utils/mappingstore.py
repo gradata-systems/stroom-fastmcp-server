@@ -11,7 +11,7 @@ from typing import Any
 
 START = '--- stroom-mcp {kind} mapping (generated; change the mapping and regenerate, rather than the XSLT) ---'
 END = '--- end of stroom-mcp mapping ---'
-_BLOCK = re.compile(r'--- stroom-mcp (translation|index) mapping[^\n]*---\n(.*?)\n--- end of stroom-mcp mapping ---',
+_BLOCK = re.compile(r'--- stroom-mcp (translation|index|cef) mapping[^\n]*---\n(.*?)\n--- end of stroom-mcp mapping ---',
                     re.S)
 
 
@@ -35,7 +35,8 @@ def read_mapping(description: str | None) -> tuple[str, dict[str, Any]] | None:
 
 def normalise_xslt(text: str) -> str:
     """XSLT text with the differences that are not edits removed: the declaration, whitespace between tags."""
-    text = re.sub(r'^\s*<\?xml[^>]*\?>', '', text or '')
+    from utils.xsltversion import strip
+    text = re.sub(r'^\s*<\?xml[^>]*\?>', '', strip(text or ''))     # its version history isn't code either
     return re.sub(r'>\s+<', '><', text).strip()
 
 

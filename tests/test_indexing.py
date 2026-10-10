@@ -549,3 +549,48 @@ async def test_documents_are_counted_not_the_rows_of_one_page():
         result = await indexing.run_test_searches(SimpleNamespace(), 'd', [706, 707], 32000, retries=0,
                                                   dashboard_doc=dashboard)
     assert result['passed'] and result['checks'][0]['returned'] == 32000 and len(result['checks'][0]['sample']) == 3
+
+
+def xml_to_json(xml: str) -> str:
+    """The JSON a json-xml document stands for, as Stroom's Elasticsearch indexing filter reads it."""
+    with PySaxonProcessor(license=False) as proc:
+        xpath = proc.new_xpath_processor()
+        xpath.set_context(xdm_item=proc.parse_xml(xml_text=xml))
+        return xpath.evaluate_single('xml-to-json(/*)').get_string_value()
+
+
+ACTIONS = '''<Events xmlns="event-logging:3">
+<Event><EventDetail><Copy><Source><Resource><Id>a.txt</Id><Type>File</Type></Resource></Source>
+  <Destination><Resource><Id>b.txt</Id></Resource></Destination><Outcome><Success>true</Success></Outcome></Copy></EventDetail></Event>
+<Event><EventDetail><View><Resource><Id>secret-1</Id></Resource></View></EventDetail></Event>
+<Event><EventDetail><Move><Outcome><Success>false</Success></Outcome></Move></EventDetail></Event>
+</Events>'''
+
+
+def test_an_object_repeated_across_actions_is_written_by_one_template():
+    # Asked for by the user: the SecretServer index wrote Outcome, Resource, Source and Destination out in full under
+    # every action, each object's single field tested twice; the translation XSLT writes each thing once.
+    def under(action, *names):
+        return [PlannedField(name=f'{action}.{n}', type='boolean' if n.endswith('Success') else 'keyword',
+                             source=f"EventDetail/{action}/{n.replace('.', '/')}") for n in names]
+    resource = ('Resource.Id', 'Resource.Type')
+    fields = (under('Copy', 'Source.Resource.Id', 'Source.Resource.Type', 'Destination.Resource.Id',
+                    'Destination.Resource.Type', 'Outcome.Success')
+              + under('Move', 'Source.Resource.Id', 'Source.Resource.Type', 'Destination.Resource.Id',
+                      'Destination.Resource.Type', 'Outcome.Success')
+              + under('View', *resource, 'Outcome.Success') + under('Delete', *resource, 'Outcome.Success')
+              + [PlannedField(name='Alert.Severity', type='keyword', source='EventDetail/Alert/Severity')])
+    xslt = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields).xslt()
+    for mode in ('Resource', 'Outcome', 'Source', 'Destination'):
+        assert xslt.count(f'<xsl:template match="*" mode="{mode}">') == 1
+    assert '<xsl:apply-templates select="(EventDetail/Copy/Source)[1]" mode="Source" />' in xslt
+    assert 'mode="Alert"' not in xslt          # once only: written in place, and its one field tested once
+    assert '<map key="Alert">\n          <string key="Severity">' in xslt
+    with PySaxonProcessor(license=False) as proc:
+        exe = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt)
+        out = exe.transform_to_string(xdm_node=proc.parse_xml(xml_text=ACTIONS))
+    docs = json.loads(xml_to_json(out))
+    assert docs == [{'Copy': {'Source': {'Resource': {'Id': 'a.txt', 'Type': 'File'}},
+                              'Destination': {'Resource': {'Id': 'b.txt'}}, 'Outcome': {'Success': True}}},
+                    {'View': {'Resource': {'Id': 'secret-1'}}},
+                    {'Move': {'Outcome': {'Success': False}}}]

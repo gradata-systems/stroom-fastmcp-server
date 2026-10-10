@@ -32,6 +32,8 @@ rules:
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}
   - {own: true, severity: [ERROR], class: blocking, reason: "Error in this pipeline's own element"}
   - {own: false, severity: [ERROR], class: review, reason: 'Error in an inherited element; check whether our output causes it'}
+  - {message: 'Kept as Unknown by rule', class: benign,
+     reason: "A record a rule keeps as EventDetail/Unknown, as the user agreed (allow_unknown): logged so review_coverage finds every one in the whole feed"}
   - {own: true, severity: [WARNING], class: review, reason: "Warning in this pipeline's own element"}
   - {severity: [WARNING, INFO], class: benign, reason: 'Warning or info from an inherited element'}
   - {class: review, reason: 'No rule matched'}

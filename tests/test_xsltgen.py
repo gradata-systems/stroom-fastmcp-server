@@ -42,7 +42,15 @@ def mapping(**overrides) -> TranslationMapping:
         **overrides})
 
 
+STROOM_STUBS = ('<xsl:function name="stroom:log"><xsl:param name="level"/><xsl:param name="message"/>'
+                '<xsl:sequence select="()"/></xsl:function>'
+                '<xsl:function name="stroom:record-no"><xsl:sequence select="0"/></xsl:function>')
+
+
 def transform(xslt: str, xml: str) -> etree._Element:
+    # Plain Saxon has no Stroom functions: the log calls (unmatched and kept-Unknown records) do nothing here.
+    if 'stroom:log(' in xslt and 'name="stroom:log"' not in xslt:
+        xslt = xslt.replace('</xsl:stylesheet>', STROOM_STUBS + '</xsl:stylesheet>')
     with PySaxonProcessor(license=False) as proc:
         executable = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt)
         return etree.fromstring(executable.transform_to_string(xdm_node=proc.parse_xml(xml_text=xml)).encode())
@@ -288,7 +296,9 @@ def test_a_rule_without_conditions_must_be_last():
 def test_unmatched_records_are_logged_when_every_rule_has_conditions():
     rules = [{'name': 'logon', 'when': [{'field': 'action', 'one_of': ['login', 'logon']}], 'fields': LOGON}]
     xslt = generate(mapping(events=rules, unmatched='warn'), SCHEMA, '4.1.0')['xslt']
-    assert "stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))" in xslt
+    # With the value the rule tests, so a whole feed's misses are grouped from its Error streams alone.
+    assert ("stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no(), ' (', "
+            "string-join((concat('action=', string((normalize-space(data[@name='action']/@value))[1]))), ' | '), ')'))") in xslt
     assert "data[@name='action']/@value = ('login', 'logon')" in xslt  # one read: no variable
 
 
@@ -675,10 +685,10 @@ def test_data_values_interpolated_and_data_names_in_a_style():
 
 
 @pytest.mark.parametrize('entry, message', [
-    ({'path': 'EventDetail/Authenticate/Action', 'field': "extract(EventData/Data, 'Action: \[([^\]]+)\]')"},
+    ({'path': 'EventDetail/Authenticate/Action', 'field': r"extract(EventData/Data, 'Action: \[([^\]]+)\]')"},
      "is a function call, not an input field. To take values out of a text field with a regular expression, add an "
      "entry to the mapping's extract list"),
-    ({'path': 'EventSource/User/Id', 'field': "stroom:extract(EventData/Data, 'User: (\S+)')"}, "mapping's extract list"),
+    ({'path': 'EventSource/User/Id', 'field': r"stroom:extract(EventData/Data, 'User: (\S+)')"}, "mapping's extract list"),
     ({'path': 'EventSource/User/Id', 'any_of': ['user', 'lower-case(name)']}, 'is an expression, not an input field: give it as xpath'),
 ])
 def test_a_function_call_is_not_taken_as_a_field(entry, message):

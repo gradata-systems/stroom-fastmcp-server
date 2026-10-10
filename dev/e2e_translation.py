@@ -273,7 +273,7 @@ async def onboard(ctx, fmt: str, case: dict, stamp: str) -> dict:
     stored = await ctx.lifespan_context['stroom'].get_doc('Documentation', doc['uuid'])
     text = stored.get('data') or ''
     # The body (data) is what the Stroom UI shows; documentation is the Documentation tab.
-    check('translation e2e test' in text and '## Change log' in text and not stored.get('documentation'),
+    check('translation e2e test' in text and '## Version control' in text and not stored.get('documentation'),
           f"documentation written to the doc's body: {len(text)} chars")
     return {'build': build, 'feed': feed_name, 'raw': raw, 'pipeline': pipeline, 'xslt': x, 'doc': doc}
 
@@ -334,6 +334,10 @@ async def promotion(ctx, csv: dict, stamp: str):
               f"missing destination folders created first: {result['promoted'][:2]}")
     text = (await stroom.get_doc('Documentation', csv['doc']['uuid'])).get('data') or ''
     check('translation e2e test' in text, f"promoted documentation keeps its text: {len(text)} chars")
+    # The build's changes, one version each: a line at the start of the XSLT, a row at the end of its documentation.
+    code = (await stroom.get_doc('XSLT', csv['xslt']['uuid'])).get('data') or ''
+    check('<!-- stroom-mcp version history\n v1 | ' in code and '| agent |' in code and '| 1 |' in text,
+          "version 1 recorded in the XSLT's history and the documentation's version control")
     check("removed the build's workspace folder, now empty" in result['promoted']
           and await guard_from(ctx).build_folder(csv['build'], create=False) is None, 'the emptied build folder is removed')
     made = result.get('processing_filters') or []

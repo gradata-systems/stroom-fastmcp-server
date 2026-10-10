@@ -73,7 +73,8 @@ async def main(with_stroom: bool) -> None:
         tools = await client.list_tools()
         prompts = await client.list_prompts()
         resources = await client.list_resource_templates()
-        check(len(tools) >= 60 and len(prompts) >= 7 and resources,
+        # The surface was cut to the cap tests/test_surface.py holds it to (54 with CEF and coverage).
+        check(len(tools) >= 50 and len(prompts) >= 7 and resources,
               f"{len(tools)} tools, {len(prompts)} prompts, {len(resources)} resource templates")
         profile = await client.call_tool('profile_sample', {'sample': 'a,b\n1,2\n3,4\n'})
         check(profile.structured_content.get('format') == 'delimited', 'a local tool runs as the signed-in user')

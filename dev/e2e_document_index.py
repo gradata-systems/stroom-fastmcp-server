@@ -174,9 +174,11 @@ async def nothing_feeds(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     beside = [v for v in found if v['docRef']['name'] == index
               and (v.get('path') or '').replace(' / ', '/') == folder]
     text = (await stroom.get_doc('Documentation', beside[0]['docRef']['uuid'])).get('data') or '' if beside else ''
+    from utils.versionlog import rows_of
+    rows = [(r['version'], r['change']) for r in rows_of(text)]
     e2e.check(len(beside) == 1 and beside[0]['docRef']['uuid'] == written['uuid'] and 'surveyed again' in text
-              and ': Created' in text and ': Surveyed again' in text,
-              f"written back into the one doc beside the index doc, both change-log lines kept ({len(beside)} doc)")
+              and rows == [('1', 'Created'), ('2', 'Surveyed again')],
+              f"written back into the one doc beside the index doc, a version row for each build ({len(beside)} doc, {rows})")
 
     print('\n### 1b. its documents have no StreamId: Stroom returns none of them, and the doc says so')
     doc = await locate(ctx, bare, 'ElasticIndex')

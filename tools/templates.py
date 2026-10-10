@@ -13,12 +13,12 @@ from security.policy import DEFAULT_MARKERS, AccessPolicy, StageMarkers
 from tools.pipelines import chain_order, merge_layers
 from utils.stroom import StroomGateway, gateway_from
 
-Stage = Literal['translation', 'indexing', 'discovery', 'reference', 'records']
+Stage = Literal['translation', 'indexing', 'discovery', 'reference', 'records', 'forwarding']
 # The property that makes each element type do something; unset means a child must supply it.
 KEY_PROPERTIES = {'XSLTFilter': ('xslt',), 'DSParser': ('textConverter',), 'CombinedParser': ('textConverter',),
                   'XMLFragmentParser': ('textConverter',),
                   'IndexingFilter': ('index',), 'ElasticIndexingFilter': ('cluster', 'indexName'),
-                  'SchemaFilter': ('schemaGroup',)}
+                  'SchemaFilter': ('schemaGroup',), 'StandardKafkaProducer': ('kafkaConfig',)}
 _INDEXING = {'IndexingFilter': 'lucene', 'ElasticIndexingFilter': 'elasticsearch'}
 _RAW_PARSERS = {'JSONParser', 'DSParser', 'CombinedParser', 'XMLFragmentParser'}
 _INDEX_TTL = 300
@@ -69,6 +69,10 @@ def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
         return ('discovery' if raw_input else 'indexing'), _INDEXING[indexers[0]]
     if 'ReferenceDataFilter' in elements.values():
         return 'loader', None
+    # Events sent on to Kafka (CEF for ArcSight, say).
+    # (A text writer can't tell: Batch Search writes text from XML too. Text CEF pipelines are found by name.)
+    if 'StandardKafkaProducer' in elements.values():
+        return 'forwarding', 'kafka'
     groups = {v for (e, n), v in properties.items() if n == 'schemaGroup'}
     types = {v for (e, n), v in properties.items() if n == 'streamType'}
     for stage, marker in (markers or DEFAULT_MARKERS).items():
@@ -87,7 +91,11 @@ async def _shape(stroom: StroomGateway, uuid: str, markers: dict[str, StageMarke
     for element in chain:
         etype = elements[element]
         for key in KEY_PROPERTIES.get(etype, ()):
-            _slot(element, etype, key, properties.get((element, key)), open_slots, shared)
+            value = properties.get((element, key))
+            if etype == 'SchemaFilter' and value in (None, ''):
+                # A schema filter is set by its namespace too (kafka-records:1), not only by a schema group.
+                value = properties.get((element, 'namespaceURI')) or properties.get((element, 'systemId'))
+            _slot(element, etype, key, value, open_slots, shared)
     return {'stage': stage, 'backend': backend, 'chain': chain, 'parser': elements.get(chain[0]) if chain else None,
             'child_must_supply': open_slots, 'shared': shared,
             'reference_data': [f"{(r.get('feed') or {}).get('name')} via {(r.get('pipeline') or {}).get('name')}"
@@ -111,8 +119,9 @@ async def find_pipeline_templates(
         stage: Annotated[Stage, Field(description="translation (Raw Events to Events; always the first pipeline for a "
                                                   "new source), indexing (Events to an index), discovery (raw structured "
                                                   "data straight to an index), reference (a Raw Reference feed to "
-                                                  "the reference-data maps stroom:lookup() reads) or records (a source "
-                                                  "to a Records stream of records:2 records). Found by what each "
+                                                  "the reference-data maps stroom:lookup() reads), records (a source "
+                                                  "to a Records stream of records:2 records) or forwarding (Events sent "
+                                                  "on: to Kafka, e.g. CEF for ArcSight, or as text). Found by what each "
                                                   "pipeline does, whatever it's called and wherever it is.")],
 ) -> dict[str, Any]:
     """

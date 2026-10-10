@@ -621,6 +621,13 @@ def input_namespace(m: 'TranslationMapping') -> str:
     return INPUT_NAMESPACE.get(m.input, m.xml_namespace)
 
 
+# Logged for each record no rule matches (WARN) and each a kept-Unknown rule takes (INFO), then the values the rules
+# test: "No event mapping matched record 5 (action=view | type=)".
+UNMATCHED = 'No event mapping matched record '
+KEPT_UNKNOWN = "Kept as Unknown by rule '{rule}': record "
+LOGGED_FIELDS = 4
+
+
 def literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
@@ -1623,6 +1630,16 @@ class _Generator:
             record_template = etree.SubElement(sheet, f'{{{XSL}}}template', match='*', mode='item')
         conditional = any(rule.when for rule in rules)
         summary = []
+        # The values the rules test, put in the log lines below: a whole feed's missed records are then grouped from
+        # its Error streams alone, however large the feed, without reading the raw records.
+        tested = list(dict.fromkeys(c.field for r in rules for c in r.when if c.field))[:LOGGED_FIELDS]
+
+        def logged(text: str) -> str:
+            parts = [literal(text), 'stroom:record-no()']
+            if tested:
+                values = [f"concat({literal(f + '=')}, string(({self.ref(f, None, 'condition', None)})[1]))" for f in tested]
+                parts += ["' ('", f"string-join(({', '.join(values)}), ' | ')", "')'"]
+            return f"concat({', '.join(parts)})"
 
         def write_rules() -> None:
             body = etree.SubElement(record_template, f'{{{XSL}}}choose') if conditional else record_template
@@ -1645,6 +1662,10 @@ class _Generator:
                     if rule.allow_unknown:
                         reason = rule.allow_unknown.replace('--', '-')
                         home.append(etree.Comment(f' {rule.name}: EventDetail/Unknown on purpose: {reason} '))
+                        # Logged (INFO, into the raw stream's Error stream) so a whole feed's Unknown records are
+                        # found exactly, as unmatched ones are, not by sampling its Events.
+                        etree.SubElement(holder, f'{{{XSL}}}sequence', select=(
+                            f"stroom:log('INFO', {logged(KEPT_UNKNOWN.format(rule=rule.name))})"))
                     event = etree.SubElement(home, f'{{{EVT}}}Event')
                     if self.mark_rules:
                         event.append(etree.Comment(f'{RULE_MARK}{rule.name}'))
@@ -1660,7 +1681,7 @@ class _Generator:
             if conditional and all(rule.when for rule in rules) and m.unmatched == 'warn':
                 otherwise = etree.SubElement(body, f'{{{XSL}}}otherwise')
                 etree.SubElement(otherwise, f'{{{XSL}}}sequence',
-                                 select="stroom:log('WARN', concat('No event mapping matched record ', stroom:record-no()))")
+                                 select=f"stroom:log('WARN', {logged(UNMATCHED)})")
 
         self.in_scope(record_template, write_rules)
         self.tidy_variables(record_template)

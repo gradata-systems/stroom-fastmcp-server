@@ -103,6 +103,14 @@ async def output_stream_type(stroom: StroomGateway, pipeline_uuid: str) -> str:
     return 'Events'
 
 
+async def _sends_to_kafka(stroom: StroomGateway, pipeline_uuid: str) -> bool:
+    try:
+        merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    except Exception:
+        return False
+    return any(e['type'] == 'StandardKafkaProducer' for e in merged['elements'])
+
+
 async def _is_indexing(stroom: StroomGateway, pipeline_uuid: str) -> bool:
     merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
     return any(e['type'] in INDEXING_ELEMENTS for e in merged['elements'])
@@ -367,8 +375,9 @@ async def _feed_bounds(stroom: StroomGateway, pipeline_uuid: str, feed: str, str
     rows = (await stroom.find_meta([_term('Feed', feed), _term('Type', stream_type)], 100)).get('values') or []
     own = [m for m in own_streams([r['meta'] for r in rows if r['meta'].get('status') != 'DELETED'], created)
            if m.get('createMs')]
-    if not own or any(m['createMs'] >= min_ms for m in own) or await _is_indexing(stroom, pipeline_uuid):
-        # An indexing pipeline may well index new data only (a new index version, the older Events in the old one).
+    if not own or any(m['createMs'] >= min_ms for m in own) or stream_type == 'Events'             or await _is_indexing(stroom, pipeline_uuid):
+        # A pipeline reading Events (indexing, CEF output) may well take new data only: a new index version, the older
+        # Events in the old one; ArcSight from now on.
         return min_ms, said
     filters = await stroom.processor_filters(pipeline_uuid)
     handled = set(await _already_processed(stroom, pipeline_uuid, [m['id'] for m in own]))
@@ -472,6 +481,10 @@ async def create_processor_filter(
     if feed:
         await _refuse_duplicate(stroom, pipeline_uuid, expression, min_ms)
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
+    if await _sends_to_kafka(stroom, pipeline_uuid):
+        # Stepping sends nothing; processing does: the destination (ArcSight, say) receives these records.
+        details['sends'] = ("each processed Event as a Kafka record, through the pipeline's KafkaConfig: the destination "
+                            "(ArcSight, say) receives them")
 
     destination = await elastic_destination(stroom, pipeline_uuid)
     summary = f"Start processing {scope} with pipeline '{pipeline['name']}'"
