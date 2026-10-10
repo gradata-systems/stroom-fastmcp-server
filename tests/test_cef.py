@@ -237,3 +237,45 @@ def test_a_text_pipelines_lines_lose_strooms_xml_declaration_and_an_unescaped_pi
     assert lines[0].startswith('CEF:0|D|S|1|User-Login') and lines[2].startswith('<134>Oct 10')   # syslog prefix kept
     [problem] = cef.review(lines, [], False)['problems']
     assert problem.startswith("an unescaped | in the header's name or class id (in 'Secret viewed: a=b|c')")
+
+
+# Asked by the user: are spaces and equals signs escaped? Each value goes through the XSLT's own escaping functions
+# (read from an input document, so no string escaping in the way) and is read back by the parser, a key after it.
+ESCAPED = {
+    'spaces and an equals sign': 'user bob logged in from host=ws01 now',
+    'ending with a backslash': 'C:\\temp\\',
+    'a backslash then an equals sign': 'a\\=b',
+    'line breaks': 'first\nsecond\r\nthird',
+    'what looks like another key': 'x act=deny y',
+    'a pipe, needing no escape here': 'a|b',
+}
+
+
+def _escaped(values: dict[str, str]) -> tuple[str, list[str]]:
+    doc = '<v>' + ''.join(f'<i n="{n}">{v.replace("&", "&amp;").replace("<", "&lt;")}</i>' for n, v in values.items()) + '</v>'
+    xslt = ('<xsl:stylesheet version="3.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" '
+            'xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cef="cef">' + cef.FUNCTIONS +
+            '<xsl:template match="/"><out><h><xsl:value-of select="cef:h(v/i[1], 63)"/></h>'
+            '<xsl:for-each select="v/i"><kv><xsl:value-of select="cef:kv(\'msg\', ., 1023)"/></kv></xsl:for-each>'
+            '</out></xsl:template></xsl:stylesheet>')
+    with PySaxonProcessor(license=False) as proc:
+        out = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt).transform_to_string(
+            xdm_node=proc.parse_xml(xml_text=doc))
+    root = etree.fromstring(out.encode())
+    return root.findtext('h'), [kv.text for kv in root.findall('kv')]
+
+
+@pytest.mark.parametrize('case', ESCAPED)
+def test_extension_values_are_escaped_so_they_read_back_whole_and_the_next_key_is_found(case):
+    value = ESCAPED[case]
+    _, (written,) = _escaped({case: value})
+    assert '\n' not in written and '\r' not in written       # one line: its breaks written as \n
+    back = dict(cef.parse(f'CEF:0|V|P|1|id|name|5|{written} dvchost=h1')['extension'])
+    # Spaces are not escaped in CEF: a value runs to the next ' key=', which an escaped = can't start.
+    assert back['msg'] == value.replace('\r\n', '\n') and back['dvchost'] == 'h1'
+
+
+def test_header_fields_escape_pipes_and_backslashes_but_not_equals_signs():
+    header, _ = _escaped({'header': 'Secret | viewed \\ by a=b'})
+    assert header == 'Secret \\| viewed \\\\ by a=b'
+    assert cef.parse(f'CEF:0|V|P|1|id|{header}|5|act=View')['header'][5:] == ['Secret | viewed \\ by a=b', '5']
