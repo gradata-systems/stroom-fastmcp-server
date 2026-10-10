@@ -101,5 +101,5 @@ def test_reference_data_and_indexing_xslts_can_leave_records_out():
     plan = FieldPlan(backend='lucene', index_name='x', time_field='EventTime', drop_when=["EventDetail/TypeId = 'Heartbeat'", "EventSource/User/Id = 'monitor'"],
                      fields=[PlannedField(name='StreamId', type='id', source='@StreamId'), PlannedField(name='EventId', type='id', source='@EventId'),
                              PlannedField(name='EventTime', type='date', source='EventTime/TimeCreated')])
-    assert "<xsl:apply-templates select=\"Event[not((EventDetail/TypeId = 'Heartbeat') or (EventSource/User/Id = 'monitor'))]\" />" in plan.xslt()
+    assert "<xsl:apply-templates select=\"Event[not((EventDetail/TypeId = 'Heartbeat') or (EventSource/User/Id = 'monitor'))]\"/>" in plan.xslt()
     assert etree.fromstring(plan.xslt().encode()) is not None

@@ -22,7 +22,7 @@ FIELDS = [PlannedField(name='StreamId', type='id', source='@StreamId'),
 ACTION = PlannedField(name='event.action', type='keyword', source='EventDetail/*/Action')
 BYTES = PlannedField(name='http.request.body.bytes', type='long', source='EventDetail/*/Resource/InboundSize')
 # The user's edit, in their own style: no xsl:if, and inside the request object the generator wrote.
-METHOD = '<string key="method"><xsl:value-of select="EventDetail/*/Resource/HTTPMethod" /></string>'
+METHOD = '<string key="method"><xsl:value-of select="EventDetail/*/Resource/HTTPMethod"/></string>'
 EDITED_IN = METHOD + ('<map key="body"><number key="bytes"><xsl:value-of select="EventDetail/View/Resource/InboundSize"/>'
                       '</number></map>')
 
@@ -58,8 +58,12 @@ class Stroom:
         return dict(self.docs[doc['uuid']])
 
     def edit_by_hand(self, old: str, new: str, uuid: str = 'x-1') -> None:
-        assert old in self.docs[uuid]['data']
-        self.docs[uuid] = {**self.docs[uuid], 'data': self.docs[uuid]['data'].replace(old, new, 1), 'updateUser': 'jane'}
+        """old as the user sees it in the editor: matched whatever the whitespace between its elements."""
+        import re
+        pattern = r'\s*'.join(re.escape(part) for part in re.split(r'(?<=>)\s*(?=<)', old))
+        data = self.docs[uuid]['data']
+        assert re.search(pattern, data), old
+        self.docs[uuid] = {**self.docs[uuid], 'data': re.sub(pattern, lambda _m: new, data, count=1), 'updateUser': 'jane'}
 
 
 @pytest.fixture
@@ -109,8 +113,8 @@ async def test_a_field_removed_or_a_source_changed_by_hand_is_kept_too(stroom):
     await save(plan(ACTION, fields=without_url))
     assert 'Resource/URL' not in stroom.docs['x-1']['data']
     # A field's source changed by hand: the same name written, from another element.
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     with pytest.raises(ToolError, match=r'no longer reads EventSource/User/Name.*reads EventSource/User/Id again'):
         await save(plan(fields=without_url))
     named = [f.model_copy(update={'source': 'EventSource/User/Name'}) if f.name == 'user.name' else f for f in without_url]
@@ -211,8 +215,8 @@ async def save_in(ctx, index_plan: FieldPlan, **kw):
 async def test_a_field_changed_by_hand_and_by_the_agent_is_the_users_to_decide(stroom):
     ctx = asking()
     await save_in(ctx, plan())
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     edited = stroom.docs['x-1']['data']
     # The agent's change: user.name from the user's email. Asked, not refused or saved.
     asked = await save_in(ctx, plan(fields=EMAIL))
@@ -240,8 +244,8 @@ async def test_a_field_changed_by_hand_and_by_the_agent_is_the_users_to_decide(s
 async def test_the_user_overwrites_their_edit_with_the_proposed_field(stroom):
     ctx = asking()
     await save_in(ctx, plan())
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     assert (await save_in(ctx, plan(fields=EMAIL)))['status'] == 'needs_guidance'
     await save_in(ctx, plan(fields=EMAIL), hand_edit_choices={'user.name': 'overwrite'})
     assert 'EventSource/User/Email' in stroom.docs['x-1']['data'] and 'User/Name' not in stroom.docs['x-1']['data']
@@ -250,8 +254,8 @@ async def test_the_user_overwrites_their_edit_with_the_proposed_field(stroom):
 async def test_only_the_colliding_field_is_overwritten_the_rest_of_the_edit_is_kept(stroom):
     # Asked in a form the client shows: the user's answer comes back in the same call.
     await save_in(asking(), plan())
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     stroom.edit_by_hand(METHOD, EDITED_IN)
     ctx = asking('Decide field by field', 'Use the proposed field')
     with pytest.raises(ToolError) as e:
@@ -320,8 +324,8 @@ async def test_the_user_overwrites_the_xslt_in_one_step(stroom):
     # Asked for by the user: one choice up front to overwrite the XSLT, rather than one a field. Every hand edit goes,
     # the fields the change changes and the rest alike.
     await save_in(asking(), plan())
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     stroom.edit_by_hand(METHOD, EDITED_IN)
     ctx = asking('Overwrite the XSLT with the change')
     await save_in(ctx, plan(fields=EMAIL))
@@ -333,8 +337,37 @@ async def test_the_user_overwrites_the_xslt_in_one_step(stroom):
 async def test_overwriting_in_one_step_from_the_chat(stroom):
     ctx = asking()
     await save_in(ctx, plan())
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
-    stroom.edit_by_hand('EventSource/User/Id', 'EventSource/User/Name')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
+    stroom.edit_by_hand('"EventSource/User/Id"', '"EventSource/User/Name"')
     assert (await save_in(ctx, plan(fields=EMAIL)))['status'] == 'needs_guidance'
     await save_in(ctx, plan(fields=EMAIL), hand_edit_choices={'*': 'overwrite'})
     assert 'EventSource/User/Email' in stroom.docs['x-1']['data']
+
+
+async def test_a_source_changed_by_hand_in_a_variable_is_its_fields():
+    # The indexing XSLT reads an input its template reads often into a variable, as the Events translation does: a
+    # source changed there is the change of the fields reading the variable, and asked about as theirs.
+    from utils.handedit import collisions, undone
+    both = plan(BYTES, fields=FIELDS)
+    saved = both.xslt()
+    assert '<xsl:variable name="http_request_method" select="EventDetail/*/Resource/HTTPMethod"/>' in saved
+    edited = saved.replace('select="EventDetail/*/Resource/HTTPMethod"/>',
+                           'select="upper-case(EventDetail/*/Resource/HTTPMethod)"/>', 1)
+    other = [f.model_copy(update={'source': 'EventDetail/*/Resource/Method'}) if f.name == 'http.request.method' else f
+             for f in FIELDS]
+    proposed = plan(BYTES, fields=other)
+    items = undone(saved, edited, proposed.xslt())
+    clashes = collisions('index', both.model_dump(), proposed.model_dump(), items)
+    assert list(clashes) == ['http.request.method']
+
+
+def test_variables_or_none_the_same_reads():
+    # An XSLT the generator wrote before it read inputs into variables, edited by hand since: regenerated now, with
+    # variables, it is checked for the edit alone, not for the reads the variables now hold.
+    from utils.handedit import lost
+    both = plan(BYTES, fields=FIELDS)
+    old = both.model_copy(update={'style': both.style.model_copy(update={'variable_min_reads': 99})}).xslt()
+    assert '<xsl:variable' not in old and '<xsl:variable' in both.xslt()
+    edited = old.replace('<string key="method">', '<string key="verb">', 1)
+    assert lost(both.xslt(), old, both.xslt()) == []
+    assert lost(both.xslt(), edited, both.xslt()) == ['no longer writes string verb', 'writes string method again']

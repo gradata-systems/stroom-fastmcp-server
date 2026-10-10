@@ -279,3 +279,28 @@ def test_header_fields_escape_pipes_and_backslashes_but_not_equals_signs():
     header, _ = _escaped({'header': 'Secret | viewed \\ by a=b'})
     assert header == 'Secret \\| viewed \\\\ by a=b'
     assert cef.parse(f'CEF:0|V|P|1|id|{header}|5|act=View')['header'][5:] == ['Secret | viewed \\ by a=b', '5']
+
+
+def test_the_cef_xslt_follows_the_events_xslt_style():
+    # Asked for by the user: CEF XSLTs written as the Events translation is (templates, variables, naming).
+    plan, _ = drafted()
+    text = plan.model_copy(update={'output': 'text'})
+    lines = cef.lines_in(run(text.xslt()))
+    xslt = text.xslt()
+    assert '<xsl:template match="Event[EventDetail/Authenticate]" mode="cef_extension" as="xs:string*">' in xslt
+    assert '<xsl:template match="Event" mode="cef_common" as="xs:string*">' in xslt
+    assert '<!-- cef_common: every event: dvchost from EventSource/Device/HostName' in xslt
+    # The same lines whatever the layout and naming.
+    for style in ({'layout': 'named', 'naming': 'camelCase'}, {'layout': 'inline'}, {'variables': 'top'}):
+        styled = text.model_copy(update={'style': cef.XsltStyle(**style)})
+        assert cef.lines_in(run(styled.xslt())) == lines, style
+    named = text.model_copy(update={'style': cef.XsltStyle(layout='named', naming='camelCase')}).xslt()
+    assert '<xsl:call-template name="cefCommon"/>' in named and '<xsl:template name="cefLine" as="xs:string">' in named
+    inline = text.model_copy(update={'style': cef.XsltStyle(layout='inline')}).xslt()
+    assert 'cef_extension' not in inline and '<xsl:when test="EventDetail/Authenticate">' in inline
+    # A header field mapped from its source's values reads it in each test: read once, into a variable.
+    mapped = text.model_copy(update={'severity': cef.CefValue(source='EventDetail/Alert/Severity', default='3',
+                                                              map={'low': '3', 'medium': '6', 'high': '9'})})
+    assert '<xsl:variable name="severity" select="EventDetail/Alert/Severity"/>' in mapped.xslt()
+    assert "if (string(($severity)[1]) = 'low')" in mapped.xslt()
+    assert cef.lines_in(run(mapped.xslt())) == lines

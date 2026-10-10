@@ -1,3 +1,4 @@
+import re
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -581,11 +582,12 @@ def test_an_object_repeated_across_actions_is_written_by_one_template():
               + under('View', *resource, 'Outcome.Success') + under('Delete', *resource, 'Outcome.Success')
               + [PlannedField(name='Alert.Severity', type='keyword', source='EventDetail/Alert/Severity')])
     xslt = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields).xslt()
-    for mode in ('Resource', 'Outcome', 'Source', 'Destination'):
+    # Modes named in the style's naming (snake_case by default), as the Events translation's are.
+    for mode in ('resource', 'outcome', 'source', 'destination'):
         assert xslt.count(f'<xsl:template match="*" mode="{mode}">') == 1
-    assert '<xsl:apply-templates select="(EventDetail/Copy/Source)[1]" mode="Source" />' in xslt
-    assert 'mode="Alert"' not in xslt          # once only: written in place, and its one field tested once
-    assert '<map key="Alert">\n          <string key="Severity">' in xslt
+    assert '<xsl:apply-templates select="(EventDetail/Copy/Source)[1]" mode="source"/>' in xslt
+    assert 'match="*" mode="alert"' not in xslt          # once only: written in place, and its one field tested once
+    assert '<map key="Alert"><string key="Severity">' in re.sub(r'>\s+<', '><', xslt)
     with PySaxonProcessor(license=False) as proc:
         exe = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=xslt)
         out = exe.transform_to_string(xdm_node=proc.parse_xml(xml_text=ACTIONS))

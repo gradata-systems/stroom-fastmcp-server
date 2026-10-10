@@ -14,7 +14,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from utils.xsltgen import SharedTemplate
+from lxml import etree
+
+from utils.xsltgen import XSL, SharedTemplate, XsltStyle, _comment
+from utils.xsltstyle import parse, part_name, serialize, variables
 
 
 def source_matches(source: str, path: str) -> bool:
@@ -107,7 +110,7 @@ def _call(use: SharedTemplate, indent: str) -> str:
     """A call to a shared XSLT's named template, with the parameters the environment passes it."""
     if not use.with_params:
         return f'{indent}<xsl:call-template name="{use.template}" />'
-    params = ''.join(f'<xsl:with-param name="{n}" select="{s}" />' for n, s in use.with_params.items())
+    params = ''.join(f'<xsl:with-param name="{n}" select="{_q(s)}" />' for n, s in use.with_params.items())
     return f'{indent}<xsl:call-template name="{use.template}">{params}</xsl:call-template>'
 
 
@@ -141,6 +144,32 @@ def _single(node: dict[str, Any], body: list[str]) -> list[str]:
     return body
 
 
+def _q(text: str) -> str:
+    """An XPath as an attribute value (written between double quotes): Data[@Name="time"] was written as it is,
+    and the XSLT didn't parse."""
+    return text.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;')
+
+
+def _reads(template: etree._Element, names: dict[str, str]) -> dict[str, str]:
+    """The inputs a template reads (a test's or select's paths, an attribute's {...}), each with the name a variable
+    holding it takes: the field reading it (a path relative to a template's element, the field whose source ends
+    with it), else its last step."""
+    out: dict[str, str] = {}
+    for el in template.iter(etree.Element):
+        if etree.QName(el).namespace == XSL:
+            values = [v for a, v in el.attrib.items() if a in ('select', 'test')]
+        else:
+            values = [e for v in el.attrib.values() for e in re.findall(r'\{([^{}]+)\}', v)]
+        for value in values:
+            for piece in re.split(r'\s+or\s+', value.split(' ! ')[0]):
+                piece = piece.strip()
+                if piece in ('.', '') or not _PLAIN.match(piece):
+                    continue
+                name = names.get(piece) or next((n for src, n in names.items() if src.endswith('/' + piece)), None)
+                out.setdefault(piece, name or _steps(piece)[-1])
+    return out
+
+
 def _json_path(dotted: str) -> str:
     """An XPath to a JSONParser field: 'event.created' -> *[@key='event']/*[@key='created']."""
     return '/'.join(f"*[@key={json.dumps(part).replace(chr(34), chr(39))}]" for part in dotted.split('.'))
@@ -165,6 +194,9 @@ class FieldPlan(BaseModel):
     convention: str | None = Field(default=None, description=(
         "The naming convention the plan follows (draft_index_mapping's), e.g. 'ecs': its names and types are "
         "checked against it."))
+    style: XsltStyle = Field(default_factory=XsltStyle, description=(
+        "How the indexing XSLT is written, as an Events translation's is (naming, variables, layout): take it from "
+        "an XSLT style section in the standing instructions (AGENTS docs); otherwise leave the defaults."))
 
     def convention_problems(self) -> list[str]:
         """Where the plan departs from its convention: for ECS, names in its field sets it doesn't define, and
@@ -378,8 +410,9 @@ class FieldPlan(BaseModel):
 </xsl:stylesheet>
 """
 
-    def _elastic_lines(self) -> tuple[list[str], list[str]]:
-        """The document's fields, and the templates for the objects it repeats.
+    def _elastic_lines(self, taken: set[str]) -> tuple[list[tuple[str, bool, list[str]]], list[str]]:
+        """The document's top-level fields and objects, each (key, is it an object, its lines), and the templates for
+        the objects it repeats.
 
         Dotted names are nested as objects (user.id -> <map key="user"><string key="id">), each object written only
         when one of its fields is present. A name below another field's name (time.min beside time) cannot be nested,
@@ -394,7 +427,7 @@ class FieldPlan(BaseModel):
                 return _call(f, indent)
             element = _ES_JSON_ELEMENT.get(f.type, 'string')
             at = source or f.source
-            return (f'{indent}<xsl:if test="{at}"><{element} key="{key}"><xsl:value-of select="{f.value(at)}" />'
+            return (f'{indent}<xsl:if test="{_q(at)}"><{element} key="{key}"><xsl:value-of select="{_q(f.value(at))}" />'
                     f'</{element}></xsl:if>')
         # A field a shared template writes is not written here: the template is called in its place.
         items: list[Any] = [f for f in self.fields if not self.written_by(f.name)] + list(self.shared)
@@ -478,20 +511,19 @@ class FieldPlan(BaseModel):
             if counts.get(signature, 0) < 2:
                 return None
             if signature not in modes:
-                name = re.sub(r'[^\w.-]', '-', key)
-                name = name if re.match(r'[A-Za-z_]', name) else f'm-{name}'
-                taken = set(modes.values())
-                modes[signature] = name if name not in taken else next(
-                    f'{name}-{n}' for n in range(2, 999) if f'{name}-{n}' not in taken)
+                from utils.xsltstyle import part_name
+                modes[signature] = part_name(key, self.style, taken)
                 body = render(value, '        ', base)
                 tests = ' or '.join(dict.fromkeys('/'.join(_steps(t)[len(base):]) for t in sources(value)))
                 templates.extend([f'  <xsl:template match="*" mode="{modes[signature]}">',
-                                  f'    <xsl:if test="{tests}">', f'      <map key="{key}">', *_single(value, body),
+                                  f'    <xsl:if test="{_q(tests)}">', f'      <map key="{key}">', *_single(value, body),
                                   '      </map>', '    </xsl:if>', '  </xsl:template>'])
             return modes[signature]
 
-        def render(node: dict[str, Any], indent: str, base: list[str] | None = None) -> list[str]:
-            """The object's fields; with base, relative to its element (inside a template)."""
+        def render(node: dict[str, Any], indent: str, base: list[str] | None = None,
+                   guarded: str | None = None) -> list[str]:
+            """The object's fields; with base, relative to its element (inside a template). guarded: the test the
+            object is already inside, not repeated for an object inside it that would test the same."""
             def rel(path: str) -> str:
                 return '/'.join(_steps(path)[len(base):]) if base else path
             out: list[str] = []
@@ -502,57 +534,82 @@ class FieldPlan(BaseModel):
                 inner = base_of(value)
                 mode = mode_for(key, value, inner) if below(inner, base) else None
                 if mode:
-                    out.append(f'{indent}<xsl:apply-templates select="({rel("/".join(inner))})[1]" mode="{mode}" />')
+                    out.append(f'{indent}<xsl:apply-templates select="({_q(rel("/".join(inner)))})[1]" mode="{mode}" />')
                     continue
                 if None in sources(value):       # a shared template inside: written whatever the event holds
                     out += [f'{indent}<map key="{key}">', *render(value, indent + '  ', base), f'{indent}</map>']
                     continue
                 tests = ' or '.join(dict.fromkeys(rel(t) for t in sources(value)))
-                body = render(value, indent + '    ', base)
-                out += [f'{indent}<xsl:if test="{tests}">', f'{indent}  <map key="{key}">',
+                if tests == guarded:
+                    # http holding only request: tested once, by the outer object.
+                    out += [f'{indent}<map key="{key}">', *_single(value, render(value, indent + '  ', base, tests)),
+                            f'{indent}</map>']
+                    continue
+                body = render(value, indent + '    ', base, tests)
+                out += [f'{indent}<xsl:if test="{_q(tests)}">', f'{indent}  <map key="{key}">',
                         *_single(value, body), f'{indent}  </map>', f'{indent}</xsl:if>']
             return out
-        return render(tree, '      '), templates
+        parts = [(key, isinstance(value, dict), render({key: value}, '      ')) for key, value in tree.items()]
+        return parts, templates
 
     def xslt(self, version: str = '3.0') -> str:
         """A draft indexing XSLT reading Events (xpath-default-namespace event-logging:3), or for a discovery
         index, reading the JSONParser's records."""
         if self.discovery:
             return self._discovery_xslt(version)
+        taken: set[str] = set()
         if self.backend == 'lucene':
-            body = '\n'.join([f'      <data name="{f.name}" value="{{{f.value()}}}" />' for f in self.fields
-                              if not self.written_by(f.name)]
-                             + [_call(u, '      ') for u in self.shared])
-            return f"""<?xml version="1.1" encoding="UTF-8"?>
-<xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns="records:2" xmlns:stroom="stroom"
-    xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="{version}">
-{self._imports()}  <xsl:template match="/Events">
-    <records xsi:schemaLocation="records:2 file://records-v2.0.xsd" version="2.0">
-      <xsl:apply-templates select="{self.events()}" />
-    </records>
-  </xsl:template>
-  <xsl:template match="Event">
-    <record>
-{body}
-    </record>
-  </xsl:template>
-</xsl:stylesheet>
-"""
-        lines, templates = self._elastic_lines()
-        body = '\n'.join(lines)
-        shapes = ('\n'.join(templates) + '\n') if templates else ''
-        return f"""<?xml version="1.1" encoding="UTF-8"?>
-<xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns="http://www.w3.org/2005/xpath-functions"
+            # Grouped as the Events are: what each part of the Event (EventTime, EventSource, EventDetail) gives.
+            groups: dict[str, list[str]] = {}
+            for f in self.fields:
+                if not self.written_by(f.name):
+                    first = _steps(f.source)[0] if _steps(f.source) else ''
+                    groups.setdefault('' if first.startswith('@') else first, []).append(
+                        f'      <data name="{f.name}" value="{{{_q(f.value())}}}" />')
+            parts = [(key, bool(key), lines) for key, lines in groups.items()]
+            parts.append(('', False, [_call(u, '      ') for u in self.shared]))
+            head, record, close, shapes = ('xmlns="records:2"', '<records xsi:schemaLocation="records:2 '
+                                           'file://records-v2.0.xsd" version="2.0">', '</records>', [])
+            holder = ('<record>', '</record>')
+        else:
+            parts, shapes = self._elastic_lines(taken)
+            head, record, close = ('xmlns="http://www.w3.org/2005/xpath-functions"', '<array xsi:schemaLocation='
+                                   '"http://www.w3.org/2005/xpath-functions file://xpath-functions.xsd">', '</array>')
+            holder = ('<map>', '</map>')
+        event, own = [], []
+        for key, separate, lines in parts:
+            if not separate or self.style.layout == 'inline':
+                event += lines
+                continue
+            name = part_name(key, self.style, taken)
+            call = (f'      <xsl:apply-templates select="." mode="{name}" />' if self.style.layout == 'modes' else
+                    f'      <xsl:call-template name="{name}" />')
+            event.append(call)
+            fields = [f for f in self.fields if f.name == key or f.name.startswith(key + '.')] \
+                if self.backend == 'elasticsearch' else [f for f in self.fields if _steps(f.source)[:1] == [key]]
+            said = '; '.join(f"{f.name} from {f.source}" for f in fields)
+            own.append(f'  <!--{_comment(f"{name}: {said}")}-->\n'
+                       + (f'  <xsl:template match="Event" mode="{name}">\n' if self.style.layout == 'modes' else
+                          f'  <xsl:template name="{name}">\n')
+                       + '\n'.join(lines) + '\n  </xsl:template>')
+        text = f"""<xsl:stylesheet xpath-default-namespace="event-logging:3" {head}
     xmlns:stroom="stroom" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="{version}">
 {self._imports()}  <xsl:template match="/Events">
-    <array xsi:schemaLocation="http://www.w3.org/2005/xpath-functions file://xpath-functions.xsd">
+    {record}
       <xsl:apply-templates select="{self.events()}" />
-    </array>
+    {close}
   </xsl:template>
+  <!--{_comment(f"Each Event: one {'document' if self.backend == 'elasticsearch' else 'record'} for the index {self.index_name}")}-->
   <xsl:template match="Event">
-    <map>
-{body}
-    </map>
+    {holder[0]}
+{chr(10).join(event)}
+    {holder[1]}
   </xsl:template>
-{shapes}</xsl:stylesheet>
-"""
+{chr(10).join(own + shapes)}
+</xsl:stylesheet>"""
+        sheet = parse(text)
+        # Read once into a variable where a template reads an input often (its guard, its value, its object's guard).
+        names = {f.source: f.name for f in self.fields}
+        for template in sheet.iterfind(f'{{{XSL}}}template'):
+            variables(template, _reads(template, names), self.style, set())
+        return serialize(sheet)

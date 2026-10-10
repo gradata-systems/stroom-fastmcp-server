@@ -723,6 +723,31 @@ mapping first (the message shows what differs, element by element, as `-` what t
 the XSLT has: a Data element added, a part no longer written); saved before digests were recorded, either, said as such. Seen in production after 0.16.43: a
 generated XSLT was called "edited by hand", and the agent went looking for the edit.
 
+**Indexing and CEF XSLTs in the Events style.** Asked for by the user: "indexing translations should also use
+templates, for readability and maintainability - like we do with Events translations ... and variables too - in
+fact, they should follow the Events XSLT styles generally". The index plan and the CEF plan carry the same `style`
+(`XsltStyle`) as a translation mapping, taken from an XSLT style section in the standing instructions, and
+`utils/xsltstyle.py` writes them with the translation generator's own helpers (`style_name`, `unique_name`,
+`just_in_time`, its comment wrapper), so the three can't drift apart:
+- Indexing (Elasticsearch): each top-level object of the document (`user`, `http`, `event`...) is a template of its
+  own, applied to the Event in its own mode (`layout: modes`), or a named template (`named`), or written in place
+  (`inline`); top-level fields (StreamId, EventId, @timestamp) are written in the Event's template. An object the
+  document repeats with the same shape is still one template, applied wherever it occurs. Lucene: the record's
+  fields grouped as the Event is, a template for EventTime, EventSource and EventDetail.
+- CEF: the line, each kind of event's keys and the keys every event gets are each a template; `inline` writes the
+  kinds in one `xsl:choose`. Modes and names are in the style's naming (`cef_line`, `cef_extension`, `cef_common`).
+- Each template is headed by a comment saying what it writes, and from where (`http: http.request.method from
+  EventDetail/*/Resource/HTTPMethod; ...`).
+- An input a template reads at least `variable_min_reads` times (an object's guard, a field's guard and its value; a
+  header field's source its value map tests in turn) is read once into a variable, named after the field in the
+  style's naming (`http_request_method`, `severity`), declared just before its first use or at the template's start
+  (`variables`). Fewer reads stay inline, as in the Events translation.
+- An object that only holds one other object (http holding request) isn't tested twice.
+- XPaths are written into attributes escaped: a source such as `Data[@Name="time"]/@Value` made the XSLT unparsable.
+The hand-edit check reads a variable as the expression it holds, so the generator's change of style (or a different
+`variable_min_reads`) isn't taken for an edit, and a source changed by hand in a variable is the change of the fields
+that read it.
+
 **A hand edit is not saved over.** Asked for by the user: an indexing XSLT generated from its plan, edited by hand in
 Stroom to write another ECS field (`http.request.body.bytes`), was regenerated from the plan at the agent's next
 change, and the edit was gone; nothing had said it was there (only a translation's hand edit was reported). Now every

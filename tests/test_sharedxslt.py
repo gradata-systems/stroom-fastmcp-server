@@ -1,3 +1,4 @@
+import re
 from saxonche import PySaxonProcessor
 
 from utils.fielddoc import index_field_mapping_markdown
@@ -70,7 +71,7 @@ def test_an_indexing_xslt_calls_shared_templates_for_their_fields_and_writes_eac
                      shared=[SharedTemplate(href='Common-Elastic-V1', template='guid', at='guid')])
     assert plan.required() == [] and plan.written_by('guid').template == 'guid'
     xslt = plan.xslt()
-    assert '<xsl:import href="Common-Elastic-V1" />' in xslt and '<xsl:call-template name="guid" />' in xslt
+    assert '<xsl:import href="Common-Elastic-V1"/>' in xslt and '<xsl:call-template name="guid"/>' in xslt
     assert 'key="guid"' not in xslt
     (tmp_path / 'Common-Elastic-V1').write_text(SHARED_JSON, encoding='utf-8')
     (tmp_path / 'main.xsl').write_text(xslt, encoding='utf-8')
@@ -93,13 +94,14 @@ def test_a_shared_object_in_an_indexing_xslt_and_a_lucene_one():
     use = SharedTemplate(href='Common-Elastic-V1', template='stroomMeta', at='stroom')
     plan = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields, shared=[use])
     xslt = plan.xslt()
-    assert '<xsl:call-template name="stroomMeta" />' in xslt and 'key="stroom"' not in xslt and 'key="feed"' not in xslt
+    assert '<xsl:call-template name="stroomMeta"/>' in xslt and 'key="stroom"' not in xslt and 'key="feed"' not in xslt
     lucene = FieldPlan(backend='lucene', index_name='x', time_field='@timestamp', fields=fields[:3] + [
         PlannedField(name='Guid', type='keyword', source='shared:guid')],
         shared=[SharedTemplate(href='Common-Lucene-V1', template='guid', at='Guid', with_params={'n': '1'})])
     text = lucene.xslt()
-    assert '<xsl:import href="Common-Lucene-V1" />' in text and 'name="Guid"' not in text
-    assert '<xsl:call-template name="guid"><xsl:with-param name="n" select="1" /></xsl:call-template>' in text
+    assert '<xsl:import href="Common-Lucene-V1"/>' in text and 'name="Guid"' not in text
+    assert '<xsl:call-template name="guid"><xsl:with-param name="n" select="1"/></xsl:call-template>' \
+        in re.sub(r'>\s+<', '><', text)
 
 
 

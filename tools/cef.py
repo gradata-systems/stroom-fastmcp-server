@@ -219,6 +219,9 @@ async def draft_cef_mapping(
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="The Events feed: its folder's standing "
                                                                          "instructions apply.")] = [],
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the pipeline will live in.")] = [],
+        style: Annotated[cef.XsltStyle | None, Field(description=(
+            "How the CEF XSLT is written, as an Events translation's is (naming, variables, layout): set it from an "
+            "XSLT style section in the standing instructions (AGENTS docs). Kept with the plan."))] = None,
         discard_hand_edit: Annotated[bool, Field(description=(
             "Save over an edit made by hand in Stroom's editor since the server saved the XSLT, though the new code "
             "undoes it. Only when the user has said to drop their edit: a save that would undo one is refused, saying "
@@ -350,6 +353,8 @@ async def draft_cef_mapping(
                 result['sample_check_error'] = str(e)[:300]
     if 'templates' not in result and not pipeline_uuid:
         result['templates'] = await _templates(ctx, said, list(folders))
+    if style is not None:
+        plan = plan.model_copy(update={'style': style})
     problems = plan.problems()
     result.update({
         'custom_keys': allowed,

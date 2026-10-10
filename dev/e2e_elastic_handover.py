@@ -380,7 +380,12 @@ async def main():
 
         print("\n### a field edited by hand that the agent's change changes too: the user decides")
         doc = await stroom.get_doc('XSLT', xslt['uuid'])
-        mine = doc['data'].replace(created, created.replace('EventTime/TimeCreated', 'current-dateTime()'), 1)
+        # In the event template (its fields' own): where it reads EventTime/TimeCreated, a variable if it holds it.
+        start = doc['data'].index('mode="event">')
+        end = doc['data'].index('</xsl:template>', start)
+        mine = (doc['data'][:start] + doc['data'][start:end].replace('select="EventTime/TimeCreated"',
+                                                                     'select="current-dateTime()"')
+                + doc['data'][end:])
         e2e.check(mine != doc['data'], "the field's source changed by hand: when the event was indexed")
         await stroom.put_doc({**doc, 'data': mine})
         proposed = carried.model_copy(update={'fields': [

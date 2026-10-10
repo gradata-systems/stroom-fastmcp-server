@@ -176,7 +176,9 @@ translation XSLT written by hand (`save_xslt`) whose records come out as `Unknow
 ## Style
 
 The mapping's `style` decides how the XSLT reads. Take it from an XSLT style section in the standing instructions
-(AGENTS docs) when there is one, or from what the user asks for; otherwise leave the defaults:
+(AGENTS docs) when there is one, or from what the user asks for; otherwise leave the defaults. The indexing XSLT
+(the index plan's `style`) and the CEF XSLT (`draft_cef_mapping style=`) take the same style: naming, variables and
+layout apply to them as here, a template a top-level object (or Event section, or CEF part):
 
 | Setting | Default | Effect |
 | --- | --- | --- |

@@ -48,4 +48,5 @@ def test_the_plan_takes_network_fields_once_nested_as_the_example_nests():
     assert 'IpAddress' not in by_source.values()       # which address the example's name means can't be told
     xslt = FieldPlan(backend='elasticsearch', index_name='fw', time_field='@timestamp',
                      fields=[PlannedField(**f) for f in named]).xslt()
-    assert '<xsl:if test="EventDetail/Network/*/Source/Device/IPAddress">' in xslt
+    # Read once, for whichever action: a variable, as the Events translation reads a field its template reads often.
+    assert 'select="EventDetail/Network/*/Source/Device/IPAddress"' in xslt

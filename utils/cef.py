@@ -16,6 +16,8 @@ from typing import Any, Literal
 from lxml import etree
 from pydantic import BaseModel, Field, model_validator
 
+from utils.xsltgen import XSL, XsltStyle, _comment, style_name
+
 EL = 'event-logging:3'
 
 # key: (ArcSight full name, type, max length, what it holds). From the CEF implementation standard's dictionary.
@@ -213,6 +215,9 @@ class CefPlan(BaseModel):
         "Per kind of event, by its action element (Authenticate, View, Network, ...): the fields it adds."))
     not_sent: list[dict[str, str]] = Field(default_factory=list, description=(
         "Event values the sample holds that no key takes, with why: documented as not sent."))
+    style: XsltStyle = Field(default_factory=XsltStyle, description=(
+        "How the CEF XSLT is written, as an Events translation's is (naming, variables, layout): from an XSLT style "
+        "section in the standing instructions (AGENTS docs); otherwise the defaults."))
 
     def problems(self) -> list[str]:
         out = []
@@ -576,27 +581,53 @@ def _field_line(f: CefField, indent: str) -> str:
     return f'{indent}<xsl:sequence select="cef:kv({_lit(f.key)}, {expr}, {max_len}{label})" />'
 
 
+def _keys_said(fields: list[CefField]) -> str:
+    return ', '.join(f"{f.key} from {f.path}" for f in fields) or 'none'
+
+
 def render_xslt(plan: CefPlan) -> str:
+    """The CEF XSLT, written as an Events translation is (asked for by the user): a template a part (the line, each
+    kind of event's keys, the keys every event gets), in its own mode, or named, or inline (plan.style.layout), named
+    in the style's naming, each with a comment; an input read often, a variable."""
+    from utils.xsltstyle import parse, part_name, serialize, variables
+    style, taken = plan.style, set()
     header = ', '.join(f"cef:h({_header_expr(getattr(plan, name))}, {length})" for name, _, length in HEADER)
-    common = '\n'.join(_field_line(f, '      ') for f in plan.common)
-    kinds = []
-    for kind, fields in plan.events.items():
-        match = f"Event[EventDetail/{kind}]" if kind != 'other' else "Event"
-        lines = '\n'.join(_field_line(f, '    ') for f in fields)
-        kinds.append(f'  <!-- {kind} events -->\n  <xsl:template match="{match}" mode="cef-ext" as="xs:string*">\n'
-                     f'{lines}\n  </xsl:template>')
-    fallback = '' if 'other' in plan.events else \
-        '  <xsl:template match="Event" mode="cef-ext" as="xs:string*" />\n'
-    line = f'''  <!-- The CEF line: header|...|extension, the event kind's own fields then the common ones. -->
-  <xsl:template match="Event" mode="cef" as="xs:string">
+    line_mode, ext_mode, common_mode = (part_name(n, style, taken) for n in ('cef-line', 'cef-extension', 'cef-common'))
+
+    def apply(name: str) -> str:
+        return (f'<xsl:call-template name="{name}" />' if style.layout == 'named' else
+                f'<xsl:apply-templates select="." mode="{name}" />')
+
+    def own(name: str, match: str = 'Event', returns: str = 'xs:string*') -> str:
+        return (f'<xsl:template name="{name}" as="{returns}">' if style.layout == 'named' else
+                f'<xsl:template match="{match}" mode="{name}" as="{returns}">')
+    parts = []
+    if style.layout == 'inline':
+        # Every kind of event in one choose, as the inline layout writes the Events translation's rules.
+        whens = ''.join(f'<xsl:when test="EventDetail/{kind}">' + ''.join(_field_line(f, '') for f in fields)
+                        + '</xsl:when>' for kind, fields in plan.events.items() if kind != 'other')
+        otherwise = ''.join(_field_line(f, '') for f in plan.events.get('other', []))
+        pairs = (f'<xsl:choose>{whens}<xsl:otherwise>{otherwise}</xsl:otherwise></xsl:choose>' if whens else otherwise) \
+            + ''.join(_field_line(f, '') for f in plan.common)
+    else:
+        # Each kind of event's keys: a template rule matching it (a named template can't choose by kind).
+        for kind, fields in plan.events.items():
+            match = f"Event[EventDetail/{kind}]" if kind != 'other' else "Event"
+            parts.append(f'<!--{_comment(f"{kind} events: {_keys_said(fields)}")}-->'
+                         f'<xsl:template match="{match}" mode="{ext_mode}" as="xs:string*">'
+                         + ''.join(_field_line(f, '') for f in fields) + '</xsl:template>')
+        if 'other' not in plan.events:
+            parts.append(f'<xsl:template match="Event" mode="{ext_mode}" as="xs:string*" />')
+        if plan.common:
+            parts.append(f'<!--{_comment(f"{common_mode}: every event: {_keys_said(plan.common)}")}-->'
+                         + own(common_mode) + ''.join(_field_line(f, '') for f in plan.common) + '</xsl:template>')
+        pairs = f'<xsl:apply-templates select="." mode="{ext_mode}" />' + (apply(common_mode) if plan.common else '')
+    line = f'''  <!-- {line_mode}: header|...|extension, the event kind's own fields then the common ones. -->
+  {own(line_mode, returns='xs:string')}
     <xsl:variable name="header" as="xs:string*" select="('CEF:0', {header})" />
-    <xsl:variable name="pairs" as="xs:string*">
-      <xsl:apply-templates select="." mode="cef-ext" />
-{common}
-    </xsl:variable>
+    <xsl:variable name="pairs" as="xs:string*">{pairs}</xsl:variable>
     <!-- One value a key: the event kind's own, where a common field gives the same key. -->
-    <xsl:variable name="extension" select="for $i in 1 to count($pairs) return $pairs[$i][not(substring-before(., '=') =
-        (for $j in 1 to $i - 1 return substring-before($pairs[$j], '=')))]" />
+    <xsl:variable name="extension" select="for $i in 1 to count($pairs) return $pairs[$i][not(substring-before(., '=') = (for $j in 1 to $i - 1 return substring-before($pairs[$j], '=')))]" />
     <xsl:sequence select="concat(string-join($header, '|'), '|', string-join($extension, ' '))" />
   </xsl:template>
 '''
@@ -618,25 +649,32 @@ def render_xslt(plan: CefPlan) -> str:
       <xsl:if test="string(EventTime/TimeCreated) castable as xs:dateTime">
         <xsl:attribute name="timestamp" select="format-dateTime(adjust-dateTime-to-timezone(xs:dateTime(string(EventTime/TimeCreated)), xs:dayTimeDuration('PT0H')), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001]Z')" />
       </xsl:if>{key}
-      <xsl:variable name="line" as="xs:string"><xsl:apply-templates select="." mode="cef" /></xsl:variable>
+      <xsl:variable name="line" as="xs:string">{apply(line_mode)}</xsl:variable>
       <value><xsl:value-of select="$line" /></value>
     </kafkaRecord>
   </xsl:template>
 '''
     else:
-        top = '''<?xml version="1.1" encoding="UTF-8"?>
+        top = f'''<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
     xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cef="urn:stroom-mcp:cef" exclude-result-prefixes="xs cef" version="3.0">
   <!-- CEF for ArcSight: one flattened CEF line per Event, as text. -->
   <xsl:output method="text" />
   <xsl:template match="/Events">
     <xsl:for-each select="Event">
-      <xsl:apply-templates select="." mode="cef" />
+      {apply(line_mode)}
       <xsl:text>&#10;</xsl:text>
     </xsl:for-each>
   </xsl:template>
 '''
-    return top + line + '\n'.join(kinds) + ('\n' if kinds else '') + fallback + FUNCTIONS + '</xsl:stylesheet>\n'
+    sheet = parse(top + line + ''.join(parts) + FUNCTIONS + '</xsl:stylesheet>')
+    # An input a template reads often, read once into a variable: a header field's source its map tests in turn.
+    every = plan.common + [f for fields in plan.events.values() for f in fields]
+    reads = {**{value.source: name for name, _, _ in HEADER if (value := getattr(plan, name)).source},
+             **{f.path: KEYS.get(f.key, (f.key,))[0] for f in every}, 'EventTime/TimeCreated': 'event-time'}
+    for template in sheet.iterfind(f'{{{XSL}}}template'):
+        variables(template, reads, style, set())
+    return serialize(sheet)
 
 
 # ---------------------------------------------------------------------------------------------- reading CEF lines

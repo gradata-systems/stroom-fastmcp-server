@@ -61,7 +61,14 @@ def _written(element: etree._Element) -> list[str]:
 
 def _context(element: etree._Element) -> set[str]:
     """The names an expression's value is written as: the result element round it, and those directly in it (an
-    xsl:if's test reads for what it holds)."""
+    xsl:if's test reads for what it holds). A variable's: where it is read (a source changed by hand in the variable a
+    template reads it into is its field's)."""
+    if etree.QName(element).namespace == XSL and etree.QName(element).localname == 'variable' and element.get('name'):
+        reading = re.compile(r'\$' + re.escape(element.get('name')) + r'(?![\w.-])')
+        scope = element.getparent() if element.getparent() is not None else element
+        return {n for el in scope.iter(etree.Element) if el is not element
+                and any(reading.search(v) for v in el.attrib.values())
+                for n in _context(el)}
     names = set()
     for up in element.iterancestors(etree.Element):
         if etree.QName(up).namespace != XSL and (up.get('key') or up.get('Name') or up.get('name')):
@@ -99,16 +106,28 @@ def outline(code: str) -> Outline:
         root = etree.fromstring(re.sub(r'^\s*<\?xml[^>]*\?>', '', strip(code or '')).encode('utf-8'))
     except etree.XMLSyntaxError:
         return Outline(writes, reads, names, within)
+    # A variable is read as the expression it holds, where it is read: the same field, read once into a variable or
+    # three times where it's used (variable_min_reads, or the generator before it wrote variables), is the same.
+    held = {v.get('name'): v.get('select') for v in root.iter(f'{{{XSL}}}variable')
+            if v.get('name') and v.get('select') and '$' not in v.get('select')}
+
+    def expanded(value: str) -> str:
+        def one(m: re.Match) -> str:
+            select = held[m.group(1)]
+            return select if re.fullmatch(r"[\w@*./:\[\]='-]+", select) else f'({select})'
+        return re.sub(r'\$([\w.-]+)', lambda m: one(m) if m.group(1) in held else m.group(0), value)
     for element in root.iter(etree.Element):
+        if element.tag == f'{{{XSL}}}variable' and element.get('name') in held:
+            continue        # read where it is used
         for item in _written(element):
             writes[item] += 1
             names.setdefault(item, set()).add(item.split(' = ')[0].split(' ')[-1])
             # What it is written from: a key renamed by hand still reads its field's source.
             within.setdefault(item, set()).update(
-                expression(v) for e in element.iter(etree.Element) for v in _read(e) if expression(v))
+                expression(expanded(v)) for e in element.iter(etree.Element) for v in _read(e) if expression(v))
         in_xsl = etree.QName(element).namespace == XSL
         for value in _read(element):
-            item = expression(value)
+            item = expression(expanded(value))
             if item:
                 reads[item] += 1
                 names.setdefault(item, set()).update(_context(element) if in_xsl else {_named(element)})

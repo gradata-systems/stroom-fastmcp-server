@@ -17,7 +17,9 @@ mapping on, which the component needs), and `get_field_conventions name=ecs ecs_
 name one ECS's way. A field of the user's own goes outside ECS's field sets.
 
 The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
-index_plan=... uuid=`). An edit the user made by hand in Stroom since (another field written, one taken out, a source
+index_plan=... uuid=`). The XSLT is written as an Events translation is, in the plan's `style` (from an XSLT style
+section in the standing instructions): a template a top-level object, each with a comment, inputs read often in
+variables. An edit the user made by hand in Stroom since (another field written, one taken out, a source
 changed) is kept: a save that would undo it is refused, saying what it changed. Carry it into the plan (a field it
 added as a field of the plan, with its name, type and source XPath) and save again; `discard_hand_edit=true` only when
 the user says to drop it. `build_status` reports such an edit. Where your change is to a field they edited too, the
