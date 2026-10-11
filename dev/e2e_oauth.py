@@ -108,8 +108,11 @@ async def main(with_stroom: bool) -> None:
             return {'value': True}
 
         async def refuse(message, response_type, params, context):
+            # Declined, as VS Code's Decline button does. Not accepted with value false: a form with a value to edit
+            # (the feed name) is confirmed by accepting it, whatever else comes back.
+            from mcp.types import ElicitResult
             asked.append(message)
-            return {'value': False}
+            return ElicitResult(action='decline')
         stamp = f"{time.strftime('%H%M%S')}{os.getpid() % 1000:03d}"
         async with Client(f'{SERVER}/mcp', auth=BearerAuth(token), elicitation_handler=agree) as client:
             made = await client.call_tool('create_feed', {'build': f'oauth-{stamp}', 'name': f'OAUTH-E-{stamp}'})
