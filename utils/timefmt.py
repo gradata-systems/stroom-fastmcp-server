@@ -191,8 +191,12 @@ def pattern_regex(pattern: str) -> re.Pattern | None:
 def check_time_format(pattern: str, values: list[str]) -> str | None:
     """Why `pattern` does not fit the sample's values, or None when every non-empty value matches it."""
     if pattern in ('epoch_ms', 'epoch_s', 'epoch seconds', 'epoch milliseconds'):
-        bad = [v for v in values if v.strip() and not re.fullmatch(r'\d{9,13}', v.strip())]
-        return f"time_format {pattern!r} expects digits only; the sample has {bad[:3]}" if bad else None
+        # Seconds may carry a fraction (GELF's timestamp, 1791676803.7), which epoch_s reads as a decimal; milliseconds
+        # are whole.
+        allowed = r'\d{9,13}(\.\d+)?' if pattern in ('epoch_s', 'epoch seconds') else r'\d{9,13}'
+        bad = [v for v in values if v.strip() and not re.fullmatch(allowed, v.strip())]
+        return (f"time_format {pattern!r} expects digits only{' (a fraction of a second allowed)' if '.' in allowed else ''}; "
+                f"the sample has {bad[:3]}") if bad else None
     regex = pattern_regex(pattern)
     if regex is None:
         return f"time_format {pattern!r} is not a Java date pattern this check understands"

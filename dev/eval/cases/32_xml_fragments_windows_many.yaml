@@ -2,6 +2,7 @@
 # source with more kinds than that needs the agent to write the rest, not leave them Unknown.
 name: Windows Security events (many event ids, each its own kind)
 template: Event Data (XML)
+capabilities: [schema_variation]
 request: |
   Onboard the domain controllers' Security events, forwarded as Windows event XML: one <Event> per line with no root element, in the Windows event namespace. The sample has one of each of the 22 event ids we collect, and our analysts search on every one, so each needs its proper event type: none should be an unknown event. Index the events.
 expected:

@@ -10,6 +10,7 @@ groups records into shapes, one per kind of event, until a few more streams add 
   as below only when nothing else names the event, so a wrapper (e.g. syslog shipped as JSON) doesn't hide the
   kinds. A field of free text by another name (a Windows event's Data) is read for naming pairs too, never masked.
 - Delimited: the values of those naming columns, or of the low-variety columns when none is named that way.
+- CEF: the header's vendor, product, signature id and name.
 - Syslog and other text: the message with its variable parts masked (numbers, addresses, quoted strings),
   merged with other messages that differ only in a few words (user names, hosts), in the style of Drain.
 """
@@ -63,6 +64,13 @@ def split_records(text: str, max_records: int = 5000, truncated: bool = False) -
     head = text[:1]
     if head == '[':
         return _json_array(text, max_records)
+    if head == '{':
+        from utils.profile import wrapped_records
+        wrapped = wrapped_records(text.rstrip())
+        if wrapped:
+            # One object wrapping the records (CloudTrail's Records): its items are the records.
+            items = wrapped[1][:max_records]
+            return Chunk('json object', [json.dumps(i) for i in items], [_flatten(i) for i in items])
     if head == '<' and not SYSLOG_5424.match(text) and not SYSLOG_3164.match(text):
         chunk = _xml_records(text, max_records)
         if chunk is not None:
@@ -72,17 +80,47 @@ def split_records(text: str, max_records: int = 5000, truncated: bool = False) -
         lines = lines[:-1]
     info = profile('\n'.join(lines[:max_records + 1]), max_records=200)
     fmt = info['format']
+    if fmt == 'multi-line text':
+        # Records of several lines (a stack trace under its entry): grouped from where each starts.
+        from utils.dsgen import group_lines
+        records = group_lines(lines, info['record_start'])
+        if truncated and len(records) > 1:
+            records = records[:-1]
+        return Chunk(fmt, records[:max_records], [None] * min(len(records), max_records))
+    if fmt == 'delimited' and info.get('header_directive'):
+        # Columns named by a directive line (W3C, Zeek): records are the data lines, read under the columns in effect.
+        from utils.dsgen import infer_spec, _dry_run_directives
+        spec, _ = infer_spec('\n'.join(lines[:max_records + 1]))
+        data = [line for line in lines if not line.startswith(info['comment_prefix'])][:max_records]
+        parsed = _dry_run_directives(spec, lines, len(lines))['records'][:max_records]
+        return Chunk(fmt, data, parsed, naming_columns=_naming_columns(info.get('columns') or [], parsed))
     if fmt == 'json lines':
         data = [json.loads(line) for line in lines[:max_records]]
         return Chunk(fmt, lines[:max_records], [_flatten(r) for r in data])
+    if fmt in ('syslog rfc3164', 'syslog rfc5424'):
+        # A delimited body after the syslog header (Palo Alto's CSV): read by its columns, the kinds of event by their
+        # low-variety ones, rather than as masked text, which made every line its own shape.
+        from utils.dsgen import infer_spec, dry_run
+        spec, _ = infer_spec('\n'.join(lines[:max_records]))
+        if spec is not None and spec.body is not None and spec.body.kind == 'delimited':
+            parsed = [r for r in dry_run(spec, '\n'.join(lines[:max_records]))['records']]
+            if len(parsed) == len(lines[:max_records]):
+                return Chunk(fmt, lines[:max_records], parsed,
+                             naming_columns=_naming_columns(list(spec.body.header), parsed))
     if fmt == 'key=value':
         from utils.profile import KEY_VALUE
         return Chunk(fmt, lines[:max_records],
                      [dict((k, v.strip('"')) for k, v in KEY_VALUE.findall(line)) for line in lines[:max_records]])
+    if fmt == 'delimited' and info.get('quoted_newlines'):
+        # Quoted values holding new lines: records end at a new line outside quotes.
+        from utils.dsgen import quoted_lines
+        lines = quoted_lines('\n'.join(lines), '"')
     if fmt == 'delimited':
         header = lines[0] if info.get('has_header') else None
         body = lines[1:] if header else lines
-        rows = list(csv.reader(io.StringIO('\n'.join(body[:max_records])), delimiter=info.get('delimiter', ',')))
+        delimiter = info.get('delimiter', ',')
+        rows = ([line.split(delimiter) for line in body[:max_records]] if len(delimiter) > 1 else
+                list(csv.reader(io.StringIO('\n'.join(body[:max_records])), delimiter=delimiter)))
         columns = info.get('columns') or []
         parsed = [dict(zip(columns, row)) for row in rows]
         return Chunk(fmt, body[:max_records], parsed, header=header, naming_columns=_naming_columns(columns, parsed))
@@ -165,6 +203,30 @@ def _xml_fields(node: etree._Element) -> dict[str, Any]:
     return out
 
 
+_CEF_FIELDS = ('version', 'vendor', 'product', 'device_version', 'signature_id', 'name', 'severity')
+
+
+def cef_header(line: str) -> dict[str, str] | None:
+    """A CEF record's header fields (after any syslog prefix), its pipes escaped as \\| inside a field; None when the
+    line has no whole CEF header."""
+    start = line.find('CEF:')
+    if start < 0:
+        return None
+    fields, current, escaped = [], [], False
+    for ch in line[start + 4:]:
+        if escaped:
+            current.append(ch)
+            escaped = False
+        elif ch == '\\':
+            escaped = True
+        elif ch == '|' and len(fields) < len(_CEF_FIELDS):
+            fields.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    return dict(zip(_CEF_FIELDS, fields)) if len(fields) == len(_CEF_FIELDS) else None
+
+
 def _free_text(value: Any) -> bool:
     """A value that reads as a sentence or message rather than a code or name."""
     return isinstance(value, str) and len(value) >= 40 and value.count(' ') >= 5
@@ -221,11 +283,19 @@ class Shapes:
 
     def signature(self, chunk: Chunk, index: int) -> str:
         parsed, record = chunk.parsed[index], chunk.records[index]
-        if chunk.format == 'delimited':
+        if chunk.format == 'delimited' or (chunk.naming_columns and parsed is not None):
             columns = chunk.naming_columns
             return 'row:' + (', '.join(f'{c}={parsed.get(c, "")}' for c in columns) if columns else 'all')
         if parsed is not None:
             return 'fields:' + self._fields(parsed, 0)
+        # A record of several lines is signed by its first: the entry, not its stack trace.
+        record = record.split('\n', 1)[0]
+        if chunk.format == 'cef':
+            header = cef_header(record)
+            if header:
+                # The header names the kind of event: masked as text, 200 lines of 5 kinds came out as 3 shapes, one
+                # per count of extension keys, the signature ids masked as numbers.
+                return 'cef:' + '|'.join(header[k] for k in ('vendor', 'product', 'signature_id', 'name'))
         return self._text(*_syslog_parts(record))
 
     def _fields(self, parsed: dict[str, Any], depth: int) -> str:

@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from utils.draftmap import draft_mapping
 from utils.dsgen import EXAMPLES, SplitterSpec, dry_run, generate_splitter, infer_spec
 from utils.samples import SAMPLE_GUIDE, SampleTexts, check_sample
-from utils.localcheck import check_mapping, sample_records
+from utils.localcheck import check_mapping, check_schema_values, sample_records
 from utils.mappingchanges import apply_changes
 from utils.mappingstore import read_mapping
 from utils.xpathcheck import check_extractions, check_xpaths
@@ -351,6 +351,7 @@ async def build_translation_xslt(
     if sample is not None:
         records, note = sample_records(mapping, sample, splitter)
         check = check_mapping(mapping, records)
+        check['problems'] += check_schema_values(mapping, records, schema)
         check['warnings'] += check_xpaths(mapping, sample, splitter)
         extraction_problems, extraction_warnings = check_extractions(mapping, sample, splitter, records)
         check['problems'] += extraction_problems

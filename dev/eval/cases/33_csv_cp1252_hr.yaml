@@ -1,5 +1,6 @@
 name: HR joiners and leavers (a file in Windows-1252, not UTF-8)
 template: Event Data (Text)
+capabilities: [encoding]
 request: >
   Onboard the HR system's joiners, movers and leavers export: a CSV file with a header, one record per change to
   an employee's account (joiner, mover or leaver), who made it, and the employee's name and department. Times are

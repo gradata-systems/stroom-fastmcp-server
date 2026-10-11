@@ -98,7 +98,11 @@ def _sample_records(mapping: TranslationMapping, sample: str | list[str], splitt
         return dry_run(splitter, text)['records'], None
     if mapping.input == 'json':
         values: list = []
-        if text.startswith('['):
+        from utils.profile import wrapped_records
+        if text.startswith('{') and wrapped_records(text):
+            # One object wrapping the records (CloudTrail): the parser's one record; for_each reads its items.
+            values = [json.loads(text)]
+        elif text.startswith('['):
             try:
                 values = [v for v in json.loads(text) if isinstance(v, dict)]
             except ValueError:
@@ -313,6 +317,45 @@ def shared_type_ids(mapping: TranslationMapping, records: list[Any]) -> list[str
     return [f"EventDetail/TypeId reads '{common.field}', which in the sample is the same for events of different kinds "
             f"({examples}). TypeId names the kind of event: give each rule its own (a value per rule, or an xpath "
             f"joining the fields)."]
+
+
+def check_schema_values(mapping: TranslationMapping, records: list[Any], schema: Any) -> list[str]:
+    """Fields mapped as they are into an element whose schema type has a pattern (an address, a port, a MAC), whose
+    sample values don't fit it: Stroom's schema check refuses such events. Seen in eval case 40: CloudTrail's
+    sourceIPAddress is an AWS service's name for calls a service made, and the step failed on 'cloudformation.amazonaws.com'
+    in EventSource/Client/IPAddress, which nothing had checked before."""
+    import re as _re
+    out: list[str] = []
+    items: list[Any] = [i for r in records for i in _items_of(r, mapping.for_each)] if mapping.for_each else []
+    for entry in list(mapping.common) + [f for rule in mapping.events for f in rule.fields]:
+        if (not entry.field or entry.map or entry.transform or entry.time_format or entry.lookup or entry.dictionary
+                or entry.xpath or entry.value is not None):
+            continue
+        try:
+            chain = schema.resolve(entry.path)
+        except Exception:
+            continue
+        patterns = []
+        for p in schema.patterns(chain[-1].decl) if chain else []:
+            try:
+                patterns.append(_re.compile(p))
+            except _re.error:
+                pass    # an XSD-only construct: not checked here
+        if not patterns:
+            continue
+        pool = items if mapping.for_each and entry.scope != 'record' else records
+        nil = set(mapping.nil_values or [])     # left out, not written
+        values = [v for r in pool for v in [_value_of(r, entry.field)] if v and v.strip() and v.strip() not in nil]
+        bad = list(dict.fromkeys(v for v in values if not any(p.fullmatch(v.strip()) for p in patterns)))
+        if bad:
+            count = sum(1 for v in values if v in bad)
+            said = (f"{entry.path} takes values of a set form (the schema's pattern), but field '{entry.field}' has "
+                       f"{bad[:3]} in {count} of the {len(values)} sample records: Stroom's schema check refuses those "
+                       f"events. Map only the values that fit (an extract whose regex matches only them gives an empty "
+                       f"field otherwise), or map the field elsewhere (a name to a HostName, say)")
+            if said not in out:
+                out.append(said)
+    return out
 
 
 def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, Any]:

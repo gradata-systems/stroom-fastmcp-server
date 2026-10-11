@@ -1,5 +1,6 @@
 name: Acme directory
 template: Event Data (Text)
+capabilities: [field_normalization]
 request: >
   Onboard the Acme directory's audit log below (CSV with a header). The codes in it are the vendor's own: their
   reference documentation is attached. Index the events so analysts can search by user and by whether a logon

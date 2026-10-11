@@ -1,5 +1,6 @@
 name: EDR process executions
 template: Event Data (JSON)
+capabilities: [nesting]
 request: >
   Onboard these endpoint (EDR) process execution records. They are a JSON array of nested objects: host, user and
   process details. Each record is a process being started. Index them so we can search by host, user and command.

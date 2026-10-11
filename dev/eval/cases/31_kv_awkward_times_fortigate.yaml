@@ -1,5 +1,6 @@
 name: Firewall user events (epoch nanoseconds, epoch seconds and zoneless local time)
 template: Event Data (Text)
+capabilities: [timestamps]
 request: >
   Onboard our Sydney firewalls' user events, forwarded by the log collector as key=value lines. Each line says when
   three ways: itime (when the collector received it), date and time (the firewall's clock), and eventtime (when it

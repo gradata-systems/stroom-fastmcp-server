@@ -1,5 +1,6 @@
 name: JSON lines with the event in a message string
 template: Event Data (JSON)
+capabilities: [mixed_formats, field_variability]
 request: >
   Onboard these application audit logs (JSON lines, one object per line). The shipper adds the host and the time
   it received the line; the event itself is the message string: its own timestamp, the user, the action (LOGIN or

@@ -228,6 +228,21 @@ def data_held(events: list[etree._Element], spec: dict[str, Any]) -> bool:
 
 Call = Callable[..., Awaitable[dict[str, Any]]]
 READ_EVENTS = 300     # events read and checked a stream: every one of a case's sample (a large file's streams are counted)
+_BLOCK = 50           # a larger stream's are read in blocks of this many, spread over it
+
+
+async def _read_events(call: Call, stream_id: int, first: int, count: int) -> tuple[list[str], int | None]:
+    """Up to `count` events from `first`, reading on past the size limit; and how many the stream holds."""
+    got, total = [], None
+    while len(got) < count:
+        read = await call('read_stream', stream_id=stream_id, first_record=first, record_count=min(100, count - len(got)))
+        records = read.get('records') or []
+        got += records
+        total = read.get('total_records') or total
+        first = read.get('next_first_record') or first + len(records)
+        if not records or (total and first >= total):
+            break
+    return got, total
 
 
 async def check_output(call: Call, score: Score, case: dict[str, Any], events_stream_ids: list[int]) -> None:
@@ -235,14 +250,15 @@ async def check_output(call: Call, score: Score, case: dict[str, Any], events_st
     for stream_id in events_stream_ids:
         # Read on past the size limit (seen: case 35's events, a kilobyte each with the message as Description, read
         # 17 of 33): every event of a case's sample, up to READ_EVENTS a stream.
-        got, first, total = [], 0, 0
-        while len(got) < READ_EVENTS:
-            read = await call('read_stream', stream_id=stream_id, first_record=first, record_count=100)
-            got += read.get('records') or []
-            total = read.get('total_records') or len(got)
-            first = read.get('next_first_record') or first + len(read.get('records') or [])
-            if not read.get('records') or first >= total:
-                break
+        got, total = await _read_events(call, stream_id, 0, READ_EVENTS)
+        total = total or len(got)
+        if total > READ_EVENTS:
+            # A larger stream is read in blocks spread over it, not from its start only (case 36: the kinds of event
+            # past the 400th record went unchecked when the first 300 were read).
+            blocks = READ_EVENTS // _BLOCK
+            got = got[:_BLOCK]
+            for i in range(1, blocks):
+                got += (await _read_events(call, stream_id, round(i * (total - _BLOCK) / (blocks - 1)), _BLOCK))[0]
         totals += total
         cut = cut or total > len(got)
         for record in got:

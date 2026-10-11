@@ -1,5 +1,6 @@
 name: Identity provider (JSON lines in two shapes)
 template: Event Data (JSON)
+capabilities: [schema_variation, field_variability]
 request: >
   Onboard our identity provider's sign-in log (JSON lines). It's mid-migration, so one stream holds two shapes of
   record: the new one (eventType, published, actor, client, outcome) and the legacy one (type, ts, user, ip, ok).

@@ -1,5 +1,6 @@
 name: Document service (JSON event string with a free-form message)
 template: Event Data (JSON)
+capabilities: [mixed_formats, escaping]
 request: >
   Onboard the document service's audit log (a JSON array from our log shipper). The shipper adds the host and the
   time it received each record; the event itself is JSON held as a string in the event field: its own timestamp

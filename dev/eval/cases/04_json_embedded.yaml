@@ -1,5 +1,6 @@
 name: Log shipper wrapping app events
 template: Event Data (JSON)
+capabilities: [mixed_formats, nesting]
 request: >
   Onboard these application logs forwarded by a log shipper (a JSON array). The shipper adds host and received
   time; the real event is JSON held as a string in the message field: user, event (login or logout) and ok.

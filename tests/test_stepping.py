@@ -255,6 +255,19 @@ async def test_large_streams_are_stepped_from_their_head(ctx, monkeypatch):
     assert result['records_stepped'] == 2 and result['hint'].startswith('Stepped the first 2 records of each stream')
 
 
+@respx.mock
+async def test_more_records_than_the_limit_says_the_limit_and_how_the_rest_are_checked(ctx, monkeypatch):
+    # Seen in production: max_records=1000 stepped 500, said only "the sample has more", and the agent called it
+    # again the same way: three more minutes for the same records.
+    mock_pipeline()
+    monkeypatch.setattr(ctx.lifespan_context['stroom'].settings, 'max_sample_records', 3)
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=[httpx.Response(200, json=record(i)) for i in range(4)])
+    result = await stepping.step_sample(ctx, 'p-1', [7], max_records=1000)
+    assert result['records_stepped'] == 3
+    assert "the server's limit for one step_sample (max_records=1000 is more than it steps)" in result['hint']
+    assert 'calling it again steps the same 3' in result['hint'] and 'wait_for_processing' in result['hint']
+
+
 async def test_a_json_array_mapping_sets_the_parser_to_read_each_item_as_a_record():
     # Seen: four 755 KB arrays each stepped as one record of 985 events, every step outlasting Stroom's wait.
     from unittest.mock import AsyncMock

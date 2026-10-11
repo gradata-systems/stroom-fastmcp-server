@@ -1,5 +1,6 @@
 name: SSH bastion (RFC 5424 syslog)
 template: Event Data (Text)
+capabilities: [format_recognition, timestamps, optional_fields]
 request: >
   Onboard sshd logs from our bastion host (RFC 5424 syslog). Lines record accepted and failed SSH logins, with the
   method, user and source address; failed logins can be for an invalid (unknown) user. Index the events.

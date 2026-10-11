@@ -1,5 +1,6 @@
 name: Helpdesk audit (pipe-delimited, quoted values)
 template: Event Data (Text)
+capabilities: [delimiters, escaping]
 request: >
   Onboard the helpdesk system's audit export. It's pipe-delimited with a header; values that hold a pipe are in
   double quotes, and a quote inside them is doubled. Each record is an agent creating, viewing or updating a

@@ -433,7 +433,8 @@ async def step_sample(
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Sample streams to step through, every record.")],
         draft_code: DraftCode = None,
         max_records: Annotated[int | None, Field(
-            ge=1, description="Stop after this many records (default: the server's max_sample_records).")] = None,
+            ge=1, description="Stop after this many records: at most the server's max_sample_records (500 unless "
+                              "configured), and that by default.")] = None,
         records_per_stream: Annotated[int | None, Field(
             ge=1, description=f"Step at most this many records from the start of each stream (default "
                               f"{PER_STREAM}, unless max_records is given: processing then checks every record).")] = None,
@@ -512,7 +513,12 @@ async def step_sample(
                               'draft_code_used': sorted(draft_code or {}), **summary,
                               'first_record_output': first_output}
     if len(records) >= cap:
-        result['hint'] = f"Stopped at {cap} records; the sample has more."
+        # Seen in production: max_records=1000 stepped 500 and said only that the sample had more; the agent called
+        # it again the same way, three more minutes for the same 500 records.
+        asked = f" (max_records={max_records} is more than it steps)" if max_records and max_records > cap else ''
+        result['hint'] = (f"Stopped at {cap} records, the server's limit for one step_sample{asked}: calling it again "
+                          f"steps the same {cap}. The rest are checked when the sample is processed: "
+                          f"wait_for_processing reports any record that fails, and check_events reads the Events.")
     elif records_per_stream and any(n >= records_per_stream for n in per_stream.values()):
         result['hint'] = (f"Stepped the first {records_per_stream} records of each stream: processing then reads every "
                           f"record, and wait_for_processing reports any that fail.")

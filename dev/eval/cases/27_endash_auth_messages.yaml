@@ -1,5 +1,6 @@
 name: Auth service log (separators that are sometimes en dashes)
 template: Event Data (Text)
+capabilities: [encoding, delimiters]
 request: >
   Onboard the auth service's application log. Each line has the time (UTC, with milliseconds after a comma), a level,
   the component in brackets, then a message: a user logging in (with the client address and session), a failed

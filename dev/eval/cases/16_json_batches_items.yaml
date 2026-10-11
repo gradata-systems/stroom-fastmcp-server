@@ -1,5 +1,6 @@
 name: Batched JSON with several events per record, role arrays and dropped traffic
 template: Event Data (JSON)
+capabilities: [field_repetition, nesting, event_boundaries]
 request: >
   Onboard these application audit batches: a JSON array of batches, each with the host and an events array; every
   item in events is one event (time, user, action, roles). Heartbeats are not events, and batches from QA hosts

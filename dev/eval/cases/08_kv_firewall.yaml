@@ -1,5 +1,6 @@
 name: Firewall connections (key=value)
 template: Event Data (Text)
+capabilities: [format_recognition, delimiters]
 request: >
   Onboard these firewall logs: a timestamp and firewall name, then key=value pairs for the action (allow or deny),
   source and destination address, destination port and protocol. Each line is a connection attempt. Index them.

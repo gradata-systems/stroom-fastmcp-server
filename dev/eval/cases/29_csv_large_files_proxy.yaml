@@ -1,5 +1,6 @@
 name: Web proxy access logs (two large files on the user's disk)
 template: Event Data (Text)
+capabilities: [large_samples]
 request: >
   Onboard our web proxy's access logs: one CSV file a day, with a header. Each record is a request: the client
   address, the signed-in user, the method, URL, HTTP status, bytes sent, the URL's category and whether the proxy

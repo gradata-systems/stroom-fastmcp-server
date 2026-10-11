@@ -158,6 +158,22 @@ class EventSchema:
             stype = self._simple.get(name)
         return name
 
+    def patterns(self, decl: etree._Element) -> list[str]:
+        """The XSD patterns a leaf's value must match (any one of them), from its simple type or the nearest type it
+        restricts that has some; [] when it has none."""
+        stype = self._simple_type(decl)
+        for _ in range(10):
+            if stype is None:
+                return []
+            restriction = stype.find(_q('restriction'))
+            if restriction is None:
+                return []
+            found = [p.get('value') for p in restriction.findall(_q('pattern')) if p.get('value')]
+            if found:
+                return found
+            stype = self._simple.get(_local(restriction.get('base')))
+        return []
+
     def enumeration(self, decl: etree._Element) -> list[str] | None:
         stype = self._simple_type(decl)
         for _ in range(10):

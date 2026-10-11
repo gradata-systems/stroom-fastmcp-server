@@ -22,7 +22,8 @@ DS_TAIL = '</dataSplitter>\n'
 SYSLOG = {
     'rfc5424': (r'^(?:<(\d+)>)?1 (\S+) (\S+) (\S+) (\S+) (\S+) (-|\[.*?\]) ?(.*)$',
                 ['pri', 'time', 'host', 'app', 'pid', 'msgid', 'structured', 'message']),
-    'rfc3164': (r'^(?:<(\d+)>)?([A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}) (\S+) ([^:\[ ]+)(?:\[(\d+)\])?:? ?(.*)$',
+    # The tag (app[pid]) only before a colon: Palo Alto sends none, and its CSV's first column was read as one.
+    'rfc3164': (r'^(?:<(\d+)>)?([A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}) (\S+) (?:([^:\[ ]+)(?:\[(\d+)\])?: ?)?(.*)$',
                 ['pri', 'time', 'host', 'app', 'pid', 'message']),
 }
 # CEF: whatever comes before it (a syslog header), the seven header fields (a | inside one is escaped \|), then the
@@ -61,6 +62,24 @@ class SplitterSpec(BaseModel):
     body: 'SplitterSpec | None' = Field(None, description="Parse the field named by body_field further with this "
                                                          "spec (syslog's message, a regex group), adding its fields.")
     body_field: str = Field('message', description="The field body parses.")
+    quoted_newlines: bool = Field(False, description=(
+        "delimited, with quote: values in quotes may hold new lines (a comment over two lines), so a record ends at a "
+        "new line outside quotes only."))
+    record_start: str | None = Field(None, description=(
+        "Records that run over several lines (a Java log entry and its stack trace, a wrapped message): a regex the "
+        "first line of a record matches at its start, e.g. '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'. Lines "
+        "that don't match continue the record before them; the record's own pattern then reads its text, new lines "
+        "and all (start it with (?s) so .* takes them)."))
+    comment_prefix: str | None = Field(None, description="delimited: lines starting with this are not records, e.g. "
+                                                        "'#' for W3C (IIS, Blue Coat), Zeek and similar logs' "
+                                                        "directive lines.")
+    header_directive: str | None = Field(None, description=(
+        "delimited, with header true: the directive line that names the columns, e.g. '#Fields:' (W3C) or '#fields' "
+        "(Zeek). Its columns hold for the lines after it, until it appears again (a log restarted mid-file)."))
+    directives: list[str] = Field(default_factory=list, description=(
+        "delimited: other directive lines whose value every record after them carries, as a field named as in the "
+        "file, e.g. ['#Software:', '#Remark:'] give fields '#Software' and '#Remark' (the device, its software, the "
+        "log's start date: whatever the header says)."))
 
     @model_validator(mode='after')
     def consistent(self):
@@ -71,7 +90,20 @@ class SplitterSpec(BaseModel):
             raise ValueError("delimited needs header: True (a header line) or the column names")
         if self.kind == 'key_value' and self.delimiter == ',':
             self.delimiter = ' '
+        if self.header_directive or self.directives:
+            if not self.comment_prefix:
+                raise ValueError("header_directive and directives need comment_prefix: the prefix of every directive "
+                                 "line, e.g. '#'")
+            if any(not d.startswith(self.comment_prefix) for d in [self.header_directive or '', *self.directives] if d):
+                raise ValueError(f"directives start with the comment_prefix '{self.comment_prefix}'")
+        if self.header_directive and self.header is not True:
+            raise ValueError("header_directive names the columns: give header: true with it")
         return self
+
+
+def directive_field(directive: str) -> str:
+    """The field a directive's value is kept in: the directive as the file writes it, without a trailing colon."""
+    return directive.strip().rstrip(':').strip()
 
 
 def named_columns_pattern(spec: SplitterSpec) -> str:
@@ -79,6 +111,9 @@ def named_columns_pattern(spec: SplitterSpec) -> str:
     cell's group is its text without the quotes, a doubled quote inside kept doubled (as Data Splitter's containers
     leave it). Seen: a value written as $1$2 from two groups, which Stroom refuses when one took no part."""
     d = re.escape(spec.delimiter)
+    if len(spec.delimiter) > 1:
+        # A separator of several characters (' ~ ', '||'): a column runs to the next whole separator.
+        return '^' + d.join(f'((?:(?!{d}).)*)' for _ in spec.header) + '$'
     if spec.quote:
         q = re.escape(spec.quote)
         cell = f'{q}?((?<={q})(?:[^{q}]|{q}{q})*(?={q})|(?<!{q})[^{d}{q}]*){q}?'
@@ -160,14 +195,51 @@ def _record_xml(spec: SplitterSpec, indent: str) -> str:
     return '\n'.join(lines) + '\n'
 
 
+def _directives_xml(spec: SplitterSpec) -> str:
+    """One record per line of a log with directive lines (W3C, Zeek): the header directive sets the column names for
+    the lines after it, each other directive kept is held for the records after it, other comment lines are passed
+    over, and each data line is split under the latest column names."""
+    lines = ['  <split delimiter="\\n">', '    <group>']
+    if spec.header_directive:
+        lines += [f'      <regex pattern="^{_attr(re.escape(spec.header_directive))}\\s*(.*)$">',
+                  '        <group value="$1">',
+                  f'          <split delimiter="{_attr(spec.delimiter)}"{_container(spec)}>',
+                  '            <var id="heading" />', '          </split>', '        </group>', '      </regex>']
+    for n, directive in enumerate(spec.directives):
+        lines += [f'      <regex pattern="^{_attr(re.escape(directive))}\\s*(.*)$">',
+                  f'        <var id="directive{n}" />', '      </regex>']
+    lines += [f'      <regex pattern="^{_attr(re.escape(spec.comment_prefix))}.*$" />', '      <regex pattern="^(.+)$">']
+    lines += [f'        <data name="{_attr(directive_field(d))}" value="$directive{n}$1" />'
+              for n, d in enumerate(spec.directives)]
+    lines += ['        <group value="$1">', _record_xml(spec, '          ').rstrip('\n'), '        </group>',
+              '      </regex>', '    </group>', '  </split>']
+    return '\n'.join(lines) + '\n'
+
+
+def record_regex(start: str) -> str:
+    """The regex taking one record of several lines: from a line that starts one to the next such line, or the end."""
+    return f'(?sm)^((?:{start}).*?)\\n?(?=^(?:{start})|\\z)'
+
+
 def generate_splitter(spec: SplitterSpec) -> str:
-    """The Data Splitter XML: one record per line, divided as the spec says."""
+    """The Data Splitter XML: one record per line, divided as the spec says (or per record start, for records of
+    several lines)."""
+    if spec.kind == 'delimited' and spec.comment_prefix:
+        return DS_HEAD + _directives_xml(spec) + DS_TAIL
+    if spec.record_start and spec.kind != 'delimited':
+        return (DS_HEAD + f'  <regex pattern="{_attr(record_regex(spec.record_start))}">\n    <group value="$1">\n'
+                + _record_xml(spec, '      ') + '    </group>\n  </regex>\n' + DS_TAIL)
     body = ''
     if spec.kind == 'delimited' and spec.header is True:
         body += (f'  <split delimiter="\\n" maxMatch="1">\n    <group>\n'
                  f'      <split delimiter="{_attr(spec.delimiter)}"{_container(spec)}>\n        <var id="heading" />\n'
                  f'      </split>\n    </group>\n  </split>\n')
-    body += f'  <split delimiter="\\n">\n    <group>\n{_record_xml(spec, "      ")}    </group>\n  </split>\n'
+    # A new line inside quotes is part of the value when quoted_newlines says so: the records' own split ignores it.
+    lines_container = _container(spec) if spec.quoted_newlines else ''
+    if lines_container and body:
+        body = body.replace('<split delimiter="\\n" maxMatch="1">', f'<split delimiter="\\n" maxMatch="1"{lines_container}>')
+    body += (f'  <split delimiter="\\n"{lines_container}>\n    <group>\n{_record_xml(spec, "      ")}    </group>\n'
+             f'  </split>\n')
     return DS_HEAD + body + DS_TAIL
 
 
@@ -240,6 +312,11 @@ def _apply_record(spec: SplitterSpec, text: str, heading: list[str] | None) -> d
         fields = dict(zip(spec.header, m.groups()))
     if spec.body and spec.body_field in fields:
         inner = _apply_record(spec.body, fields[spec.body_field], None)
+        if not inner and fields[spec.body_field].strip():
+            # Stroom reports a body its expressions don't match ("Expressions failed to match all of the content"):
+            # so does the dry run, rather than keeping the record without the body's fields (seen: a Palo Alto body
+            # short of a column, fine here and refused in Stroom).
+            return None
         if inner:
             fields = {**fields, **inner}
     return fields
@@ -255,11 +332,20 @@ EXAMPLES = {
 
 
 def _body_spec(messages: list[str]) -> 'SplitterSpec | None':
-    """How syslog message bodies divide further, when they do: key=value pairs."""
+    """How syslog message bodies divide further, when they do: key=value pairs, or delimited columns (as Palo Alto
+    firewalls send them: a syslog header, then their CSV), named by position for the model to rename."""
     pairs = [len(KEY_VALUE.findall(m)) for m in messages if m.strip()]
     if pairs and sum(1 for n in pairs if n >= 2) >= 0.8 * len(pairs):
         quote = '"' if any('="' in m for m in messages) else None
         return SplitterSpec(kind='key_value', delimiter=' ', quote=quote)
+    bodies = [m for m in messages if m.strip()]
+    for delimiter in (',', '|', '\t', ';'):
+        quote = '"' if any('"' in m for m in bodies) else None
+        widths = [len(_split_quoted(m, delimiter, quote)) for m in bodies]
+        if widths and min(widths) >= 6 and sum(w == widths[0] for w in widths) >= 0.8 * len(widths):
+            # Columns named by position: a vendor's own names (its documentation) are the model's to give.
+            return SplitterSpec(kind='delimited', delimiter=delimiter, quote=quote,
+                                header=[f'col{i + 1}' for i in range(max(widths))])
     return None
 
 
@@ -269,6 +355,13 @@ def infer_spec(sample: str) -> tuple['SplitterSpec | None', dict[str, Any]]:
     info = profile(sample)
     fmt = info['format']
     lines = [l for l in sample.splitlines() if l.strip()]
+    if fmt == 'delimited' and info.get('header_directive'):
+        return SplitterSpec(kind='delimited', delimiter=info['delimiter'], header=True, quote=info.get('quote'),
+                            comment_prefix=info['comment_prefix'], header_directive=info['header_directive'],
+                            directives=info.get('directives') or []), info
+    if fmt == 'delimited' and info.get('quoted_newlines'):
+        return SplitterSpec(kind='delimited', delimiter=info.get('delimiter', ','), header=bool(info.get('has_header'))
+                            or list(info.get('columns') or []), quote='"', quoted_newlines=True), info
     if fmt == 'delimited':
         quote = '"' if any('"' in l for l in lines[:50]) else None
         header = bool(info.get('has_header'))
@@ -286,6 +379,12 @@ def infer_spec(sample: str) -> tuple['SplitterSpec | None', dict[str, Any]]:
                                   CEF_PREFIXES[-1])
             body = SplitterSpec(kind='regex', pattern=pattern, names=names)
         return SplitterSpec(kind='cef', body=body), info
+    if fmt == 'multi-line text':
+        # The start and the time it begins with; the rest of the record is the message, new lines and all: the
+        # record's own pattern (level, thread, logger...) is the model's to give, checked by the dry run.
+        start = info['record_start']
+        return SplitterSpec(kind='regex', record_start=start, pattern=rf'(?s)^({start}\S*)\s+(.*)$',
+                            names=['time', 'message']), info
     if fmt in ('syslog rfc3164', 'syslog rfc5424'):
         rfc = 'rfc3164' if fmt.endswith('3164') else 'rfc5424'
         head = SplitterSpec(kind='syslog', rfc=rfc)
@@ -294,21 +393,92 @@ def infer_spec(sample: str) -> tuple['SplitterSpec | None', dict[str, Any]]:
     return None, info
 
 
-def dry_run(spec: SplitterSpec, sample: str, max_records: int = 200) -> dict[str, Any]:
+def dry_run(spec: SplitterSpec, sample: str, max_records: int = 2000) -> dict[str, Any]:
     """What the generated splitter makes of the sample: records as name -> value, lines that match nothing,
-    and the field names seen (what a mapping's `field` may name)."""
+    and the field names seen (what a mapping's `field` may name). A longer sample is read at lines spread over it:
+    seen in an eval case (a day's CEF file), the first 200 lines held only two kinds of event, and a mapping's field
+    from a later kind was refused as in none of the sample's records."""
     lines = [line for line in sample.splitlines() if line.strip()]
     heading = None
+    if spec.record_start and spec.kind != 'delimited':
+        lines = group_lines(lines, spec.record_start)
+    if spec.kind == 'delimited' and spec.quoted_newlines and spec.quote:
+        lines = quoted_lines(sample, spec.quote)
+    if spec.kind == 'delimited' and spec.comment_prefix:
+        return _dry_run_directives(spec, lines, max_records)
     if spec.kind == 'delimited' and spec.header is True and lines:
         heading = [h.strip() for h in _split_quoted(lines[0], spec.delimiter, spec.quote)]
         lines = lines[1:]
+    if len(lines) > max_records:
+        lines = [lines[round(i * (len(lines) - 1) / (max_records - 1))] for i in range(max_records)]
     records, unmatched = [], []
-    for line in lines[:max_records]:
+    for line in lines:
         fields = _apply_record(spec, line, heading)
         if fields:
             records.append(fields)
         else:
             unmatched.append(line[:200])
+    names: list[str] = []
+    for record in records:
+        names += [k for k in record if k not in names]
+    return {'records': records, 'unmatched_lines': unmatched, 'fields': names, 'heading': heading}
+
+
+def quoted_lines(text: str, quote: str) -> list[str]:
+    """Records of delimited text whose quoted values may hold new lines: lines joined while a quote is open."""
+    records: list[str] = []
+    current, open_ = None, False
+    for line in text.splitlines():
+        if current is None:
+            if not line.strip():
+                continue
+            current = line
+        else:
+            current += '\n' + line
+        open_ = current.count(quote) % 2 == 1
+        if not open_:
+            records.append(current)
+            current = None
+    if current is not None:
+        records.append(current)
+    return records
+
+
+def group_lines(lines: list[str], start: str) -> list[str]:
+    """Lines joined into records: a line matching `start` begins one, the lines after it until the next continue it
+    (lines before the first start are a record of their own, as the splitter would leave them)."""
+    begins = re.compile(start)
+    records: list[str] = []
+    for line in lines:
+        if begins.match(line) or not records:
+            records.append(line)
+        else:
+            records[-1] += '\n' + line
+    return records
+
+
+def _dry_run_directives(spec: SplitterSpec, lines: list[str], max_records: int) -> dict[str, Any]:
+    """dry_run for a log with directive lines: read in order (the columns and directives hold for the lines after
+    them), then records spread over it kept, as for any long sample."""
+    heading, held, records, unmatched = None, {}, [], []
+    for line in lines:
+        if spec.header_directive and line.startswith(spec.header_directive):
+            heading = [h.strip() for h in _split_quoted(line[len(spec.header_directive):].strip(), spec.delimiter,
+                                                        spec.quote)]
+            continue
+        directive = next((d for d in spec.directives if line.startswith(d)), None)
+        if directive:
+            held[directive_field(directive)] = line[len(directive):].strip()
+            continue
+        if line.startswith(spec.comment_prefix):
+            continue
+        fields = _apply_record(spec, line, heading if spec.header is True else None)
+        if fields:
+            records.append({**{directive_field(d): held.get(directive_field(d), '') for d in spec.directives}, **fields})
+        else:
+            unmatched.append(line[:200])
+    if len(records) > max_records:
+        records = [records[round(i * (len(records) - 1) / (max_records - 1))] for i in range(max_records)]
     names: list[str] = []
     for record in records:
         names += [k for k in record if k not in names]

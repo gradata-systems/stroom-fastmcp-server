@@ -1,5 +1,6 @@
 name: VPN logons from two exports that differ
 template: Event Data (Text)
+capabilities: [format_evolution, schema_variation]
 request: >
   Onboard these VPN logs. We have two exports from different appliance versions: the older one has columns
   time, user, action, result, src_ip; the newer one renamed the first two to timestamp and username, added a

@@ -189,3 +189,20 @@ def test_the_kind_of_event_inside_free_text_is_read_by_its_naming_pairs():
     for i in range(len(chunk.records)):
         shapes.add(chunk, i, 1)
     assert list(shapes.shapes) == ['fields:Data,Id']
+
+
+def test_cef_records_are_grouped_by_their_header():
+    # Masked as text, CEF lines of 5 kinds came out as 3 shapes, one per count of extension keys, the signature ids
+    # masked as numbers.
+    from utils.survey import cef_header
+    kinds = [('1001', 'User authenticated'), ('1002', 'Authentication failed'), ('2001', r'Web request allowed \| proxy')]
+    lines = [f'<134>Oct  2 09:00:{n:02d} swg01 CEF:0|Acme|SecureGateway|5.2|{sig}|{name}|3|suser=u{n} '
+             + ' '.join(f'k{i}=v' for i in range(n % 4)) for n, (sig, name) in enumerate(kinds * 4)]
+    chunk = split_records('\n'.join(lines))
+    shapes = Shapes()
+    for i in range(len(chunk.records)):
+        shapes.add(chunk, i, 1)
+    assert chunk.format == 'cef' and sorted(shapes.shapes) == [
+        'cef:Acme|SecureGateway|1001|User authenticated', 'cef:Acme|SecureGateway|1002|Authentication failed',
+        'cef:Acme|SecureGateway|2001|Web request allowed | proxy']
+    assert cef_header('no header here') is None and cef_header('CEF:0|Acme|only|three') is None

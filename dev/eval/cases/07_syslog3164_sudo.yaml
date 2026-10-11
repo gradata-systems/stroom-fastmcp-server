@@ -1,5 +1,6 @@
 name: sudo on web servers (RFC 3164 syslog)
 template: Event Data (Text)
+capabilities: [format_recognition, timestamps]
 request: >
   Onboard sudo logs from our web servers (classic RFC 3164 syslog, so the timestamp has no year; these are from
   2026). Each line is a user running a command as another user (usually root). Index the events.

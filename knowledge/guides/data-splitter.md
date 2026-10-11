@@ -20,6 +20,11 @@ read the client's files, and refuses a path with that instruction.
 | key=value pairs | `{"kind": "key_value", "delimiter": " ", "pair_separator": "=", "quote": "\""}` |
 | Syslog, body parsed further | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "key_value"}}` |
 | CEF, alone or after syslog | `{"kind": "cef"}` (a syslog header before it is inferred as `body`) |
+| Records over several lines (Java stack traces) | `{"kind": "regex", "record_start": "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}", "pattern": "(?s)^(\\S+ \\S+) +(\\w+) +\\[([^\\]]*)\\] (\\S+) - (.*)$", "names": ["time", "level", "thread", "logger", "message"]}` |
+| Quoted values holding new lines | `{"kind": "delimited", "delimiter": ",", "header": true, "quote": "\"", "quoted_newlines": true}` |
+| A separator of several characters | `{"kind": "delimited", "delimiter": " ~ ", "header": ["time", "user", "action"]}` |
+| Syslog, then delimited columns (Palo Alto) | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "delimited", "delimiter": ",", "header": ["future_use1", "receive_time", ...]}}` |
+| Columns named by a directive line (W3C, IIS, Blue Coat, Zeek) | `{"kind": "delimited", "delimiter": " ", "header": true, "quote": "\"", "comment_prefix": "#", "header_directive": "#Fields:", "directives": ["#Software:", "#Remark:"]}` |
 
 `body` parses one field further (syslog's `message`, or a regex group) and adds its fields; the recipes below
 are what it writes.
@@ -52,6 +57,42 @@ Change `delimiter` for tab (`\t`), pipe or semicolon data. Quoted fields need
 (`"Said ""bye"" and left"`) stays doubled: Data Splitter has no way to make it one (its `escape` attribute breaks
 the quoting), so the mapping reads such a field with `transform: unescape_quotes`; the draft sets it where the
 sample has them.
+
+## Records over several lines
+
+A Java (or Python, .NET) log entry and its stack trace, a wrapped message: the record is not a line. `record_start` is a
+regex a record's first line matches at its start (its time, usually); the lines after it until the next such line are
+part of it. `profile_sample` recognises such text (`multi-line text`) and `build_data_splitter` infers the start, with a
+pattern that takes the time and the rest as `message`: give the record's own pattern (level, thread, logger), starting
+`(?s)` so its last `.*` takes the trace's lines. In the mapping, a regex on such a message must cross lines too:
+`[\s\S]*`, not `.*`, which stops at a line break in XPath.
+
+Quoted values that hold new lines (a CSV comment over two lines) are the other case: `quoted_newlines: true` ends a
+record at a new line outside quotes only (`profile_sample` sets it when the sample has one).
+
+## Separators and bodies
+
+A separator of several characters (` ~ `, `||`, ` :: `) or an unusual one (`^`) is recognised when every line has it
+the same number of times; a split takes it as it is. A syslog header followed by delimited columns (Palo Alto's CSV)
+is read as `syslog` with a `delimited` body whose columns are named by position (`col1` ...): name them from the
+vendor's documentation, as the source has no header.
+
+## Columns named by a directive line
+
+Some logs name their columns in a comment-like directive rather than a first line: W3C extended logs (IIS, Blue
+Coat: `#Fields: date time c-ip ...`), Zeek (`#fields	ts	uid ...`, tab-separated) and the like, with other directives
+around it (`#Software:`, `#Remark:`, `#path`). `profile_sample` and `build_data_splitter` recognise them: the
+directive whose value has as many names as the data lines have columns names them. The spec says so with:
+
+- `comment_prefix`: lines starting with it are not records (`#`).
+- `header_directive`: the directive naming the columns. Its columns hold for the lines after it, until it appears
+  again: a log that restarts mid-file (an upgrade, a new day) names them afresh, often reordered or with more.
+- `directives`: other directives whose value each record after them carries, as a field named as in the file
+  (`#Software`, `#Remark`): the device, its software and the like, which the lines themselves often lack. Pull a part
+  out of one with an `extract` regex on that field (`#Remark: 4111140007 "proxy01" ...` gives the proxy's name).
+
+Before saving, read the dry run: every data line should be a record (`unmatched_lines` empty), the field names should
+be the directive's, and a record after a restart should have the new columns.
 
 ## Without a header
 

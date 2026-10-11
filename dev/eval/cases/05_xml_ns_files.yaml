@@ -1,5 +1,6 @@
 name: File server audit (XML with a namespace)
 template: Event Data (XML)
+capabilities: [format_recognition, nesting, schema_variation]
 request: >
   Onboard this file server audit log. It is XML in the urn:example:fileaudit namespace; each entry is one file
   operation (read or delete) by an account on a machine. Index the events.

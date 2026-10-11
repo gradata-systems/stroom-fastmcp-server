@@ -1,5 +1,6 @@
 name: VPN concentrator (JSON lines, message layout varies by kind)
 template: Event Data (JSON)
+capabilities: [field_variability, schema_variation, escaping]
 request: >
   Onboard the VPN concentrators' logs (JSON lines). Each line has the host, time and severity, and a message whose
   layout depends on its first word: AUTH ok or fail (user, source address, then the method on success or the reason

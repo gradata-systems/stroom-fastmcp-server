@@ -1,5 +1,6 @@
 name: JSON array wrapping JSON wrapping a message string
 template: Event Data (JSON)
+capabilities: [mixed_formats, nesting]
 request: >
   Onboard these gateway logs. The shipper sends a JSON array (host, received time) and puts the gateway's own JSON
   record in the payload field as a string: ts, level and msg. The msg text is the event itself:

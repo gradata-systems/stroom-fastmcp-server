@@ -1,5 +1,6 @@
 name: Edge firewall (CSV, mixed records)
 template: Event Data (Text)
+capabilities: [schema_variation, optional_fields, timestamps]
 request: >
   Onboard the edge firewall's CSV export (it has a header). It mixes three kinds of record, told apart by
   event_type: TRAFFIC is a connection a rule allowed or denied; ADMIN is an administrator logging in (or failing

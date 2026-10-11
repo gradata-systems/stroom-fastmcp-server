@@ -1,5 +1,6 @@
 name: Suricata-style IDS alerts
 template: Event Data (JSON)
+capabilities: [format_recognition, nesting, schema_inference]
 request: >
   Onboard these IDS alerts (a JSON array). Each object is one alert from a sensor: signature, severity, and the
   source and destination of the traffic that triggered it. Index them for the SOC.

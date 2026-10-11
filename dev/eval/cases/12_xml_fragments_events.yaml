@@ -1,5 +1,6 @@
 name: XML fragments, one Event element per line
 template: Event Data (XML)
+capabilities: [format_recognition, event_boundaries]
 request: >
   Onboard these workstation security events: XML fragments with no root element, one <Event> per line and no
   namespace. System holds the time, computer and event id (4624 successful logon, 4625 failed logon, 4634 logoff);

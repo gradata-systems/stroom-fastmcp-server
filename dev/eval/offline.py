@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_eval as ev  # noqa: E402
 from utils.dsgen import SplitterSpec, dry_run, infer_spec  # noqa: E402
 from utils.eventschema import EventSchema  # noqa: E402
-from utils.localcheck import check_mapping, sample_records  # noqa: E402
+from utils.localcheck import check_mapping, check_schema_values, sample_records  # noqa: E402
 from utils.xpathcheck import check_extractions, check_xpaths  # noqa: E402
 from utils.xsltgen import TranslationMapping, generate  # noqa: E402
 
@@ -57,7 +57,7 @@ def check(case: dict[str, Any]) -> dict[str, Any]:
             return {'problems': problems, 'warnings': warnings, 'records': None, 'splitter': None}
     records, note = sample_records(mapping, texts, splitter)
     checked = check_mapping(mapping, records)
-    problems += checked['problems']
+    problems += checked['problems'] + check_schema_values(mapping, records, schema())
     warnings += checked['warnings'] + ([note] if note else []) + check_xpaths(mapping, texts, splitter)
     extraction_problems, extraction_warnings = check_extractions(mapping, texts, splitter, records)
     problems += extraction_problems
@@ -66,6 +66,11 @@ def check(case: dict[str, Any]) -> dict[str, Any]:
     if case.get('files') and splitter is not None:
         # The server reads a sample's first records only: files are counted whole, as Stroom will split them.
         counted = sum(len(dry_run(splitter, t.strip('﻿\r\n '), max_records=10 ** 7)['records']) for t in texts)
+    from utils.profile import wrapped_records
+    wrapped = [wrapped_records(t.strip()) for t in texts] if mapping.input == 'json' else []
+    if wrapped and all(wrapped):
+        # One object wrapping the records (CloudTrail): its items are the events, one Stroom record holding them.
+        counted = sum(len(items) for _, items in wrapped)
     if counted != case['expected']['records']:
         problems.append(f"{counted} records read from the sample, expected {case['expected']['records']}")
     return {'problems': problems, 'warnings': warnings, 'records': counted,

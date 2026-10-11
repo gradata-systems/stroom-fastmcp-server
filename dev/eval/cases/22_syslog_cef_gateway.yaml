@@ -1,5 +1,6 @@
 name: Secure web gateway (CEF after a syslog header)
 template: Event Data (Text)
+capabilities: [mixed_formats, escaping, format_recognition]
 request: >
   Onboard our secure web gateway's logs. They arrive over syslog as CEF: the syslog header, then the CEF header
   (vendor, product, version, signature id, name, severity) and its key=value extension. Signature ids 1001-1003 are

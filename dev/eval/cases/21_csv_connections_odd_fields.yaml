@@ -1,5 +1,6 @@
 name: Connection broker (CSV, fields with no element of their own)
 template: Event Data (Text)
+capabilities: [field_normalization, optional_fields]
 request: >
   Onboard the connection broker's CSV export (it has a header). Each record is a client's connection to a backend
   service: CONNECT when it is made, DISCONNECT when it ends. Besides the client and server addresses, ports and

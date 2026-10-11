@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 35 and len({c["id"] for c in cases}) == 35
+    assert len(cases) == 47 and len({c["id"] for c in cases}) == 47
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']
@@ -206,3 +206,18 @@ def test_the_workflows_and_their_comparison_of_events():
     assert workflows._canonical(a) == workflows._canonical(b)
     assert workflows._canonical(a) != workflows._canonical(etree.fromstring(
         etree.tostring(a).decode().replace('Logon', 'Logoff')))
+
+
+def test_every_capability_has_a_case_or_a_reason_and_the_readme_shows_them():
+    # Asked for by the user: the set organised around parsing capabilities, so a gap is visible.
+    import capabilities
+    cases = ev.load_cases()
+    assert all(c.get('capabilities') for c in cases), [c['id'] for c in cases if not c.get('capabilities')]
+    unknown = {k for c in cases for k in c['capabilities']} - set(capabilities.CAPABILITIES)
+    assert not unknown, unknown
+    missing = [k for k, ids in capabilities.covered(cases).items() if not ids and k not in capabilities.PENDING]
+    assert not missing, f"capabilities with no case and no reason: {missing}"
+    stale = [k for k in capabilities.PENDING if capabilities.covered(cases)[k]]
+    assert not stale, f"pending, but a case covers them now: {stale}"
+    readme = (Path(__file__).resolve().parents[1] / 'dev' / 'eval' / 'README.md').read_text(encoding='utf-8')
+    assert capabilities.table(cases) in readme, 'regenerate the table: uv run python dev/eval/capabilities.py'

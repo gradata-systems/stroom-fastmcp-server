@@ -1,5 +1,6 @@
 name: Badge access with a user directory lookup
 template: Event Data (Text)
+capabilities: [schema_inference, field_normalization]
 request: >
   Onboard these door-controller badge events (CSV). The user directory export (also CSV: user, name, department,
   site) must be loaded as reference data, and each event enriched with the badge holder's name and department

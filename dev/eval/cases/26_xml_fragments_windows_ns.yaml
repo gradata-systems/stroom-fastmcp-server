@@ -1,5 +1,6 @@
 name: Windows Security events (XML fragments in the Windows event namespace)
 template: Event Data (XML)
+capabilities: [format_recognition, nesting]
 request: >
   Onboard the domain controllers' Security events, forwarded as Windows event XML: one <Event> per line with no
   root element, each in the Windows event namespace. System holds the time, the computer and the event id; EventData

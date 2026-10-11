@@ -322,6 +322,158 @@ def _not_json(text: str) -> ToolError:
                          f"and the server reads it from the stream.")
 
 
+# How a record of several lines starts: its time, as logs write it (ISO, with a space or T; bracketed; syslog's;
+# Apache's day/month/year).
+RECORD_STARTS = [r'\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}', r'\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}',
+                 r'[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}', r'\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2}',
+                 r'\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}']
+
+
+def multiline_records(lines: list[str]) -> tuple[str, list[str]] | None:
+    """(start, records) for text whose records run over several lines: most records' first lines start with a time,
+    and lines between them (a stack trace's 'at ...', a wrapped message) don't. Text whose every line starts one is
+    single-line, and left to the other formats."""
+    from utils.dsgen import group_lines
+    for start in RECORD_STARTS:
+        begins = sum(bool(re.match(start, l)) for l in lines)
+        if begins >= 2 and begins < len(lines) and re.match(start, lines[0]) and begins >= 0.2 * len(lines):
+            return start, group_lines(lines, start)
+    return None
+
+
+def quoted_csv(text: str, max_records: int = 200) -> dict[str, Any] | None:
+    """Delimited text with new lines inside quoted values (a comment over two lines): read as CSV over the whole text,
+    not a line at a time, which made such a file unknown text. None unless some quoted value holds a new line."""
+    if '"' not in text or '\n' not in text:
+        return None
+    for delimiter in (',', '\t', '|', ';'):
+        try:
+            rows = list(csv.reader(io.StringIO(text), delimiter=delimiter, quotechar='"'))
+        except csv.Error:
+            continue
+        rows = [r for r in rows if any(c.strip() for c in r)]
+        if len(rows) < 3 or not any('\n' in c for r in rows for c in r):
+            continue
+        width = Counter(len(r) for r in rows).most_common(1)[0][0]
+        if width < 2 or sum(len(r) == width for r in rows) < 0.9 * len(rows):
+            continue
+        has_header = _names_a_header(rows) or csv.Sniffer().has_header('\n'.join(','.join(r) for r in rows[:20]))
+        header = rows[0] if has_header else [f'col{i + 1}' for i in range(width)]
+        body = rows[1:] if has_header else rows
+        return {'format': 'delimited', 'delimiter': delimiter, 'has_header': has_header, 'columns': header,
+                'quoted_newlines': True, 'records': len(body), '_records': [dict(zip(header, r)) for r in body[:max_records]],
+                'suggested_parser': 'Data Splitter for delimited data whose quoted values hold new lines '
+                                    '(quoted_newlines: a record ends at a new line outside quotes)'}
+    return None
+
+
+_SEPARATOR = re.compile(r' *[^\w\s"\'.:/@()\[\]{}<>=+-]{1,3} *| +:: +| +- +')
+
+
+def custom_delimiter(lines: list[str]) -> str | None:
+    """A separator the CSV sniffer doesn't try: longer than one character (' ~ ', '||', ' :: ') or an unusual one
+    ('~', '^'), found the same number of times (two or more) on every line. Seen unknown text: '... ~ alice ~ LOGIN
+    ~ OK ~ ...'."""
+    if len(lines) < 2:
+        return None
+    counts: Counter = Counter()
+    for token in set(_SEPARATOR.findall(lines[0])):
+        if token.strip() in (',', ';', '|', '') and token == token.strip():
+            continue        # the sniffer's own, unpadded
+        found = [line.count(token) for line in lines]
+        if min(found) >= 2 and len(set(found)) == 1:
+            counts[token] = found[0]
+    if not counts:
+        return None
+    return max(counts, key=lambda t: (len(t), counts[t]))
+
+
+_WRAPPER_HEAD = re.compile(r'^\{\s*(?:"[^"]*"\s*:\s*(?:"(?:\\.|[^"\\])*"|-?[\d.eE+-]+|true|false|null)\s*,\s*)*'
+                           r'"([^"]+)"\s*:\s*\[\s*(?=\{)')
+
+
+def wrapped_records(text: str) -> tuple[str, list[dict[str, Any]]] | None:
+    """(key, records) for one JSON object whose array holds the records, as AWS CloudTrail writes them
+    ({"Records": [...]}) and many APIs do ("data", "events", "items"...): the key whose array of objects is the
+    longest. Seen: such a file refused as "starts as JSON but isn't valid JSON", read a line at a time."""
+    if not text.startswith('{'):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        # Cut off (a stream's head): the array key among the object's first keys, and the items whole before the cut.
+        m = _WRAPPER_HEAD.match(text)
+        if not m:
+            return None
+        decoder, items, at = json.JSONDecoder(), [], m.end()
+        while True:
+            while at < len(text) and text[at] in ' \t\r\n,':
+                at += 1
+            if at >= len(text) or text[at] != '{':
+                break
+            try:
+                item, at = decoder.raw_decode(text, at)
+            except ValueError:
+                break
+            items.append(item)
+        return (m.group(1), items) if items else None
+    if not isinstance(value, dict):
+        return None
+    arrays = [(k, v) for k, v in value.items() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)]
+    return max(arrays, key=lambda kv: len(kv[1])) if arrays else None
+
+
+def json_setup_wrapped(key: str) -> dict[str, Any]:
+    """How a wrapped JSON object reaches the XSLT: the JSONParser's record is the whole object (addRootObject on, as
+    for JSON lines), and for_each makes an Event of each item of its array."""
+    setup = json.loads(json.dumps(JSON_SETUP['lines']))
+    setup['text_converter'] = 'none: the JSONParser element parses the object itself; a text converter cannot'
+    setup['xslt_input']['mapping'] = {'input': 'json', 'json_layout': 'lines', 'for_each': key}
+    return setup
+
+
+_DIRECTIVE = re.compile(r'^(#[A-Za-z][\w-]*:?)(?:[ \t]+(.*))?$')
+_COLUMN_NAME = re.compile(r'^[A-Za-z_][\w.()\-/:]*$')
+
+
+def directive_log(lines: list[str]) -> dict[str, Any] | None:
+    """A log whose columns are named by a directive line rather than a first line: W3C extended logs (IIS, Blue
+    Coat: #Software, #Fields: date time ...), Zeek (#separator, #fields ts uid ...) and the like. The data lines'
+    delimiter and quoting, and the first directive whose value splits into as many names as they have columns."""
+    from utils.dsgen import _split_quoted
+    comments = [l for l in lines if l.startswith('#')]
+    data = [l for l in lines if not l.startswith('#')]
+    if not comments or not data:
+        return None
+    quote = '"' if any('"' in l for l in data[:50]) else None
+    parsed = [(l, _DIRECTIVE.match(l)) for l in lines[:2000]]
+    for delimiter in ('\t', ' ', ',', '|', ';'):
+        def names_of(m: re.Match | None) -> list[str]:
+            return [n.strip() for n in _split_quoted((m.group(2) or '').strip(), delimiter, quote)] if m else []
+        for prefix in dict.fromkeys(m.group(1) for _, m in parsed if m):
+            # Each data line read under the latest of these directives above it (a log restarted mid-file names its
+            # columns again): it names the columns if most data lines then have as many as it names.
+            heading, fits, read = None, 0, 0
+            for line, m in parsed:
+                if m and m.group(1) == prefix:
+                    names = names_of(m)
+                    heading = names if len(names) >= 3 and all(_COLUMN_NAME.match(n) for n in names) else None
+                elif not line.startswith('#') and heading:
+                    read += 1
+                    fits += len(_split_quoted(line, delimiter, quote)) == len(heading)
+            if not read or fits < 0.8 * len([l for l, _ in parsed if not l.startswith('#')]):
+                continue
+            directives = list(dict.fromkeys(m.group(1) for _, m in parsed if m and m.group(1) != prefix))
+            from utils.dsgen import SplitterSpec, dry_run
+            spec = SplitterSpec(kind='delimited', delimiter=delimiter, header=True, quote=quote, comment_prefix='#',
+                                header_directive=prefix, directives=directives)
+            first = next(names_of(m) for _, m in parsed if m and m.group(1) == prefix)
+            return {'format': 'delimited', 'delimiter': delimiter, 'has_header': True, 'quote': quote,
+                    'comment_prefix': '#', 'header_directive': prefix, 'directives': directives,
+                    'columns': first, 'records': len(data), '_records': dry_run(spec, '\n'.join(lines))['records']}
+    return None
+
+
 def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
     text = sample.strip('﻿\r\n ')
     lines = [line for line in text.splitlines() if line.strip()]
@@ -365,6 +517,15 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                 return {**result, 'format': 'json array', 'records': len(head), 'fields': _inventory(
                     [_flatten(r) for r in head]), 'note': 'the array is cut short here: these are its first records',
                     'suggested_parser': 'JSONParser (a translation template with one: find_pipeline_templates)', **JSON_SETUP['array']}
+    wrapped = wrapped_records(text)
+    if wrapped:
+        key, items = wrapped
+        return {**result, 'format': 'json object', 'records_key': key, 'records': len(items),
+                'fields': _inventory([_flatten(r) for r in items[:max_records]]),
+                'suggested_parser': f"JSONParser: one object whose '{key}' array holds the records (as AWS CloudTrail "
+                                    f"writes them); the mapping makes an Event of each with for_each='{key}' (a "
+                                    f"translation template with a JSONParser: find_pipeline_templates)",
+                **json_setup_wrapped(key)}
     json_lines = []
     for line in lines[:max_records]:
         try:
@@ -382,6 +543,12 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
 
     if not json_lines and JSON_START.match(text):
         raise _not_json(text)
+    directed = directive_log(lines)
+    if directed:
+        return {**result, **directed, 'fields': _inventory(directed.pop('_records')[:max_records]),
+                'suggested_parser': "Data Splitter for delimited data whose columns are named by a directive line "
+                                    f"({directed['header_directive']}): build_data_splitter infers it (a translation "
+                                    "template with a DSParser: find_pipeline_templates)"}
     if sum(bool(CEF.search(line)) for line in lines) >= 0.8 * len(lines):
         # CEF, alone or after a syslog header: seen read as key=value, its header fields taken for keys and its
         # values cut at their first space.
@@ -396,11 +563,31 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
         return {**result, 'format': 'syslog rfc3164', 'records': len(lines), 'examples': lines[:3],
                 'suggested_parser': 'Data Splitter with a regex for PRI, timestamp, host, tag and message'}
 
+    multi = multiline_records(lines)
+    if multi:
+        start, records = multi
+        return {**result, 'format': 'multi-line text', 'record_start': start, 'records': len(records),
+                'examples': records[:3],
+                'suggested_parser': "Data Splitter with record_start: a record starts at a line beginning with its "
+                                    "time, and the lines after it (a stack trace, a wrapped message) are part of it "
+                                    "(build_data_splitter infers the start; give the record's pattern, starting (?s))"}
     kv = [dict((k, v.strip('"')) for k, v in KEY_VALUE.findall(line)) for line in lines[:max_records]]
     if kv and sum(len(r) >= 3 for r in kv) >= 0.8 * len(kv):
         return {**result, 'format': 'key=value', 'records': len(lines), 'fields': _inventory(kv),
                 'suggested_parser': 'Data Splitter splitting on spaces then = (a translation template with a DSParser: find_pipeline_templates)'}
 
+    quoted = quoted_csv(text, max_records)
+    if quoted:
+        return {**result, **quoted, 'fields': _inventory(quoted.pop('_records'))}
+    custom = custom_delimiter(lines[:max_records])
+    if custom:
+        rows = [line.split(custom) for line in lines[:max_records]]
+        header = [c.strip() for c in rows[0]] if _names_a_header(rows) else [f'col{i + 1}' for i in range(len(rows[0]))]
+        body = rows[1:] if header == [c.strip() for c in rows[0]] else rows
+        return {**result, 'format': 'delimited', 'delimiter': custom, 'has_header': header == [c.strip() for c in rows[0]],
+                'columns': header, 'records': len(lines) - (len(rows) - len(body)),
+                'fields': _inventory([dict(zip(header, r)) for r in body]),
+                'suggested_parser': f'Data Splitter for delimited data, columns separated by {custom!r}'}
     try:
         dialect = csv.Sniffer().sniff('\n'.join(lines[:20]), delimiters=',\t|;')
         has_header = csv.Sniffer().has_header('\n'.join(lines[:20]))

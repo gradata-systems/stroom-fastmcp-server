@@ -1,5 +1,6 @@
 name: Print server jobs (headerless CSV, quoted values)
 template: Event Data (Text)
+capabilities: [delimiters, escaping]
 request: >
   Onboard the print server's job log. It's CSV with no header line; the columns are the time (UTC), the user, the
   printer, the document name, the page count and the printer's location. Document names and locations with commas

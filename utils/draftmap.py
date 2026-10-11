@@ -7,6 +7,7 @@ shows, and every other field carried as Data, with notes on what a person or mod
 action element for each kind of event, the system name and environment, a time zone for naive timestamps.
 The result is checked like any mapping, so a wrong guess shows up as a problem, not as a silent mistake.
 """
+import json
 import re
 from collections import Counter
 from typing import Any
@@ -90,8 +91,13 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
     records: list[dict[str, str]] = []
     spec = given
     for text in named.values():
-        if fmt in ('json array', 'json lines'):
-            import json
+        if fmt == 'json object':
+            # The wrapper's array holds the records: the draft's fields are the items' (for_each reads them).
+            from utils.profile import wrapped_records
+            found = wrapped_records(text.strip())
+            records += [{k: (v if isinstance(v, str) else json.dumps(v)) for k, v in _flatten(r).items()}
+                        for r in (found[1] if found else [])]
+        elif fmt in ('json array', 'json lines'):
             stripped = text.strip()
             values = json.loads(stripped) if stripped.startswith('[') else [json.loads(l) for l in stripped.splitlines() if l.strip()]
             records += [{k: (v if isinstance(v, str) else json.dumps(v)) for k, v in _flatten(r).items()} for r in values if isinstance(r, dict)]
@@ -155,6 +161,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     mapping: dict[str, Any] = {}
     if fmt in ('json array', 'json lines'):
         mapping.update(input='json', json_layout='lines' if fmt == 'json lines' else 'array')
+    elif fmt == 'json object':
+        mapping.update(input='json', json_layout='lines', for_each=info['records_key'])
     elif fmt == 'xml':
         mapping.update(input='xml', root=info.get('root'), record=info.get('record_element'), xml_namespace=info.get('namespace') or '')
     elif fmt == 'xml fragments':

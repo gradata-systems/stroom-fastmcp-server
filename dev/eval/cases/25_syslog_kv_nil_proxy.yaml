@@ -1,5 +1,6 @@
 name: Web filter (RFC 5424 syslog, key=value body, "-" for none)
 template: Event Data (Text)
+capabilities: [optional_fields, mixed_formats]
 request: >
   Onboard the web filter's logs: RFC 5424 syslog with a key=value body. Each line is a web request it allowed or
   blocked. Where the filter has no value for a key it writes "-" (no user when the client wasn't signed in, no

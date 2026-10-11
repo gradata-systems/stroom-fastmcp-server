@@ -1,5 +1,6 @@
 name: Door controller export (the source's own XML is <records><record>)
 template: Event Data (XML)
+capabilities: [format_recognition, event_boundaries]
 request: >
   Onboard the door controllers' export. It's an XML document, <records> holding a <record> per badge swipe, with
   no namespace: when, the badge holder, the door and whether access was granted. Times are UTC. Index the events.

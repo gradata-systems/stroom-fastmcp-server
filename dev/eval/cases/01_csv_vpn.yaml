@@ -1,5 +1,6 @@
 name: Acme VPN gateway
 template: Event Data (Text)
+capabilities: [format_recognition, delimiters, schema_inference, timestamps]
 request: >
   Onboard the Acme VPN gateway logs below (CSV with a header). Each line is a user logging in to or out of the
   VPN gateway; result says whether it worked. Index the events so analysts can search by user and source IP.

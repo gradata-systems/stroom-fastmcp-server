@@ -1,5 +1,6 @@
 name: Workstation screen locks (XML attributes)
 template: Event Data (XML)
+capabilities: [nesting]
 request: >
   Onboard these workstation session events: XML where each event element carries its values as attributes
   (time, user, host, action). The action is lock or unlock of the screen. Index them.

@@ -1,5 +1,6 @@
 name: USB copy monitor (headerless CSV)
 template: Event Data (Text)
+capabilities: [delimiters, schema_inference]
 request: >
   Onboard these data-loss-prevention logs: CSV without a header. The columns are time, user, host, source path and
   destination path; each line is a file copied to removable media. Index them.

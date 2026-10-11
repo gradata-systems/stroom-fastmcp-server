@@ -29,6 +29,11 @@ all in one `map`, which is what makes JSON lines (one object per line, or concat
 | JSON lines | `true` (keep the default; false gives several root elements, which fails) | `/map` | `/map/map` | `input: json, json_layout: lines` |
 | One JSON array | `false` (set it on `create_pipeline`, as sibling pipelines do) | `/array` | `/array/map` | `input: json, json_layout: array` |
 | One JSON array, default left | `true` | `/map` | `/map/array/map` | the same; the generated XSLT matches both |
+| One object wrapping the records (AWS CloudTrail's `{"Records": [...]}`, an API's `data` or `items`) | `true` | `/map` | `/map/map`, each item through `for_each` | `input: json, json_layout: lines, for_each: Records` |
+
+A wrapped object is the parser's one record; `for_each` names its array and makes an Event of each item, fields read
+from the item (mark one read from the wrapper with `scope: record`). `profile_sample` names the array's key (the one
+holding the most objects), also from a stream's head cut off mid-array.
 
 `profile_sample` reports which (`parser_properties`, `xslt_input`), and `build_translation_xslt` returns the
 setting to apply as `pipeline_properties`. Check `describe_document` for the value a template's children use.

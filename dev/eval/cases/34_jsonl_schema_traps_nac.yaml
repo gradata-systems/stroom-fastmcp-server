@@ -1,5 +1,6 @@
 name: Network access control (values the schema rejects as written)
 template: Event Data (JSON)
+capabilities: [type_inference]
 request: >
   Onboard the network access control system's log (JSON lines). Each line is a device asking to join the network
   at a switch port: its MAC and IP address, the user when there was one (an empty string when not), whether it

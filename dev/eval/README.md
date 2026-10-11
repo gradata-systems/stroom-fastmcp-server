@@ -1,6 +1,6 @@
 # Evaluation set
 
-Thirty-five samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Forty-seven samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -43,6 +43,18 @@ case), not a margin to spend.
 | `33_csv_cp1252_hr` | A CSV file in Windows-1252 on the user's disk | Create, Update, Delete | The feed's encoding: sent whole as UTF-8 the accented names are broken in Stroom though the user's excerpt shows them right; the user knows the encoding when asked |
 | `34_jsonl_schema_traps_nac` | JSON lines with values the schema rejects as written | Authenticate | Upper-case IPv6 (lower-cased), MAC addresses in three styles (to upper-case pairs), a port written `443/tcp`, an empty user |
 | `35_xml_fragments_secretserver_messages` | Windows event XML fragments (Delinea Secret Server), the event in a message string; 33 records, one per category and action, cut from a user's 1,000-record sample | Authenticate, Update, View, Create, Delete, Alert, Process | The kind of event extracted from the message (`extract`), details after it in three separator styles, the source IP in `EventSource/Client/IPAddress` (not Data), a TypeId per kind of event (not the category), none Unknown |
+| `36_xml_fragments_secretserver_whole_export` | As case 35, at the size of the user's export: 1,000 records (744 KB) in a file on the user's disk, generated from case 35's records | As case 35 | The whole sample read, not its head: the agent sees only the first lines, the request says no more than the user's did, every record is the same Windows event but for its message, and the first 400 are logons and secret views only, so the other kinds start about 280,000 characters in (Stroom returns about 80,000 a fetch). The scorer reads a stream's events in blocks spread over it, so they are checked too |
+| `37_cef_gateway_whole_day` | Syslog then CEF, a day's file: 5,000 lines (883 KB) on the user's disk | Authenticate, Network, Alert | Case 22 at size: the first 3,000 lines are logons and allowed requests only, the other kinds start about 536,000 characters in; kinds of event read from the CEF header (signature id, name), not masked text; the mapping checks read lines spread over the sample, not its first 200 |
+| `38_json_array_one_line_alerts` | One JSON array on a single line: 2,500 alerts (387 KB) on the user's disk | Alert | Case 02 as a SIEM exports it: Stroom holds the stream as one record of one line, so reading, surveying and stepping it rely on the server splitting it, and the parser needs `addRootObject` false; the critical alerts start about 230,000 characters in |
+| `39_w3c_bluecoat_proxy` | Blue Coat access log, W3C extended format: 3,000 requests on the user's disk | Network | Columns named by a `#Fields:` directive (no first-line header), the device only in `#Remark` (an `extract` on the directive's field), quoted values with spaces, and a restart at the 2,000th request with new directives and the columns reordered and added |
+| `40_json_cloudtrail_records` | One pretty-printed JSON object whose `Records` array holds 800 events (AWS CloudTrail) | Authenticate, View, Delete, Create, Update | The object is the parser's one record and `for_each` makes an Event of each item; nested fields; the kind of event in `eventName`; a source address that is sometimes a service's name; the later kinds past the 500th event |
+| `41_java_multiline_app` | Java application log (logback), 2,000 entries with stack traces over several lines | Authenticate, Create, Alert, Update | `record_start`: a record begins at a line starting with its time, the stack trace's lines are part of it; a regex over a message of several lines (`[\s\S]`, not `.`); the later kinds past the 1,200th entry |
+| `42_csv_quoted_newlines_tickets` | CSV export whose quoted comments hold commas, doubled quotes and new lines | Create, Update | `quoted_newlines`: a record ends at a new line outside quotes; `unescape_quotes`; an empty last column |
+| `43_syslog_csv_palo_alto_traffic` | Palo Alto TRAFFIC logs: an RFC 3164 header, then 47 positional CSV columns | Network | A delimited body after a syslog header, its columns named by position until named from the vendor's documentation; the kind of event in type and subtype |
+| `44_custom_tilde_delimited` | In-house access log: fields separated by ` ~ `, no header | Authenticate | A separator of several characters, which the CSV sniffer doesn't try; named columns |
+| `45_jsonl_gelf` | Graylog GELF messages (JSON lines) | Authenticate, Alert | Fractional epoch seconds (`epoch_s`); the kind of event in an `_`-prefixed additional field; fields that differ by kind |
+| `46_jsonl_ecs_input` | Events already in ECS (JSON lines, nested) | Authenticate, Delete | An ECS source translated to Events like any other; the kind of event in `event.action`; arrays in `event.category` |
+| `47_kv_fortios_native` | FortiGate native logs (key=value) | Network, Authenticate, Alert | The kind of event in two keys (type, subtype); the time from date, time and tz; keys that differ by kind |
 | `21_csv_connections_odd_fields` | CSV with a header: connections made and ended, with the broker's own fields (zones, `destination_key`, a TLS fingerprint, policy, connection id) | Network (Connect, Close) | Fields with no element of their own carried as `Data` on the side they describe (`destination_key` under `Destination`, `source_zone` under `Source`) rather than invented or left Unknown: `forbidden_types: [Unknown]` and `data` checks |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
@@ -70,6 +82,32 @@ fragment wrapper (`converter: profile`). `feed_encoding` sets the feed's encodin
 `build_translation_xslt` does before it saves (the mapping generates, the sample is read as the server's Data
 Splitter reads it, every field and time format fits, the extractions and xpaths select something) and counts the
 records; `tests/test_eval.py` runs it on every case. Stepping and processing are the reference run's.
+
+## Capabilities
+
+What the cases exercise, by capability rather than source format (a case's `capabilities:`): a capability with no case is a gap, and `tests/test_eval.py` fails until it has one or a reason it is pending (`dev/eval/capabilities.py`, which also prints this table).
+
+| Capability | What | Cases |
+| --- | --- | --- |
+| Format recognition | JSON, XML, CSV, CEF, syslog and free text detected without being told | `01`, `02`, `05`, `06`, `07`, `08`, `12`, `22`, `26`, `28`, `40` |
+| Schema inference | fields and their types inferred from the sample | `01`, `02`, `09`, `15`, `43` |
+| Field variability | different fields present for different kinds of event | `11`, `19`, `30`, `35`, `45`, `47` |
+| Delimiter detection | commas, tabs, pipes, semicolons, spaces and separators of several characters | `01`, `08`, `09`, `23`, `24`, `27`, `39`, `43`, `44` |
+| Escaping | embedded and doubled quotes, escaped separators | `18`, `19`, `22`, `23`, `24`, `42` |
+| Nested structures | JSON objects and arrays, XML elements and attributes | `02`, `03`, `04`, `05`, `10`, `13`, `16`, `26`, `40`, `46` |
+| Timestamp recognition | ISO 8601, epoch (seconds, milliseconds, nanoseconds), syslog, split and custom formats | `01`, `06`, `07`, `17`, `31`, `39`, `45`, `47` |
+| Type inference | addresses, integers, booleans, values the schema rejects as written | `34`, `40` |
+| Multi-line records | stack traces, quoted values over several lines | `41`, `42` |
+| Event boundaries | where one record ends: fragments, arrays, wrapped objects, several events in one | `12`, `16`, `28`, `38`, `40`, `41` |
+| Optional fields | missing, empty and placeholder values | `06`, `17`, `21`, `25`, `42` |
+| Field normalisation | a source's names mapped to the schema's (ECS, codes, odd fields) | `15`, `20`, `21`, `46` |
+| Schema variation | many kinds of event from one source | `05`, `14`, `17`, `19`, `30`, `32`, `36` |
+| Malformed records | truncation, invalid quoting, missing separators, reported not dropped | pending: no case yet: a sample with truncated lines, unbalanced quotes and missing separators, whose records the server reports rather than drops |
+| Mixed formats | syslog wrapping CEF or CSV, JSON or text inside JSON, text inside XML | `04`, `11`, `13`, `18`, `22`, `25`, `35`, `37`, `43` |
+| Encoding | non-UTF-8 files, Unicode punctuation, control characters | `27`, `33` |
+| Field repetition | repeated keys and elements, arrays of values | `16` |
+| Format evolution | new or reordered fields, a changed version, mid-file | `14`, `39` |
+| Large samples | samples bigger than one read, the kinds of event deep in the file | `29`, `36`, `37`, `38` |
 
 ## Running
 
