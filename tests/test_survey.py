@@ -165,3 +165,27 @@ def test_kinds_left_untranslated_are_recorded_and_shown():
     assert dropped(read_state(markdown)) == dropped(state)  # survives the round trip through the doc
     set_handling(state, signatures, 'translate', '', 'later')
     assert dropped(state) == {}
+
+
+def test_the_kind_of_event_inside_free_text_is_read_by_its_naming_pairs():
+    # Seen in production: Secret Server's audit events, every one an identical Windows event but for the message in
+    # Data ("Event: [User] Action: [Login]"); the survey found one kind of event where there were 32.
+    line = ('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><EventID>1000</EventID>'
+            '</System><EventData><Data>Sep 27 2026 23:48:10 - User: domain.com\\Patel, Priya - [[SecretServer]] '
+            'Event: [{c}] Action: [{a}] By User: domain.com\\priya.patel (Item Id: 219); Source IP: 192.0.2.45</Data>'
+            '</EventData></Event>')
+    kinds = [('User', 'Login'), ('User', 'Login Failed'), ('Secret', 'View'), ('User', 'Login')]
+    chunk = split_records('\n'.join(line.format(c=c, a=a) for c, a in kinds))
+    shapes = Shapes()
+    for i in range(len(chunk.records)):
+        shapes.add(chunk, i, 1)
+    found = {k: v['count'] for k, v in shapes.shapes.items()}
+    assert len(found) == 3 and any(k.endswith('Data: kv:Action=Login Failed, Event=User') for k in found)
+    # Free text that names nothing isn't masked into a shape of its own (only a field named as a message is).
+    plain = '\n'.join(f'<Event><Id>1</Id><Data>The quick brown fox number {n} jumped over the lazy dog</Data></Event>'
+                      for n in range(3))
+    chunk = split_records(plain)
+    shapes = Shapes()
+    for i in range(len(chunk.records)):
+        shapes.add(chunk, i, 1)
+    assert list(shapes.shapes) == ['fields:Data,Id']

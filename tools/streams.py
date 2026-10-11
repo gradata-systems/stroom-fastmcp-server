@@ -105,6 +105,13 @@ async def read_stream(
         'stream_id': stream_id, 'feed': first_body.get('feedName'), 'type': first_body.get('streamTypeName'),
         'first_record': first_record, 'total_records': (first_body.get('totalItemCount') or {}).get('count'),
         'available_child_types': first_body.get('availableChildStreamTypes'), 'records': records}
+    if child_type is None and first_body.get('dataType') != 'SEGMENTED' and (result['total_records'] or 1) <= 1:
+        split = await _split_raw(ctx, stroom, stream_id, first_record, record_count, limit)
+        if split:
+            records = split.pop('records')
+            result.update(split, records=records)
+            if not records:
+                return result
     if sum(len(r) for r in records) >= limit:
         result['truncated'] = True
         result['hint'] = "Record data was trimmed; read fewer records at a time."
@@ -114,6 +121,49 @@ async def read_stream(
         result['hint'] = (f"{len(records)} whole records fit the size limit; read on with "
                           f"first_record={result['next_first_record']}.")
     return result
+
+
+_LINE_FORMATS = {'xml fragments', 'json lines', 'key=value', 'delimited', 'syslog rfc3164', 'syslog rfc5424', 'cef',
+                 'unknown text'}
+
+
+async def _split_raw(ctx: Context, stroom: StroomGateway, stream_id: int, first: int, count: int,
+                     char_budget: int) -> dict[str, Any] | None:
+    """Records of a raw stream Stroom holds as one record, split from its text as survey_feed splits them: seen in
+    production, reads of records 200, 450, 700 and 950 of a 1,000-fragment sample each returned its first four. None
+    when it holds only one record after all."""
+    from utils.survey import split_records
+    text, truncated = await _cached_raw_text(ctx, stroom, stream_id)
+    try:
+        chunk = split_records(text, 1_000_000, truncated)
+    except Exception:       # a text the survey's splitter can't read: Stroom's one record, as before
+        return None
+    if len(chunk.records) <= 1:
+        return None
+    lines = [line for line in text.splitlines() if line.strip()]
+    if truncated and lines and not text.endswith(('\n', '\r')):
+        lines = lines[:-1]
+    if chunk.header and lines and lines[0] == chunk.header:
+        lines = lines[1:]
+    # One record a line: each as it is in the stream (an XML fragment keeps its namespace declaration); otherwise
+    # each record as the splitter gives it.
+    whole = lines if chunk.format in _LINE_FORMATS and len(lines) == len(chunk.records) else chunk.records
+    out, used = [], 0
+    for record in whole[first:first + count]:
+        if out and used + len(record) > char_budget:
+            break
+        out.append(record[:char_budget - used])
+        used += len(out[-1])
+    total = len(whole)
+    return {'records': out, 'total_records': None if truncated else total,
+            'records_are': (f"split from the stream's text ({chunk.format}{', a header line first' if chunk.header else ''}"
+                            f"), as Stroom holds it as one record"
+                            + (f"; only its first {len(text):,} characters were read, holding {total} records"
+                               if truncated else '')),
+            **({'hint': f"Records run from 0 to {total - 1}: first_record={first} is past the end."}
+               if first >= total and not truncated else
+               {'hint': f"first_record={first} is past the {total} records in the first {len(text):,} characters "
+                        f"read (max_sample_chars)."} if first >= total else {})}
 
 
 RAW_PAGE_CHARS = 200_000

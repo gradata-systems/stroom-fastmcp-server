@@ -70,17 +70,38 @@ async def pick_spread(stroom: StroomGateway, terms: list[dict[str, Any]], count:
     return picked, span
 
 
+FEED_CHARS = 250_000          # a part's head, for a feed's streams (any size)
+SAMPLE_CHARS = 2_000_000      # a sample stream's (stream_ids), read whole when it is a sample's size
+
+
 async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int) -> tuple[str, bool, int]:
-    """The first `chars` characters of one part: (text, cut off, number of parts in the stream)."""
-    body = await stroom.post('/data/v1/fetch', {
-        'sourceLocation': {'metaId': stream_id, 'partIndex': part, 'recordIndex': 0,
-                           'dataRange': {'charOffsetFrom': 0, 'length': chars}},
-        'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
-    if body.get('errors'):
-        raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
+    """The first `chars` characters of one part: (text, cut off, number of parts in the stream). Read in pages:
+    Stroom returns about 80,000 characters of a big part a fetch, whatever is asked (seen in production: a survey
+    allowed 250,000 characters read 108 of a sample's 1,000 records, and said it had read them all)."""
+    from tools.streams import NO_DATA
+
+    async def fetch(offset: int, length: int) -> dict[str, Any]:
+        body = await stroom.post('/data/v1/fetch', {
+            'sourceLocation': {'metaId': stream_id, 'partIndex': part, 'recordIndex': 0,
+                               'dataRange': {'charOffsetFrom': offset, 'length': length}},
+            'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
+        if body.get('errors'):
+            raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
+        return body
+    body = await fetch(0, chars)
     text = body.get('data') or ''
     total = (body.get('totalCharacterCount') or {}).get('count')
     parts = (body.get('totalItemCount') or {}).get('count') or 1
+    pages = [text]
+    have = len(text)
+    while total and have < min(chars, total - 1):
+        # As raw_text: Stroom's ranges end one past the length asked for, so the next page starts after what came back.
+        data = (await fetch(have, chars - have)).get('data') or ''
+        if not data or data.strip() == NO_DATA:
+            break
+        pages.append(data)
+        have += len(data)
+    text = ''.join(pages)
     # Stroom rounds a range out to whole lines, so a single-line stream (one big JSON array) can come back
     # whole: cut it here too.
     cut = len(text) > chars
@@ -105,11 +126,13 @@ async def survey_feed(
             description="Shape signatures from earlier calls; locations then only cover new shapes.")] = [],
         quiet_streams: Annotated[int, Field(ge=1, le=50, description="Stop after this many streams in a row add no "
                                                                      "new shape.")] = 4,
-        max_chars_per_stream: Annotated[int, Field(
+        max_chars_per_stream: Annotated[int | None, Field(
             ge=1000, le=5_000_000, description="Read at most this many characters from the start of each part; "
-                                               "big streams are only sampled at their head.")] = 250_000,
+                                               "big streams are only sampled at their head. Default 250,000, or "
+                                               "SAMPLE_CHARS for stream_ids (a sample is read whole).")] = None,
         max_parts_per_stream: Annotated[int, Field(ge=1, le=20)] = 3,
-        max_records_per_stream: Annotated[int, Field(ge=10, le=10_000)] = 1000,
+        max_records_per_stream: Annotated[int | None, Field(
+            ge=10, le=10_000, description="Default 1,000, or 10,000 for stream_ids.")] = None,
         examples_per_shape: Annotated[int, Field(ge=1, le=10)] = 2,
         build: Annotated[str | None, Field(
             description="Keep the survey record in this build: a Documentation doc '<feed> - Survey' with the kinds "
@@ -121,7 +144,8 @@ async def survey_feed(
     and group their records into shapes (kinds of event): by fields and event-naming values for structured
     data, by masked message templates for syslog and other text. Only the head of each stream is read
     (max_chars_per_stream per part, max_parts_per_stream parts), so multi-GB streams cost the same as small
-    ones. Stops when quiet_streams streams in a row show nothing new (saturated), or when every stream has
+    ones; a sample's streams (stream_ids) are read whole up to 2,000,000 characters, and coverage says when one
+    wasn't. Stops when quiet_streams streams in a row show nothing new (saturated), or when every stream has
     been read. Returns each shape with its count, share and examples, and where each example is (stream,
     part, record) for step_records. Call again with skip_stream_ids (all streams read so far) and
     known_signatures to read further streams for kinds of event not seen yet. With a build, the results are
@@ -129,6 +153,10 @@ async def survey_feed(
     """
     stroom = gateway_from(ctx)
     chosen = [await _meta(stroom, i) for i in stream_ids]
+    # A sample is read whole where it can be: seen in production, a 750 KB sample read only to its 108th record of
+    # 1,000 hid most of its kinds of event.
+    max_chars_per_stream = max_chars_per_stream or (SAMPLE_CHARS if chosen else FEED_CHARS)
+    max_records_per_stream = max_records_per_stream or (10_000 if chosen else 1000)
     if not feed:
         if not chosen:
             raise ToolError("Give feed, or stream_ids")
@@ -180,7 +208,9 @@ async def survey_feed(
             part += 1
         records_read += read_here
         per_stream.append({'stream': meta['id'], 'created': _iso(meta['createMs']) if meta.get('createMs') else None,
-                           'records': read_here, 'parts': parts, 'head_only': cut or parts > max_parts_per_stream,
+                           'records': read_here,
+                           'parts': parts, 'head_only': cut or parts > max_parts_per_stream
+                           or read_here >= max_records_per_stream,
                            'new_shapes': new_here})
         quiet = 0 if new_here else quiet + 1
         if quiet >= quiet_streams:
@@ -194,12 +224,19 @@ async def survey_feed(
     to_step = new_shapes if known_signatures else found
     drop = dropped(state)
     read_ids = [p['stream'] for p in per_stream if 'records' in p]
+    partly = [p['stream'] for p in per_stream if p.get('head_only')]
     saturated = (quiet >= quiet_streams or (bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams)
                  or bool(chosen))   # chosen streams: every one was read, so the sample is covered as far as it goes
+    # Not when a given stream was read only in part: the kinds of event further in weren't seen.
+    saturated = saturated and not (chosen and partly)
     result = {
         'feed': feed, 'format': fmt, 'time_range': span, 'streams_read': read_ids, 'records_read': records_read,
         'saturated': saturated,
-        'coverage': (f'all {len(read_ids)} given stream(s) read: these are the kinds of event the sample holds' if chosen else
+        'coverage': (f"NOT COVERED: only the start of stream(s) {partly} was read ({records_read} records); there may be "
+                     f"other kinds of event further in. Survey them again with max_chars_per_stream="
+                     f"{min(5_000_000, max_chars_per_stream * 4)} (up to 5,000,000)" if chosen and partly else
+                     f'all {len(read_ids)} given stream(s) read whole: these are the kinds of event the sample holds'
+                     if chosen else
                      'covered: no new kinds of event in the last streams read' if saturated else
                      'NOT COVERED YET: keep surveying before treating the translation as complete'),
         'per_stream': per_stream,

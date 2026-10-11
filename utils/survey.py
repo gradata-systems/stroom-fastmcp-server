@@ -6,8 +6,9 @@ groups records into shapes, one per kind of event, until a few more streams add 
 - JSON, XML, key=value: which fields a record has, plus the values of fields that usually name the event
   (action, event, type, category, logger and similar). A message-like field (body, message, msg...) is
   unwrapped: JSON inside it (after any text prefix or byte order mark) is signed the same way, and
-  key=value pairs in it keep the values of naming keys (type="LOGIN"). Its text is masked as below only
-  when nothing else names the event, so a wrapper (e.g. syslog shipped as JSON) doesn't hide the kinds.
+  key=value pairs in it keep the values of naming keys (type="LOGIN", or Action: [Login]). Its text is masked
+  as below only when nothing else names the event, so a wrapper (e.g. syslog shipped as JSON) doesn't hide the
+  kinds. A field of free text by another name (a Windows event's Data) is read for naming pairs too, never masked.
 - Delimited: the values of those naming columns, or of the low-variety columns when none is named that way.
 - Syslog and other text: the message with its variable parts masked (numbers, addresses, quoted strings),
   merged with other messages that differ only in a few words (user names, hosts), in the style of Drain.
@@ -29,6 +30,8 @@ NAMING = re.compile(r'(^|[._-])(type|event|event_?type|event_?name|event_?id|act
 # Fields holding the message itself, whose content may name the event.
 MESSAGE = re.compile(r'(^|[._-])(body|message|msg|log|text|payload)$', re.I)
 _KV = re.compile(r'(?<![\w.])([A-Za-z_][\w.]*)=\\?"?([\w.:-]+)')
+# Key: [Value], as audit messages name the event (Secret Server: "Event: [User] Action: [Login Failed]").
+_BRACKETED = re.compile(r'(?<![\w.])([A-Za-z_][\w.]*)\s*[:=]\s*\[([^\[\]]{1,60})\]')
 _DEPTH = 3
 _MASKS = [(re.compile(r'"[^"]*"'), '<s>'), (re.compile(r"'[^']*'"), '<s>'),
           (re.compile(r'\b[\w.+-]+@[\w-]+\.[\w.]+\b'), '<email>'),
@@ -162,6 +165,11 @@ def _xml_fields(node: etree._Element) -> dict[str, Any]:
     return out
 
 
+def _free_text(value: Any) -> bool:
+    """A value that reads as a sentence or message rather than a code or name."""
+    return isinstance(value, str) and len(value) >= 40 and value.count(' ') >= 5
+
+
 def _naming_columns(columns: list[str], rows: list[dict[str, Any]]) -> list[str]:
     named = [c for c in columns if NAMING.search(c)]
     if named or not rows:
@@ -227,8 +235,14 @@ class Shapes:
         signature = ','.join(keys) + (' | ' + ', '.join(naming) if naming else '')
         message = next((k for k in keys if MESSAGE.search(k.split('@')[-1]) and isinstance(parsed[k], str)
                         and parsed[k].strip()), None)
+        drain = not naming
+        if message is None:
+            # Free text under another name: seen in production, Secret Server's audit detail in a Windows event's
+            # Data, every record alike but for the kind of event inside it. Read for naming pairs only.
+            message = max((k for k in keys if _free_text(parsed[k])), key=lambda k: len(parsed[k]), default=None)
+            drain = False
         if message and depth < _DEPTH:
-            inner = self._inner(parsed[message], depth + 1, drain=not naming)
+            inner = self._inner(parsed[message], depth + 1, drain=drain)
             if inner:
                 signature += f' > {message}: {inner}'
         return signature
@@ -245,7 +259,8 @@ class Shapes:
                 inner = None
             if isinstance(inner, dict):
                 return 'json:' + self._fields(_flatten(inner), depth)
-        pairs = sorted({f'{k}={v}' for k, v in _KV.findall(text) if NAMING.search(k) and len(v) <= 60})
+        pairs = sorted({f'{k}={v.strip()}' for k, v in _KV.findall(text) + _BRACKETED.findall(text)
+                        if NAMING.search(k) and len(v) <= 60})
         if pairs:
             return 'kv:' + ', '.join(pairs)
         return self._text('', text) if drain else None

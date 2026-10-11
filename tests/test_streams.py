@@ -45,3 +45,27 @@ async def test_a_record_the_size_limit_would_cut_is_left_for_the_next_page():
     stroom.settings.max_stream_chars = 40
     one = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5)
     assert len(one['records']) == 1 and one['truncated']
+
+
+async def test_a_raw_stream_held_as_one_record_is_read_by_its_records():
+    # Seen in production: reads of records 200, 450, 700 and 950 of a 1,000-fragment sample each returned its first
+    # four, as Stroom holds a raw stream as one record; the agent went on to parse the file on disk in PowerShell.
+    from unittest.mock import patch
+    lines = [f'<Event xmlns="urn:win"><Id>{n}</Id></Event>' for n in range(1000)]
+    text = '\n'.join(lines) + '\n'
+    body = {'data': text[:500], 'dataType': 'NON_SEGMENTED', 'totalItemCount': {'count': 1}}
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(max_stream_chars=20_000))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(text, False))):
+        read = await streams.read_stream(ctx, stream_id=7, first_record=450, record_count=2)
+        assert read['records'] == lines[450:452] and read['total_records'] == 1000      # as in the stream
+        assert 'xml fragments' in read['records_are']
+        past = await streams.read_stream(ctx, stream_id=7, first_record=1000, record_count=2)
+        assert past['records'] == [] and 'past the end' in past['hint']
+    with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(text[:30_000], True))):
+        partly = await streams.read_stream(ctx, stream_id=7, first_record=900, record_count=2)
+        assert partly['records'] == [] and partly['total_records'] is None and 'max_sample_chars' in partly['hint']
+    one = {'data': 'just one line of text', 'dataType': 'NON_SEGMENTED', 'totalItemCount': {'count': 1}}
+    stroom.fetch_data = AsyncMock(return_value=one)
+    with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(one['data'], False))):
+        assert (await streams.read_stream(ctx, stream_id=7))['records'] == [one['data']]

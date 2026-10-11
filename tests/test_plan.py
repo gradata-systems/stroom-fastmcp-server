@@ -224,5 +224,28 @@ async def test_a_whole_document_is_not_read_as_cut_for_strooms_count_of_one_more
                                                           'totalItemCount': {'count': 1}}))
     text, cut, _ = await read_head(stroom, 1, 0, 20_000)
     assert text == doc and cut is False
-    stroom.post.return_value = {'data': doc, 'totalCharacterCount': {'count': len(doc) + 500}}
+    # Counted 500 more than there is: past the end, Stroom answers with its placeholder.
+    stroom.post = AsyncMock(side_effect=lambda path, body: {
+        'data': doc if body['sourceLocation']['dataRange']['charOffsetFrom'] == 0 else '## No Data ##',
+        'totalCharacterCount': {'count': len(doc) + 500}})
     assert (await read_head(stroom, 1, 0, 20_000))[1] is True
+
+
+async def test_a_big_part_is_read_in_pages_up_to_the_limit():
+    # Seen in production: Stroom returns about 80,000 characters a fetch, so a survey allowed 250,000 read only the
+    # first 108 of a sample's 1,000 records, and said it had read them all.
+    from tools.sampling import read_head
+    lines = ''.join(f'<Event><Id>{n}</Id></Event>\n' for n in range(1000))
+    page = 3000
+
+    async def post(path, body):
+        start = body['sourceLocation']['dataRange']['charOffsetFrom']
+        end = min(len(lines), start + min(page, body['sourceLocation']['dataRange']['length']))
+        end = lines.find('\n', end - 1) + 1 or len(lines)       # rounded out to a whole line
+        return {'data': lines[start:end] if start < len(lines) else '## No Data ##',
+                'totalCharacterCount': {'count': len(lines)}, 'totalItemCount': {'count': 1}}
+    stroom = SimpleNamespace(post=post)
+    text, cut, _ = await read_head(stroom, 1, 0, 1_000_000)
+    assert text == lines and cut is False
+    text, cut, _ = await read_head(stroom, 1, 0, 10_000)
+    assert len(text) <= 10_000 and cut is True and lines.startswith(text)
