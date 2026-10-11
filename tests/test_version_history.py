@@ -122,7 +122,8 @@ def test_the_docs_version_control_takes_one_row_a_build_and_keeps_an_older_chang
     assert rows[-1] == {'version': '3', 'date': '2026-10-12', 'by': 'peter (agent)',
                         'change': 'Rule for Checkout events; Field mapping regenerated', 'code': 'XSLT Acme @5678abcd'}
     assert versionlog.pending_of(released) == [] and versionlog.consolidate(released) is None
-    fresh = versionlog.with_pending('# New', '', 'Created', 'peter (agent)')
+    # Dated as the rest are: the day it ran broke it at midnight UTC.
+    fresh = versionlog.with_pending('# New', '', 'Created', 'peter (agent)', '', DAY1)
     assert versionlog.UNRELEASED in fresh and '| Unreleased | 2026-10-10 | peter (agent) | Created |' in fresh
     assert versionlog.rows_of(fresh) == []                     # the preview is never read back as a released row
     released = versionlog.consolidate(fresh, DAY1)
