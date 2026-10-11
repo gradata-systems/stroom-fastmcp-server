@@ -93,6 +93,28 @@ async def _refuse_case_twin(stroom: StroomGateway, name: str) -> None:
                         f"existing feed, or have it deleted first.")
 
 
+async def _existing_feed(ctx: Context, name: str, build: str) -> dict[str, Any] | None:
+    """The feed of exactly this name, when this build already has it (an agent's retry: it carries on with it); a feed
+    of the name anywhere else is refused, before the user is asked or anything is made. Seen on the local stack: Stroom
+    refused the duplicate only after the user had confirmed it, as a bare 500, leaving the new build's folder empty."""
+    stroom = gateway_from(ctx)
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')     # exact, and not lagging
+    except ToolError:
+        return None
+    if not (ref or {}).get('uuid'):
+        return None
+    if await guard_from(ctx).build_of(ref) == build:
+        doc = await stroom.get_doc('Feed', ref['uuid'])
+        return {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'], 'stream_type': doc.get('streamType'),
+                'encoding': doc.get('encoding'), 'existing': True,
+                'note': f"This build already has feed '{doc['name']}': nothing new was made; carry on with it."}
+    where = next((f.get('path') for f in await feeds_named(stroom, name) if f.get('uuid') == ref['uuid']), None)
+    raise ToolError(f"A feed named '{name}' already exists ({where or 'outside the workspace'}), and Stroom keeps one "
+                    f"feed per name. If it is the same source, use that feed (upload to it, or onboard_existing_feed for "
+                    f"the data it holds); if not, propose another name, such as the next version.")
+
+
 async def create_feed(
         ctx: Context,
         build: Build,
@@ -105,8 +127,14 @@ async def create_feed(
     """
     Create a feed in the build folder, under the name you propose: the user confirms it, or corrects it in the
     confirmation form, before anything is made (call this rather than asking for the name in the chat first). Stroom checks the
-    name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed.
+    name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed. A
+    feed of the same name elsewhere is refused before the user is asked, saying where it is; one already in this
+    build is returned as it is (existing: true).
     """
+    existing = await _existing_feed(ctx, name, build)
+    if existing:
+        from tools.plan import with_next
+        return await with_next(ctx, build, existing)
     await _refuse_case_twin(gateway_from(ctx), name)
     details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type}
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', f"Create feed '{name}'", details,
@@ -116,6 +144,11 @@ async def create_feed(
     proposed, name = name, edited(ctx, 'name', name)       # the user may have corrected it in the form
     stroom = gateway_from(ctx)
     if name != proposed:
+        # The name the user settled on in the form, checked as the proposed one was.
+        existing = await _existing_feed(ctx, name, build)
+        if existing:
+            from tools.plan import with_next
+            return await with_next(ctx, build, existing)
         await _refuse_case_twin(stroom, name)
     try:
         ref = await guard_from(ctx).create('Feed', name, build)

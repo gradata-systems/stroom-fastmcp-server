@@ -157,7 +157,7 @@ async def test_a_feed_differing_from_another_only_in_case_is_refused():
     from tools import feeds
     found = {'values': [{'docRef': {'type': 'Feed', 'uuid': 'old', 'name': 'Delinea-SecretServer-V1.0'},
                          'path': 'System / MCP Workspace / onboard-delinea'}]}
-    stroom = SimpleNamespace(find_documents=AsyncMock(return_value=found))
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value=found), get=AsyncMock(return_value=None))
     asked = AsyncMock(return_value={'status': 'needs_confirmation'})
     with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
             patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)):
@@ -166,3 +166,27 @@ async def test_a_feed_differing_from_another_only_in_case_is_refused():
             await feeds.create_feed(None, 'b', 'DELINEA-SECRETSERVER-V1.0')
         assert not asked.await_count                     # refused before the user is asked
         assert (await feeds.create_feed(None, 'b', 'DELINEA-SECRETSERVER-V2.0'))['status'] == 'needs_confirmation'
+
+
+
+async def test_a_feed_of_the_same_name_is_refused_before_anything_or_carried_on_with_in_its_own_build():
+    # Seen on the local stack: Stroom refused the duplicate only after the user confirmed it, as a bare 500, and the
+    # new build's folder was left empty. Now refused first, saying where the feed is; in its own build, carried on.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds
+    ref = {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-VPN-V1.0'}
+    found = {'values': [{'docRef': ref, 'path': 'System / Feeds / ACME'}]}
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value=found), get=AsyncMock(return_value=ref),
+                             get_doc=AsyncMock(return_value={**ref, 'streamType': 'Raw Events', 'encoding': 'UTF-8'}))
+    asked = AsyncMock(return_value={'status': 'needs_confirmation'})
+    guard = SimpleNamespace(build_of=AsyncMock(return_value=None), create=AsyncMock())
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom),             patch.object(feeds, 'guard_from', lambda ctx: guard),             patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)),             patch('tools.plan.with_next', AsyncMock(side_effect=lambda ctx, build, result: result)):
+        with pytest.raises(ToolError, match=r"A feed named 'ACME-VPN-V1.0' already exists \(System / Feeds / ACME\)"):
+            await feeds.create_feed(None, 'onboard-acme', 'ACME-VPN-V1.0')
+        assert not asked.await_count and not guard.create.await_count     # nothing asked, nothing made
+        guard.build_of.return_value = 'onboard-acme'                     # an agent's retry in the same build
+        again = await feeds.create_feed(None, 'onboard-acme', 'ACME-VPN-V1.0')
+        assert again['existing'] and again['uuid'] == 'f1' and 'nothing new was made' in again['note']
+        assert not asked.await_count and not guard.create.await_count
