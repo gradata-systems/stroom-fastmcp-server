@@ -229,7 +229,7 @@ async def list_template_children(
         pf = row.get('processorFilter')
         if pf and not pf.get('deleted'):
             terms = ((pf.get('queryData') or {}).get('expression') or {}).get('children') or []
-            names = {t.get('value') for t in terms if t.get('field') == 'Feed'}
+            names = {t.get('value') or (t.get('docRef') or {}).get('name') for t in terms if t.get('field') == 'Feed'}
             feeds_by_pipeline.setdefault(pf.get('pipelineUuid'), set()).update(n for n in names if n)
     result = []
     for kid in sorted(kids, key=lambda k: k['name']):

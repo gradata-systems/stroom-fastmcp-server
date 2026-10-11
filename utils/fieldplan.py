@@ -85,6 +85,9 @@ class Discovery(BaseModel):
         "The source field holding the event time, as the user names it: a JSON key (dotted for a nested one, e.g. "
         "'event.created'), a column name, or an XML child element ('when', 'header.time') or attribute ('@time'). "
         "Indexed as @timestamp."))
+    timestamp_chosen_by_user: bool = Field(default=False, description=(
+        "True only when the user picked timestamp_field among the candidates a needs_guidance reply listed (the "
+        "records hold times in several fields): not asked again."))
     timestamp_format: str | None = Field(default=None, description=(
         "Its Java date pattern when it is not ISO 8601 or epoch milliseconds, e.g. 'dd/MM/yyyy HH:mm:ss'."))
     meta: dict[str, str] = Field(default_factory=dict, description=(
@@ -284,6 +287,12 @@ class FieldPlan(BaseModel):
             # Elastic's recommended base for an ECS index template: its built-in component template, mapping ECS
             # fields by name. A field mapped here (not ECS's, or typed otherwise) overrides it.
             body['composed_of'] = [ECS_COMPONENT]
+        # Events are time series, written once: a data stream, as the user's indices generally are (asked for by the
+        # user: a plan-only ECS template came out a plain index). Every Event has @timestamp, which a data stream
+        # needs (validate requires it). A template built from the user's example follows the example instead. A
+        # discovery index is decided from its documents (propose_index_template): a data stream when every record
+        # has its time.
+        body['data_stream'] = {}
         return {'name': template_name, 'body': {**body, 'template': {'mappings': mappings}}}
 
     def _discovery_template(self, priority: int) -> dict[str, Any]:

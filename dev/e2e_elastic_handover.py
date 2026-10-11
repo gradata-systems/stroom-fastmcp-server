@@ -220,6 +220,8 @@ async def main():
         proposal['template'] = json.loads(dev_tools.split(chr(10), 1)[1])
         print('    ' + dev_tools.splitlines()[0])
         e2e.check(proposal['template']['index_patterns'] == [f'{index}*'], "template covers the pipeline's index")
+        # Asked by the user: their indices are data streams, and a template from the plan alone came out a plain index.
+        e2e.check(proposal['template'].get('data_stream') == {}, 'built from the plan alone: a data stream')
         e2e.check(proposal['self_check']['compatible'] and proposal['self_check']['documents_checked'] == 3,
                  f"proposal fits the {proposal['self_check']['documents_checked']} documents the pipeline writes: "
                  f"{proposal['self_check']['blocking']}")

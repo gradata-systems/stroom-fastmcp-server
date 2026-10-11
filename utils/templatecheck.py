@@ -530,6 +530,10 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     if 'data_stream' in example:
         body['data_stream'] = copy.deepcopy(example['data_stream'])
         notes.append("a data stream, as the example is")
+    elif str((own.get('_data_stream_timestamp') or {}).get('enabled', '')).lower() == 'true' and not discovery:
+        # The example is a data stream's backing index (GET <data stream>/_mapping): its mapping says so.
+        body['data_stream'] = {}
+        notes.append("a data stream, as the example's index is (its mapping has _data_stream_timestamp)")
     body['template'] = template
     if left:
         notes.append(f"left to the component templates (they map them): {left}")
@@ -652,6 +656,9 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                                   f"indexName to an index they match"})
     from utils import ecs
     mapping = read_mapping((body.get('template') or {}).get('mappings') or {})
+    if body.get('data_stream') is not None:
+        # Elasticsearch maps a data stream's @timestamp as a date itself, whatever dynamic says.
+        mapping.fields.setdefault('@timestamp', {'type': 'date'})
     by_component = ecs.COMPONENT in (body.get('composed_of') or [])
     for path, spec in mapping.fields.items():
         target = spec.get('path')
@@ -758,3 +765,21 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
 def _parents(path: str) -> list[str]:
     parts = path.split('.')
     return ['.'.join(parts[:n]) for n in range(len(parts) - 1, 0, -1)]
+
+
+def discovery_data_stream(body: dict[str, Any], docs: list[dict[str, Any]], field: str) -> tuple[dict[str, Any], str]:
+    """(body, note): a discovery index's template as a data stream when every sample document has its time
+    (@timestamp, from the source's time field), as event indexes are (asked for by the user); else a plain index, as a
+    data stream rejects a document without @timestamp."""
+    def time_of(doc: dict[str, Any]) -> str:
+        value = doc.get('@timestamp')
+        value = value[1] if isinstance(value, tuple) else value     # a document as read: (kind, value)
+        return str(value or '').strip()
+    missing = sum(1 for d in docs if not time_of(d))
+    if missing or not docs:
+        return body, (f"a plain index, not a data stream: {missing} of {len(docs)} sample records have no time in "
+                      f"{field!r}, and a data stream rejects a document without @timestamp")
+    out = {k: v for k, v in body.items() if k != 'template'}
+    out['data_stream'] = {}
+    out['template'] = body.get('template') or {}
+    return out, f"a data stream: all {len(docs)} sample records have their time in {field!r}, written as @timestamp"

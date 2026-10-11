@@ -21,8 +21,11 @@ Other limits:
   reprocessing, which Stroom handles by marking the earlier output deleted, so each raw stream keeps one Events
   stream.
 - **The right Events.** An indexing filter also carries `Pipeline IS_DOC_REF <events pipeline>`, so it indexes only
-  Events from the events pipeline built for the source, even on a shared feed. Indexing Events from a pipeline the
+  Events from the events pipeline built for the source, even on a shared feed. For new data it names that pipeline
+  and the stream type, with no feed condition: the pipeline says which Events. Indexing Events from a pipeline the
   server didn't build needs the user's confirmation of that pipeline.
+- **By reference, not by name.** Filters name feeds and pipelines with `IS_DOC_REF`, by their UUID. Stroom lists the
+  filter as depending on them, and renaming a feed or pipeline doesn't break it.
 
 ## Elasticsearch
 
@@ -33,7 +36,8 @@ The server has no Elasticsearch connection or credentials. Everything goes throu
 2. The server builds the new **index template** from it, following its names, types and settings, and checks it
    against the documents the indexing pipeline writes. The user sees it in the chat and agrees it, or corrects it,
    in which case it is checked again.
-3. Your **cluster admin applies** the agreed template (a Dev Tools request).
+3. Your **cluster admin applies** the agreed template (a Dev Tools request). Without an example, the template makes a **data stream**,
+   named as the index, with `@timestamp` as its time; with one, the example decides (index or data stream).
 4. The approval that starts indexing asks the user to confirm the template has been applied, since documents
    arriving first would create the index without it.
 

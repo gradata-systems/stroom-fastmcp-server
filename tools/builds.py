@@ -884,7 +884,11 @@ async def promote_build(
         details['warnings'] = warnings
     if processing:
         details['processing after promotion (created disabled, new data only)'] = [
-            f"{e['pipeline']['name']}: feed {e['feed']} ({e['stream_type']})" for e in processing]
+            f"{e['pipeline']['name']}: " + (f"feed {e['feed']} ({e['stream_type']})" if e['feed'] else
+                                             f"{e['stream_type']} from pipeline " + ', '.join(
+                                                 (t.get('docRef') or {}).get('name') or '?' for t in e['extra_terms']
+                                                 if t.get('field') == 'Pipeline'))
+            for e in processing]
     gate = await consent_from(ctx).require(ctx, 'approval', 'promote_build', f"Promote build '{build}'", details,
                                            approval_id)
     if gate:

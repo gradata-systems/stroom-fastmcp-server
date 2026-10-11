@@ -59,6 +59,16 @@ those. Going without an example (`without_example`) is confirmed in a form too. 
 the cluster without being agreed through it doesn't count, so indexing stays refused. Stepping clean is not
 indexing: the build's `indexed` step is done only once `verify_index` passes.
 
+Index or data stream: a template built from the plan alone (with `without_example`) makes a data stream
+(`data_stream: {}`), as event indexes are time series written once; `@timestamp`, which every Elasticsearch plan
+has, is its time field, and the index name is the data stream's. With an example, the example decides: a data
+stream if its template has `data_stream`, or if it is a data stream's backing index (`GET <data stream>/_mapping`,
+whose mapping has `_data_stream_timestamp`); otherwise a plain index. A discovery index is a data stream when every
+sample record has its time in the time field (the self-check counts them), else a plain index, as a data stream
+refuses a document without `@timestamp`. Give `draft_index_mapping` the raw streams (`events_stream_ids`) with a
+discovery index: when the records hold times in several fields, the user picks which is `@timestamp` (in a form,
+or ask them with the `timestamp_candidates` it lists, then draft again with `timestamp_chosen_by_user`).
+
 A discovery index is different: raw data (JSON, delimited text, XML) indexed as it is into Elasticsearch, for
 exploration, with no translation. Don't survey the data first; Elasticsearch maps its fields dynamically. Give
 `draft_index_mapping` `discovery` with what the user confirmed (the input: `json`, `delimited`, which needs a Data

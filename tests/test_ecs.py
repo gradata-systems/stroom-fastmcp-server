@@ -135,7 +135,8 @@ def test_documents_are_checked_against_what_the_component_maps():
 
     def docs(ip: str) -> list:
         return json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">7'
-                                  f'</number><map key="source"><string key="ip">{ip}</string></map></map></array>')
+                                  '</number><string key="@timestamp">2026-10-11T08:00:00.000Z</string>'
+                                  f'<map key="source"><string key="ip">{ip}</string></map></map></array>')
     plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', convention='ecs',
                      fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
                              PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
@@ -173,7 +174,8 @@ def test_dynamic_off_stops_the_component_and_says_so():
                      fields=[PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
     body = plan.elastic_template('ecs-acme-v1')['body']
     body['template']['mappings']['dynamic'] = 'strict'
-    docs = json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><map key="source">'
+    docs = json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map>'
+                              '<string key="@timestamp">2026-10-11T08:00:00.000Z</string><map key="source">'
                               '<string key="ip">10.0.0.1</string></map></map></array>')
     said = compare(body, docs, 'ecs-acme-v1')
     assert said['blocking'] == ['source.ip: an ECS field left to ecs@mappings, but dynamic is strict, so it isn\'t '

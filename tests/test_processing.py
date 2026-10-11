@@ -290,7 +290,8 @@ async def test_feed_wide_indexing_filter_carries_the_pipeline_condition(ctx):
         await gated_through(ctx, feed='ACME', stream_type='Events', created_after='2026-09-29T00:00:00Z',
                             source_pipeline_uuid='ev')
     children = json.loads(create.calls.last.request.content)['queryData']['expression']['children']
-    assert children[1] == PIPELINE_TERM and [c['field'] for c in children[0]['children']] == ['Feed', 'Type']
+    # The source pipeline says which Events: no feed condition beside it (asked for by the user).
+    assert children[1] == PIPELINE_TERM and [c['field'] for c in children[0]['children']] == ['Type']
 
 
 @respx.mock
@@ -521,10 +522,37 @@ async def test_promotion_plans_new_data_filters_from_sample_filters_and_surveys(
         {'uuid': 'sp', 'name': 'Old-Events'}], ['OLD-FEED'])
     assert [(e['pipeline']['name'], e['feed'], e['stream_type'], bool(e['extra_terms'])) for e in plan] == [
         ('Acme-Events', 'ACME', 'Raw Events', False),           # the test feed is left out
-        ('Acme - Indexing', 'ACME', 'Events', True),            # keeps its Pipeline condition
+        ('Acme - Indexing', None, 'Events', True),              # its Pipeline condition, no feed
         ('Old-Events', 'OLD-FEED', 'Raw Events', False)]        # stepping-only build: the surveyed feed
     create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 21}))
     made = await processing_writes.create_promotion_filters(ctx, plan[1:2], 1790000000000)
     body = json.loads(create.calls.last.request.content)
     assert body['enabled'] is False and body['minMetaCreateTimeMs'] == 1790000000000 and body['maxProcessingTasks'] == 2
-    assert body['queryData']['expression']['children'][2] == PIPELINE_TERM and made[0]['pipeline_link'].endswith('docUuid=ip')
+    children = body['queryData']['expression']['children']
+    assert [c['field'] for c in children] == ['Type', 'Pipeline'] and children[1] == PIPELINE_TERM
+    assert made[0]['pipeline_link'].endswith('docUuid=ip')
+
+
+@respx.mock
+async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(ctx):
+    # Asked for by the user: Feed IS_DOC_REF, not EQUALS a name, so Stroom keeps the filter as a dependency of the feed.
+    respx.get(f'{API}/feed/v1/getDocRefForName/ACME').mock(return_value=httpx.Response(
+        200, json={'type': 'Feed', 'uuid': 'feed-uuid', 'name': 'ACME'}))
+    create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 22}))
+    pipeline = {'uuid': 'tp', 'name': 'Acme-Events'}
+    await processing_writes.create_promotion_filters(
+        ctx, [{'pipeline': pipeline, 'feed': 'ACME', 'stream_type': 'Raw Events', 'extra_terms': []}], 1790000000000)
+    feed = json.loads(create.calls.last.request.content)['queryData']['expression']['children'][0]
+    assert feed == {'type': 'term', 'field': 'Feed', 'condition': 'IS_DOC_REF',
+                    'docRef': {'type': 'Feed', 'uuid': 'feed-uuid', 'name': 'ACME'}}
+    # Read back: shown by name, matched against a stream's feed, and the same filter as one naming the feed.
+    from tools.processing import _terms
+    expression = {'type': 'operator', 'op': 'AND', 'children': [feed]}
+    assert _terms(expression) == ['Feed IS_DOC_REF ACME']
+    assert processing_writes._selects(expression, {'feedName': 'acme'})
+    assert not processing_writes._selects(expression, {'feedName': 'OTHER'})
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9, 'pipelineUuid': 'tp', 'queryData': {'expression': {'type': 'operator', 'op': 'AND',
+            'children': [{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': 'ACME'}]}}}}]}))
+    with pytest.raises(ToolError, match='already selects these streams'):
+        await processing_writes._refuse_duplicate(processing_writes.gateway_from(ctx), 'tp', expression, None)

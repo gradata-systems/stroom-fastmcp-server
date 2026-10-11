@@ -14,7 +14,9 @@ def _terms(expression: dict[str, Any] | None) -> list[str]:
         if child.get('type') == 'operator':
             out.append(f"{child.get('op') or 'AND'}({', '.join(_terms(child))})")
         else:
-            out.append(f"{child.get('field')} {child.get('condition')} {child.get('value')}")
+            # A document by reference (Feed or Pipeline IS_DOC_REF) shows its name.
+            value = child.get('value') if child.get('value') is not None else (child.get('docRef') or {}).get('name')
+            out.append(f"{child.get('field')} {child.get('condition')} {value}")
     return out
 
 

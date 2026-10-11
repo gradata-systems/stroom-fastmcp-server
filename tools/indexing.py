@@ -168,11 +168,11 @@ async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[
                   f"its index template itself (settings, component templates) is not visible through Stroom"), read
 
 
-async def _choose(ctx: Context, question: str, options: list[str]) -> Any:
+async def _choose(ctx: Context, question: str, options: list[str], action: str = 'get_field_conventions') -> Any:
     """The user's pick in a form, None where the client has no form (the agent asks instead), or on a modern
     connection the form itself, for the tool to return."""
     store = (getattr(ctx, 'lifespan_context', None) or {}).get('consent')
-    return await store.choose(ctx, 'get_field_conventions', question, options) if store else None
+    return await store.choose(ctx, action, question, options) if store else None
 
 
 _NAMING = 'field_naming_chosen'
@@ -339,6 +339,69 @@ async def get_field_conventions(
     return out
 
 
+_TIME = 'discovery_time_chosen'
+
+
+def _time_chosen(ctx: Context, index_name: str) -> str | None:
+    """The source field the user picked in the form as a discovery index's @timestamp, this session."""
+    from tools.plan import _user
+    try:
+        chosen = ctx.lifespan_context.get(_TIME, {}).get((_user(ctx), index_name))
+    except Exception:
+        return None
+    return chosen['field'] if chosen and time.time() - chosen['at'] < _NAMING_TTL else None
+
+
+async def _discovery_time(ctx: Context, index_name: str, discovery: Discovery,
+                          stream_ids: list[int]) -> Discovery | dict[str, Any]:
+    """The discovery index's time field, confirmed by the user when the records hold more than one field of times
+    (asked for by the user: it becomes @timestamp, and with it whether the index is a data stream), or when the one
+    proposed holds no times. The answer is kept for the session, so the user isn't asked again."""
+    remembered = _time_chosen(ctx, index_name)
+    if remembered:
+        return discovery.model_copy(update={'timestamp_field': remembered})
+    if discovery.timestamp_chosen_by_user or not stream_ids:
+        return discovery
+    from tools.sampling import read_head
+    from utils.profile import profile
+    stroom = gateway_from(ctx)
+    text = ''
+    for stream_id in stream_ids[:3]:
+        try:
+            head, _, _ = await read_head(stroom, int(stream_id), 0, 100_000)
+        except (ToolError, ValueError):
+            continue
+        text += head.rstrip('\n') + '\n'
+    try:
+        fields = profile(text).get('fields') or [] if text.strip() else []
+    except Exception:
+        return discovery
+    candidates = [f.get('field') for f in fields if str(f.get('type') or '').startswith('timestamp') and f.get('field')]
+    proposed = discovery.timestamp_field
+    if not candidates or (candidates == [proposed]):
+        return discovery
+    ordered = ([proposed] if proposed in candidates else []) + [c for c in candidates if c != proposed]
+    labels = {(f"{c} (proposed)" if c == proposed else c): c for c in ordered}
+    chosen = await _choose(ctx, "Which field holds each record's time? It is indexed as @timestamp.", list(labels),
+                           action='draft_index_mapping')
+    if chosen is not None and not isinstance(chosen, str):
+        return chosen       # the form, on a modern connection: the answer comes with the repeated call
+    if chosen in labels:
+        field = labels[chosen]
+        from tools.plan import _user
+        try:
+            ctx.lifespan_context.setdefault(_TIME, {})[(_user(ctx), index_name)] = {'field': field, 'at': time.time()}
+        except Exception:
+            pass
+        return discovery.model_copy(update={'timestamp_field': field})
+    return {'status': 'needs_guidance', 'timestamp_candidates': ordered,
+            'hint': (f"The records hold times in {len(ordered)} fields ({', '.join(ordered)})"
+                     + ("" if proposed in candidates else f", and '{proposed}' isn't one of them")
+                     + ": ask the user which one is each record's time (it becomes @timestamp), in that order, "
+                       "recommending none. Then draft_index_mapping again with discovery.timestamp_field= their "
+                       "choice and discovery.timestamp_chosen_by_user=true.")}
+
+
 def _draft_discovery(backend: str, index_name: str, discovery: Discovery) -> dict[str, Any]:
     """Nothing is read: Elasticsearch maps the source's fields as documents arrive. The fields Stroom needs are
     the only explicit ones."""
@@ -363,7 +426,9 @@ async def draft_index_mapping(
         convention: Annotated[str | None, Field(description="Convention profile the user chose (get_field_conventions); "
                                                      "none for a discovery index.")] = None,
         events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams from stage 1, to see which "
-                                                                  "event-logging paths are actually populated.")] = [],
+                                                                  "event-logging paths are actually populated. For a "
+                                                                  "discovery index: its raw streams, to find the fields "
+                                                                  "holding times.")] = [],
         extra_fields: Annotated[list[PlannedField] | str, ONE_OR_MORE, Field(
             description="Fields the user asked for beyond the convention's map.")] = [],
         drop_when: Annotated[list[str] | str, ONE_OR_MORE, Field(
@@ -406,7 +471,10 @@ async def draft_index_mapping(
     their fields dynamically. Nothing is saved.
     """
     if discovery:
-        return _draft_discovery(backend, index_name, discovery)
+        timed = await _discovery_time(ctx, index_name, discovery, events_stream_ids)
+        if not isinstance(timed, Discovery):
+            return timed
+        return _draft_discovery(backend, index_name, timed)
     if events_stream_ids:
         # First, whatever else is asked: the streams must be Events (a Records stream, or a source's own data, is
         # refused with how to index it).
@@ -1641,15 +1709,23 @@ async def propose_index_template(
                         "source's index") + " uses, exactly as the user pasted it, and its component templates. If "
                         "it is not in this conversation, ask the user to paste it and end your turn. Only if they say "
                         "they have none: without_example=true, and they confirm the template built from the plan."}
-    composed, _ = compose(body, components)
     await _require_input(ctx, pipeline_uuid, events_stream_ids, plan)
-    check = compare(composed, await _documents(ctx, pipeline_uuid, events_stream_ids, 50), index)
+    docs = await _documents(ctx, pipeline_uuid, events_stream_ids, 50)
+    time_note = None
+    if plan.discovery is not None and not example_template:
+        # A discovery index is a data stream when the source's time field gives every record its time.
+        from utils.templatecheck import discovery_data_stream
+        body, time_note = discovery_data_stream(body, docs, plan.discovery.timestamp_field)
+    composed, _ = compose(body, components)
+    check = compare(composed, docs, index)
     text = json.dumps(body, indent=2)
     if not example_template:
-        notes = ["built from the field plan alone: the user has no example index template"]
+        notes = ["built from the field plan alone: the user has no example index template"] + (
+            [time_note] if time_note else [])
     result = {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
               'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
               **({'from_example': notes} if example_template else {}),
+              **({'data_stream': time_note} if time_note else {}),
               'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid)}
     if not check['compatible']:
         result['hint'] = ("It does not fit the documents the pipeline writes (self_check): show the user and ask "

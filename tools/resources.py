@@ -412,7 +412,9 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    sibling index, for its settings (and component templates, if it has any). If they don't know the time field, read one record
    (read_stream), no more.
 3. draft_index_mapping backend=elasticsearch discovery={{input (json, delimited, xml), timestamp_field, record (xml: the
-   record element), timestamp_format?, meta?, drop?}}: its XSLT copies every record as it is (a JSON object; each
+   record element), timestamp_format?, meta?, drop?}} events_stream_ids=the raw streams. When the records hold times in
+   several fields, the user picks which is @timestamp (a form, or ask them with the candidates it lists); every record
+   having its time makes the index a data stream. its XSLT copies every record as it is (a JSON object; each
    column, named by the header; an XML element as nested objects, repeated elements as arrays, attributes as
    fields), adding StreamId, EventId (the record number) and @timestamp, and parses a value holding a JSON object
    into a sibling <field>_json. save_xslt index_plan=plan with no code;

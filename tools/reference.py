@@ -87,7 +87,8 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
         if pf and not pf.get('deleted'):
             terms = ((pf.get('queryData') or {}).get('expression') or {}).get('children') or []
             feeds_by_pipeline.setdefault(pf.get('pipelineUuid'), set()).update(
-                t.get('value') for t in terms if t.get('field') == 'Feed' and t.get('value'))
+                t.get('value') or (t.get('docRef') or {}).get('name') for t in terms
+                if t.get('field') == 'Feed' and (t.get('value') or t.get('docRef')))
     maps: dict[str, dict[str, Any]] = {}
     for xslt in xslts.values():
         doc = await stroom.get(f"/xslt/v1/{xslt['uuid']}")

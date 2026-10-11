@@ -245,7 +245,9 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
         # Only when the user says they have none: built from the plan, and they confirm it as shown.
         asked = await indexing.propose_index_template(ctx, 'p1', plan, [7], without_example=True, reviewed=True)
     assert asked['status'] == 'needs_confirmation' and asked['template_name'] == 'stroom-discovery-acme-v1'
-    assert asked['details']['notes'] == ['built from the field plan alone: the user has no example index template']
+    assert asked['details']['notes'][0] == 'built from the field plan alone: the user has no example index template'
+    # Every sample record has its time: a data stream, as the user's indices are (asked for by the user).
+    assert asked['details']['notes'][1].startswith('a data stream:')
 
 
 
@@ -613,3 +615,58 @@ def test_an_object_repeated_across_actions_is_written_by_one_template():
                               'Destination': {'Resource': {'Id': 'b.txt'}}, 'Outcome': {'Success': True}}},
                     {'View': {'Resource': {'Id': 'secret-1'}}},
                     {'Move': {'Outcome': {'Success': False}}}]
+
+
+def _discovery_ctx():
+    from config import Settings
+    from utils.consent import ConsentStore
+    settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=settings), 'consent': ConsentStore(False)})
+
+
+TWO_TIMES = ('{"ts": "2026-10-11T08:00:00Z", "received": "2026-10-11T08:00:05Z", "user": "a"}\n'
+             '{"ts": "2026-10-11T08:01:00Z", "received": "2026-10-11T08:01:05Z", "user": "b"}\n')
+
+
+async def test_several_time_fields_are_put_to_the_user_and_the_choice_kept():
+    # Asked for by the user: when the records hold times in more than one field, the user picks @timestamp.
+    from utils.fieldplan import Discovery
+    ctx = _discovery_ctx()
+    asked = AsyncMock(return_value='received')
+    with patch('tools.sampling.read_head', AsyncMock(return_value=(TWO_TIMES, False, 1))), \
+            patch('tools.indexing._choose', asked):
+        result = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'stroom-discovery-acme-v1',
+                                                    discovery=Discovery(timestamp_field='ts'), events_stream_ids=[7])
+        assert result['plan']['discovery']['timestamp_field'] == 'received'
+        question, options = asked.call_args.args[1], asked.call_args.args[2]
+        assert '@timestamp' in question and options == ['ts (proposed)', 'received']
+        # Kept for the session: drafting again doesn't ask again, whatever the agent proposes.
+        again = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'stroom-discovery-acme-v1',
+                                                   discovery=Discovery(timestamp_field='ts'), events_stream_ids=[7])
+        assert asked.await_count == 1 and again['plan']['discovery']['timestamp_field'] == 'received'
+
+
+async def test_without_forms_the_candidates_are_listed_and_the_users_answer_goes_ahead():
+    from utils.fieldplan import Discovery
+    ctx = _discovery_ctx()
+    with patch('tools.sampling.read_head', AsyncMock(return_value=(TWO_TIMES, False, 1))), \
+            patch('tools.indexing._choose', AsyncMock(return_value=None)):
+        listed = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'stroom-discovery-acme-v1',
+                                                    discovery=Discovery(timestamp_field='when'), events_stream_ids=[7])
+        assert listed['status'] == 'needs_guidance' and listed['timestamp_candidates'] == ['ts', 'received']
+        assert "'when' isn't one of them" in listed['hint'] and 'timestamp_chosen_by_user=true' in listed['hint']
+        answered = await indexing.draft_index_mapping(
+            ctx, 'elasticsearch', 'stroom-discovery-acme-v1', events_stream_ids=[7],
+            discovery=Discovery(timestamp_field='received', timestamp_chosen_by_user=True))
+        assert answered['plan']['discovery']['timestamp_field'] == 'received'
+
+
+async def test_one_time_field_as_proposed_is_not_asked_about():
+    from utils.fieldplan import Discovery
+    one = '{"ts": "2026-10-11T08:00:00Z", "user": "a"}\n{"ts": "2026-10-11T08:01:00Z", "user": "b"}\n'
+    asked = AsyncMock()
+    with patch('tools.sampling.read_head', AsyncMock(return_value=(one, False, 1))), \
+            patch('tools.indexing._choose', asked):
+        result = await indexing.draft_index_mapping(_discovery_ctx(), 'elasticsearch', 'stroom-discovery-acme-v1',
+                                                    discovery=Discovery(timestamp_field='ts'), events_stream_ids=[7])
+    assert not asked.called and result['plan']['discovery']['timestamp_field'] == 'ts'

@@ -469,3 +469,55 @@ def test_an_alias_in_the_example_becomes_a_field_when_the_pipeline_writes_it():
     assert not check['compatible']
     assert any("an alias of 'User.Name', which this template doesn't map" in b for b in check['blocking'])
     assert any('User.Id: written by the pipeline, but mapped as an alias' in b for b in check['blocking'])
+
+
+def test_a_template_from_the_plan_alone_is_a_data_stream_and_an_example_decides_otherwise():
+    # Asked for by the user: a plan-only ECS template came out a plain index, where their indices are data streams.
+    from utils.fieldplan import FieldPlan, PlannedField
+    from utils.templatecheck import from_example, parse_template
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    body = plan.elastic_template('ecs-acme-v1')['body']
+    assert body['data_stream'] == {} and list(body).index('data_stream') < list(body).index('template')
+    full = plan.elastic_template('ecs-acme-v1', leave_to_component=False)['body']
+    # An example index template that is a plain index keeps it a plain index.
+    plain, _ = from_example(full, parse_template('{"index_patterns": ["ecs-other-v1*"], "template": {"mappings": '
+                                                 '{"properties": {"user": {"properties": {"name": {"type": "keyword"}}}}}}}')[1], {})
+    assert 'data_stream' not in plain
+    # A data stream's backing index, pasted as GET <data stream>/_mapping, says it is one.
+    backing, notes = from_example(full, parse_template(
+        '{".ds-ecs-other-v1-2026.10.11-000001": {"mappings": {"_data_stream_timestamp": {"enabled": true}, '
+        '"properties": {"@timestamp": {"type": "date"}}}}}')[1], {})
+    assert backing['data_stream'] == {} and any('_data_stream_timestamp' in n for n in notes)
+
+
+def test_a_data_stream_maps_its_own_timestamp_but_still_needs_the_pipeline_to_write_it():
+    from utils.templatecheck import compare, json_xml_documents
+    body = {'index_patterns': ['ecs-acme-v1*'], 'data_stream': {},
+            'template': {'mappings': {'dynamic': 'strict', 'properties': {'StreamId': {'type': 'long'}}}}}
+    def docs(extra: str) -> list:
+        return json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">'
+                                  f'7</number>{extra}</map></array>')
+    assert compare(body, docs('<string key="@timestamp">2026-10-11T08:00:00.000Z</string>'), 'ecs-acme-v1')['compatible']
+    missing = compare(body, docs(''), 'ecs-acme-v1')
+    assert not missing['compatible'] and any('needs @timestamp' in b for b in missing['blocking'])
+
+
+def test_a_discovery_index_is_a_data_stream_only_when_every_record_has_its_time():
+    from utils.templatecheck import discovery_data_stream
+    body = {'index_patterns': ['stroom-discovery-acme-v1*'], 'priority': 200, 'template': {'mappings': {}}}
+    timed = [{'@timestamp': '2026-10-11T08:00:00Z', 'user': 'a'}, {'@timestamp': '2026-10-11T08:01:00Z'}]
+    out, note = discovery_data_stream(body, timed, 'ts')
+    assert out['data_stream'] == {} and list(out)[-1] == 'template' and note.startswith('a data stream: all 2')
+    # One record without a time: a data stream would reject it, so a plain index, and why.
+    out, note = discovery_data_stream(body, timed + [{'user': 'b'}], 'ts')
+    assert 'data_stream' not in out and "1 of 3 sample records have no time in 'ts'" in note
+
+
+def test_a_record_with_an_empty_time_counts_as_without_one():
+    from utils.templatecheck import discovery_data_stream
+    body = {'index_patterns': ['d*'], 'template': {'mappings': {}}}
+    out, note = discovery_data_stream(body, [{'@timestamp': ('string', '2026-10-11T08:00:00Z')},
+                                             {'@timestamp': ('string', ' ')}], 'ts')
+    assert 'data_stream' not in out and '1 of 2' in note

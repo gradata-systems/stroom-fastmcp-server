@@ -8,6 +8,7 @@ outputs of a given filter while that happens.
 """
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -73,6 +74,19 @@ async def _already_processed(stroom: StroomGateway, pipeline_uuid: str, stream_i
     for f in await stroom.processor_filters(pipeline_uuid):
         selected |= _selected_ids((f.get('queryData') or {}).get('expression'))
     return [i for i in stream_ids if i in selected or await _outputs(stroom, i, pipeline_uuid)]
+
+
+async def _feed_term(stroom: StroomGateway, feed: str) -> dict[str, Any]:
+    """The filter's condition on its feed, by reference (Feed IS_DOC_REF), not by name: Stroom then keeps it as a
+    dependency of the feed, and a renamed feed is still the one selected (asked for by the user)."""
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+    except ToolError as e:
+        raise ToolError(f"No feed named '{feed}' in Stroom: give the feed's exact name") from e
+    if not (ref or {}).get('uuid'):
+        raise ToolError(f"No feed named '{feed}' in Stroom: give the feed's exact name")
+    return {'type': 'term', 'field': 'Feed', 'condition': 'IS_DOC_REF',
+            'docRef': {'type': 'Feed', 'uuid': ref['uuid'], 'name': ref.get('name') or feed}}
 
 
 def _pipeline_term(ref: dict[str, Any]) -> dict[str, Any]:
@@ -250,8 +264,16 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]],
             for feed in survey_feeds:
                 # The feed's own stream type (a reference feed's is Raw Reference), not Raw Events assumed.
                 targets.setdefault((feed, await feed_stream_type(stroom, feed)), [])
-        for (feed, stream_type), extra in sorted(targets.items()):
-            if feed and not feed.endswith('-MCP-TEST'):
+        by_source: set[tuple] = set()
+        for (feed, stream_type), extra in sorted(targets.items(), key=lambda t: (t[0][0] or '', t[0][1] or '')):
+            sources = tuple(sorted((t.get('docRef') or {}).get('uuid') or '' for t in extra if t.get('field') == 'Pipeline'))
+            if sources:
+                # Named by its source pipeline, not its feed: one filter whatever feeds the sample was in (a test
+                # feed among them), as the pipeline's Events are those meant.
+                if (stream_type, sources) not in by_source:
+                    by_source.add((stream_type, sources))
+                    plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra})
+            elif feed and not feed.endswith('-MCP-TEST'):
                 plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra})
     return plan
 
@@ -261,8 +283,9 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]], fro
     stroom = gateway_from(ctx)
     made = []
     for entry in plan:
-        expression = {'type': 'operator', 'op': 'AND', 'children': [
-            _term('Feed', entry['feed']), _term('Type', entry['stream_type']), *entry['extra_terms']]}
+        expression = {'type': 'operator', 'op': 'AND', 'children': (
+            [await _feed_term(stroom, entry['feed'])] if entry['feed'] else []) + [
+            _term('Type', entry['stream_type']), *entry['extra_terms']]}
         created = await _create_filter(stroom, entry['pipeline'], expression, 10, stroom.settings.max_feed_filter_tasks,
                                        from_ms, enabled=False)
         made.append({'filter_id': created['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
@@ -395,11 +418,15 @@ async def _feed_bounds(stroom: StroomGateway, pipeline_uuid: str, feed: str, str
 async def _refuse_duplicate(stroom: StroomGateway, pipeline_uuid: str, expression: dict[str, Any], min_ms: int | None) -> None:
     """Seen (Gemma, VS Code): the same feed-wide filter made twice, neither selecting anything."""
     from tools.processing import _terms
-    wanted = sorted(_terms(expression))
+    # A feed by name (filters made before) or by reference is the same feed.
+    def key(e):
+        return sorted(re.sub(r'^Feed (EQUALS|IS_DOC_REF) (.*)$', lambda m: f'Feed {m.group(2).lower()}', t)
+                      for t in _terms(e))
+    wanted = key(expression)
     for f in await stroom.processor_filters(pipeline_uuid):
         theirs = (f.get('queryData') or {}).get('expression')
         earliest = f.get('minMetaCreateTimeMs')
-        if sorted(_terms(theirs)) == wanted and (earliest or 0) <= (min_ms or 0):
+        if key(theirs) == wanted and (earliest or 0) <= (min_ms or 0):
             raise ToolError(f"Processor filter {f['id']} on this pipeline already selects these streams"
                             + (f" (created after {_iso(earliest)})" if earliest else '') + ": processing_status shows "
                             f"what it matched. If it matched nothing, the streams are not what it selects: a new filter "
@@ -474,8 +501,13 @@ async def create_processor_filter(
         except ValueError:
             raise ToolError(f"created_after '{created_after}' is not an ISO time, e.g. 2026-10-09T21:30:00Z")
         min_ms, since = await _feed_bounds(stroom, pipeline_uuid, feed, stream_type, min_ms)
-        expression = {'type': 'operator', 'op': 'AND', 'children': [_term('Feed', feed), _term('Type', stream_type)]}
-        scope, max_tasks = f"feed {feed} ({stream_type}) created after {since}", stroom.settings.max_feed_filter_tasks
+        # With the source pipeline named (below), its Events are those meant, whatever feed they are in: no feed
+        # condition (asked for by the user).
+        expression = {'type': 'operator', 'op': 'AND', 'children': (
+            [] if source else [await _feed_term(stroom, feed)]) + [_term('Type', stream_type)]}
+        scope = (f"{stream_type} streams created after {since}" if source
+                 else f"feed {feed} ({stream_type}) created after {since}")
+        max_tasks = stroom.settings.max_feed_filter_tasks
     if source:
         expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
         scope += f", only Events from pipeline '{source['name']}'"
@@ -615,6 +647,8 @@ def _selects(expression: dict[str, Any] | None, meta: dict[str, Any]) -> bool:
         return str(meta.get('id')) == value
     if condition == 'EQUALS' and field == 'Feed':
         return (meta.get('feedName') or '').lower() == value.lower()   # Stroom matches feed names whatever their case
+    if condition == 'IS_DOC_REF' and field == 'Feed':
+        return (meta.get('feedName') or '').lower() == str((expression.get('docRef') or {}).get('name')).lower()
     if condition == 'EQUALS' and field == 'Type':
         return meta.get('typeName') == value
     if condition == 'IS_DOC_REF' and field == 'Pipeline':
