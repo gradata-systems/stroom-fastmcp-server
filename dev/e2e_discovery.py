@@ -31,6 +31,10 @@ drifts: an older stream's latency_ms is "n/a", only the newest has a geo object)
    the drift is absorbed (malformed numbers ignored, new fields mapped as they arrive); Stroom's searches find
    them all.
 
+With --data-stream only: no example template, so a data stream (asked for by the user). The sample's records hold
+times in two fields, so the user is asked which is @timestamp; Stroom indexes into the data stream and searches
+it, and reprocessing clears the stream's documents from it first, with the request the approval gives.
+
 With --shapes only (and last in a full run), awkward shapes: arrays of objects (indexed flattened, and documented
 so), arrays of numbers and of arrays, null and empty values, deep nesting, keys with spaces, a JSON array held in a
 string (left as text), a mixed array (its odd value ignored), keys Elasticsearch refuses or Stroom drops (_id, other
@@ -222,6 +226,80 @@ async def text_formats(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp:
         e2e.check('secret' not in e2e.field_rows(written.get('field_mapping') or ''), 'the dropped column is not documented')
 
 
+# Two fields of times: the event's (ts) and when it was received; the user picks @timestamp.
+TWO_TIMES = json.dumps([
+    {'ts': '2026-10-01T09:00:00Z', 'received': '2026-10-01T09:00:04Z', 'host': 'web01', 'event': 'login', 'status': 200},
+    {'ts': '2026-10-01T09:01:30Z', 'received': '2026-10-01T09:01:31Z', 'host': 'web02', 'event': 'logout', 'status': 200},
+    {'ts': '2026-10-01T09:05:00Z', 'received': '2026-10-01T09:05:09Z', 'host': 'web01', 'event': 'upload', 'status': 500},
+], indent=1)
+
+
+async def data_stream(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str) -> None:
+    """With no example template, a discovery index whose records all have their time is a data stream (asked for
+    by the user): Stroom indexes into it, searches it, and reprocessing clears it first as the approval says."""
+    build, feed = f'e2e-discovery-ds-{stamp}', f'E2E-DS-RAW-{stamp}'
+    index = f'stroom-discovery-ds-{stamp}-v1'
+    print('\n### a data stream, from the plan alone')
+    await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
+    raw = (await feeds.upload_sample(ctx, feed, TWO_TIMES))['stream_id']
+    template = await fixture_template(stroom)
+    cluster = await live_cluster(stroom)
+    # The records hold times in two fields: the user is asked which is @timestamp (no forms here: listed to ask).
+    asked = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, events_stream_ids=[raw],
+                                               discovery=Discovery(timestamp_field='ts'))
+    e2e.check(asked.get('status') == 'needs_guidance' and asked.get('timestamp_candidates') == ['ts', 'received'],
+              f"two fields of times: the user is asked which is @timestamp: {asked.get('timestamp_candidates')}")
+    draft = await indexing.draft_index_mapping(ctx, 'elasticsearch', index, events_stream_ids=[raw],
+                                               discovery=Discovery(timestamp_field='ts', timestamp_chosen_by_user=True))
+    plan = FieldPlan.model_validate(draft['plan'])
+    e2e.check(plan.discovery.timestamp_field == 'ts', "the user's choice, ts, is @timestamp")
+    xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan)
+    pipeline = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{index} - Discovery',
+                                template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_name=index,
+                                cluster_uuid=cluster['uuid'])
+    stepped = await stepping.step_sample(ctx, pipeline['uuid'], [raw])
+    e2e.check(stepped['verdict'] == 'clean', f"stepped clean: {stepped['verdict']}")
+    final = await e2e.agreed(indexing.propose_index_template, ctx=ctx, pipeline_uuid=pipeline['uuid'], plan=plan,
+                             events_stream_ids=[raw], without_example=True)
+    e2e.check(final['template'].get('data_stream') == {} and (final.get('data_stream') or '').startswith('a data stream'),
+              f"no example, and every record has its time: a data stream ({final.get('data_stream')})")
+    path, request = _request(final['dev_tools'])
+    e2e.check((await es.put(f'/{path}', json=request)).status_code == 200, f'PUT {path}')
+    started = await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                               stream_ids=[raw])
+    done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
+                                                       filter_id=started['filter_id'])
+    e2e.check(done.get('gate') == 'pass', f"Stroom indexed into the data stream with no Error stream: {done.get('streams')}")
+    found = (await es.get(f'/_data_stream/{index}')).json().get('data_streams') or []
+    backing = [i['index_name'] for i in (found[0]['indices'] if found else [])]
+    e2e.check(len(found) == 1 and backing and backing[0].startswith('.ds-'),
+              f'{index} is a data stream in Elasticsearch, backed by {backing}')
+    await es.post(f'/{index}/_refresh')
+    e2e.check((await es.get(f'/{index}/_count')).json().get('count') == 3, 'all three records in the data stream')
+    doc = await e2e.agreed(indexing.create_index_doc, ctx=ctx, build=build, backend='elasticsearch', name=index,
+                           time_field='@timestamp', index_name=index, cluster_uuid=cluster['uuid'])
+    await paired(ctx, es, build, index, doc['uuid'], [raw], 3, ['StreamId', 'EventId', '@timestamp'], [
+        ('host', 'EQUALS', 'web01', 2, {'term': {'host': 'web01'}}),
+        ('status', 'GREATER_THAN', '400', 1, {'range': {'status': {'gt': 400}}}),
+    ], pipeline_uuid=pipeline['uuid'])
+    # Reprocessing: a data stream keeps what was indexed, so the approval gives the request to clear the stream's
+    # documents first; after it, the count is three again, not six.
+    asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw])
+    note = (asked.get('details') or {}).get('already indexed') or ''
+    e2e.check(asked.get('status') == 'needs_approval' and f'POST {index}/_delete_by_query' in note,
+              'the approval gives the _delete_by_query request for the data stream')
+    request = note[note.index('POST '):]
+    path, body = request.split(' ', 2)[1], json.loads(request.split(' ', 2)[2])
+    deleted = (await es.post(f'/{path}?refresh=true', json=body)).json().get('deleted')
+    e2e.check(deleted == 3, f'the cluster admin deletes them from the data stream first: {deleted} documents')
+    again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], approval_id=asked['approval_id'])
+    redone = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
+                                                         filter_id=again['filter_id'])
+    e2e.check(redone.get('gate') == 'pass', 'reprocessed into the data stream with no Error stream')
+    await es.post(f'/{index}/_refresh')
+    e2e.check((await es.get(f'/{index}/_count')).json().get('count') == 3, 'three records again, not six')
+
+
 async def main():
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
@@ -244,6 +322,8 @@ async def main():
                 await existing_feed(ctx, stroom, es, stamp)
             if only in (None, '--formats'):
                 await text_formats(ctx, stroom, es, stamp)
+            if only in (None, '--data-stream'):
+                await data_stream(ctx, stroom, es, stamp)
             if only in (None, '--shapes'):
                 await shapes(ctx, stroom, es, stamp)
         print('\nALL PASSED')
