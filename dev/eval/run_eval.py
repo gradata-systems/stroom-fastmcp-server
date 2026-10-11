@@ -305,6 +305,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
     score, started = Score(case['id'], 'reference'), time.monotonic()
     tag = case['id'].split('_', 1)[0]
     build, feed = f'eval-{tag}-{stamp}', f'EVAL-{tag}-{stamp}'
+    pipelines: list[str] = []     # the case's pipelines, whose processor filters go when it is done
     try:
         reference = case['reference']
         samples = samples_of(case)
@@ -364,6 +365,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
             rprops.append(PropertyValue(element='translationFilter', name='xslt', doc_uuid=rx['uuid'], doc_type='XSLT'))
             rpipe = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{ref_feed}-Reference',
                                     template_uuid=ref_template['uuid'], set_properties=rprops)
+            pipelines.append(rpipe['uuid'])
             rstep = await stepping.step_sample(ctx, rpipe['uuid'], [ref_raw])
             if rstep['verdict'] != 'clean':
                 score.problems.append(f"reference pipeline stepping: {rstep['verdict']}")
@@ -390,6 +392,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
         pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
                                    template_uuid=template['uuid'], set_properties=props, replace_parser=replace_parser,
                                    references=references)
+        pipelines.append(pipeline['uuid'])
         sample = await stepping.step_sample(ctx, pipeline['uuid'], raws)
         if sample['verdict'] == 'blocking':
             score.problems.append(f"stepping blocking: {[(g['element'], g.get('examples')) for g in sample['groups']][:3]}")
@@ -418,6 +421,7 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
                       if c['backend'] == 'lucene')
         ipipe = await e2e.agreed(indexing.create_indexing_pipeline, ctx=ctx, build=build, name=f'{feed}-INDEX - Indexing',
                                 template_uuid=lucene['uuid'], xslt_uuid=ixslt['uuid'], index_uuid=index['uuid'])
+        pipelines.append(ipipe['uuid'])
         istep = await stepping.step_sample(ctx, ipipe['uuid'], events)
         if istep['verdict'] != 'clean':
             score.problems.append(f"indexing pipeline stepping: {istep['verdict']}")
@@ -441,8 +445,26 @@ async def run_reference(case: dict[str, Any], stamp: str) -> Score:
     finally:
         score.seconds = round(time.monotonic() - started, 1)
         score.passed = score.stage1 and score.indexed and score.hints <= MAX_HINTS
+        try:
+            await delete_filters(stroom, pipelines)
+        except Exception as e:
+            score.problems.append(f"cleanup: processor filters not deleted: {type(e).__name__}: {e}")
         await stroom.close()
     return score
+
+
+async def delete_filters(stroom, pipelines: list[str]) -> None:
+    """Delete the processor filters on a case's pipelines once it is scored, leaving its streams and documents to look
+    at. Left enabled, every case's filters were gone through on each of Stroom's task-creation cycles: 1,600 of them
+    kept the local stack's database at 40% CPU."""
+    if not pipelines:
+        return
+    rows = (await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND',
+                                                                         'children': []}})).get('values') or []
+    for row in rows:
+        f = row.get('processorFilter')
+        if f and f.get('pipelineUuid') in pipelines and not f.get('deleted'):
+            await stroom.request('DELETE', f"/processorFilter/v1/{f['id']}")
 
 
 def print_score(s: Score) -> None:

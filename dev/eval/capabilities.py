@@ -30,10 +30,7 @@ CAPABILITIES = {
     'large_samples': ('Large samples', 'samples bigger than one read, the kinds of event deep in the file'),
 }
 # Capabilities with no case yet, and why: the test accepts these, the README shows them.
-PENDING = {
-    'malformed_records': 'no case yet: a sample with truncated lines, unbalanced quotes and missing separators, whose '
-                         'records the server reports rather than drops',
-}
+PENDING: dict[str, str] = {}
 
 
 def covered(cases: list[dict[str, Any]]) -> dict[str, list[str]]:

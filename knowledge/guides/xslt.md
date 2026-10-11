@@ -104,7 +104,7 @@ Each value has one source and optional modifiers:
 
 | Modifier | Meaning |
 | --- | --- |
-| `transform` | `lower`, `upper`, `trim`, `strip_domain` (`DOMAIN\user`, `user@domain` → `user`), `domain`, `digits` |
+| `transform` | `lower`, `upper`, `trim`, `strip_domain` (`DOMAIN\user`, `user@domain` → `user`), `domain`, `digits`, `unescape_quotes` (a quoted CSV value's doubled quotes as one), `strip_control` (ANSI colour codes and other control characters out, from a log written for a terminal) |
 | `dictionary: name` | The value a Dictionary of key=value lines gives the field |
 | `map`, `default`, `time_format`, `timezone` | As before: a value map, a fallback, time parsing |
 
@@ -121,7 +121,8 @@ entry per line). Write XSLT by hand only for what none of this expresses.
   of) writes one element per value: the nearest element on the path the schema lets repeat, so
   `EventSource/User/Groups/Group/Name` with `repeat` writes one `Group` per value, and
   `EventDetail/<Action>/Data` with a `data_name` writes one `Data` per value. Nothing else may be mapped below
-  the repeated element; `transform` applies to each value.
+  the repeated element; `transform` applies to each value. A key=value key given several times (`rcpt=` once per
+  recipient) is such a field: without `repeat` only its first value is read.
 - **`drop_when`**: records (or items) to leave untranslated on purpose, each with a reason: heartbeats, test
   traffic, service accounts. They are tried before the event rules, write no Event and raise no "no mapping
   matched" warning; the reasons appear in the XSLT and the documentation. `survey_feed`'s `set_shape_handling`

@@ -66,6 +66,17 @@ def check(case: dict[str, Any]) -> dict[str, Any]:
     if case.get('files') and splitter is not None:
         # The server reads a sample's first records only: files are counted whole, as Stroom will split them.
         counted = sum(len(dry_run(splitter, t.strip('﻿\r\n '), max_records=10 ** 7)['records']) for t in texts)
+    if mapping.json_fields and case.get('files') and splitter is not None:
+        # Lines whose JSON field doesn't parse give no fields and no Event (a damaged line, logged): not counted.
+        import json as _json
+
+        def parses(record: dict[str, Any]) -> bool:
+            try:
+                return all(isinstance(_json.loads(record.get(f) or ''), dict) for f in mapping.json_fields)
+            except ValueError:
+                return False
+        counted = sum(sum(parses(r) for r in dry_run(splitter, t.strip('﻿\r\n '), max_records=10 ** 7)['records'])
+                      for t in texts)
     from utils.profile import wrapped_records
     wrapped = [wrapped_records(t.strip()) for t in texts] if mapping.input == 'json' else []
     if wrapped and all(wrapped):

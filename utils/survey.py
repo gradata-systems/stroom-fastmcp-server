@@ -87,6 +87,13 @@ def split_records(text: str, max_records: int = 5000, truncated: bool = False) -
         if truncated and len(records) > 1:
             records = records[:-1]
         return Chunk(fmt, records[:max_records], [None] * min(len(records), max_records))
+    if fmt == 'cri':
+        # Kubernetes CRI: a record ends at its full (F) line, its partial (P) lines before it.
+        from utils.dsgen import group_lines_to_end
+        records = group_lines_to_end(lines, info['record_end'])
+        if truncated and len(records) > 1:
+            records = records[:-1]
+        return Chunk(fmt, records[:max_records], [None] * min(len(records), max_records))
     if fmt == 'delimited' and info.get('header_directive'):
         # Columns named by a directive line (W3C, Zeek): records are the data lines, read under the columns in effect.
         from utils.dsgen import infer_spec, _dry_run_directives

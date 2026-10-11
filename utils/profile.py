@@ -34,11 +34,21 @@ TIMESTAMPS = [
 # How a JSON sample reaches the XSLT. The JSONParser reads every top-level value in the stream and, with
 # addRootObject (its default), wraps them all in one <map>; so JSON lines parse as /map/map with no text
 # converter, and an array as /map/array/map, or /array/map with addRootObject off.
+# Lines read when looking for those that aren't what the rest are (a JSON line cut short, a row short of a column).
+MALFORMED_SCAN = 5000
+# JSON lines some of which aren't JSON: one record a line through a Data Splitter, the JSON parsed in the XSLT.
+JSON_LINES_SPEC = "build_data_splitter spec {'kind': 'regex', 'pattern': '^(.*)$', 'names': ['json']}"
 JSON_SETUP = {
     'lines': {'text_converter': 'none: the JSONParser element parses JSON lines itself; a text converter cannot',
               'parser_properties': {'jsonParser.addRootObject': True},
               'xslt_input': {'namespace': 'http://www.w3.org/2013/XSL/json', 'root': '/map', 'record': 'map',
                              'mapping': {'input': 'json', 'json_layout': 'lines'}}},
+    'lines_with_bad': {'text_converter': f'a Data Splitter, one record a line ({JSON_LINES_SPEC})',
+                       'suggested_parser': 'DSParser with a Data Splitter, one record a line, the JSON read by the '
+                                           "mapping's json_fields: Stroom's JSONParser stops at a line that isn't JSON",
+                       'parser_properties': {},
+                       'xslt_input': {'namespace': 'records:2', 'root': '/records', 'record': 'record',
+                                      'mapping': {'input': 'data_splitter', 'json_fields': ['json']}}},
     'array': {'text_converter': 'none: the JSONParser element parses the array itself; a text converter cannot',
               'parser_properties': {'jsonParser.addRootObject': False},
               'xslt_input': {'namespace': 'http://www.w3.org/2013/XSL/json', 'root': '/array', 'record': 'map',
@@ -258,7 +268,8 @@ def profile_many(samples: dict[str, str], max_records: int = 200) -> dict[str, A
     setup = {k: first[k] for k in ('suggested_parser', 'text_converter', 'parser_properties', 'xslt_input', 'parser')
              if k in first}
     return {'files': {n: {k: v for k, v in p.items() if k in ('format', 'records', 'lines', 'note', 'delimiter', 'has_header',
-                                                               'record_element', 'namespace', 'event_logging')} for n, p in profiles.items()},
+                                                               'record_element', 'namespace', 'event_logging',
+                                                               'malformed_lines', 'malformed_note')} for n, p in profiles.items()},
             'format': first['format'] if len(formats) == 1 else 'mixed', 'records': sum(p.get('records', 0) for p in profiles.values()),
             'fields': fields, 'differences': differences, **setup,
             'hint': ("Map every field a rule needs with any_of where files name it differently, and give rules for the "
@@ -386,6 +397,42 @@ def custom_delimiter(lines: list[str]) -> str | None:
     if not counts:
         return None
     return max(counts, key=lambda t: (len(t), counts[t]))
+
+
+def steady_delimiter(lines: list[str]) -> str | None:
+    """The separator ('|', ',', tab, ';') that splits at least four in five lines into the same number (two or
+    more) of columns."""
+    from utils.dsgen import _split_quoted
+    for delimiter in (',', '\t', '|', ';'):
+        widths = Counter(len(_split_quoted(l, delimiter, '"')) for l in lines)
+        width, seen = widths.most_common(1)[0]
+        if width >= 2 and seen >= 0.8 * len(lines):
+            return delimiter
+    return None
+
+
+def off_rows(lines: list[str], delimiter: str, width: int, has_header: bool) -> list[dict[str, Any]]:
+    """Delimited lines that aren't like the rest: a quote opened and not closed, or another number of columns."""
+    from utils.dsgen import _split_quoted
+    out = []
+    for n, line in enumerate(lines[1:] if has_header else lines, 2 if has_header else 1):
+        if line.count('"') % 2:
+            out.append({'line': n, 'reason': 'a quote opened and not closed', 'text': line[:160]})
+            continue
+        cells = len(_split_quoted(line, delimiter, '"'))
+        if cells != width:
+            out.append({'line': n, 'reason': f'{cells} columns where the rest have {width}', 'text': line[:160]})
+    return out
+
+
+def _malformed(bad: list[dict[str, Any]], what_stroom_does: str) -> dict[str, Any]:
+    """The lines that aren't like the rest, said rather than left to be found in processing."""
+    if not bad:
+        return {}
+    return {'malformed_lines': bad[:20],
+            'malformed_note': (f"{len(bad)} line(s) aren't like the rest (first: line {bad[0]['line']}, "
+                               f"{bad[0]['reason']}). {what_stroom_does}. Show them to the user: fixed at the source, "
+                               f"left out on purpose (drop_when), or mapped as they are.")}
 
 
 _WRAPPER_HEAD = re.compile(r'^\{\s*(?:"[^"]*"\s*:\s*(?:"(?:\\.|[^"\\])*"|-?[\d.eE+-]+|true|false|null)\s*,\s*)*'
@@ -526,20 +573,39 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                                     f"writes them); the mapping makes an Event of each with for_each='{key}' (a "
                                     f"translation template with a JSONParser: find_pipeline_templates)",
                 **json_setup_wrapped(key)}
-    json_lines = []
-    for line in lines[:max_records]:
+    json_lines, bad = [], []
+    for n, line in enumerate(lines[:max(max_records, MALFORMED_SCAN)], 1):
         try:
             obj = json.loads(line)
-            if isinstance(obj, dict):
-                json_lines.append(obj)
-        except ValueError:
-            break
-    # A last line cut short by a read limit doesn't make JSON lines something else.
-    whole = min(len(lines), max_records)
-    if json_lines and (len(json_lines) == whole or (len(json_lines) == whole - 1 and len(lines) <= max_records
-                                                    and len(json_lines) >= 2)):
-        return {**result, 'format': 'json lines', 'records': len(lines), 'fields': _inventory([_flatten(r) for r in json_lines]),
-                'suggested_parser': 'JSONParser, one object per line (a translation template with one: find_pipeline_templates)', **JSON_SETUP['lines']}
+        except ValueError as e:
+            if not json_lines and n == 1:
+                break           # not JSON lines at all (or not JSON): the other formats are tried
+            bad.append({'line': n, 'reason': f"isn't JSON: {str(e).split(':')[0]}", 'text': line[:160]})
+            continue
+        if isinstance(obj, dict):
+            json_lines.append(obj)
+        else:
+            bad.append({'line': n, 'reason': "isn't a JSON object", 'text': line[:160]})
+    read = min(len(lines), max(max_records, MALFORMED_SCAN))
+    if bad and bad[-1]['line'] == read == len(lines) and len(bad) == 1 and json_lines:
+        bad, read = [], read - 1    # only the last line, cut short by a read limit
+    if len(json_lines) >= 2 and len(json_lines) >= 0.8 * (read - len(bad)) and len(json_lines) >= 0.8 * read:
+        found = {**result, 'format': 'json lines', 'records': len(lines),
+                 'fields': _inventory([_flatten(r) for r in json_lines[:max_records]]),
+                 'suggested_parser': 'JSONParser, one object per line (a translation template with one: '
+                                     'find_pipeline_templates)', **JSON_SETUP['lines']}
+        if bad:
+            # Seen on the local Stroom: a line cut short stopped the JSONParser with a fatal error, and every record
+            # after it in the stream was lost.
+            found.update(JSON_SETUP['lines_with_bad'])
+            found['malformed_lines'] = bad[:20]
+            found['note'] = (f"{len(bad)} of the {read} lines read aren't JSON objects (first: line {bad[0]['line']}, "
+                             f"{bad[0]['reason']}). Stroom's JSONParser stops the stream at the first such line, a "
+                             f"fatal error, and every record after it is lost. Read the lines with a Data Splitter "
+                             f"instead, one record a line ({JSON_LINES_SPEC}), and map their keys through json_fields: "
+                             f"['json'] (a key is then json.<key>): a line that isn't JSON gives no fields, matches no "
+                             f"rule and is logged, and the rest are read.")
+        return found
 
     if not json_lines and JSON_START.match(text):
         raise _not_json(text)
@@ -563,6 +629,13 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
         return {**result, 'format': 'syslog rfc3164', 'records': len(lines), 'examples': lines[:3],
                 'suggested_parser': 'Data Splitter with a regex for PRI, timestamp, host, tag and message'}
 
+    from utils.dsgen import CRI_LINE, CRI_END, CRI_JOIN, group_lines_to_end
+    if lines and sum(bool(re.match(CRI_LINE, l)) for l in lines) >= 0.9 * len(lines):
+        records = group_lines_to_end(lines, CRI_END)
+        return {**result, 'format': 'cri', 'record_end': CRI_END, 'records': len(records), 'examples': records[:3],
+                'suggested_parser': "Data Splitter with record_end: Kubernetes CRI container log lines, a message split "
+                                    "into partial (P) lines ended by its full (F) line (build_data_splitter infers it); "
+                                    f"the mapping joins the parts with xpath {CRI_JOIN}"}
     multi = multiline_records(lines)
     if multi:
         start, records = multi
@@ -573,8 +646,12 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                                     "(build_data_splitter infers the start; give the record's pattern, starting (?s))"}
     kv = [dict((k, v.strip('"')) for k, v in KEY_VALUE.findall(line)) for line in lines[:max_records]]
     if kv and sum(len(r) >= 3 for r in kv) >= 0.8 * len(kv):
-        return {**result, 'format': 'key=value', 'records': len(lines), 'fields': _inventory(kv),
-                'suggested_parser': 'Data Splitter splitting on spaces then = (a translation template with a DSParser: find_pipeline_templates)'}
+        found = {**result, 'format': 'key=value', 'records': len(lines), 'fields': _inventory(kv),
+                 'suggested_parser': 'Data Splitter splitting on spaces then = (a translation template with a DSParser: find_pipeline_templates)'}
+        bad = [{'line': n, 'reason': 'holds no key=value pairs', 'text': line[:160]}
+               for n, line in enumerate(lines[:MALFORMED_SCAN], 1) if not KEY_VALUE.search(line)]
+        return {**found, **_malformed(bad, "Stroom's Data Splitter writes no record for such a line and reports it as "
+                                           "content its expressions failed to match")}
 
     quoted = quoted_csv(text, max_records)
     if quoted:
@@ -589,19 +666,29 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                 'fields': _inventory([dict(zip(header, r)) for r in body]),
                 'suggested_parser': f'Data Splitter for delimited data, columns separated by {custom!r}'}
     try:
-        dialect = csv.Sniffer().sniff('\n'.join(lines[:20]), delimiters=',\t|;')
-        has_header = csv.Sniffer().has_header('\n'.join(lines[:20]))
-        rows = list(csv.reader(io.StringIO('\n'.join(lines[:max_records + 1])), dialect))
+        delimiter = csv.Sniffer().sniff('\n'.join(lines[:20]), delimiters=',\t|;').delimiter
+    except csv.Error:
+        # The sniffer gives up on a few bad rows (an unbalanced quote, a row short of a column): the separator that
+        # splits most lines into the same number of columns.
+        delimiter = steady_delimiter(lines[:max_records])
+    if delimiter:
+        try:
+            has_header = csv.Sniffer().has_header('\n'.join(lines[:20]))
+        except csv.Error:
+            has_header = False
+        rows = list(csv.reader(io.StringIO('\n'.join(lines[:max_records + 1])), delimiter=delimiter))
         if not has_header and len(rows) > 1:
             has_header = _names_a_header(rows)
         header = rows[0] if has_header else [f'col{i + 1}' for i in range(len(rows[0]))]
         body = rows[1:] if has_header else rows
         records = [dict(zip(header, row)) for row in body]
-        return {**result, 'format': 'delimited', 'delimiter': dialect.delimiter, 'has_header': has_header,
-                'columns': header, 'records': len(lines) - (1 if has_header else 0), 'fields': _inventory(records),
-                'suggested_parser': 'Data Splitter for delimited data' + (' with a header row' if has_header else '')
-                                    + ' (a translation template with a DSParser: find_pipeline_templates)'}
-    except csv.Error:
-        pass
+        found = {**result, 'format': 'delimited', 'delimiter': delimiter, 'has_header': has_header,
+                 'columns': header, 'records': len(lines) - (1 if has_header else 0), 'fields': _inventory(records),
+                 'suggested_parser': 'Data Splitter for delimited data' + (' with a header row' if has_header else '')
+                                     + ' (a translation template with a DSParser: find_pipeline_templates)'}
+        return {**found, **_malformed(off_rows(lines[:MALFORMED_SCAN], delimiter, len(header), has_header),
+                                      "Stroom's Data Splitter still writes a record for such a line, its fields as the "
+                                      "line splits: a missing column is a missing field, an unclosed quote runs to the "
+                                      "line's end")}
     return {**result, 'format': 'unknown text', 'examples': lines[:5],
             'suggested_parser': 'Data Splitter with regexes; ask the user for the record structure'}

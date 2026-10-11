@@ -73,10 +73,41 @@ def with_json_fields(records: list[Any], json_fields: list[str]) -> list[Any]:
     return records
 
 
+def with_xml_fields(records: list[Any], xml_fields: list[str]) -> list[Any]:
+    """Records with the elements and attributes of the XML their xml_fields hold added as <field>/<path> from the
+    root and <field>//<name> for anywhere below, by local name, as the XSLT reads them (the first value)."""
+    if not xml_fields:
+        return records
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for field in xml_fields:
+            text = (record.get(field) or '').strip()
+            if not text.startswith('<'):
+                continue
+            try:
+                root = etree.fromstring(text.encode('utf-8'))
+            except etree.XMLSyntaxError:
+                continue
+            for node in root.iter():
+                if not isinstance(node.tag, str):
+                    continue
+                path = '/'.join(_local(a.tag) for a in list(reversed(list(node.iterancestors()))) + [node])
+                value = (node.text or '').strip()
+                for name in (f'{field}/{path}', f'{field}//{_local(node.tag)}'):
+                    if value or len(node) == 0:
+                        record.setdefault(name, value)
+                for attr, attr_value in node.attrib.items():
+                    for name in (f'{field}/{path}/@{_local(attr)}', f'{field}//{_local(node.tag)}/@{_local(attr)}',
+                                 f'{field}//@{_local(attr)}'):
+                        record.setdefault(name, attr_value)
+    return records
+
+
 def sample_records(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None = None
                    ) -> tuple[list[Any], str | None]:
     found, note = _sample_records(mapping, sample, splitter)
-    return with_json_fields(found, mapping.json_fields), note
+    return with_xml_fields(with_json_fields(found, mapping.json_fields), mapping.xml_fields), note
 
 
 def _sample_records(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None = None

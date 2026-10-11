@@ -1,6 +1,6 @@
 # Evaluation set
 
-Forty-seven samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
+Fifty-three samples to measure how well an agent builds with the server, whatever runs the agent. The bar: every
 case reaches indexed events with no hints. It holds for the reference solutions, and for an agent on the default
 model, where a case passes when most of its runs pass (`run_agent.py --repeat`). Lighter models are measured
 against the same bar rather than held to it: their pass rate shows how far the server's own guidance carries a
@@ -55,6 +55,12 @@ case), not a margin to spend.
 | `45_jsonl_gelf` | Graylog GELF messages (JSON lines) | Authenticate, Alert | Fractional epoch seconds (`epoch_s`); the kind of event in an `_`-prefixed additional field; fields that differ by kind |
 | `46_jsonl_ecs_input` | Events already in ECS (JSON lines, nested) | Authenticate, Delete | An ECS source translated to Events like any other; the kind of event in `event.action`; arrays in `event.category` |
 | `47_kv_fortios_native` | FortiGate native logs (key=value) | Network, Authenticate, Alert | The kind of event in two keys (type, subtype); the time from date, time and tz; keys that differ by kind |
+| `48_jsonl_damaged_lines` | Web app JSON lines, a few cut short or with stray text | Authenticate, Export | A line that is not JSON stops Stroom's JSONParser for the rest of the stream: read through a Data Splitter with json_fields, the damaged lines dropped by name |
+| `49_jsonl_soap_payload` | SOAP gateway JSON lines, each holding the request's XML envelope as a string | Authenticate, Update | XML inside a JSON value, in namespaces: read with xml_fields, by local name, so a payload that won't parse gives no value rather than an error |
+| `50_kv_mail_repeated_keys` | Mail gateway key=value lines, rcpt= given once per recipient | Send | A key given several times: one Destination per value (repeat), not the first or a joined string |
+| `51_kv_unicode_ansi` | App log written for a terminal: a byte order mark, names in Latin, Greek and Japanese script, ANSI colour codes | Authenticate | The byte order mark not part of the first key; names whole; control characters taken out of the description (strip_control) |
+| `52_postgres_multiline_sql` | PostgreSQL log with statement logging, statements over several lines | Authenticate, View, Update, Delete | A record is an entry, not a line (record_start); the kind of event is the statement's first word or the connection message |
+| `53_cri_container_partial_lines` | Kubernetes container log as the CRI writes it, long messages split into partial lines | Authenticate, Export | A record ends at its F line (record_end); the parts joined by taking each continuation line's prefix out |
 | `21_csv_connections_odd_fields` | CSV with a header: connections made and ended, with the broker's own fields (zones, `destination_key`, a TLS fingerprint, policy, connection id) | Network (Connect, Close) | Fields with no element of their own carried as `Data` on the side they describe (`destination_key` under `Destination`, `source_zone` under `Source`) rather than invented or left Unknown: `forbidden_types: [Unknown]` and `data` checks |
 
 Each case (`cases/*.yaml`) holds the sample (or `samples`, several files), the request to give the agent, what the output must contain (record
@@ -89,23 +95,23 @@ What the cases exercise, by capability rather than source format (a case's `capa
 
 | Capability | What | Cases |
 | --- | --- | --- |
-| Format recognition | JSON, XML, CSV, CEF, syslog and free text detected without being told | `01`, `02`, `05`, `06`, `07`, `08`, `12`, `22`, `26`, `28`, `40` |
+| Format recognition | JSON, XML, CSV, CEF, syslog and free text detected without being told | `01`, `02`, `05`, `06`, `07`, `08`, `12`, `22`, `26`, `28`, `40`, `53` |
 | Schema inference | fields and their types inferred from the sample | `01`, `02`, `09`, `15`, `43` |
 | Field variability | different fields present for different kinds of event | `11`, `19`, `30`, `35`, `45`, `47` |
 | Delimiter detection | commas, tabs, pipes, semicolons, spaces and separators of several characters | `01`, `08`, `09`, `23`, `24`, `27`, `39`, `43`, `44` |
-| Escaping | embedded and doubled quotes, escaped separators | `18`, `19`, `22`, `23`, `24`, `42` |
-| Nested structures | JSON objects and arrays, XML elements and attributes | `02`, `03`, `04`, `05`, `10`, `13`, `16`, `26`, `40`, `46` |
+| Escaping | embedded and doubled quotes, escaped separators | `18`, `19`, `22`, `23`, `24`, `42`, `50` |
+| Nested structures | JSON objects and arrays, XML elements and attributes | `02`, `03`, `04`, `05`, `10`, `13`, `16`, `26`, `40`, `46`, `49` |
 | Timestamp recognition | ISO 8601, epoch (seconds, milliseconds, nanoseconds), syslog, split and custom formats | `01`, `06`, `07`, `17`, `31`, `39`, `45`, `47` |
 | Type inference | addresses, integers, booleans, values the schema rejects as written | `34`, `40` |
-| Multi-line records | stack traces, quoted values over several lines | `41`, `42` |
-| Event boundaries | where one record ends: fragments, arrays, wrapped objects, several events in one | `12`, `16`, `28`, `38`, `40`, `41` |
+| Multi-line records | stack traces, quoted values over several lines | `41`, `42`, `52`, `53` |
+| Event boundaries | where one record ends: fragments, arrays, wrapped objects, several events in one | `12`, `16`, `28`, `38`, `40`, `41`, `52`, `53` |
 | Optional fields | missing, empty and placeholder values | `06`, `17`, `21`, `25`, `42` |
 | Field normalisation | a source's names mapped to the schema's (ECS, codes, odd fields) | `15`, `20`, `21`, `46` |
-| Schema variation | many kinds of event from one source | `05`, `14`, `17`, `19`, `30`, `32`, `36` |
-| Malformed records | truncation, invalid quoting, missing separators, reported not dropped | pending: no case yet: a sample with truncated lines, unbalanced quotes and missing separators, whose records the server reports rather than drops |
-| Mixed formats | syslog wrapping CEF or CSV, JSON or text inside JSON, text inside XML | `04`, `11`, `13`, `18`, `22`, `25`, `35`, `37`, `43` |
-| Encoding | non-UTF-8 files, Unicode punctuation, control characters | `27`, `33` |
-| Field repetition | repeated keys and elements, arrays of values | `16` |
+| Schema variation | many kinds of event from one source | `05`, `14`, `17`, `19`, `30`, `32`, `36`, `52` |
+| Malformed records | truncation, invalid quoting, missing separators, reported not dropped | `48` |
+| Mixed formats | syslog wrapping CEF or CSV, JSON or text inside JSON, text inside XML | `04`, `11`, `13`, `18`, `22`, `25`, `35`, `37`, `43`, `48`, `49` |
+| Encoding | non-UTF-8 files, Unicode punctuation, control characters | `27`, `33`, `51` |
+| Field repetition | repeated keys and elements, arrays of values | `16`, `50` |
 | Format evolution | new or reordered fields, a changed version, mid-file | `14`, `39` |
 | Large samples | samples bigger than one read, the kinds of event deep in the file | `29`, `36`, `37`, `38` |
 
@@ -161,6 +167,10 @@ shell or web tools, and none of your settings, hooks or other MCP servers. Each 
 (`--user-model`, Haiku by default) plays the user on its last message: it agrees, answers from the request, says
 to carry on, says not to promote, or, when the agent asks for help, the case's next hint is given (counted). The
 build is then scored from Stroom with the same checks as `--reference`.
+
+Once a case is scored, both runners delete the processor filters on its pipelines; its documents and streams stay
+to look at. Left enabled, every past case's filters are gone through on each of Stroom's task-creation cycles,
+which kept the local stack's database busy.
 
 Results are written to `results/<time>-agent-<model>.json` with the user turns, help requests, tool calls and
 the API-equivalent cost Claude Code reports; each case's transcript (stream-json) and the server log are in

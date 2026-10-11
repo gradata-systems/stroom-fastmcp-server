@@ -26,8 +26,11 @@ PARSER_FOR_FORMAT = {
     'delimited': ('DSParser', 'CombinedParser'), 'syslog rfc5424': ('DSParser', 'CombinedParser'),
     'syslog rfc3164': ('DSParser', 'CombinedParser'), 'key=value': ('DSParser', 'CombinedParser'),
     'unknown text': ('DSParser', 'CombinedParser'), 'cef': ('DSParser', 'CombinedParser'),
+    'multi-line text': ('DSParser', 'CombinedParser'), 'json object': ('JSONParser', 'CombinedParser'),
+    'json lines (some not JSON)': ('DSParser', 'CombinedParser'), 'cri': ('DSParser', 'CombinedParser'),
 }
-TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'unknown text', 'cef'}
+TEXT_FORMATS = {'delimited', 'syslog rfc5424', 'syslog rfc3164', 'key=value', 'unknown text', 'cef', 'multi-line text',
+                'cri'}
 
 
 async def templates_reading(ctx: Context, fmt: str) -> str:
@@ -156,6 +159,11 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
         # messages' "User: x" taken for pairs, and create_pipeline refused the XMLFragmentParser (Qwen, VS Code).
         text = text[:text.rstrip('\n').rfind('\n') + 1]
     profiled = profile(text)
+    if profiled.get('malformed_lines') and profiled['format'] == 'json lines':
+        # Lines that aren't JSON: the Data Splitter route (one record a line, the JSON parsed in the XSLT), as the
+        # JSONParser would stop at the first of them.
+        return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': 'json lines (some not JSON)',
+                'suggested_parser': profiled.get('suggested_parser'), 'needs_text_converter': True}
     return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': profiled['format'],
             'namespace': profiled.get('namespace'), 'root': profiled.get('root'),
             'suggested_parser': profiled.get('suggested_parser'), 'needs_text_converter': profiled['format'] in TEXT_FORMATS

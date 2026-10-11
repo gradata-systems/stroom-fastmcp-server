@@ -12,7 +12,7 @@ TOOLS = {t.__name__ for m in TOOL_MODULES for t in m.ALL_TOOLS}
 GUIDES = {p.stem: p.read_text(encoding='utf-8') for p in (ROOT / 'knowledge' / 'guides').glob('*.md')}
 PROMPTS = {'instructions': resources.SERVER_INSTRUCTIONS}
 # Words that look like tool names (snake_case, a known verb first) but are not tools.
-NOT_TOOLS = {'data_splitter', 'record_start', 'xml_fragments', 'json_layout', 'xpath_default_namespace', 'time_format', 'any_of',
+NOT_TOOLS = {'data_splitter', 'record_start', 'record_end', 'xml_fragments', 'json_layout', 'xpath_default_namespace', 'time_format', 'any_of',
              'in_dictionary', 'data_name', 'xml_namespace', 'key_xpath', 'pair_separator', 'body_field',
              'strip_domain', 'event_logging_path', 'type_id', 'event_detail', 'stream_type', 'stream_ids',
              'loader_pipeline', 'replace_parser', 'output_type', 'source_pipeline_uuid', 'draft_code', 'pipeline_uuid',

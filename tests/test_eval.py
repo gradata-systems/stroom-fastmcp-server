@@ -17,7 +17,7 @@ EVENTS = """<Events xmlns="event-logging:3"><Event><EventTime><TimeCreated>2026-
 
 def test_every_case_has_a_reference_mapping_the_schema_accepts():
     cases = ev.load_cases()
-    assert len(cases) == 47 and len({c["id"] for c in cases}) == 47
+    assert len(cases) == 53 and len({c["id"] for c in cases}) == 53
     for case in cases:
         assert {'name', 'template', 'request', 'expected', 'reference'} <= set(case), case['id']
         assert ev.samples_of(case), case['id']

@@ -45,7 +45,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_eval import (MAX_HINTS, RESULTS, ROOT, Score, case_files, check_output, criterion, load_cases,  # noqa: E402
-                      local_ctx, print_score, sample_text, summary)
+                      delete_filters, local_ctx, print_score, sample_text, summary)
 
 STROOM_URL = 'http://127.0.0.1:18080'
 SERVER = 'stroom'
@@ -516,7 +516,13 @@ async def score_build(score: AgentScore, case: dict[str, Any], build: str, feed:
     except Exception as e:
         score.problems.append(f"scoring: {type(e).__name__}: {e}")
     finally:
-        await ctx.lifespan_context['stroom'].close()
+        stroom = ctx.lifespan_context['stroom']
+        try:
+            # Scored: the build's processor filters go (see run_eval.delete_filters), its streams and documents stay.
+            await delete_filters(stroom, [d['uuid'] for d in await builds._build_docs(ctx, build) if d['type'] == 'Pipeline'])
+        except Exception as e:
+            score.notes.append(f"cleanup: processor filters not deleted: {type(e).__name__}: {e}")
+        await stroom.close()
 
 
 def repeated_summary(scores: list[AgentScore], repeat: int) -> str:

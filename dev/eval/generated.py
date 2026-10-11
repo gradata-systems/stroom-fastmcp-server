@@ -382,3 +382,144 @@ def fortios_native(records: int, seed: int) -> str:
                          f'vd="root" severity="high" srcip=203.0.113.{rng.randint(2, 250)} dstip=10.0.0.20 '
                          f'action="dropped" attack="SQL.Injection"')
     return '\n'.join(lines) + '\n'
+
+
+DAMAGED_AT = {4: 'cut', 120: 'garbage', 333: 'quote', 512: 'cut'}
+
+
+def damaged_jsonl(records: int, seed: int) -> str:
+    """An app's auth events as JSON lines, some lines damaged as files in the wild are: cut off part-way (a writer
+    killed mid-line), a line of garbage (a stack dump in the wrong file), and a value with an unescaped quote. The
+    first damaged line is the 5th: read by the JSONParser, the stream stops there and the rest are lost."""
+    import json
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    lines = []
+    for n in range(records):
+        event = {'time': f'{start + timedelta(seconds=17 * n):%Y-%m-%dT%H:%M:%S}Z', 'user': rng.choice(['alice', 'bob', 'carol']),
+                 'action': rng.choice(['login', 'login', 'logout', 'password_change']),
+                 'result': rng.choice(['success', 'success', 'failure']), 'ip': f'10.0.{rng.randint(0, 9)}.{rng.randint(2, 250)}'}
+        line = json.dumps(event)
+        damage = DAMAGED_AT.get(n)
+        if damage == 'cut':
+            line = line[:len(line) // 2]
+        elif damage == 'garbage':
+            line = 'Exception in thread "main" java.lang.OutOfMemoryError: Java heap space'
+        elif damage == 'quote':
+            line = line.replace(f'"user": "{event["user"]}"', f'"user": "{event["user"][:1]}"{event["user"][1:]}"')
+        lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
+def soap_gateway(records: int, seed: int) -> str:
+    """An API gateway's audit log as JSON lines, each request's SOAP payload kept as XML text in a string field:
+    namespaced (soap:, acme:), the user and the outcome only inside it, the operation the kind of event."""
+    import json
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    lines = []
+    for n in range(records):
+        operation = rng.choice(['Login', 'Login', 'GetAccount', 'UpdateAccount'])
+        user, ok = rng.choice(['alice', 'bob', 'carol']), rng.random() > 0.15
+        body = (f'<acme:{operation} xmlns:acme="urn:acme:accounts:v2"><acme:User>{user}</acme:User>'
+                + (f'<acme:Account id="ACC-{1000 + n % 50}"/>' if operation != 'Login' else '')
+                + f'<acme:Result>{"success" if ok else "failure"}</acme:Result></acme:{operation}>')
+        payload = ('<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Header/>'
+                   f'<soap:Body>{body}</soap:Body></soap:Envelope>')
+        lines.append(json.dumps({'time': f'{start + timedelta(seconds=23 * n):%Y-%m-%dT%H:%M:%S}Z',
+                                 'client_ip': f'10.0.{rng.randint(0, 9)}.{rng.randint(2, 250)}', 'service': 'accounts',
+                                 'operation': operation, 'status': 200 if ok else 403, 'payload': payload}))
+    return '\n'.join(lines) + '\n'
+
+
+def mail_gateway(records: int, seed: int) -> str:
+    """A mail gateway's delivery log, key=value: one rcpt= per recipient (a key given again), a quoted subject, and
+    the action taken (deliver, quarantine, reject)."""
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    people = ['bob@example.com', 'carol@example.com', 'dave@example.org', 'erin@example.net']
+    lines = []
+    for n in range(records):
+        recipients = rng.sample(people, rng.randint(1, 3))
+        action = rng.choice(['deliver', 'deliver', 'deliver', 'quarantine', 'reject'])
+        lines.append(f"time={start + timedelta(seconds=29 * n):%Y-%m-%dT%H:%M:%S}Z host=mx01 msgid=<{n}@mail.example.com> "
+                     f"from={rng.choice(['alice@example.com', 'frank@example.com'])} "
+                     + ' '.join(f'rcpt={r}' for r in recipients)
+                     + f' subject="{rng.choice(["Q3 report", "Lunch?", "Invoice 4471"])}" size={rng.randint(800, 900000)} '
+                       f'action={action}')
+    return '\n'.join(lines) + '\n'
+
+
+def unicode_app(records: int, seed: int) -> str:
+    """An app's log, key=value, written as a terminal shows it: a byte order mark at the start, user names in many
+    scripts (José Álvarez, Zoë, 山田太郎, Ελένη), and messages coloured with ANSI escape codes (ESC [32m ... ESC [0m)."""
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    users = [('jalvarez', 'José Álvarez'), ('zoe', 'Zoë Brontë'), ('tyamada', '山田太郎'), ('eleni', 'Ελένη Παππά')]
+    lines = []
+    for n in range(records):
+        uid, name = rng.choice(users)
+        ok = rng.random() > 0.2
+        colour, word = ('\x1b[32m', 'OK') if ok else ('\x1b[31m', 'FAILED')
+        lines.append(f'time={start + timedelta(seconds=31 * n):%Y-%m-%dT%H:%M:%S}Z user={uid} name="{name}" '
+                     f'action={rng.choice(["login", "logout"])} result={"success" if ok else "failure"} '
+                     f'msg="{colour}{word}\x1b[0m for {name}"')
+    return '﻿' + '\n'.join(lines) + '\n'
+
+
+def postgres_log(records: int, seed: int) -> str:
+    """A PostgreSQL server log with statement logging on: each entry starts with its time and the session's
+    [pid] user@database, a statement runs over several indented lines, and connections and disconnections are
+    entries of their own."""
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    users = ['alice', 'bob', 'svc_report']
+    lines = []
+    for n in range(records):
+        at = start + timedelta(milliseconds=4137 * n)
+        stamp = f'{at:%Y-%m-%d %H:%M:%S}.{at.microsecond // 1000:03d} UTC'
+        user, pid = rng.choice(users), 4000 + rng.randint(0, 50)
+        kind = rng.choice(['connect', 'select', 'select', 'update', 'delete', 'disconnect'])
+        head = f'{stamp} [{pid}] {user}@finance'
+        if kind == 'connect':
+            lines.append(f'{head} LOG:  connection authorized: user={user} database=finance application_name=psql')
+        elif kind == 'disconnect':
+            lines.append(f'{head} LOG:  disconnection: session time: 0:0{rng.randint(1, 9)}:12.345 user={user} '
+                         f'database=finance host=10.0.0.{rng.randint(2, 250)}')
+        elif kind == 'select':
+            lines += [f'{head} LOG:  statement: SELECT a.id, a.name, sum(t.amount)', '\tFROM accounts a',
+                      '\tJOIN transactions t ON t.account_id = a.id', f'\tWHERE a.region = \'north\' AND t.day = \'2026-10-1{n % 9}\'',
+                      '\tGROUP BY a.id, a.name;']
+        elif kind == 'update':
+            lines += [f'{head} LOG:  statement: UPDATE accounts', f"\tSET credit_limit = {rng.randint(1, 9)}000",
+                      f'\tWHERE id = {rng.randint(100, 999)};']
+        else:
+            lines += [f'{head} LOG:  statement: DELETE FROM transactions', f'\tWHERE id = {rng.randint(1000, 9999)};']
+    return '\n'.join(lines) + '\n'
+
+
+def cri_container_log(records: int, seed: int) -> str:
+    """A Kubernetes container's log as the CRI writes it on the node: '<time> <stream> <P|F> <content>', a long
+    message split into partial (P) lines at arbitrary characters, its last part a full (F) line. The app writes
+    key=value messages; exports carry a long detail that is split."""
+    rng = random.Random(seed)
+    start = datetime(2026, 10, 11, 8, 0, 0, tzinfo=timezone.utc)
+    lines = []
+    for n in range(records):
+        at = start + timedelta(seconds=7 * n)
+        action = rng.choice(['login', 'logout', 'export'])
+        message = (f'user={rng.choice(["alice", "bob", "carol"])} action={action} '
+                   f'result={rng.choice(["success", "success", "failure"])} pod=api-7d9f-{n % 5}')
+        if action == 'export':
+            message += ' detail=' + 'x' * rng.randint(40, 120) + f' rows={rng.randint(1, 900)}'
+        stream = 'stderr' if 'failure' in message else 'stdout'
+        parts, rest = [], message
+        while action == 'export' and len(rest) > 50:
+            cut = rng.randint(20, 50)
+            parts.append(rest[:cut])
+            rest = rest[cut:]
+        parts.append(rest)
+        for i, part in enumerate(parts):
+            stamp = (at + timedelta(microseconds=i)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            lines.append(f"{stamp} {stream} {'F' if i == len(parts) - 1 else 'P'} {part}")
+    return '\n'.join(lines) + '\n'

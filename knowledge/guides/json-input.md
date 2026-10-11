@@ -38,6 +38,15 @@ holding the most objects), also from a stream's head cut off mid-array.
 `profile_sample` reports which (`parser_properties`, `xslt_input`), and `build_translation_xslt` returns the
 setting to apply as `pipeline_properties`. Check `describe_document` for the value a template's children use.
 
+## Lines that are not JSON
+
+Stroom's JSONParser stops the stream at the first line that isn't JSON (a line cut short, a shipper's banner): the
+error is fatal, and every record after it is lost. `profile_sample` still calls a file JSON lines when most lines
+are, and names the others (`malformed_lines`); its `xslt_input` then reads each line through a Data Splitter (one
+field, `json`) with `json_fields: ["json"]`, in the Event Data (Text) template, so a bad line gives a record with
+no values: drop it by name with `drop_when` (`json.time` `present: false`) and tell the user how many there were.
+`create_pipeline` shows the format as `json lines (some not JSON)`.
+
 ## Addressing fields
 
 Declare `xmlns:json="http://www.w3.org/2013/XSL/json"` and match `json:map` and `json:string[@key='ts']`, or set
@@ -84,6 +93,12 @@ The generated XSLT reads it safely: a record whose field is empty, or isn't JSON
 stopping processing (a bare `json-to-xml()` on such a value is a fatal error). An `xpath` using `json-to-xml()`, as
 in `json-to-xml(*[@key='message'])/*/*[@key='user']`, is read the same safe way; its output is in the
 `http://www.w3.org/2005/xpath-functions` namespace.
+
+**XML** (the field holds an XML document, such as a SOAP envelope or a Windows event): name it in `xml_fields`,
+and read inside it as `<field>/<path>` from the document's root element down (`payload/Envelope/Body/Login/User`),
+`<field>//<name>` for an element anywhere in it, and `<field>//<name>/@<attr>` for an attribute. Steps match by local
+name, so the document's namespaces need no declaring. A value that isn't XML gives nothing rather than an error.
+`draft_translation_mapping` does this itself for a field whose values are XML documents.
 
 When the sample's records come in different shapes (one file flat, another with the event as JSON in a field), an
 element reads every shape's field in turn with `any_of`, e.g. `{"path": "EventDetail/TypeId", "any_of":

@@ -57,8 +57,23 @@ def _json_values(text: str) -> list[dict[str, Any]]:
         return []
 
 
+_CONTROL = re.compile('[---]')
+
+
+def _xml11(document: str) -> str:
+    """A record document as Stroom writes records, XML 1.1: control characters (an ANSI colour code's ESC, seen in
+    eval case 51) as character references, which XML 1.0 can't hold at all and the check's parser refused."""
+    if not _CONTROL.search(document):
+        return document
+    return '<?xml version="1.1"?>' + _CONTROL.sub(lambda m: f'&#x{ord(m.group()):X};', document)
+
+
 def record_documents(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None) -> list[str]:
     """Each sample record as the XML document the translation reads it from (its root element is the record)."""
+    return [_xml11(d) for d in _record_documents(mapping, sample, splitter)]
+
+
+def _record_documents(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None) -> list[str]:
     texts = sample if isinstance(sample, list) else [sample]
     ns = input_namespace(mapping)
     if mapping.input == 'json':

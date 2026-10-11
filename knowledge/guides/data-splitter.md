@@ -21,6 +21,7 @@ read the client's files, and refuses a path with that instruction.
 | Syslog, body parsed further | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "key_value"}}` |
 | CEF, alone or after syslog | `{"kind": "cef"}` (a syslog header before it is inferred as `body`) |
 | Records over several lines (Java stack traces) | `{"kind": "regex", "record_start": "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}", "pattern": "(?s)^(\\S+ \\S+) +(\\w+) +\\[([^\\]]*)\\] (\\S+) - (.*)$", "names": ["time", "level", "thread", "logger", "message"]}` |
+| Records ending at a marked line (Kubernetes CRI) | `{"kind": "regex", "record_end": "\S+ (?:stdout\|stderr) F ", "pattern": "(?s)^(\S+) (stdout\|stderr) [PF] (.*)$", "names": ["time", "stream", "message"]}` |
 | Quoted values holding new lines | `{"kind": "delimited", "delimiter": ",", "header": true, "quote": "\"", "quoted_newlines": true}` |
 | A separator of several characters | `{"kind": "delimited", "delimiter": " ~ ", "header": ["time", "user", "action"]}` |
 | Syslog, then delimited columns (Palo Alto) | `{"kind": "syslog", "rfc": "rfc3164", "body": {"kind": "delimited", "delimiter": ",", "header": ["future_use1", "receive_time", ...]}}` |
@@ -67,8 +68,23 @@ pattern that takes the time and the rest as `message`: give the record's own pat
 `(?s)` so its last `.*` takes the trace's lines. In the mapping, a regex on such a message must cross lines too:
 `[\s\S]*`, not `.*`, which stops at a line break in XPath.
 
-Quoted values that hold new lines (a CSV comment over two lines) are the other case: `quoted_newlines: true` ends a
+A record whose last line is marked is the reverse: `record_end` is a regex its last line matches at its start, and
+the lines before it since the last such line are part of it. Kubernetes writes a container's log on the node as the
+CRI does, `<time> <stream> <P|F> <content>`: a long message is split into partial (`P`) lines at any character and
+ended by a full (`F`) line. `profile_sample` recognises it (`cri`) and `build_data_splitter` infers the spec above;
+the continuation lines keep their prefixes in `message`, so the mapping joins the parts with an `extract` (or field)
+xpath `replace(data[@name='message']/@value, '\n\S+ (stdout|stderr) [PF] ', '')`.
+
+Quoted values that hold new lines (a CSV comment over two lines) are another case: `quoted_newlines: true` ends a
 record at a new line outside quotes only (`profile_sample` sets it when the sample has one).
+
+## Lines that are not records
+
+Stroom's Data Splitter skips a line its pattern doesn't match and reports an error for it; a delimited line short of
+columns still becomes a record, its missing columns empty. `profile_sample` names such lines (`malformed_lines`:
+line number, reason, text) from up to 5,000 lines of the sample, so they can be told to the user and dropped by name
+(`drop_when`) rather than lost unseen. A byte order mark before the first line is taken first by every generated
+splitter: Stroom keeps it, and it became part of the first field's name.
 
 ## Separators and bodies
 

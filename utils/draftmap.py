@@ -83,6 +83,25 @@ def _selector(mapping: dict[str, Any], field: str) -> str:
     return field
 
 
+def _xml_element(value: Any) -> bool:
+    """A field value that is an XML element, as text (a SOAP payload held in a JSON string)."""
+    if not isinstance(value, str) or not value.lstrip().startswith('<'):
+        return False
+    from lxml import etree
+    try:
+        etree.fromstring(value.strip().encode('utf-8'))
+        return True
+    except etree.XMLSyntaxError:
+        return False
+
+
+def _json_or_none(line: str) -> Any:
+    try:
+        return json.loads(line) if line.strip() else None
+    except ValueError:
+        return None
+
+
 def _records(named: dict[str, str], given: SplitterSpec | None = None
              ) -> tuple[dict[str, Any], list[dict[str, str]], SplitterSpec | None]:
     """The profile (merged across files), the records as flat name -> value dicts, and the splitter spec for text."""
@@ -99,8 +118,15 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
                         for r in (found[1] if found else [])]
         elif fmt in ('json array', 'json lines'):
             stripped = text.strip()
-            values = json.loads(stripped) if stripped.startswith('[') else [json.loads(l) for l in stripped.splitlines() if l.strip()]
-            records += [{k: (v if isinstance(v, str) else json.dumps(v)) for k, v in _flatten(r).items()} for r in values if isinstance(r, dict)]
+            values = json.loads(stripped) if stripped.startswith('[') else [v for v in map(_json_or_none, stripped.splitlines()) if v]
+            bad_lines = fmt == 'json lines' and bool(info.get('malformed_lines'))
+            # With lines that aren't JSON, the lines are read by a Data Splitter and their keys through json_fields:
+            # json.<key>.
+            prefix = 'json.' if bad_lines else ''
+            records += [{prefix + k: (v if isinstance(v, str) else json.dumps(v)) for k, v in _flatten(r).items()}
+                        for r in values if isinstance(r, dict)]
+            if bad_lines and spec is None:
+                spec = SplitterSpec(kind='regex', pattern='^(.*)$', names=['json'])
         elif fmt in ('xml', 'xml fragments'):
             from utils.localcheck import _local
             from lxml import etree
@@ -159,7 +185,12 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     fmt = info['format']
     notes: list[str] = []
     mapping: dict[str, Any] = {}
-    if fmt in ('json array', 'json lines'):
+    if fmt == 'json lines' and info.get('malformed_lines'):
+        # Some lines aren't JSON: Stroom's JSONParser would stop at the first, so a Data Splitter reads one record a
+        # line and the mapping parses each (a line that isn't JSON gives no fields and is logged).
+        mapping.update(input='data_splitter', json_fields=['json'])
+        notes.append(info.get('note') or '')
+    elif fmt in ('json array', 'json lines'):
         mapping.update(input='json', json_layout='lines' if fmt == 'json lines' else 'array')
     elif fmt == 'json object':
         mapping.update(input='json', json_layout='lines', for_each=info['records_key'])
@@ -197,6 +228,20 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                      f"its keys are fields of their own, e.g. "
                      f"{', '.join(repr(n) for n in inside[:4])} (json_fields). The text itself isn't mapped.")
 
+    # Fields holding XML text (a SOAP payload): their elements are fields of their own (<field>/<path>, read
+    # through xml_fields), and the text itself is never mapped.
+    xml_fields = [n for n in names if n not in json_fields and values[n]
+                  and sum(_xml_element(v) for v in values[n]) >= 0.8 * len(values[n])]
+    if xml_fields:
+        from utils.localcheck import with_xml_fields
+        with_xml_fields(records, xml_fields)
+        names, values, types = survey()
+        mapping['xml_fields'] = xml_fields
+        inside = [n for n in names if any(n.startswith(x + '/') and '//' not in n for x in xml_fields)]
+        notes.append(f"{', '.join(repr(x) for x in xml_fields)} {'holds' if len(xml_fields) == 1 else 'hold'} XML: its "
+                     f"elements are fields of their own, e.g. {', '.join(repr(n) for n in inside[:4])} (xml_fields; "
+                     f"'<field>//<name>' for one anywhere below). The text itself isn't mapped.")
+        json_fields = json_fields + xml_fields
     taken: set[str] = set(json_fields)
     common: list[dict[str, Any]] = []
 

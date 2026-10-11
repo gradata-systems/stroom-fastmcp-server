@@ -74,7 +74,7 @@ class Lookup(BaseModel):
         return self
 
 
-Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits', 'unescape_quotes']
+Transform = Literal['lower', 'upper', 'trim', 'strip_domain', 'domain', 'digits', 'unescape_quotes', 'strip_control']
 
 
 _CALL = re.compile(r'^\s*(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)\s*\(')
@@ -116,7 +116,9 @@ class FieldMapping(BaseModel):
                                                           "strip_domain (DOMAIN\\user or user@domain -> user), domain "
                                                           "(the DOMAIN or domain part), digits (digits only), "
                                                           "unescape_quotes (a quoted CSV value's doubled quotes as one: "
-                                                          "Data Splitter keeps them doubled).")
+                                                          "Data Splitter keeps them doubled), strip_control (ANSI colour "
+                                                          "codes and other control characters out: a log written for a "
+                                                          "terminal).")
     repeat: bool = Field(False, description="Write one element per value of the input (a JSON array, an element the "
                                             "record has several of) instead of the first value: the nearest element on "
                                             "the path the schema lets repeat is written once per value, e.g. Group for "
@@ -196,6 +198,33 @@ SAFE_JSON = (f'<xsl:function xmlns:xsl="{XSL}" xmlns:mcp="{MCP_NS}" name="mcp:js
              '<xsl:variable name="json" select="string(($text)[1])"/>'
              '<xsl:if test="normalize-space($json)"><xsl:try><xsl:sequence select="json-to-xml($json)"/>'
              '<xsl:catch/></xsl:try></xsl:if></xsl:function>')
+
+
+# XML held in a field, read safely: an empty value, or one that isn't XML, gives nothing rather than stopping the
+# pipeline.
+SAFE_XML = (f'<xsl:function xmlns:xsl="{XSL}" xmlns:mcp="{MCP_NS}" name="mcp:parse-xml" as="node()?">'
+            '<xsl:param name="text" as="item()*"/>'
+            '<xsl:variable name="xml" select="string(($text)[1])"/>'
+            '<xsl:if test="starts-with(normalize-space($xml), \'&lt;\')"><xsl:try><xsl:sequence select="parse-xml($xml)"/>'
+            '<xsl:catch/></xsl:try></xsl:if></xsl:function>')
+
+
+def xml_steps(path: str) -> str:
+    """A path into XML held in a field ('/Envelope/Body/User', '//User', '/Login/@id') as XPath steps matched by local
+    name, whatever the XML's namespaces."""
+    out, rest = '', path
+    while rest:
+        sep = '//' if rest.startswith('//') else '/'
+        rest = rest[len(sep):] if rest.startswith(sep) else rest
+        step, _, rest = rest.partition('/')
+        if rest:
+            rest = '/' + rest
+        if rest.startswith('//'):
+            pass
+        out += sep + (f'@*:{step[1:]}' if step.startswith('@') else f'*:{step}')
+        if not rest:
+            break
+    return out
 
 
 class Condition(BaseModel):
@@ -511,6 +540,12 @@ class TranslationMapping(BaseModel):
         "Input fields holding JSON text (an event serialised into a string field): a key inside one is the field "
         "<field>.<key> (nested: <field>.<a>.<b>) in common, events, when and any_of. Read safely: a record whose "
         "field is empty, or isn't JSON, gives nothing. Never map the field itself into an element."))
+    xml_fields: list[str] = Field(default_factory=list, description=(
+        "Input fields holding XML text (a SOAP payload, an XML audit record inside a JSON or CSV record): a path "
+        "inside one is the field <field>/<path>, its steps element names matched whatever their namespace "
+        "(payload/Envelope/Body/Login/User), '//' for anywhere below (payload//User), '@name' for an attribute. Read "
+        "safely: a record whose field is empty, or isn't XML, gives nothing. Never map the field itself into an "
+        "element."))
     extract: list[Extraction] = Field(default_factory=list, description=(
         "Fields parsed out of text fields with regular expressions, e.g. a message string holding the time, user "
         "and action; their names are then used as fields in common, events and when."))
@@ -609,6 +644,10 @@ def transform_expr(t: str | None, one: str) -> str:
         return f"replace({one}, '^(?:([^\\\\]*)\\\\.*|[^@]*@(.*))$', '$1$2')"
     if t == 'digits':
         return f"replace({one}, '[^0-9]', '')"
+    if t == 'strip_control':
+        # An ANSI escape (ESC [ ... letter), then any other control character. Matched by class: Stroom's XPath can't
+        # make an ESC to match with (codepoints-to-string(27): "invalid XML character", seen in eval case 51).
+        return rf"replace({one}, '\p{{Cc}}\[[0-9;]*[A-Za-z]|[\p{{Cc}}-[\t\n\r]]', '')"
     if t == 'unescape_quotes':
         return f"replace({one}, '\"\"', '\"')"
     return one
@@ -1092,6 +1131,13 @@ class _Generator:
             # key, a repeat): a named template shared between rules has its own scope.
             self.declare_parts(ex)
             return group_text(f"${self.parts_name(ex)}", nr)
+        xml_held = next((x for x in sorted(self.m.xml_fields, key=len, reverse=True)
+                         if field_name and field_name.startswith(x + '/')), None) if xpath is None else None
+        if xml_held:
+            # A path into the XML a field holds, read through the guarded helper (an empty field, or one that isn't
+            # XML, gives nothing), its steps matched by local name: the XML's own namespaces don't matter.
+            base = self.source(xml_held, None, scope)
+            return f"mcp:parse-xml(({base})[1])" + xml_steps(field_name[len(xml_held):])
         held = next((j for j in sorted(self.m.json_fields, key=len, reverse=True)
                      if field_name and field_name.startswith(j + '.')), None) if xpath is None else None
         if held:
@@ -1237,6 +1283,11 @@ class _Generator:
             return None
         if entry.default is not None:
             return None
+        if entry.repeat and not entry.map:
+            # Several values (a key given again, as rcpt= once per recipient): whether any has text. Seen in eval case
+            # 50: normalize-space() over them all, which takes one, failed every record with two recipients.
+            field_name, xpath, scope = self.src_of(entry)
+            return f"({self.source(field_name, xpath, scope)})[normalize-space(.)]"
         if entry.map:
             src = self.entry_ref(entry)
             key = self.scalar(entry, src) if entry.transform else src
@@ -1937,7 +1988,8 @@ class _Generator:
                                       f"it (a Data entry if nothing else fits), or leave it out of names ('').")
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
-        uses_json = bool(m.json_fields) or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
+        uses_json = bool(m.json_fields) or bool(m.xml_fields) \
+            or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
             or bool(self._own_functions) or bool(self._keyed_functions) \
             or self._data_function_wanted                                       # the mcp prefix: its own functions
         bound = {f.prefix: f.namespace for f in m.functions}
@@ -1953,6 +2005,8 @@ class _Generator:
         sheet.set('exclude-result-prefixes', ' '.join(own + [p for p in bound if p not in own]))
         if m.json_fields or JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True))):
             sheet.append(etree.fromstring(SAFE_JSON))
+        if m.xml_fields:
+            sheet.append(etree.fromstring(SAFE_XML))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')

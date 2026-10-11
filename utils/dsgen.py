@@ -16,8 +16,17 @@ from utils.profile import KEY_VALUE, SYSLOG_3164, SYSLOG_5424, profile
 
 DS_HEAD = ('<?xml version="1.1" encoding="UTF-8"?>\n'
            '<dataSplitter xmlns="data-splitter:3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
-           '              xsi:schemaLocation="data-splitter:3 file://data-splitter-v3.0.xsd" version="3.0">\n')
+           '              xsi:schemaLocation="data-splitter:3 file://data-splitter-v3.0.xsd" version="3.0">\n'
+           # A byte order mark before the first record, taken first: Stroom doesn't strip it, and it became part of
+           # the first key (seen in eval case 51: '﻿time', so the first event had no time).
+           '  <regex pattern="^\\uFEFF" maxMatch="1" />\n')
 DS_TAIL = '</dataSplitter>\n'
+# Kubernetes CRI container logs: '<time> <stream> <P|F> <content>', a long message split into partial (P) lines
+# ended by a full (F) one.
+CRI_LINE = r'^\S+ (?:stdout|stderr) [PF] '
+CRI_END = r'\S+ (?:stdout|stderr) F '
+# The XPath joining a CRI record's parts: each line's prefix after the first taken out, with its new line.
+CRI_JOIN = "replace(data[@name='message']/@value, '\\n\\S+ (stdout|stderr) [PF] ', '')"
 # Regexes for the syslog header, with the names their groups get; the body is group 'message'.
 SYSLOG = {
     'rfc5424': (r'^(?:<(\d+)>)?1 (\S+) (\S+) (\S+) (\S+) (\S+) (-|\[.*?\]) ?(.*)$',
@@ -65,6 +74,10 @@ class SplitterSpec(BaseModel):
     quoted_newlines: bool = Field(False, description=(
         "delimited, with quote: values in quotes may hold new lines (a comment over two lines), so a record ends at a "
         "new line outside quotes only."))
+    record_end: str | None = Field(None, description=(
+        "Records whose last line is marked (Kubernetes CRI: a message split into partial 'P' lines ends at its 'F' "
+        "line): a regex the record's last line matches at its start, e.g. '\\S+ (?:stdout|stderr) F '. The lines "
+        "before it since the last such line are part of the record."))
     record_start: str | None = Field(None, description=(
         "Records that run over several lines (a Java log entry and its stack trace, a wrapped message): a regex the "
         "first line of a record matches at its start, e.g. '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'. Lines "
@@ -221,13 +234,19 @@ def record_regex(start: str) -> str:
     return f'(?sm)^((?:{start}).*?)\\n?(?=^(?:{start})|\\z)'
 
 
+def record_end_regex(end: str) -> str:
+    """The regex taking one record whose last line is marked: lines that aren't an end, then the end line."""
+    return f'(?m)^((?:(?!(?:{end}))[^\\n]*\\n)*(?:{end})[^\\n]*)\\n?'
+
+
 def generate_splitter(spec: SplitterSpec) -> str:
     """The Data Splitter XML: one record per line, divided as the spec says (or per record start, for records of
     several lines)."""
     if spec.kind == 'delimited' and spec.comment_prefix:
         return DS_HEAD + _directives_xml(spec) + DS_TAIL
-    if spec.record_start and spec.kind != 'delimited':
-        return (DS_HEAD + f'  <regex pattern="{_attr(record_regex(spec.record_start))}">\n    <group value="$1">\n'
+    if (spec.record_start or spec.record_end) and spec.kind != 'delimited':
+        pattern = record_regex(spec.record_start) if spec.record_start else record_end_regex(spec.record_end)
+        return (DS_HEAD + f'  <regex pattern="{_attr(pattern)}">\n    <group value="$1">\n'
                 + _record_xml(spec, '      ') + '    </group>\n  </regex>\n' + DS_TAIL)
     body = ''
     if spec.kind == 'delimited' and spec.header is True:
@@ -297,7 +316,9 @@ def _apply_record(spec: SplitterSpec, text: str, heading: list[str] | None) -> d
             found = next((m for m in (p.match(text, at) for p in patterns) if m and m.end() > at), None)
             if not found:
                 break
-            fields[found.group(1)] = found.group(2)
+            # A key given again (rcpt= once per recipient) is several data elements in Stroom; a field reads the
+            # first (repeat: true writes each), so the dry run keeps the first, not the last.
+            fields.setdefault(found.group(1), found.group(2))
             at = found.end()
         if not fields:
             return None
@@ -379,6 +400,11 @@ def infer_spec(sample: str) -> tuple['SplitterSpec | None', dict[str, Any]]:
                                   CEF_PREFIXES[-1])
             body = SplitterSpec(kind='regex', pattern=pattern, names=names)
         return SplitterSpec(kind='cef', body=body), info
+    if fmt == 'cri':
+        # Kubernetes CRI: a record ends at its 'F' line; the parts after the first carry their own prefixes, which
+        # the mapping takes out to join them (CRI_JOIN).
+        return SplitterSpec(kind='regex', record_end=CRI_END, pattern=r'(?s)^(\S+) (stdout|stderr) [PF] (.*)$',
+                            names=['time', 'stream', 'message']), info
     if fmt == 'multi-line text':
         # The start and the time it begins with; the rest of the record is the message, new lines and all: the
         # record's own pattern (level, thread, logger...) is the model's to give, checked by the dry run.
@@ -402,6 +428,8 @@ def dry_run(spec: SplitterSpec, sample: str, max_records: int = 2000) -> dict[st
     heading = None
     if spec.record_start and spec.kind != 'delimited':
         lines = group_lines(lines, spec.record_start)
+    elif spec.record_end and spec.kind != 'delimited':
+        lines = group_lines_to_end(lines, spec.record_end)
     if spec.kind == 'delimited' and spec.quoted_newlines and spec.quote:
         lines = quoted_lines(sample, spec.quote)
     if spec.kind == 'delimited' and spec.comment_prefix:
@@ -441,6 +469,21 @@ def quoted_lines(text: str, quote: str) -> list[str]:
             current = None
     if current is not None:
         records.append(current)
+    return records
+
+
+def group_lines_to_end(lines: list[str], end: str) -> list[str]:
+    """Lines joined into records that end at a line matching `end` (an unfinished last record kept as it is)."""
+    ends = re.compile(end)
+    records: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        current.append(line)
+        if ends.match(line):
+            records.append('\n'.join(current))
+            current = []
+    if current:
+        records.append('\n'.join(current))
     return records
 
 

@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dev'))
 from format_samples import SAMPLES  # noqa: E402
 from tests.test_xsltgen import SCHEMA  # noqa: E402
 from utils.draftmap import draft_mapping  # noqa: E402
-from utils.dsgen import SplitterSpec, dry_run, generate_splitter, infer_spec  # noqa: E402
+from utils.dsgen import DS_HEAD, SplitterSpec, dry_run, generate_splitter, infer_spec  # noqa: E402
 from utils.profile import profile  # noqa: E402
 from utils.xsltgen import TranslationMapping, generate  # noqa: E402
 
@@ -43,7 +43,7 @@ def test_key_value_pairs_are_one_regex_with_one_value_group_quoted_or_not():
     assert records('kv_quoted')[1] == {'date': '2026-10-01', 'time': '08:05:00', 'devname': 'fw01', 'type': 'traffic',
                                        'action': 'deny', 'srcip': '203.0.113.9', 'dstip': '10.0.0.10', 'user': 'bob smith'}
     xml = generate_splitter(infer_spec(SAMPLES['kv_quoted'])[0])
-    assert xml.count('<regex ') == 1 and '<data name="$1" value="$2" />' in xml and 'split delimiter="="' not in xml
+    assert xml.replace(DS_HEAD, '').count('<regex ') == 1 and '<data name="$1" value="$2" />' in xml and 'split delimiter="="' not in xml
     unquoted = SplitterSpec(kind='key_value')
     assert dry_run(unquoted, 'a=1 b=two c=')['records'] == [{'a': '1', 'b': 'two', 'c': ''}]
 
