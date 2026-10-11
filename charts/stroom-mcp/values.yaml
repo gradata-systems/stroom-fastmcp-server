@@ -100,7 +100,7 @@ errorRules: ""
 conventions: {}
 
 # Audit trail of every tool call, resource read, Stroom request, confirmation, approval and refusal, as
-# JSON lines (see docs/AUDIT.md). By default it goes to stdout, for the cluster's log shipper to collect.
+# JSON lines (see docs/operate/audit.md). By default it goes to stdout, for the cluster's log shipper to collect.
 audit:
   file:
     # Write it to a file instead, e.g. for a sidecar or node agent that ships it.

@@ -16,7 +16,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 - **stdout** (the default): the container runtime rotates container logs (in Kubernetes, the kubelet's
   `containerLogMaxSize` and `containerLogMaxFiles`), so ship them to a log store before they rotate away.
 - **A file**: in Kubernetes, the chart's `audit.file` settings write it to a volume, optionally a claim per
-  replica ([DEPLOYMENT.md](DEPLOYMENT.md#kubernetes-helm)). Rotate it with `logrotate` or similar, by moving the file aside. The server notices the file
+  replica ([Deployment](../admin/deployment.md#kubernetes-helm)). Rotate it with `logrotate` or similar, by moving the file aside. The server notices the file
   has been moved or deleted and reopens it by name before the next event, so nothing is lost or written to
   the old file. Don't use `copytruncate`: events written during the copy are lost. For example:
 

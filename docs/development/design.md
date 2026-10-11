@@ -1,7 +1,6 @@
 # Stroom FastMCP Server — Design
 
-As of 2026-10-04. Kept in step with the shared design doc
-(https://claude.ai/code/artifact/d0f92563-de5d-4c87-9d9b-8ba1c06f8c9a); diagrams are redrawn here in Mermaid.
+How the server is built, and why. For running and using it, see the operating and administration sections.
 
 ## Overview
 
@@ -442,7 +441,7 @@ stroom-fastmcp-server/
   tests/                  # unit tests: respx-mocked Stroom, schema fixtures
 ```
 
-**Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in `docs/DEPLOYMENT.md`.
+**Config (`STROOM_MCP_*`)**: every setting, with its default and chart value, is in [Deployment](../admin/deployment.md#settings).
 
 **Deployment.** One container image (uv multi-stage, non-root uid 10001, read-only root file system, no capabilities) and a Helm chart, `charts/stroom-mcp`, modelled on the Elasticsearch MCP server's. The server terminates TLS itself and refuses to start without a certificate, unless a proxy in front terminates TLS (`tls_terminated_upstream`, which the chart sets with `tls.enabled: false`) or it listens on localhost for development; with sign-in on, `public_base_url` must be https. The certificate comes from a Secret or cert-manager. Private CAs for Stroom and the identity provider are trusted in addition to the system CAs. Forms carry sealed state between rounds; several replicas must share the sealing keys (`request_state_keys`), and the chart refuses more than one replica without them. `/healthz` is unauthenticated and independent of Stroom and the identity provider, for probes. The access policy, error rules and field conventions can be replaced from chart values. CI runs the tests, lints and renders the chart (and checks it refuses to render without its required settings), and smoke-tests the image over TLS before publishing the image and chart to GHCR.
 
@@ -908,7 +907,7 @@ Rules live in `error_rules.yaml` (message regex, element, severity, class) so an
 
 Names follow the environment's versioned conventions, learned from sibling content and confirmed with the user. In the reference environment, feeds and events pipelines carry a version (`Fortigate-FG60F-V1.2`, `Keycloak-V1.2-Events`, XSLT `Fortigate-FG60F-Events-V1.2`), indexing pipelines are `<Source> - Indexing`, and indices are `ecs-<source>-v<n>`. Test feeds add `-MCP-TEST`, the verification dashboard takes the index's name with a `-VERIFY` suffix, and Documentation docs take the name of the pipeline they document.
 
-**Audit**: JSON lines with the user: `tool_call` (tool, arguments, outcome), `resource_read` (uri, outcome), `stroom_request` (method, path, status, ms), `es_request`, `access_denied` (rejected tokens with the check they failed, writes the guard refused, and Stroom's 401s and 403s), and each confirmation and approval (action, details, requested, granted or declined, and how: form, elicitation or id). Events and fields: `docs/AUDIT.md`.
+**Audit**: JSON lines with the user: `tool_call` (tool, arguments, outcome), `resource_read` (uri, outcome), `stroom_request` (method, path, status, ms), `es_request`, `access_denied` (rejected tokens with the check they failed, writes the guard refused, and Stroom's 401s and 403s), and each confirmation and approval (action, details, requested, granted or declined, and how: form, elicitation or id). Events and fields: [Audit log](../operate/audit.md).
 
 ## Clients
 
@@ -932,7 +931,7 @@ The server includes no agent. The agent is whatever the user runs: a chat client
 
 ## Open questions, risks and delivery
 
-The riskiest parts are driving stepping and pipeline JSON through REST APIs built for the Stroom UI; they were proven first against a real 7.13 instance (`dev/api_checks`, findings in [FINDINGS.md](FINDINGS.md)).
+The riskiest parts are driving stepping and pipeline JSON through REST APIs built for the Stroom UI; they were proven first against a real 7.13 instance (`dev/api_checks`, findings in [dev/FINDINGS.md](https://github.com/gradata-systems/stroom-fastmcp-server/blob/master/dev/FINDINGS.md)).
 
 **Design decisions** (can be revisited)
 
@@ -964,7 +963,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Schema version: decided. Stroom holds v3.0.0 to v4.0.2 and the pipelines target v3.5.2, so the version is configurable (the `SchemaFilter` schema group plus the version declared in the XSLT).
 - [x] Pipeline structure (e.g. the template's empty `decorationFilter`): decided. A new pipeline keeps the template's structure and defaults; a modified pipeline keeps its original's structure and settings.
 - [x] Live uploads with the user's token: checked read-only. The live instance uses an external IdP (a Keycloak realm), requires authentication on receipt with token and certificate authentication enabled, and validates the audience against its client id `stroom`. Tokens carrying `stroom` in `aud` will be accepted; the VS Code client in that realm needs the `stroom-mcp` and `stroom` audience mappers.
-- [x] Clients: decided. The server is client-agnostic and includes no agent; building an agent is a separate initiative. VS Code is the first client set up and tested (`docs/VSCODE.md`).
+- [x] Clients: decided. The server is client-agnostic and includes no agent; building an agent is a separate initiative. VS Code is the first client set up and tested ([Sign-in and VS Code](../admin/vscode.md)).
 - [x] Sample filters: decided, one task at a time.
 - [x] Processing after promotion: decided, pre-created disabled for new data, with the pipeline link.
 - [x] Translation pipelines: decided, the build's own feeds only.
@@ -984,7 +983,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 
 | Capability | Covers | Proven by |
 | --- | --- | --- |
-| Stroom API access | Sign-in for scripts, datafeed upload, pipeline JSON round trip, stepping, against a local Stroom 7.13 stack | `dev/api_checks`: one CSV sample to a valid Events stream; what was found is in [FINDINGS.md](FINDINGS.md) |
+| Stroom API access | Sign-in for scripts, datafeed upload, pipeline JSON round trip, stepping, against a local Stroom 7.13 stack | `dev/api_checks`: one CSV sample to a valid Events stream; what was found is in [dev/FINDINGS.md](https://github.com/gradata-systems/stroom-fastmcp-server/blob/master/dev/FINDINGS.md) |
 | Reading and validating | Explorer, template discovery (with the shared XSLTs pipelines import), streams, errors, stepping, pipeline evaluation, validation, resources | Errors in a broken pipeline explained and an evaluation report for a working one; read-only tools run against the live instance (`dev/live_readonly.py`) |
 | Translation | Feeds, translation from a mapping (shared templates called in place), pipelines, processing, the write guard, confirmations and approvals, updates with backups and output diffs, documentation, promotion | `dev/e2e_translation.py`: CSV, JSON, XML and syslog samples each reach valid Events, and a field fix lands with a diff limited to that field; `dev/e2e_generator.py`, `dev/e2e_existing_feed.py`, `dev/e2e_shared_xslt.py` (an importing XSLT's mapping lost and rebuilt, its shared templates read from the imported XSLT; a shared XSLT of functions called from the translation, run by Stroom, and read back when the mapping is lost) |
 | Stream types and templates by what they are | Fixture templates with names no standard template has, in a folder of their own: a JSON translation template found for its stage, named by start_onboarding and onboarded through; a records template. Raw Reference: the reference-data template and the loader found by structure, a whole-feed filter on the feed's own type, the wait on the pipeline's output type, a lookup through a loader resolved with none named, read back by rebuild_mapping as the entry that wrote it when the mapping is lost. Records: a pipeline writing Records, its wait on Records, the Records stream refused as Events and indexed as records into Elasticsearch | `dev/e2e_stream_types.py` |

@@ -1,0 +1,88 @@
+site_name: Stroom MCP server
+site_description: Build Stroom feeds, event-logging translations and indexes with an agent, checked and approved before they reach production.
+site_url: https://gradata-systems.github.io/stroom-fastmcp-server/
+repo_url: https://github.com/gradata-systems/stroom-fastmcp-server
+repo_name: gradata-systems/stroom-fastmcp-server
+edit_uri: edit/master/docs/
+
+docs_dir: docs
+hooks:
+  - dev/docs_hooks.py
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle: {icon: material/brightness-7, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle: {icon: material/brightness-4, name: Light mode}
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - For Stroom operators:
+      - operate/index.md
+      - What it changes in Stroom: operate/what-it-changes.md
+      - Confirmations and approvals: operate/confirmations.md
+      - Builds, review and promotion: operate/builds.md
+      - Processing and indexing: operate/processing.md
+      - Workflows: operate/workflows.md
+      - Standing instructions: operate/standing-instructions.md
+      - Errors and triage: operate/errors.md
+      - Audit log: operate/audit.md
+      - Troubleshooting: operate/troubleshooting.md
+  - Administration:
+      - Deployment: admin/deployment.md
+      - Sign-in and VS Code: admin/vscode.md
+      - Clients: admin/clients.md
+      - Upgrading: admin/upgrading.md
+  - Reference:
+      - Tools, prompts and resources: reference/tools.md
+      - Agent guides:
+          - Event logging: reference/guides/event-logging.md
+          - Data Splitter: reference/guides/data-splitter.md
+          - JSON input: reference/guides/json-input.md
+          - XSLT: reference/guides/xslt.md
+          - Reference data: reference/guides/reference-data.md
+          - Indexing: reference/guides/indexing.md
+          - CEF: reference/guides/cef.md
+          - Documentation: reference/guides/documentation.md
+          - Standing instructions (AGENTS docs): reference/guides/agent-instructions.md
+  - Development:
+      - development/index.md
+      - Design: development/design.md

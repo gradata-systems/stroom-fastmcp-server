@@ -3,21 +3,21 @@
 The server is one container that terminates TLS itself, signs users in with an OpenID Connect provider
 (Keycloak, Entra ID, Okta, Auth0, ...) and calls Stroom as each
 user with their own token. It holds no credentials for Stroom. VS Code (or any MCP client) connects to
-`<publicBaseUrl>/mcp`; setup for users is in [VSCODE.md](VSCODE.md).
+`<publicBaseUrl>/mcp`; setup for users is in [Sign-in and VS Code](vscode.md).
 
 ## Prerequisites
 
 - **An OpenID Connect provider**: the one Stroom already trusts, with a public client for VS Code whose access
   tokens are JWTs carrying this server's audience and Stroom's (or one audience both accept), plus `sub`.
-  Details: [VSCODE.md, section 1](VSCODE.md#1-identity-provider).
+  Details: [Sign-in and VS Code, section 1](vscode.md#1-identity-provider).
 - **Stroom** trusts that provider (`identityProviderType: EXTERNAL_IDP`, audience `stroom`), and receipt accepts
-  tokens if samples are uploaded through the server ([VSCODE.md, section 2](VSCODE.md#2-stroom)).
+  tokens if samples are uploaded through the server ([Sign-in and VS Code, section 2](vscode.md#2-stroom)).
 - **A certificate** for the server's DNS name: a Secret, or cert-manager. Plain HTTP is only allowed when a
   proxy in front terminates TLS.
 - **Stroom folder permissions**: users need rights on the workspace folder (`MCP Workspace` by default), where
   builds, survey docs and backups are made; promotion needs rights on the destination folders. Tell users not to
   move or rename anything in a build's folder (or the folder) before promotion: a document's build is the folder it
-  is in, and the folder's `Build record` doc refers to its documents (see the README).
+  is in, and the folder's `Build record` doc refers to its documents (see [What it changes in Stroom](../operate/what-it-changes.md#where-it-builds)).
 
 ## Kubernetes (Helm)
 
@@ -68,7 +68,7 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   token. `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider; it answers `ok` and
   the running version, e.g. `ok 0.17.17`, which MCP clients also see in the server's `serverInfo`.
 - **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, resource read, Stroom request,
-  confirmation, approval and refusal, with the user behind it. Events and fields: [AUDIT.md](AUDIT.md). To write
+  confirmation, approval and refusal, with the user behind it. Events and fields: [Audit log](../operate/audit.md). To write
   it to a file instead, set `audit.file.enabled`. The file is on an `emptyDir` and lost with the pod, unless you
   also set `audit.file.persistence.enabled`. The chart then deploys a StatefulSet rather than a Deployment, giving
   each replica (`stroom-mcp-0`, `stroom-mcp-1`, ...) its own PersistentVolumeClaim, so each keeps its file across
@@ -141,7 +141,7 @@ brackets.
 | `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
 | `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
-| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([AUDIT.md](AUDIT.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet |
+| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([Audit log](../operate/audit.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
 

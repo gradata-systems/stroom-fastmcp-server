@@ -63,7 +63,7 @@ def test_the_guide_index_lists_every_guide():
 PROMPT_NAMES = {'onboard_data_source', 'onboard_existing_feed', 'update_events_pipeline', 'update_indexing_pipeline',
                 'index_event_data', 'create_discovery_index', 'evaluate_events_pipeline', 'fix_pipeline_issue',
                 'document_index', 'forward_events_as_cef', 'review_cef_pipeline', 'check_feed_coverage'}
-DESIGN = (ROOT / 'docs' / 'DESIGN.md').read_text(encoding='utf-8')
+DESIGN = (ROOT / 'docs' / 'development' / 'design.md').read_text(encoding='utf-8')
 
 
 def test_the_design_lists_every_tool_and_only_tools_and_prompts():
@@ -76,9 +76,9 @@ def test_the_design_lists_every_e2e_suite():
     suites = {p.stem for p in (ROOT / 'dev').glob('e2e_*.py')} - {'e2e_cleanup'}   # a utility, not a suite
     missing = sorted(s for s in suites if f'dev/{s}.py' not in DESIGN)
     assert not missing, f"e2e suites DESIGN's table lacks: {missing}"
-    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
-    missing = sorted(s for s in suites if f'dev/{s}.py' not in readme)
-    assert not missing, f"e2e suites the README's table lacks: {missing}"
+    page = (ROOT / 'docs' / 'development' / 'index.md').read_text(encoding='utf-8')
+    missing = sorted(s for s in suites if f'dev/{s}.py' not in page)
+    assert not missing, f"e2e suites the development page's table lacks: {missing}"
 
 
 def test_the_evaluation_readme_lists_every_case_and_workflow():

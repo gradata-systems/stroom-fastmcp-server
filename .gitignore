@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 /dev/api_checks/out/
 /dev/eval/results/
+
+# The docs site, built by mkdocs
+/site/

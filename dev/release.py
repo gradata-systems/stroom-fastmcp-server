@@ -9,33 +9,36 @@ The docs are written by hand (what changed and why is a judgement), but a releas
 
 1. On master, with nothing uncommitted but the IDE's own files.
 2. Docs: when code changed since the last tag (tools, utils, security, config, the server's resources, the chart's
-   templates), the docs must have too: docs/, knowledge/ (what the server gives agents), README.md or
-   dev/eval/README.md. Otherwise it stops and lists the code changes. --docs-unchanged "why" overrides it, for a
+   templates), the docs must have too: docs/ (the docs site), knowledge/ (what the server gives agents and the site
+   shows), README.md, dev/eval/README.md or dev/FINDINGS.md. Otherwise it stops and lists the code changes. --docs-unchanged "why" overrides it, for a
    release with nothing a reader would see (a dependency bump, say), and the reason goes in the release commit.
 3. Tests: the unit tests, which check the docs list every tool, e2e suite, evaluation case and workflow
-   (tests/test_knowledge.py), and every evaluation case's reference checked offline (dev/eval/offline.py).
-4. The version in README.md, docs/DEPLOYMENT.md, charts/stroom-mcp/Chart.yaml (version and appVersion),
+   (tests/test_knowledge.py), every evaluation case's reference checked offline (dev/eval/offline.py), and the
+   docs site built strictly (mkdocs.yml).
+4. The version in README.md, docs/admin/deployment.md, charts/stroom-mcp/Chart.yaml (version and appVersion),
    pyproject.toml and uv.lock; a "Release X" commit, the vX tag, both pushed. CI builds the image and the chart.
 
 --co-author adds a Co-Authored-By trailer to the release commit, for a release an agent makes.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = 'gradata-systems/stroom-fastmcp-server'
-VERSIONED = ['README.md', 'docs/DEPLOYMENT.md', 'charts/stroom-mcp/Chart.yaml', 'pyproject.toml']
+VERSIONED = ['README.md', 'docs/admin/deployment.md', 'charts/stroom-mcp/Chart.yaml', 'pyproject.toml']
 # What a release changes for its users: code the server runs and what it ships.
 CODE = ('tools/', 'utils/', 'security/', 'conventions/', 'charts/stroom-mcp/templates/', 'charts/stroom-mcp/values.yaml',
         'config.py', 'main.py', 'main_tools.py', 'access_policy.yaml', 'error_rules.yaml', 'Dockerfile')
 # Where it is written up.
-DOCS = ('docs/', 'knowledge/', 'README.md', 'dev/eval/README.md')
+DOCS = ('docs/', 'knowledge/', 'README.md', 'dev/eval/README.md', 'dev/FINDINGS.md')
 # Never part of a release, and never a reason to stop one.
 IGNORED = ('.idea/', '.claude/')
 
@@ -77,7 +80,7 @@ def check_docs(last_tag: str, unchanged_reason: str | None) -> list[str]:
     docs = [f for f in changed if f.startswith(DOCS)]
     if code and not docs and not unchanged_reason:
         stop(f"the code changed since {last_tag} and the docs didn't: {code[:15]}{' ...' if len(code) > 15 else ''}. "
-             f"Write up what changed first: docs/FINDINGS.md (what was found and done), docs/DESIGN.md (the tool "
+             f"Write up what changed first: dev/FINDINGS.md (what was found and done), docs/development/design.md (the tool "
              f"catalogue and e2e tables, the workflows), knowledge/guides (what agents read) and the tools' own "
              f"descriptions. Or --docs-unchanged \"why\" when nothing a reader sees changed.")
     return code
@@ -85,12 +88,16 @@ def check_docs(last_tag: str, unchanged_reason: str | None) -> list[str]:
 
 def run_tests() -> None:
     for name, command in (('unit tests', [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '--color=no']),
-                          ('evaluation references, offline', [sys.executable, 'dev/eval/offline.py'])):
+                          ('evaluation references, offline', [sys.executable, 'dev/eval/offline.py']),
+                          # The docs site, strictly: a broken link or a page left out of the navigation stops it.
+                          ('docs site', ['uv', 'run', '--group', 'docs', 'mkdocs', 'build', '--strict', '--quiet',
+                                         '--site-dir', str(Path(tempfile.gettempdir()) / 'stroom-mcp-site')])):
         print(f"  {name} ...", flush=True)
-        done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                              env={**os.environ, 'NO_MKDOCS_2_WARNING': '1'})   # Material's banner, on every build
         if done.returncode:
             stop(f"{name} failed:\n{(done.stdout + done.stderr)[-3000:]}")
-        print(f"    {(done.stdout.strip().splitlines() or [''])[-1]}")
+        print(f"    {(done.stdout.strip().splitlines() or ['built'])[-1]}")
 
 
 def bump(old: str, new: str) -> None:

@@ -2,7 +2,7 @@
 
 Records every tool call and resource read, every Stroom and Elasticsearch request, every confirmation and
 approval, and every refusal with the identity that caused it, so content the agent creates or changes can be
-traced back to a person. See docs/AUDIT.md.
+traced back to a person. See docs/operate/audit.md.
 """
 import json
 import logging

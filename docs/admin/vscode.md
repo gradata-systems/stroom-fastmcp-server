@@ -82,11 +82,11 @@ STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com
 ```
 
 No Stroom API key: the server refuses one when sign-in is on. It serves TLS itself (or behind a TLS proxy);
-deployment with the Helm chart and every setting: [DEPLOYMENT.md](DEPLOYMENT.md).
+deployment with the Helm chart and every setting: [Deployment](deployment.md).
 
 ## 4. VS Code
 
-Add the server to `.vscode/mcp.json` (workspace) or your user `mcp.json`; `docs/vscode/mcp.json` is an example:
+Add the server to `.vscode/mcp.json` (workspace) or your user `mcp.json`; [mcp.json](mcp.json) is an example:
 
 ```json
 {
