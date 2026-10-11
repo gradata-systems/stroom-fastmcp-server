@@ -182,21 +182,22 @@ async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: 
     if await _is_indexing(stroom, pipeline['uuid']):
         return
     guard = guard_from(ctx)
-    tags = await guard.tags({'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']})
-    builds = {t for t in tags if t.startswith('mcp-build-')}
+
+    async def build_of(ref: dict[str, Any]) -> str | None:
+        return await guard.build_of(ref) if MANAGED in await guard.tags(ref) else None
+    build = await build_of({'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']})
     feeds = {feed} if feed else {r['meta'].get('feedName') for r in (await stroom.find_meta(
         [_term('Id', i) for i in stream_ids or []], len(stream_ids or []), op='OR')).get('values') or []}
     outside = []
     from tools.feeds import feeds_named
     for name in sorted(f for f in feeds if f):
         ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')
-        feed_tags = await guard.tags(ref) if ref else []
-        if not builds & set(feed_tags):
+        if not build or not ref or await build_of(ref) != build:
             # Stream data names a feed as Stroom first spelt it: the build's feed may be the same name in another case.
             twins = [f for f in await feeds_named(stroom, name) if f['uuid'] != (ref or {}).get('uuid')]
             in_build = False
             for twin in twins:
-                in_build = in_build or bool(builds & set(await guard.tags(twin)))
+                in_build = in_build or bool(build and await build_of(twin) == build)
             if not in_build:
                 outside.append(name)
     if outside:
@@ -726,7 +727,7 @@ async def wait_for_processing(
                             "ask the user which to keep")
     ref = {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline_uuid}
     # Only while the pipeline is in a build, where its code changes: a promoted one keeps no record of its steps.
-    in_build = any(t.startswith('mcp-build-') for t in await guard_from(ctx).tags(ref))
+    in_build = MANAGED in await guard_from(ctx).tags(ref)
     if in_build and not await stepped_clean(ctx, ref):
         # Seen: a filter made after a clean step kept processing once the XSLT was replaced by one that never stepped
         # clean, and the agent went on to document and index its output.

@@ -2,7 +2,8 @@
 
 Creates land in `<workspace>/<build>/`; updates are allowed only on documents tagged
 `mcp-managed`. Changing anything else (a production XSLT, say) goes through a working copy that
-`promote_build` writes back after approval and a backup.
+`promote_build` writes back after approval and a backup. A document's build is the folder it is in; what else the
+server remembers about it is kept in the build's record (security/record.py), not in tags.
 """
 import asyncio
 import logging
@@ -24,14 +25,20 @@ GENERATED = 'mcp-generated'
 KEPT_MAPPING = 'mcp-kept-mapping'
 logger = logging.getLogger(__name__)
 _BUILD = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
+_PATH_ATTEMPTS = 4
+_TREE_FILTER = {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
+                'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False, 'recentItems': None}
 
 
-def build_tag(build: str) -> str:
-    return f'mcp-build-{build.lower()}'
-
-
-def copy_of_tag(uuid: str) -> str:
-    return f'mcp-copy-of-{uuid}'
+def _path_in(nodes: list[dict[str, Any]], uuid: str, above: list[str]) -> list[str] | None:
+    for node in nodes:
+        path = [*above, node.get('name') or '']
+        if node.get('uuid') == uuid:
+            return path
+        hit = _path_in(node.get('children') or [], uuid, path)
+        if hit:
+            return hit
+    return None
 
 
 def _node_in(nodes: list[dict[str, Any]], uuid: str) -> dict[str, Any] | None:
@@ -48,6 +55,10 @@ class WriteGuard:
     def __init__(self, stroom: StroomGateway, workspace: str):
         self._stroom = stroom
         self.workspace = workspace
+
+    @property
+    def stroom(self) -> StroomGateway:
+        return self._stroom
 
     def _known_folders(self) -> dict[tuple[str, str], dict[str, Any]]:
         # Folders this server process found or made, by (parent uuid, name), kept with its Stroom gateway. The search
@@ -147,17 +158,19 @@ class WriteGuard:
             return None
         return {**folder, '_open': [system['uniqueKey'], workspace['uniqueKey'], folder['uniqueKey']]}
 
-    async def folder_contents(self, build: str) -> list[dict[str, Any]]:
-        """The documents in a build folder, read from the explorer tree (the search index lags new docs)."""
+    async def folder_contents(self, build: str, with_record: bool = False) -> list[dict[str, Any]]:
+        """The documents in a build folder, read from the explorer tree (the search index lags new docs); the
+        build's own record only with_record."""
+        from security.record import NAME as RECORD
         folder, node = await self._build_node(build)
         if folder is None:
             return []
         docs = {c['uuid']: {'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
                             'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder'}
         # The tree can briefly leave out a doc whose node was just updated (a tag added, say), and a promotion that
-        # missed it would leave it behind: the docs tagged with the build, from the search index, are added too.
+        # missed it would leave it behind: the managed docs the search index has in the build folder are added too.
         tagged = explorer_filter(None, '*')
-        tagged['tags'] = [build_tag(build)]
+        tagged['tags'] = [MANAGED]
         found = await self._stroom.post('/explorer/v2/find', {'filter': tagged, 'pageRequest': {'offset': 0, 'length': 1000}})
         for value in found.get('values') or []:
             ref = value.get('docRef') or {}
@@ -168,7 +181,40 @@ class WriteGuard:
             if node:
                 docs[ref['uuid']] = {'type': ref['type'], 'uuid': ref['uuid'], 'name': ref.get('name'),
                                      'tags': node.get('tags') or [], 'path': folder['_path']}
-        return list(docs.values())
+        return [d for d in docs.values() if with_record or not (d['type'] == 'Documentation' and d['name'] == RECORD)]
+
+    async def build_of(self, ref: dict[str, Any]) -> str | None:
+        """The build a document is in: the folder it sits in under the workspace, from the explorer tree (the
+        search index lags new documents); None outside the workspace."""
+        node = await self._stroom.post('/explorer/v2/getFromDocRef', {k: ref.get(k) for k in ('type', 'uuid', 'name')})
+        if not node:
+            return None
+        key = node.get('uniqueKey') or {'type': node.get('type'), 'uuid': node.get('uuid'), 'rootNodeUuid': '0'}
+        path: list[str] = []
+        for attempt in range(_PATH_ATTEMPTS):
+            tree = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
+                'openItems': [], 'temporaryOpenedItems': [], 'minDepth': 1, 'ensureVisible': [key],
+                'showAlerts': False, 'filter': _TREE_FILTER})
+            path = _path_in((tree or {}).get('rootNodes') or [], node.get('uuid'), []) or []
+            if not path:
+                # The tree can briefly leave out a doc just made or tagged (e2e: a pipeline copied moments before it
+                # stepped clean, the step left unrecorded), and the search index lags new docs: either may have it.
+                found = await self._stroom.find_documents(node.get('name') or '*', [node.get('type')], 50)
+                hit = next((v for v in found.get('values') or [] if (v.get('docRef') or {}).get('uuid') == node.get('uuid')), None)
+                if hit:
+                    path = [p for p in (hit.get('path') or '').replace(' / ', '/').split('/') if p] + [node.get('name')]
+            if path:
+                break
+            await asyncio.sleep(0.5 * (attempt + 1))
+        # System / <workspace> / <build> / ... / the doc
+        if len(path) >= 4 and path[0] == 'System' and path[1] == self.workspace:
+            return path[2]
+        return None
+
+    async def copy_of(self, ref: dict[str, Any]) -> str | None:
+        """The production document a working copy in a build was made from (None for a new document)."""
+        from security import record as build_record
+        return (await build_record.entry(self, await self.build_of(ref), ref['uuid'])).get('copy_of')
 
     async def remove_build_folder_if_empty(self, build: str) -> bool:
         """Delete a build's folder once nothing at all is left in it, subfolders included. Stroom deletes a
@@ -221,11 +267,17 @@ class WriteGuard:
             return None
         return folder, find(tree['rootNodes']) or {}
 
-    async def create(self, doc_type: str, name: str, build: str, extra_tags: list[str] | None = None) -> dict[str, Any]:
-        """Create an empty document in the build folder and tag it as the agent's. A name the build already has for
-        that type is refused, naming the one there: after a long conversation was summarised, an agent made the same
-        indexing pipeline twice, and the build held two."""
-        twin = next((d for d in await self.folder_contents(build) if d['type'] == doc_type and d['name'] == name), None)
+    async def create(self, doc_type: str, name: str, build: str, copy_of: str | None = None,
+                     record: bool = False) -> dict[str, Any]:
+        """Create an empty document in the build folder and tag it as the agent's; copy_of, the production document it
+        is a working copy of, goes in the build's record. A name the build already has for that type is refused,
+        naming the one there: after a long conversation was summarised, an agent made the same indexing pipeline
+        twice, and the build held two."""
+        from security import record as build_record
+        if doc_type == 'Documentation' and name == build_record.NAME and not record:
+            raise ToolError(f"'{name}' is the server's own record of the build: give the Documentation another name")
+        twin = next((d for d in await self.folder_contents(build, with_record=True)
+                     if d['type'] == doc_type and d['name'] == name), None)
         if twin:
             raise ToolError(f"A {doc_type} named '{name}' is already in build {build} (uuid {twin['uuid']}): carry on "
                             f"with that one (build_status lists the build's documents), or give the new one another name.")
@@ -233,14 +285,16 @@ class WriteGuard:
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': doc_type, 'docName': name, 'destinationFolder': _strip(folder),
             'permissionInheritance': 'DESTINATION'})
-        await self.tag([_ref(node)], [MANAGED, GENERATED, build_tag(build), *(extra_tags or [])])
+        await self.tag([_ref(node)], [MANAGED, GENERATED])
+        if copy_of:
+            await build_record.update(self, build, _ref(node), lambda entry: entry.update(copy_of=copy_of))
         return _ref(node)
 
     async def create_filled(self, doc_type: str, name: str, build: str,
-                            fill: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+                            fill: Callable[[dict[str, Any]], Awaitable[Any]], record: bool = False) -> Any:
         """Create a document and fill it with fill(ref). Stroom creates documents empty, so if filling fails
         the document is deleted again rather than left behind empty, and the error is raised."""
-        ref = await self.create(doc_type, name, build)
+        ref = await self.create(doc_type, name, build, record=record)
         try:
             return await fill(ref)
         except Exception:

@@ -411,7 +411,7 @@ async def review_coverage(
         result['tell_user'] = (f"Found untranslated events{so_far}: {total} record(s) of {len(groups)} kind(s) the "
                                f"sample didn't have, in {len(affected_ids)} raw stream(s). The mapping needs a rule for "
                                f"each; then only those streams need processing again, once the user approves.")
-        in_build = any(t.startswith('mcp-build-') for t in await _tags(ctx, pipeline))
+        in_build = 'mcp-managed' in await _tags(ctx, pipeline)
         many = len(affected_ids) > EXACT_LIMIT or more is not None
         if in_build and not many:
             reprocess = "reprocess_streams with the affected raw streams, at most 10 a call: each call asks the user's approval"

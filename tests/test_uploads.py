@@ -116,8 +116,8 @@ async def test_once_a_feed_has_had_commands_text_samples_are_refused():
     from fastmcp.exceptions import ToolError
     from tools import feeds
     feed = {'type': 'Feed', 'uuid': 'f1', 'name': 'FORTIOS-FIREWALL-V1.0'}
-    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed', feeds.FILES_TAG]))
-    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)), \
+    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed']))
+    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)),             patch.object(feeds, '_sample_files', AsyncMock(return_value=True)), \
             patch.object(feeds, 'guard_from', lambda ctx: guard), patch.object(feeds, 'gateway_from', lambda ctx: None):
         with pytest.raises(ToolError, match="samples are files on the user's disk .* exactly as given"):
             await feeds.upload_sample(SimpleNamespace(lifespan_context={}), 'FORTIOS-FIREWALL-V1.0',
@@ -133,7 +133,7 @@ async def test_a_reference_sample_applies_from_long_ago_unless_told_otherwise():
     guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed']))
     send = AsyncMock(return_value={'receipt_id': 'r', 'stream_id': None})
     ticket = AsyncMock(return_value={})
-    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)), patch.object(feeds, 'send_to_feed', send), \
+    with patch.object(feeds, '_build_feed', AsyncMock(return_value=feed)), patch.object(feeds, 'send_to_feed', send),             patch.object(feeds, '_sample_files', AsyncMock(return_value=False)), \
             patch.object(feeds, 'guard_from', lambda ctx: guard), patch.object(feeds, 'gateway_from', lambda ctx: None), \
             patch.object(feeds, 'upload_ticket', ticket):
         ctx = SimpleNamespace(lifespan_context={})

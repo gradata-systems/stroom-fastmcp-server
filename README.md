@@ -60,10 +60,18 @@ that issues JWT access tokens works; Keycloak is the worked example.
 - **As the user.** Every Stroom call, including datafeed uploads, acts as the signed-in user. The server forwards
   their access token, whose `aud` must include `stroom` as well as the MCP audience (or one audience both accept). There is no shared API key.
 - **In a workspace.** Everything is written under `MCP Workspace/<build>` and tagged `mcp-managed` and
-  `mcp-generated`. Only `mcp-managed` docs can be changed; promotion moves them into place and removes
-  `mcp-managed`. `mcp-generated` stays, so everything the server created can be found in Stroom by that tag.
+  `mcp-generated`, the only tags the server puts on documents (besides `mcp-kept-mapping` on XSLTs it generated), so
+  they are there to filter by and don't add to Stroom's tag list as builds come and go. Only `mcp-managed` docs can be
+  changed; promotion moves them into place and removes `mcp-managed`. `mcp-generated` stays, so everything the server
+  created can be found in Stroom by that tag.
+- **Leave build folders as they are.** Don't move or rename anything in a build's folder, or the folder itself, until
+  the build is promoted: a document's build is the folder it is in, and the folder's `Build record` doc (the server's
+  record of which docs are working copies of production docs, and which code has passed the checks promotion looks
+  for) refers to the documents in it. A document moved out of the folder drops out of the build, and promotion leaves
+  it behind; a renamed folder is a different build. Editing a document's content in Stroom is fine: the server
+  notices hand edits and keeps them.
 - **Checked before promotion.** `build_status` and the promotion approval show what a build's pipelines still lack:
-  a clean step of their current code (recorded as `mcp-stepped-*` tags on the pipeline), documentation whose Field
+  a clean step of their current code (kept in the build's record), documentation whose Field
   mapping matches the current mapping and XSLT, and an XSLT that is still what its mapping generates.
 - **Documented from the mapping.** The mapping an XSLT was generated from is kept with it; `write_documentation`
   generates the Field mapping section from it over the sample streams (sources and sampled values, exact per-rule

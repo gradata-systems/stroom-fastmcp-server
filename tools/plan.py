@@ -11,7 +11,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from security.guard import MANAGED, build_tag, guard_from
+from security.guard import MANAGED, guard_from
 from tools.streams import SampleStreams, own_streams, read_sample_streams
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
@@ -109,13 +109,12 @@ def resolve_build(ctx: Context, build: str | None, tool: str) -> str:
 
 
 async def build_of(ctx: Context, ref: dict[str, Any]) -> str | None:
-    """The build a managed document belongs to, from its tags."""
+    """The build a managed document belongs to: the build folder it is in."""
     try:
-        tags = await guard_from(ctx).tags(ref)
+        guard = guard_from(ctx)
+        return await guard.build_of(ref) if MANAGED in await guard.tags(ref) else None
     except Exception:
         return None
-    marker = build_tag('x')[:-1]
-    return next((t[len(marker):] for t in tags if t.startswith(marker)), None)
 
 
 async def _feed_created(stroom, feed: dict[str, Any]) -> int | None:

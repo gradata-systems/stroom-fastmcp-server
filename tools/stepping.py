@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
@@ -104,82 +103,55 @@ async def code_fingerprint(stroom: StroomGateway, pipeline_uuid: str,
     return prints
 
 
-# Clean steps are recorded as explorer tags on the pipeline, 'mcp-stepped-<code digest>', so every replica sees
-# them and they survive restarts; a passed index verification ('mcp-verified-') and Events that passed check_events
-# ('mcp-validated-') the same way. Only pipelines the server manages (in a build) are tagged: stepping anything else
-# stays read-only. Promotion removes them with mcp-managed.
-#
-# Stroom keeps all of a node's tags in one 255-character column. Seen in production: with a timestamp in each tag and
-# the last five of each kind kept, a pipeline's tags outgrew it, every new record was refused (500, "Data too long
-# for column 'tags'") and only logged, and promotion said the pipeline had never stepped clean. So a record is the
-# digest alone, and each kind keeps only what can still matter: the new record, and the one for the code saved now
-# (a draft stepped clean is recorded beside it, for when it is saved).
-STEPPED = 'mcp-stepped-'
-VERIFIED = 'mcp-verified-'
-VALIDATED = 'mcp-validated-'
-TAGS_LIMIT = 255
+# Clean steps are recorded in the build's record (security/record.py), by the digest of the code that stepped clean,
+# so every replica sees them and they survive restarts; a passed index verification ('verified') and Events that
+# passed check_events ('validated') the same way. Only pipelines the server manages (in a build) are recorded: stepping
+# anything else stays read-only. Promotion removes the record. Each kind keeps only what can still matter: the new
+# record, and the one for the code saved now (a draft stepped clean is recorded beside it, for when it is saved).
+STEPPED = 'stepped'
+VERIFIED = 'verified'
+VALIDATED = 'validated'
 
 
 def fingerprint_digest(prints: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(prints, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def stepped_tags(tags: list[str]) -> list[str]:
-    return sorted(t for t in tags if t.startswith(STEPPED))
-
-
-def verified_tags(tags: list[str]) -> list[str]:
-    return sorted(t for t in tags if t.startswith(VERIFIED))
-
-
-def validated_tags(tags: list[str]) -> list[str]:
-    return sorted(t for t in tags if t.startswith(VALIDATED))
-
-
-def _digest_of(tag: str) -> str:
-    return tag.rsplit('-', 1)[-1]
-
-
-async def _record(ctx: Context, pipeline: dict[str, Any], prefix: str,
+async def _record(ctx: Context, pipeline: dict[str, Any], kind: str,
                   draft_code: dict[str, str] | None = None) -> str | None:
-    """Record that the pipeline's code (or the draft stepped) passed, as a tag: 'recorded'; None for a pipeline
-    outside a build (never tagged); else why it couldn't be saved."""
+    """Record that the pipeline's code (or the draft stepped) passed: 'recorded'; None for a pipeline outside a build
+    (never recorded); else why it couldn't be saved."""
+    from security import record
     guard = guard_from(ctx)
     ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
     try:
-        tags = await guard.tags(ref)
-        if MANAGED not in tags:
+        if MANAGED not in await guard.tags(ref):
             return None
+        build = await guard.build_of(ref)
+        if build is None:
+            raise ToolError("it is managed by the server but not in a build folder (moved out of the workspace?)")
         saved = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
         digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid'], draft_code)) \
             if draft_code else saved
-        mine = [t for t in tags if t.startswith(prefix)]
-        tag = f'{prefix}{digest}'
-        stale = [t for t in mine if _digest_of(t) not in (digest, saved) or t != f'{prefix}{_digest_of(t)}']
-        if stale:
-            await guard.untag([ref], stale)
-        if tag not in mine:
-            kept = [t for t in tags if t not in stale]
-            if len(' '.join(kept + [tag])) > TAGS_LIMIT:
-                # Still too long (a long build name, say): the record for the saved code goes, the new one stays.
-                older = [t for t in kept if t.startswith(prefix)]
-                if older:
-                    await guard.untag([ref], older)
-            await guard.tag([ref], [tag])
+
+        def note(entry: dict[str, Any]) -> None:
+            entry[kind] = sorted({*(d for d in entry.get(kind, []) if d == saved), digest})
+        await record.update(guard, build, ref, note)
         return 'recorded'
     except Exception as e:  # the record is a convenience; never fail the step over it, but say so
-        logger.warning("Couldn't record %s on pipeline %s: %s", prefix.strip('-'), ref['uuid'], e)
-        return (f"Passed, but the record of it couldn't be saved on the pipeline ({str(e)[:160]}): promotion will "
-                f"report it as not done.")
+        logger.warning("Couldn't record %s on pipeline %s: %s", kind, ref['uuid'], e)
+        return (f"Passed, but the record of it couldn't be saved in the build's record ({str(e)[:160]}): promotion "
+                f"will report it as not done.")
 
 
-async def _recorded(ctx: Context, pipeline: dict[str, Any], prefix: str) -> bool:
+async def _recorded(ctx: Context, pipeline: dict[str, Any], kind: str) -> bool:
+    from security import record
+    guard = guard_from(ctx)
     ref = {k: pipeline[k] for k in ('type', 'uuid', 'name')}
-    mine = [t for t in await guard_from(ctx).tags(ref) if t.startswith(prefix)]
+    mine = (await record.entry(guard, await guard.build_of(ref), ref['uuid'])).get(kind) or []
     if not mine:
         return False
-    digest = fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid']))
-    return any(_digest_of(t) == digest for t in mine)
+    return fingerprint_digest(await code_fingerprint(gateway_from(ctx), ref['uuid'])) in mine
 
 
 async def remember_clean(ctx: Context, pipeline: dict[str, Any], draft_code: dict[str, str] | None,
@@ -305,8 +277,9 @@ async def _unagreed_unknown(ctx: Context, pipeline_uuid: str, name: str | None, 
     if not unknown or draft_code:
         return None
     try:
-        tags = await guard_from(ctx).tags({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
-        if MANAGED not in tags or any(t.startswith('mcp-copy-of-') for t in tags):
+        guard = guard_from(ctx)
+        ref = {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name}
+        if MANAGED not in await guard.tags(ref) or await guard.copy_of(ref):
             return None     # not the build's own new pipeline: someone else's design
         from tools.builds import kept_mapping
         if await kept_mapping(ctx, pipeline_uuid):

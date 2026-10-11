@@ -335,8 +335,11 @@ async def promotion(ctx, csv: dict, stamp: str):
         dest = f'System/E2E Promoted {stamp}/Events'
     everything = {t: dest for t in ('Feed', 'Pipeline', 'XSLT', 'TextConverter', 'Documentation')}
     ref = {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'], 'name': csv['pipeline']['name']}
-    stepped = [t for t in (await stroom.post('/explorer/v2/getFromDocRef', ref)).get('tags') or [] if t.startswith('mcp-stepped-')]
-    check(stepped, f"clean steps are recorded on the pipeline: {stepped}")
+    from security import record
+    pipeline_tags = (await stroom.post('/explorer/v2/getFromDocRef', ref)).get('tags') or []
+    stepped = (await record.entry(guard_from(ctx), csv['build'], ref['uuid'])).get('stepped')
+    check(stepped and sorted(pipeline_tags) == ['mcp-generated', 'mcp-managed'],
+          f"clean steps are recorded in the build's record, not as tags: {stepped}, tags {pipeline_tags}")
     # A new context, as after a restart or on another replica: the record is in Stroom, not in memory.
     fresh = SimpleNamespace(lifespan_context=dict(ctx.lifespan_context))
     listed = await builds.list_build(fresh, csv['build'])
@@ -369,8 +372,9 @@ async def promotion(ctx, csv: dict, stamp: str):
     check(info['explorerNode']['uuid'] == csv['pipeline']['uuid'], 'pipeline kept its UUID')
     tags = (await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'],
                                                              'name': csv['pipeline']['name']})).get('tags') or []
-    check('mcp-generated' in tags and 'mcp-managed' not in tags and not any(t.startswith('mcp-stepped-') for t in tags),
-          f"promoted pipeline keeps mcp-generated only: {tags}")
+    check(tags == ['mcp-generated'], f"promoted pipeline keeps mcp-generated only: {tags}")
+    check(not any(d['name'] == record.NAME for d in await guard_from(ctx).folder_contents(csv['build'], with_record=True)),
+          "the build's record went with the promotion")
 
     # Documented again after promotion (seen in VS Code): the promoted doc is changed through a working copy, written
     # back by promoting the build again, not a second doc of its name in a new workspace folder.

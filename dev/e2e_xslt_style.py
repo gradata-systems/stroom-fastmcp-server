@@ -324,14 +324,22 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     print('\n### 5. the naming choice, in a form')
     picked = []
 
-    async def elicit(message, options):
+    async def elicit(message, response_type):
+        # The choices, as the form's one field (titled with the question, as VS Code's history shows it) lists them.
+        import dataclasses
+        import typing
+        choices = dataclasses.fields(response_type)[0].type
+        if typing.get_origin(choices) is typing.Annotated:
+            choices = typing.get_args(choices)[0]
+        options = list(typing.get_args(choices))
         picked.append((message, options))
         return SimpleNamespace(action='accept', data=options[-1])
     form_ctx = SimpleNamespace(lifespan_context={**ctx.lifespan_context, 'consent': ConsentStore(use_elicitation=True)},
                                elicit=elicit)
     chosen = await indexing.get_field_conventions(form_ctx, backend='elasticsearch')
     e2e.check(picked and picked[0][1][0] == 'From an index template' and chosen.get('status') == 'chosen'
-              and 'without_example=true' in chosen.get('hint', ''),
+              and 'draft_index_mapping convention=' in chosen.get('hint', '')
+              and "isn't asked again" in chosen.get('hint', ''),
               f"the user picks from a picker, and the reply gives the next call: {picked[0][1] if picked else None} "
               f"-> {chosen.get('choice')}")
 

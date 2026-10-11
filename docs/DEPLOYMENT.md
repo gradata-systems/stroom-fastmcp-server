@@ -15,7 +15,9 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 - **A certificate** for the server's DNS name: a Secret, or cert-manager. Plain HTTP is only allowed when a
   proxy in front terminates TLS.
 - **Stroom folder permissions**: users need rights on the workspace folder (`MCP Workspace` by default), where
-  builds, survey docs and backups are made; promotion needs rights on the destination folders.
+  builds, survey docs and backups are made; promotion needs rights on the destination folders. Tell users not to
+  move or rename anything in a build's folder (or the folder) before promotion: a document's build is the folder it
+  is in, and the folder's `Build record` doc refers to its documents (see the README).
 
 ## Kubernetes (Helm)
 

@@ -9,11 +9,12 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from security.guard import GENERATED, KEPT_MAPPING, MANAGED, build_tag, folder_parts, guard_from, copy_of_tag
+from security import record as build_record
+from security.guard import GENERATED, KEPT_MAPPING, MANAGED, folder_parts, guard_from
 from tools.instructions import applicable_instructions
 from tools.processing_writes import agreement_problem, create_promotion_filters, elastic_destination, promotion_processing
 from tools.pipelines import translation_docs
-from tools.stepping import _outputs, _Pipeline, stepped_clean, stepped_tags, validated_tags, verified, verified_tags
+from tools.stepping import _outputs, _Pipeline, stepped_clean, verified
 from tools.streams import summarise_events
 from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents, object_arrays,
                             index_field_mapping_markdown, sampled_events, written_fields_markdown)
@@ -37,7 +38,6 @@ class AcceptedError(BaseModel):
 
 
 Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.3'.")]
-_COPY_OF = 'mcp-copy-of-'
 _LISTING_RETRIES, _LISTING_WAIT = 5, 1.0     # a build listed empty right after a write
 
 
@@ -61,8 +61,11 @@ async def start_build(
 
 async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
     docs = []
-    for doc in await guard_from(ctx).folder_contents(build):
-        copy_of = next((tag[len(_COPY_OF):] for tag in doc['tags'] if tag.startswith(_COPY_OF)), None)
+    guard = guard_from(ctx)
+    contents = await guard.folder_contents(build)
+    kept = (await build_record.load(guard, build))['docs'] if contents else {}
+    for doc in contents:
+        copy_of = (kept.get(doc['uuid']) or {}).get('copy_of')
         docs.append({k: doc[k] for k in ('type', 'uuid', 'name', 'path')} | {'working_copy_of': copy_of})
     # A stable order: approvals are bound to the exact plan built from this list.
     return sorted(docs, key=lambda d: (d['type'], d['name'], d['uuid']))
@@ -133,8 +136,8 @@ BLOCKS = ' (promotion waits for this)'
 
 
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
-    """What a build's pipelines still lack before promotion: a clean step of their current code (recorded as
-    mcp-stepped-* tags on the pipeline), a Documentation doc (for new pipelines), a Field mapping section that
+    """What a build's pipelines still lack before promotion: a clean step of their current code (recorded in
+    the build's record), a Documentation doc (for new pipelines), a Field mapping section that
     matches the current mapping and XSLT, and an XSLT that is what its mapping generates."""
     documented = {d['name']: d for d in docs if d['type'] == 'Documentation'}
     problems = []
@@ -563,8 +566,7 @@ async def write_documentation(
 
     name, beside = pipeline['name'], None
     guard = guard_from(ctx)
-    copy_of = next((t[len(_COPY_OF):] for t in await guard.tags({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
-                    if t.startswith(_COPY_OF)), None)
+    copy_of = await guard.copy_of({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
     if copy_of:
         # An in-place change (a working copy): the documentation is the production pipeline's, under its name, and
         # its existing doc beside it is changed through a working copy that promotion writes back after a backup.
@@ -586,7 +588,7 @@ async def write_documentation(
     if existing:
         doc = await write(existing)
     elif beside:
-        ref = await guard.create('Documentation', name, build, [copy_of_tag(beside['uuid'])])
+        ref = await guard.create('Documentation', name, build, copy_of=beside['uuid'])
         copy, current = await stroom.get_doc('Documentation', ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
         copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
         await stroom.put_doc(copy)
@@ -693,7 +695,7 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
         doc = await write(existing)
     elif beside:
         # A working copy of the doc beside the index doc: its change log carries on, and promotion writes it back.
-        copy_ref = await guard.create('Documentation', ref['name'], build, [copy_of_tag(beside['uuid'])])
+        copy_ref = await guard.create('Documentation', ref['name'], build, copy_of=beside['uuid'])
         copy, current = await stroom.get_doc('Documentation', copy_ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
         copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
         await stroom.put_doc(copy)
@@ -919,10 +921,7 @@ async def promote_build(
             # Now production content: the agent may no longer change it directly.
             # mcp-generated stays, so it is still known as the server's own.
             ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
-            # Clean-step and verification records only mean something inside a build.
-            tags = await guard.tags(ref)
-            await guard.untag([ref], [MANAGED, build_tag(build)] + stepped_tags(tags) + verified_tags(tags)
-                              + validated_tags(tags))
+            await guard.untag([ref], [MANAGED])
             done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
         else:
             original = await stroom.get_doc(doc['type'], step['target'])
@@ -952,6 +951,9 @@ async def promote_build(
                 await guard.tag([{'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']}], [KEPT_MAPPING])
             await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
             done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
+    # What the record kept about the promoted docs only meant something inside the build; it goes once nothing is
+    # left in the build.
+    await build_record.forget(guard, build, [p['doc']['uuid'] for p in plan if p['action'] != 'keep'])
     if await guard.remove_build_folder_if_empty(build):
         done.append("removed the build's workspace folder, now empty")
     filters =await create_promotion_filters(ctx, processing, started_ms)

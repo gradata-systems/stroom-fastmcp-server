@@ -59,11 +59,11 @@ async def accepted_for(stroom, pipeline_uuid: str) -> list[dict[str, Any]]:
     try:
         pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
         names = {pipeline.get('name')}
-        node = await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': pipeline_uuid,
-                                                                'name': pipeline.get('name')})
-        for tag in node.get('tags') or []:
-            if tag.startswith('mcp-copy-of-'):
-                names.add((await stroom.get_doc('Pipeline', tag[len('mcp-copy-of-'):])).get('name'))
+        from security.guard import WriteGuard
+        copy_of = await WriteGuard(stroom, stroom.settings.workspace_folder).copy_of(
+            {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.get('name')})
+        if copy_of:
+            names.add((await stroom.get_doc('Pipeline', copy_of)).get('name'))
         entries: list[dict[str, Any]] = []
         for name in filter(None, names):
             found = (await stroom.find_documents(name, ['Documentation'], 20)).get('values') or []

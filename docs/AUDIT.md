@@ -122,8 +122,8 @@ Refusals:
 
 ## Finding the changes in Stroom
 
-Everything the server creates is tagged `mcp-generated` (and, until it is promoted, `mcp-managed` and
-`mcp-build-<build>`), so it can be found in Stroom's explorer by tag. Stroom's own logs record each change
+Everything the server creates is tagged `mcp-generated` (and, until it is promoted, `mcp-managed`), so it can be
+found in Stroom's explorer by tag; what is still in a build is in its folder, `MCP Workspace/<build>`. Stroom's own logs record each change
 under the user who made it. The `stroom_request` events give the time, method and path to match them on.
 
 ## Useful queries on the audit log

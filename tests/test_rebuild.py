@@ -213,7 +213,7 @@ async def test_the_proof_runs_on_the_pipelines_original_samples_else_its_feeds_n
             return {'values': [{'meta': {'id': i, 'feedName': 'ACME'}} for i in (901, 900)]}
         return SimpleNamespace(processor_filters=AsyncMock(return_value=filters), find_meta=find_meta,
                                get_doc=AsyncMock(return_value={'name': 'ACME-Events'}))
-    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-build-acme']),
+    guard = SimpleNamespace(build_of=AsyncMock(return_value='acme'),
                             folder_contents=AsyncMock(return_value=[{'type': 'Feed', 'name': 'ACME'}]))
     cases = [([filter_on(*ids)], (), [101, 102], 'original sample streams'),
              ([filter_on(*ids), filter_on(feed)], (101, 102), [901, 900], "feed 'ACME' (its sample streams are gone)"),

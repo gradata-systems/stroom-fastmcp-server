@@ -76,7 +76,8 @@ async def test_more_sample_text_than_profiling_needs_is_noted_for_next_time():
 
 
 async def test_create_pipeline_refuses_documents_from_outside_the_build():
-    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed', 'mcp-generated', 'mcp-build-other']))
+    guard = SimpleNamespace(tags=AsyncMock(return_value=['mcp-managed', 'mcp-generated']),
+                            build_of=AsyncMock(return_value='other'))
     props = [PropertyValue(element='translationFilter', name='xslt', doc_uuid='x', doc_type='XSLT')]
     with patch.object(pipeline_writes, 'guard_from', lambda c: guard):
         with pytest.raises(ToolError, match="is not a document of build 'fortios'"):

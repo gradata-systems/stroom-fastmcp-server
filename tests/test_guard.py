@@ -136,20 +136,41 @@ async def test_a_doc_the_explorer_tree_leaves_out_is_still_in_the_build():
     from security.guard import WriteGuard
     guard = WriteGuard(SimpleNamespace(), 'MCP Workspace')
     folder = {'_path': 'System/MCP Workspace/b1'}
-    tree = {'children': [{'type': 'XSLT', 'uuid': 'x', 'name': 'X', 'tags': ['mcp-build-b1']}]}
+    tree = {'children': [{'type': 'XSLT', 'uuid': 'x', 'name': 'X', 'tags': ['mcp-managed']},
+                         {'type': 'Documentation', 'uuid': 'r', 'name': 'Build record', 'tags': ['mcp-managed']}]}
 
     async def post(path, body):
         if path == '/explorer/v2/find':
-            assert body['filter']['tags'] == ['mcp-build-b1']
+            assert body['filter']['tags'] == ['mcp-managed']
             return {'values': [{'docRef': {'type': 'Folder', 'uuid': 'f', 'name': 'b1'}, 'path': 'System / MCP Workspace'},
                                {'docRef': {'type': 'XSLT', 'uuid': 'x', 'name': 'X'}, 'path': 'System / MCP Workspace / b1'},
                                {'docRef': {'type': 'Pipeline', 'uuid': 'p', 'name': 'P'}, 'path': 'System / MCP Workspace / b1'},
+                               {'docRef': {'type': 'Pipeline', 'uuid': 'b', 'name': 'B'}, 'path': 'System / MCP Workspace / b2'},
                                {'docRef': {'type': 'Pipeline', 'uuid': 'q', 'name': 'Q'}, 'path': 'System / Elsewhere'}]}
-        return {'tags': ['mcp-build-b1', 'mcp-managed']}       # getFromDocRef
+        return {'tags': ['mcp-generated', 'mcp-managed']}       # getFromDocRef
     guard._stroom = SimpleNamespace(post=post)
     with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, tree))):
         docs = await guard.folder_contents('b1')
     assert sorted(d['uuid'] for d in docs) == ['p', 'x'] and next(d for d in docs if d['uuid'] == 'p')['tags'][1] == 'mcp-managed'
+    with patch.object(guard, '_build_node', AsyncMock(return_value=(folder, tree))):
+        assert sorted(d['uuid'] for d in await guard.folder_contents('b1', with_record=True)) == ['p', 'r', 'x']
+
+
+async def test_a_documents_build_is_the_folder_it_is_in():
+    # Not a tag: the user asked for only mcp-managed and mcp-generated on documents, so the tag list doesn't grow with
+    # every build.
+    from tests.fake_explorer import Explorer
+    stroom = Explorer()
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    made = await guard.create('XSLT', 'Acme', 'acme-v1')
+    assert sorted(stroom.tags(made['uuid'])) == ['mcp-generated', 'mcp-managed']
+    assert await guard.build_of(made) == 'acme-v1'
+    elsewhere = stroom.ref(stroom.add('XSLT', 'Prod', stroom.folder('System/Feeds')['uuid']))
+    assert await guard.build_of(elsewhere) is None
+    assert await guard.build_of({'type': 'XSLT', 'uuid': 'gone', 'name': 'Gone'}) is None
+    copied = await guard.create('XSLT', 'Prod', 'acme-v1', copy_of=elsewhere['uuid'])
+    assert await guard.copy_of(copied) == elsewhere['uuid'] and await guard.copy_of(made) is None
+    assert sorted(stroom.tags(copied['uuid'])) == ['mcp-generated', 'mcp-managed']
 
 
 @pytest.mark.parametrize('ignored, removed, deletes', [(1, True, 2), (9, False, 5)])
@@ -231,3 +252,26 @@ async def test_tags_are_asked_for_with_the_doc_ref_alone():
     found = {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-V1.0', 'path': 'System / MCP Workspace / b'}
     assert await guard.tags(found) == ['mcp-build-b']
     stroom.post.assert_awaited_once_with('/explorer/v2/getFromDocRef', {'type': 'Feed', 'uuid': 'f1', 'name': 'ACME-V1.0'})
+
+
+async def test_a_documents_build_is_found_while_the_tree_still_leaves_it_out():
+    # e2e: a pipeline copied moments before it stepped clean wasn't in the explorer tree yet, so its step went
+    # unrecorded and processing was refused.
+    from tests.fake_explorer import Explorer
+    stroom = Explorer()
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    made = await guard.create('Pipeline', 'Acme', 'acme-v1')
+    tree = stroom.post
+    lagging = {'tree': 2}
+
+    async def post(path, body):
+        if path == '/explorer/v2/fetchExplorerNodes' and body.get('ensureVisible') and lagging['tree']:
+            lagging['tree'] -= 1
+            return {'rootNodes': []}
+        return await tree(path, body)
+    stroom.post = post
+    with patch('security.guard.asyncio.sleep', AsyncMock()):
+        assert await guard.build_of(made) == 'acme-v1'                 # from the search index
+        stroom.find_documents = AsyncMock(return_value={'values': []})  # not indexed yet either
+        lagging['tree'] = 2
+        assert await guard.build_of(made) == 'acme-v1'                 # the tree, looked at again

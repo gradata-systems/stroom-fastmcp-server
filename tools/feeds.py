@@ -184,7 +184,7 @@ async def upload_sample(
     check_sample(sample)
     stroom = gateway_from(ctx)
     match = await _build_feed(ctx, feed)
-    if FILES_TAG in await guard_from(ctx).tags(match):
+    if await _sample_files(ctx, match):
         # Seen: the terminal command failed, and the agent uploaded two records of each file as text instead.
         raise ToolError(f"Feed {feed}'s samples are files on the user's disk (it was given commands for them): text "
                         f"isn't taken for it. Call upload_sample with files=[their paths] for fresh commands, and run "
@@ -209,8 +209,12 @@ async def _build_feed(ctx: Context, feed: str) -> dict[str, Any]:
     return match
 
 
-# On a feed whose samples were given commands: its samples are files, never text (upload_sample refuses it).
-FILES_TAG = 'mcp-sample-files'
+async def _sample_files(ctx: Context, feed: dict[str, Any]) -> bool:
+    """Whether the feed's samples were given commands: its samples are files, never text (upload_sample refuses
+    it). Kept in the build's record."""
+    from security import record
+    guard = guard_from(ctx)
+    return bool((await record.entry(guard, await guard.build_of(feed), feed['uuid'])).get('sample_files'))
 
 
 async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_type: str,
@@ -236,7 +240,12 @@ async def upload_ticket(ctx: Context, feed: str, files: list[str] | str, stream_
     ticket = tickets.issue({'feed': feed, 'feed_uuid': match.get('uuid'), 'type': stream_type,
                             'headers': headers or {}, 'auth': authorization, 'exp': int(expires),
                             'sub': _subject()}, settings.upload_tickets)
-    await guard_from(ctx).tag([{k: match[k] for k in ('type', 'uuid', 'name')}], [FILES_TAG])
+    from security import record
+    guard = guard_from(ctx)
+    ref = {k: match[k] for k in ('type', 'uuid', 'name')}
+    build = await guard.build_of(ref)
+    if build:
+        await record.update(guard, build, ref, lambda entry: entry.update(sample_files=True))
     base = (settings.public_base_url or f'http://127.0.0.1:{settings.port}').rstrip('/')
     minutes = max(1, int((expires - time.time()) // 60))
     return {'feed': feed, 'expires_in_minutes': minutes, 'max_mb': settings.max_upload_mb,

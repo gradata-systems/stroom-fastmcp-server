@@ -10,7 +10,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field, model_validator
 
-from security.guard import MANAGED, build_tag, copy_of_tag, guard_from
+from security.guard import MANAGED, guard_from
 from tools.pipelines import chain_order, merge_layers
 from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
@@ -340,7 +340,7 @@ async def _own_documents(ctx: Context, build: str, properties: list[PropertyValu
             continue
         ref = {'type': prop.doc_type, 'uuid': prop.doc_uuid}
         tags = await guard.tags(ref)
-        if MANAGED not in tags or build_tag(build) not in tags:
+        if MANAGED not in tags or await guard.build_of(ref) != build:
             raise ToolError(f"{prop.element}.{prop.name}: {prop.doc_type} {prop.doc_uuid} is not a document of build "
                             f"'{build}'. A new pipeline's translation is written for its own source: "
                             f"build_translation_xslt from a mapping, saved in the build (build=, name=), and a text "
@@ -600,8 +600,8 @@ async def copy_pipeline(
         if entity['uuid'] in copies:
             continue
         original = await stroom.get_doc(entity['type'], entity['uuid'])
-        tags = [copy_of_tag(entity['uuid'])] if working_copy else []
-        ref = await guard.create(entity['type'], names[entity['uuid']], build, tags)
+        ref = await guard.create(entity['type'], names[entity['uuid']], build,
+                                 copy_of=entity['uuid'] if working_copy else None)
         doc = await stroom.get_doc(entity['type'], ref['uuid'])
         for key in ('data', 'converterType', 'description'):
             if key in original:
@@ -615,7 +615,7 @@ async def copy_pipeline(
     for prop in set_properties:
         _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
 
-    ref = await guard.create('Pipeline', new_name, build, [copy_of_tag(source_uuid)] if working_copy else [])
+    ref = await guard.create('Pipeline', new_name, build, copy_of=source_uuid if working_copy else None)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = source.get('parentPipeline')
     doc['description'] = source.get('description')

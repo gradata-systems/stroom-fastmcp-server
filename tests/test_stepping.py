@@ -168,13 +168,17 @@ async def test_unknown_from_an_xslt_saved_without_a_mapping_blocks(ctx, monkeypa
     # check build_translation_xslt makes, then processed and documented.
     mock_pipeline()
     tags = ['mcp-managed']
+    copy_of = [None]
 
     class Guard:
         async def tags(self, ref):
             return tags
 
-        async def tag(self, refs, names):
-            pass
+        async def build_of(self, ref):
+            return None
+
+        async def copy_of(self, ref):
+            return copy_of[0]
     monkeypatch.setattr(stepping, 'guard_from', lambda ctx: Guard())
     kept = {'mapping': None}
 
@@ -199,10 +203,11 @@ async def test_unknown_from_an_xslt_saved_without_a_mapping_blocks(ctx, monkeypa
 
     # Saved from a mapping, Unknown was checked and agreed there; a working copy of a production pipeline, or a
     # pipeline outside a build, is someone else's design.
-    for mapping, tagged in (({'kind': 'mapping'}, ['mcp-managed']), (None, ['mcp-managed', 'mcp-copy-of-p-9']), (None, [])):
-        kept['mapping'], tags[:] = mapping, tagged
+    for mapping, tagged, original in (({'kind': 'mapping'}, ['mcp-managed'], None), (None, ['mcp-managed'], 'p-9'),
+                                      (None, [], None)):
+        kept['mapping'], tags[:], copy_of[0] = mapping, tagged, original
         respx.post(f'{API}/stepping/v1/step').mock(side_effect=steps())
-        assert (await stepping.step_sample(ctx, 'p-1', [7]))['verdict'] == 'clean', (mapping, tagged)
+        assert (await stepping.step_sample(ctx, 'p-1', [7]))['verdict'] == 'clean', (mapping, tagged, original)
 
 
 async def _async(value):

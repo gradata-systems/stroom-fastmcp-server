@@ -90,9 +90,8 @@ async def sample_streams(ctx: Context, pipeline_uuid: str) -> tuple[list[int], s
         # Stepped but never processed: no filters. The feeds of the build the pipeline is in.
         guard = guard_from(ctx)
         pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
-        builds = [t[len('mcp-build-'):] for t in await guard.tags({'type': 'Pipeline', 'uuid': pipeline_uuid,
-                                                                   'name': pipeline.get('name')})
-                  if t.startswith('mcp-build-')]
+        builds = [b for b in [await guard.build_of({'type': 'Pipeline', 'uuid': pipeline_uuid,
+                                                    'name': pipeline.get('name')})] if b]
         for build in builds:
             try:
                 feeds += [d['name'] for d in await guard.folder_contents(build) if d['type'] == 'Feed']
