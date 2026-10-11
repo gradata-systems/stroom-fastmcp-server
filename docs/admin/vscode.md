@@ -33,7 +33,9 @@ One client for VS Code, in the realm Stroom trusts:
 | PKCE | S256 (`pkce.code.challenge.method`) |
 | Valid redirect URIs | As above |
 | Access token audiences | Both `stroom-mcp` (the MCP server, `STROOM_MCP_OIDC_AUDIENCE`) and `stroom` (Stroom, `STROOM_MCP_STROOM_AUDIENCE`): add an Audience mapper for each, e.g. in a default client scope |
-| Claims | `sub` (the `basic` scope) and `preferred_username` (the `profile` scope); the token's scope must include `openid` |
+| Claims | `sub` (the `basic` scope) and `preferred_username` (the `profile` scope: the audit log's user name, and the user each confirmation is bound to); the token's scope must include `openid` |
+| Access token lifespan | 15 minutes (the client's Advanced tab, Access Token Lifespan), not the realm's default of 5: with 5-minute tokens VS Code refreshed its sign-ins in a loop, and every Stroom call waited behind it |
+| Scopes the server asks for | `STROOM_MCP_OIDC_REQUIRED_SCOPES=openid profile email`, the scopes Keycloak grants by default: VS Code asks for what the server names, and when the token came back with more (`openid email profile` for `openid`) it overwrote its sign-in on every refresh |
 
 The issuer is the realm URL, `https://keycloak.example.com/realms/<realm>`. `dev/keycloak/realm-stroom.json` is
 a working example (it also enables direct access grants, for scripted tests only).

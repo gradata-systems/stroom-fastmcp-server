@@ -10,6 +10,9 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 - **An OpenID Connect provider**: the one Stroom already trusts, with a public client for VS Code whose access
   tokens are JWTs carrying this server's audience and Stroom's (or one audience both accept), plus `sub`.
   Details: [Sign-in and VS Code, section 1](vscode.md#1-identity-provider).
+- **Access tokens that last 15 minutes**, not Keycloak's default of 5, on the client VS Code uses. With 5-minute
+  tokens VS Code kept refreshing its sign-ins in a loop, and every Stroom call waited behind it, for minutes
+  ([Troubleshooting](../operate/troubleshooting.md#every-stroom-call-takes-minutes-and-vs-codes-auth-log-loops)).
 - **Stroom** trusts that provider (`identityProviderType: EXTERNAL_IDP`, audience `stroom`), and receipt accepts
   tokens if samples are uploaded through the server ([Sign-in and VS Code, section 2](vscode.md#2-stroom)).
 - **A certificate** for the server's DNS name: a Secret, or cert-manager. Plain HTTP is only allowed when a
@@ -56,7 +59,8 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
 - **Service**: ClusterIP by default; a LoadBalancer can pass TLS straight through (`service.type`,
   `loadBalancerIP`, `loadBalancerSourceRanges`).
 - **Replicas**: MCP sessions live in the replica that started them, so with more than one either set
-  `statelessHttp: true` or `service.sessionAffinity: ClientIP`. Forms (confirmations and approvals) carry sealed
+  `service.sessionAffinity: ClientIP` (`statelessHttp: true` breaks VS Code: see
+  [Upgrading](upgrading.md#stateless-http-keep-it-off-for-vs-code)). Forms (confirmations and approvals) carry sealed
   state between rounds; several replicas must share the sealing keys: `requestState.existingSecret` (keys
   comma-separated, each at least 32 characters). The chart refuses `replicaCount` > 1 without them.
 - **Elasticsearch**: nothing to configure. The server never connects to Elasticsearch: indexing, index
@@ -145,7 +149,7 @@ brackets.
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
 
-`FASTMCP_STATELESS_HTTP` [`statelessHttp`] runs each request on its own.
+`FASTMCP_STATELESS_HTTP` [`statelessHttp`] runs each request on its own; keep it off for VS Code (see [Upgrading](upgrading.md#stateless-http-keep-it-off-for-vs-code)).
 
 ## CI
 

@@ -93,7 +93,8 @@
         "+"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "access.token.lifespan": "900"
       },
       "defaultClientScopes": [
         "stroom-audiences",

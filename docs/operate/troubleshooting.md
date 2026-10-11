@@ -3,9 +3,29 @@
 ## A tool call never returns, and the server logs nothing
 
 The call never left the client. In VS Code, restart the MCP server from the MCP servers view, or reload the window,
-and ask the agent to carry on. This has been seen after the server was redeployed during a chat: VS Code kept
-using a session the new server process didn't know, and waited instead of starting a new one. Running the server
-stateless avoids it (see [Upgrading](../admin/upgrading.md)).
+and ask the agent to carry on. Seen after the server was redeployed during a chat: VS Code kept using a session the
+new server process didn't know, and waited instead of starting a new one.
+
+## Every Stroom call takes minutes, and VS Code's auth log loops
+
+VS Code's authentication log (Output → Authentication) repeating "Token for session … is about to expire,
+refreshing" for many sessions, with "Token scopes 'openid email profile' do not match requested scopes 'openid'",
+means VS Code is refreshing sign-ins in a loop, and every Stroom call waits for a token behind it: calls of 3
+minutes, the server answering each in milliseconds. Seen with 80 sessions stored for one server. To clear it:
+
+1. Run **Authentication: Remove Dynamic Authentication Providers** from the command palette, restart VS Code and
+   sign in again.
+2. Give the client VS Code uses access tokens that last 15 minutes (in Keycloak, the client's Advanced tab, Access
+   Token Lifespan), not Keycloak's default of 5.
+3. Have the server ask for the scopes the provider grants, so VS Code's request and the token agree: for Keycloak,
+   `STROOM_MCP_OIDC_REQUIRED_SCOPES=openid profile email`. Don't make `profile` optional instead: the server reads
+   the user's name from it.
+
+## Tools refused as "disabled" though they are ticked
+
+The server was never called. Seen with `statelessHttp` on: switch it off (see
+[Upgrading](../admin/upgrading.md#stateless-http-keep-it-off-for-vs-code)). With it off, check the tool picker, and
+that VS Code's total tool count stays under its limit of 128 a request.
 
 ## Every call gets slower as the chat goes on
 

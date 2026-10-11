@@ -9,9 +9,10 @@ nameOverride: ""
 fullnameOverride: ""
 
 replicaCount: 1
-# MCP sessions are held in memory by the replica that started them. With more than one replica, either
-# run stateless (each request stands alone) or pin clients with service.sessionAffinity; either way set
-# requestState so every replica can read the forms (confirmations and approvals) another one sent.
+# MCP sessions are held in memory by the replica that started them. With more than one replica, pin clients
+# with service.sessionAffinity, and set requestState so every replica can read the forms (confirmations and
+# approvals) another one sent. Keep statelessHttp off for VS Code: with it on, VS Code refused the server's tools
+# as "disabled" and got confirmation ids instead of forms (docs/admin/upgrading.md).
 statelessHttp: false
 
 # External URL clients use to reach the server, e.g. https://stroom-mcp.example.com. Used in OAuth
