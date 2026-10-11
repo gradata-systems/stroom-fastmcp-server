@@ -141,8 +141,9 @@ async def test_elasticsearch_indexing_starts_once_the_template_is_applied(ctx):
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
     [approve] = [g for g in gates if g['status'] == 'needs_approval']
-    assert approve['summary'].startswith("The agreed index template 'ecs-acme-v2' for Elasticsearch index 'ecs-acme-v2' "
-                                         "is committed to cluster ES_DEV: start indexing")
+    assert approve['summary'].startswith('Create processor filter and start processing\nIndex streams [6]')
+    assert approve['summary'].endswith("Approve only if the agreed index template 'ecs-acme-v2' for Elasticsearch "
+                                       "index 'ecs-acme-v2' is committed to cluster ES_DEV.")
     assert approve['details']['index template'].startswith("the agreed index template 'ecs-acme-v2'")
     assert json.loads(create.calls.last.request.content)['enabled'] is True and create.call_count == 1
     assert result['filter_id'] and 'pipeline_link' not in result

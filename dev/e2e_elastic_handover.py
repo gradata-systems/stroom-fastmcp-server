@@ -330,9 +330,11 @@ async def main():
         print('\n### the admin has committed it: indexing starts')
         first = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
                                                                 source_pipeline_uuid=csv['pipeline']['uuid'])
-        e2e.check(first.get('status') == 'needs_approval' and first['summary'].startswith(
-                 f"The agreed index template '{index}' for Elasticsearch index '{index}' is committed to cluster "
-                 f"{cluster['name']}: start indexing"), f"the approval asks whether it is committed: {first.get('summary')}")
+        e2e.check(first.get('status') == 'needs_approval'
+                  and first['summary'].startswith('Create processor filter and start processing\n')
+                  and first['summary'].endswith(f"Approve only if the agreed index template '{index}' for Elasticsearch "
+                                                f"index '{index}' is committed to cluster {cluster['name']}."),
+                  f"the approval says what it does, and asks whether the template is committed: {first.get('summary')}")
         started = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
                                                                   source_pipeline_uuid=csv['pipeline']['uuid'],
                                                                   approval_id=first['approval_id'])

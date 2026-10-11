@@ -488,11 +488,14 @@ async def create_processor_filter(
                             "(ArcSight, say) receives them")
 
     destination = await elastic_destination(stroom, pipeline_uuid)
-    summary = f"Start processing {scope} with pipeline '{pipeline['name']}'"
+    # The first line is the form's heading, so it says what the user is agreeing to (asked for by the user: an
+    # Elasticsearch approval led with the template being committed, and the heading didn't say what it would do).
+    summary = f"Create processor filter and start processing\nProcess {scope} with pipeline '{pipeline['name']}'."
     if destination:
         committed = await _committed(stroom, pipeline, destination)
         details['index template'] = committed
-        summary = f"{committed[0].upper()}{committed[1:]}: start indexing {scope} with pipeline '{pipeline['name']}'"
+        summary = (f"Create processor filter and start processing\nIndex {scope} with pipeline '{pipeline['name']}'. "
+                   f"Approve only if {committed}.")
     gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter', summary, details, approval_id)
     if gate:
         return gate
@@ -583,7 +586,8 @@ async def reprocess_streams(
                                       f"they are indexed twice: POST {destination['index name']}/_delete_by_query "
                                       f"{delete}")
     gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
-                                           f"Reprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'",
+                                           f"Create processor filter and reprocess streams\nReprocess "
+                                           f"{len(stream_ids)} stream(s) with '{pipeline['name']}'.",
                                            details, approval_id)
     if gate:
         return gate

@@ -156,7 +156,7 @@ flowchart TD
        Admin->>ES: PUT _component_template, _index_template
        User-->>Agent: it is committed
        Agent->>Server: create_processor_filter
-       Server-->>User: Approve: the agreed template is committed, start indexing?
+       Server-->>User: Create processor filter and start processing (approve only if the agreed template is committed)
        Server->>Stroom: processor filter, enabled
        Stroom->>ES: documents, through the indexing filter
    ```
