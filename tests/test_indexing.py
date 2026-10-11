@@ -318,6 +318,23 @@ def test_searches_that_would_mislead_on_elasticsearch_are_refused_with_what_to_u
                                            S(field='status', condition='BETWEEN', value='100,300')])
 
 
+def test_a_search_on_a_field_stroom_doesnt_list_says_why():
+    # Seen in production: message EQUALS '*connection*', MATCHES_REGEX and the rest all found 0, as Stroom lists no
+    # match_only_text field; the agent dropped the check after three tries without knowing why.
+    from tools.indexing import SearchCheck as S
+    listed = {'@timestamp', 'event.code', 'source.ip'}
+    with pytest.raises(ToolError, match="message isn't among the index's fields in Stroom: ecs@mappings maps it as "
+                                        "match_only_text.*Map it as text"):
+        indexing._searchable('elasticsearch', [S(field='message', condition='EQUALS', value='*connection*')],
+                             listed=listed)
+    with pytest.raises(ToolError, match="acme.ticket isn't among the index's fields in Stroom: either no document "
+                                        "has it yet"):
+        indexing._searchable('elasticsearch', [], exact=[{'field': 'acme.ticket', 'value': 'T-1'}], listed=listed)
+    indexing._searchable('elasticsearch', [S(field='event.code', condition='EQUALS', value='TrafficDeny')],
+                         listed=listed)
+
+
+
 async def test_a_hit_is_traced_to_its_record_and_a_mismatch_fails():
     step_output = ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">9</number>'
                    '<number key="EventId">2</number><map key="user"><string key="name">bob</string></map></map></array>')

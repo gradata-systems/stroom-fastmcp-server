@@ -23,6 +23,10 @@ _PLAN_TYPES = {
 }
 # Fields Stroom needs in every document, whatever the convention.
 _STROOM = {'StreamId', 'EventId'}
+# Elasticsearch types Stroom leaves out of an Elastic Index doc's fields, so it can neither search nor show a field of
+# them (nor a subfield of one). Measured on the local stack (Stroom 7.x, Elasticsearch 9.5); seen in production:
+# ecs@mappings maps message as match_only_text, and every search on it found nothing.
+STROOM_UNLISTED = {'match_only_text', 'flattened', 'geo_point', 'search_as_you_type'}
 
 
 @lru_cache(maxsize=1)
@@ -61,8 +65,10 @@ def component_type(name: str) -> str | None:
 
 def left_to_component(name: str, plan_type: str) -> bool:
     """Whether a planned field is mapped by ecs@mappings as ECS says, and the plan agrees with ECS: the index
-    template then leaves it to the component, mapping only the rest (asked for by the user)."""
+    template then leaves it to the component, mapping only the rest (asked for by the user). Not when the component
+    maps it as a type Stroom can't search (message as match_only_text): the template maps it as the plan says."""
     return (name not in _STROOM and name not in _component()['differs'] and component_type(name) is not None
+            and component_type(name) not in STROOM_UNLISTED
             and plan_type in _PLAN_TYPES and check(name, plan_type) is None)
 
 

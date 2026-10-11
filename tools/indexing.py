@@ -1736,13 +1736,35 @@ def _cidr(value: str) -> str:
 _RANGES = ('BETWEEN', 'GREATER_THAN', 'GREATER_THAN_OR_EQUAL_TO', 'LESS_THAN', 'LESS_THAN_OR_EQUAL_TO')
 
 
+def _unlisted(field: str) -> str:
+    """Why Stroom doesn't list a field of an Elasticsearch index."""
+    from utils import ecs
+    kind = ecs.component_type(field)
+    if kind in ecs.STROOM_UNLISTED:
+        return (f"{field} isn't among the index's fields in Stroom: {ecs.COMPONENT} maps it as {kind}, a type Stroom "
+                f"leaves out, so Stroom can't search or show it. Map it as "
+                f"{'text' if kind in ('match_only_text', 'search_as_you_type') else 'keyword'} in the index template "
+                f"(propose_index_template does, for a new index; an existing index keeps a field's type, so it takes a "
+                f"new index or a reindex), and leave it out of these searches until then")
+    return (f"{field} isn't among the index's fields in Stroom: either no document has it yet (a field left to dynamic "
+            f"mapping is mapped once a document brings it), or its mapping type is one Stroom leaves out "
+            f"({', '.join(sorted(ecs.STROOM_UNLISTED))}), so Stroom can't search it")
+
+
 def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] = frozenset(),
-                exact: list[dict[str, str]] = (), lucene_text: dict[str, str] | None = None) -> None:
+                exact: list[dict[str, str]] = (), lucene_text: dict[str, str] | None = None,
+                listed: set[str] | None = None) -> None:
     """Searches whose answer would mislead: on Elasticsearch, Stroom (7.13) finds nothing for STARTS_WITH and
     CONTAINS, nor for a wildcard on an ip field, and matches every document for IS_NULL and IS_NOT_NULL, without an
     error; on Lucene it finds nothing for STARTS_WITH and ENDS_WITH, for CONTAINS on a keyword field, nor for a range
     on a text field (lucene_text: the index's TEXT fields and their analyzers); IN takes values separated by commas."""
     problems = []
+    if backend == 'elasticsearch' and listed:
+        # Seen in production: message, mapped as match_only_text by ecs@mappings, isn't listed by Stroom; every
+        # search on it found nothing, and after three tries the agent dropped the check.
+        for name in dict.fromkeys([s.field for s in searches] + [e.get('field') for e in exact if e.get('field')]):
+            if name not in listed:
+                problems.append(_unlisted(name))
     for e in exact:
         if backend == 'elasticsearch' and e.get('field') in ip_fields and '*' in str(e.get('value')):
             problems.append(f"{e['field']} = '{e['value']}': {e['field']} is an ip field, where a wildcard finds "
@@ -1839,7 +1861,7 @@ async def verify_index(
             except Exception:    # a check on the searches, not a reason for verification to fail
                 typed = {}
         _searchable(backend, searches, {n for n, t in typed.items() if t in ('ip', 'ipv4_address')},
-                    [e for e in exact if isinstance(e, dict)])
+                    [e for e in exact if isinstance(e, dict)], listed=set(typed))
     elif any(s.condition == 'CONTAINS' or s.condition in _RANGES for s in searches):
         try:
             found = await stroom.post('/index/v2/findFields', {'dataSourceRef': {'type': 'Index', 'uuid': index_uuid},

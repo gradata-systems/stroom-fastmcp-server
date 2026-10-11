@@ -703,6 +703,14 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                 continue   # an object: its leaves are checked on their own
             unmapped.append(path)
             continue
+        if spec.get('type') in ecs.STROOM_UNLISTED and any(kind != 'object' for kind, _ in values):
+            # Indexed, but Stroom lists no field of this type: nothing in Stroom can search or show it.
+            notes.append(f"{path}: mapped as {spec['type']}, a type Stroom leaves out of the Elastic Index doc's "
+                         f"fields, so Stroom can't search or show it")
+            changes.append({'field': path, 'problem': f"mapped as {spec['type']}, which Stroom can't search",
+                            'change': f"map '{path}' in the template as "
+                                      f"{'text' if spec['type'] in ('match_only_text', 'search_as_you_type') else 'keyword'}"
+                                      f" (ahead of any component template), so Stroom lists it"})
         bad = next(((text, why) for kind, text in values for why in [_fits(spec, kind, text or '')] if why), None)
         if bad:
             blocking.append(f"{path} {bad[1]}")

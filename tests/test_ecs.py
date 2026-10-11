@@ -110,8 +110,9 @@ def test_an_ecs_plans_index_template_leaves_ecs_fields_to_elastics_ecs_mappings(
     mappings = body['template']['mappings']
     assert body['composed_of'] == ['ecs@mappings'] and mappings['dynamic'] is True
     properties = mappings['properties']
-    assert set(properties) == {'StreamId', 'source', 'gen_ai', 'acme'}
-    assert properties['source']['properties'] == {'port': {'type': 'keyword'}}
+    # message too: the component maps it as match_only_text, which Stroom can't search (seen in production).
+    assert set(properties) == {'StreamId', 'source', 'gen_ai', 'acme', 'message'}
+    assert properties['source']['properties'] == {'port': {'type': 'keyword'}} and properties['message']['type'] == 'text'
     assert properties['gen_ai']['properties']['usage']['properties']['input_tokens'] == {'type': 'long'}
     # Every field mapped, for a template built from the user's example (which says what it is composed of).
     full = ecs_plan.elastic_template('ecs-acme-v1', leave_to_component=False)['body']['template']['mappings']
@@ -126,6 +127,7 @@ def test_the_component_is_measured_and_maps_ecs_fields_as_ecs_says():
     assert ecs.component_type('gen_ai.usage.input_tokens') == 'integer' and ecs.component_type('acme.ticket') is None
     assert ecs.left_to_component('url.original', 'keyword') and not ecs.left_to_component('source.port', 'keyword')
     assert not ecs.left_to_component('data_stream.dataset', 'keyword') and not ecs.left_to_component('StreamId', 'id')
+    assert not ecs.left_to_component('message', 'text') and not ecs.left_to_component('error.message', 'text')
 
 
 def test_documents_are_checked_against_what_the_component_maps():
@@ -177,3 +179,19 @@ def test_dynamic_off_stops_the_component_and_says_so():
     assert said['blocking'] == ['source.ip: an ECS field left to ecs@mappings, but dynamic is strict, so it isn\'t '
                                 'mapped and documents are rejected']
     assert 'dynamic back to true' in said['pipeline_changes'][0]['change']
+
+
+def test_a_field_stroom_cant_list_is_said_when_a_template_maps_it_so():
+    # Seen in production: Stroom leaves match_only_text (message, under ecs@mappings) out of an Elastic Index doc's
+    # fields, so no search on it found anything.
+    from utils.templatecheck import compare, json_xml_documents
+    docs = json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">7'
+                              '</number><string key="message">Connection Failed</string></map></array>')
+    body = {'index_patterns': ['ecs-acme-v1*'], 'composed_of': ['ecs@mappings'],
+            'template': {'mappings': {'dynamic': True, 'properties': {'StreamId': {'type': 'long'}}}}}
+    left = compare(body, docs, 'ecs-acme-v1')
+    assert left['compatible'] and any('message: mapped as match_only_text' in n for n in left['notes'])
+    assert next(c for c in left['pipeline_changes'] if c['field'] == 'message')['change'].startswith(
+        "map 'message' in the template as text")
+    body['template']['mappings']['properties']['message'] = {'type': 'text'}
+    assert compare(body, docs, 'ecs-acme-v1')['notes'] == []
