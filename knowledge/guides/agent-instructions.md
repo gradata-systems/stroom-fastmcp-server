@@ -44,7 +44,8 @@ A `## Required imports` section names shared XSLTs every XSLT of a stage imports
 `- indexing: Common-Index-V1`; stages translation, records, indexing, reference, cef). The server applies it: generated XSLTs
 get the imports (`build_translation_xslt`, `save_xslt index_plan=`, the CEF plan's save and `build_reference_xslt
 build=` add them, and say which named templates each
-offers: call them with `shared` entries where they write), and a hand-written XSLT without them is refused at save.
+offers: call them with `shared` entries where they write; for a translation, also the functions each defines, with
+the `functions` entry that binds their prefix), and a hand-written XSLT without them is refused at save.
 
 A `## Component templates` section says which Elasticsearch component templates new index templates compose
 (`- include: logs-ilm-90d, org-base`, `- exclude: legacy-base`). The server applies it: `propose_index_template`
