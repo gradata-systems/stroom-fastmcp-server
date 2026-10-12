@@ -86,6 +86,14 @@ _PIPELINE_DOC = re.compile(r'^/pipeline/v1/([0-9a-fA-F-]{36})$')
 _CHANGES_PIPELINES = re.compile(r'^/(pipeline/v1/|explorer/v2/(create|copy|move|delete))')
 
 
+def _of_types(found: Any, types: list[str] | None) -> Any:
+    """Only the asked-for types: Stroom's explorer search returns folders of the name whatever the types (a build's
+    Indexing subfolder came back for the 'Indexing' template pipeline)."""
+    if not types or not isinstance(found, dict) or not found.get('values'):
+        return found
+    return {**found, 'values': [v for v in found['values'] if (v.get('docRef') or {}).get('type') in types]}
+
+
 class StroomGateway:
     """Calls the Stroom REST API (`/api/...`) as the MCP caller.
 
@@ -186,6 +194,9 @@ class StroomGateway:
         return await self.request('POST', path, body)
 
     async def find_documents(self, name: str, types: list[str] | None, limit: int, offset: int = 0) -> dict[str, Any]:
+        return _of_types(await self._find(name, types, limit, offset), types)
+
+    async def _find(self, name: str, types: list[str] | None, limit: int, offset: int = 0) -> dict[str, Any]:
         return await self.post('/explorer/v2/find', {
             'filter': explorer_filter(types, name),
             'pageRequest': {'offset': offset, 'length': limit},
@@ -196,17 +207,18 @@ class StroomGateway:
         values: list[dict[str, Any]] = []
         seen: set[str] = set()
         for _ in range(1000):
-            found = await self.find_documents(name, types, page, len(values))
+            # Paged by what Stroom returned, folders included; only the asked-for types are kept.
+            found = await self._find(name, types, page, len(seen))
             batch = found.get('values') or []
             fresh = [v for v in batch if (v.get('docRef') or {}).get('uuid') not in seen]
             if not fresh:
-                return values     # an empty page, or the same page again: Stroom ignored the offset
+                return _of_types({'values': values}, types)['values']   # an empty page, or the same page again
             seen.update((v.get('docRef') or {}).get('uuid') for v in fresh)
             values += fresh
             total = (found.get('pageResponse') or {}).get('total')
-            if len(batch) < page or (total is not None and len(values) >= total):
-                return values
-        return values
+            if len(batch) < page or (total is not None and len(seen) >= total):
+                break
+        return _of_types({'values': values}, types)['values']
 
     async def property_types(self) -> dict[tuple[str, str], str]:
         """{(element type, property name): the type Stroom declares ('boolean', 'int', 'long', 'String', a document

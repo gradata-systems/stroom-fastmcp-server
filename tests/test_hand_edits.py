@@ -69,7 +69,7 @@ class Stroom:
 @pytest.fixture
 def stroom():
     fake = Stroom()
-    guard = SimpleNamespace(check_managed=AsyncMock(), tag=AsyncMock())
+    guard = SimpleNamespace(check_managed=AsyncMock(), tag=AsyncMock(), build_of=AsyncMock(return_value=None))
     with patch.object(translation, 'gateway_from', lambda ctx: fake), \
             patch.object(translation, 'guard_from', lambda ctx: guard), \
             patch.object(translation, '_checked', AsyncMock()):

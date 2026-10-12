@@ -9,6 +9,36 @@ user repeat them:
 - naming for feeds, pipelines and indexes;
 - XSLT style, applied by the generator, so generated code follows it without hand edits.
 
+## Required imports
+
+Many environments keep common steps in shared XSLTs that every pipeline XSLT imports. An `AGENTS` doc can require
+them, per stage, and the server applies it rather than only handing it to the agent:
+
+```markdown
+## Required imports
+- translation: Stream-Meta-V1
+- indexing: Common-Index-V1, Lookups-V2
+```
+
+Stages are `translation` (Raw Events to Events), `indexing`, `reference` and `cef`. XSLTs the server generates get
+the imports, and the agent is told the named templates each offers, to call where they write; an XSLT written by
+hand without them is refused when it is saved. Like any standing instruction, the section applies in its doc's
+folder and below.
+
+## Component templates
+
+An `AGENTS` doc can also say which Elasticsearch component templates new index templates compose:
+
+```markdown
+## Component templates
+- include: logs-ilm-90d, org-base
+- exclude: legacy-base
+```
+
+Included components are referenced in every index template the server proposes there, whatever fields they map,
+and the fields they map are left to them. Excluded ones are left out, even when the user's example composes them,
+unless the user asks for one themselves. A template the user brings is checked against the section too.
+
 ## Where they apply
 
 | Doc | Applies to |

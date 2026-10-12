@@ -324,7 +324,8 @@ class Walk:
             elif call['tool'] == 'create_processor_filter':
                 result = await run(self.ctx, 'create_processor_filter', **fill(call))
                 # Not verified yet: promotion's approval would say so.
-                gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations())
+                gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations(),
+                                             reviewed=True)
                 check(any('has not been indexed and verified' in w for w in gate['details'].get('warnings') or []),
                       "promoting now: the approval warns the sample isn't indexed and verified")
             elif call['tool'] == 'wait_for_processing':
@@ -396,7 +397,8 @@ class Walk:
         set_body_text(doc, written)
         await stroom.put_doc(doc)
         try:
-            gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations())
+            gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations(),
+                                             reviewed=True)
             warnings = gate['details'].get('warnings') or []
             check(gate.get('status', '').startswith('needs_approval') or 'approval_id' in json.dumps(gate),
                   'a hand edit: the approval is still offered')

@@ -143,6 +143,46 @@ async def _checked(ctx: Context, xslt: str, build: str | None = None) -> None:
         raise ToolError(f"XSLT not saved: {'; '.join(result['errors'])}")
 
 
+def xslt_role(code: str) -> str | None:
+    """The build subfolder an XSLT belongs in, from what it writes: Events (a translation), reference data,
+    CEF lines or Kafka records, or documents for an index; None when it can't be told (the build's top)."""
+    if re.search(r'<(?:\w+:)?Events[\s/>]', code):
+        return 'Events'
+    if '<referenceData' in code or 'reference-data:2' in code:
+        return 'Reference'
+    if 'kafka-records' in code or re.search(r'<xsl:output[^>]*method="text"', code):
+        return 'CEF'
+    if re.search(r'<(?:\w+:)?array[\s/>]', code) or (re.search(r'<(?:\w+:)?records[\s/>]', code)
+                                                         and 'event-logging:' in code):
+        return 'Indexing'           # documents for an index, from Events
+    if re.search(r'<(?:\w+:)?records[\s/>]', code):
+        return 'Records'            # records from a source's own: a Raw Records translation (Events if the feed is)
+    return None
+
+
+_ROLE_STAGE = {'Events': 'translation', 'Records': 'records', 'Indexing': 'indexing', 'Reference': 'reference',
+               'CEF': 'cef'}
+
+
+async def _refuse_without_required_imports(ctx: Context, code: str, build: str, role: str | None = None) -> None:
+    """An XSLT of a stage whose standing instructions require shared imports, without them, is refused (asked for by
+    the user): generated ones get them from the generator; one written by hand must add them."""
+    stage = _ROLE_STAGE.get(role or xslt_role(code) or '')
+    if not stage:
+        return
+    from tools.generation import _required_for
+    from utils.sharedxslt import imports_of
+    required = await _required_for(ctx, stage, build)
+    have = set(imports_of(code))
+    missing = [r for r in required if r['href'] not in have]
+    if missing:
+        raise ToolError(f"Standing instructions require every {stage} XSLT to import "
+                        f"{', '.join(repr(r['href']) for r in missing)} (the AGENTS doc in "
+                        f"{', '.join(sorted({r['from'] or '(root)' for r in missing}))}): add "
+                        + ' '.join(f'<xsl:import href="{r["href"]}"/>' for r in missing)
+                        + " first in the stylesheet, or build it from a mapping (build_translation_xslt adds them)")
+
+
 async def create_text_converter(
         ctx: Context,
         build: Build,
@@ -160,7 +200,7 @@ async def create_text_converter(
     """
     _check_converter(converter_type, code)
     stroom = gateway_from(ctx)
-    ref = await guard_from(ctx).create('TextConverter', name, build)
+    ref = await guard_from(ctx).create('TextConverter', name, build, role='Events')     # Records for a Raw Records feed
     doc = await stroom.get_doc('TextConverter', ref['uuid'])
     doc.update(converterType=converter_type, data=code)
     from tools.plan import with_next
@@ -271,8 +311,11 @@ async def create_xslt(
     is generated from it.
     """
     await _checked(ctx, code, build)
+    # A plan says what an XSLT is for; a discovery XSLT reads a source's records, as a Raw Records translation does.
+    role = 'Indexing' if index_plan is not None else 'CEF' if cef_plan is not None else xslt_role(code)
+    await _refuse_without_required_imports(ctx, code, build, role)
     stroom = gateway_from(ctx)
-    ref = await guard_from(ctx).create('XSLT', name, build)
+    ref = await guard_from(ctx).create('XSLT', name, build, role=role)
     doc = await stroom.get_doc('XSLT', ref['uuid'])
     doc['data'] = code
     extra = await _described(ctx, doc, code, mapping, index_plan, cef_plan)
@@ -446,7 +489,12 @@ async def update_xslt(
     await _checked(ctx, code)
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('XSLT', uuid)
-    await guard_from(ctx).check_managed({'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')})
+    ref = {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')}
+    await guard_from(ctx).check_managed(ref)
+    build = await guard_from(ctx).build_of(ref)
+    if build:
+        await _refuse_without_required_imports(ctx, code, build, 'Indexing' if index_plan is not None else
+                                               'CEF' if cef_plan is not None else None)
     if not discard_hand_edit:
         kind, payload = (('translation', {'mapping': mapping.model_dump(exclude_none=True, exclude_defaults=True)})
                          if mapping is not None else ('index', index_plan.model_dump()) if index_plan is not None
@@ -562,6 +610,14 @@ async def save_xslt(
     remember_model(ctx, agent_model)
     said = change or (('Saved again' if uuid else 'Created') + (' from its index plan' if index_plan and code is None
                                                                 else ' by hand' if code else ''))
+    if code is None and index_plan is not None and (build or uuid):
+        # The imports standing instructions require of indexing XSLTs, added as the generator writes it.
+        from tools.generation import _required_for
+        where = build or await guard_from(ctx).build_of({'type': 'XSLT', 'uuid': uuid})
+        required = [r['href'] for r in await _required_for(ctx, 'indexing', where)
+                    if r['href'] not in {*index_plan.imports, *(u.href for u in index_plan.shared)}]
+        if required:
+            index_plan = index_plan.model_copy(update={'imports': [*index_plan.imports, *required]})
     if code is None:
         code = await _generated(index_plan)
     if uuid:

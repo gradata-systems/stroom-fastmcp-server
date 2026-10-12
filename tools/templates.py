@@ -81,6 +81,16 @@ def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
     return 'other', None
 
 
+async def pipeline_role(stroom: StroomGateway, uuid: str) -> str | None:
+    """The build subfolder a pipeline (or a pipeline made from this template) belongs in, from its stage; None when
+    the stage can't be read (it then goes at the build's top)."""
+    from security.guard import STAGE_ROLES
+    try:
+        return STAGE_ROLES.get((await _shape(stroom, uuid))['stage'])
+    except Exception:
+        return None
+
+
 async def _shape(stroom: StroomGateway, uuid: str, markers: dict[str, StageMarkers] | None = None) -> dict[str, Any]:
     merged = merge_layers(await stroom.pipeline_layers(uuid))
     elements = {e['id']: e['type'] for e in merged['elements']}

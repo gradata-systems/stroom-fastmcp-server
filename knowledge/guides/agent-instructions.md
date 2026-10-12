@@ -40,6 +40,17 @@ Short, concrete rules the agent can apply and you can check:
 - Always declare value maps as xsl:map.
 ```
 
+A `## Required imports` section names shared XSLTs every XSLT of a stage imports (`- translation: Stream-Meta-V1`,
+`- indexing: Common-Index-V1`; stages translation, indexing, reference, cef). The server applies it: generated XSLTs
+get the imports (`build_translation_xslt`, `save_xslt index_plan=`, the CEF plan's save and `build_reference_xslt
+build=` add them, and say which named templates each
+offers: call them with `shared` entries where they write), and a hand-written XSLT without them is refused at save.
+
+A `## Component templates` section says which Elasticsearch component templates new index templates compose
+(`- include: logs-ilm-90d, org-base`, `- exclude: legacy-base`). The server applies it: `propose_index_template`
+references the included ones (asking for their content) and leaves the excluded out, and `check_index_template`
+notes a template that breaks it. A user's own `include_components` wins over an exclusion.
+
 An XSLT style section is applied through the translation mapping's `style` (naming, and when to use variables and
 xsl:maps; see the XSLT guide), and the same `style` of an index plan and of a CEF plan (`draft_cef_mapping style=`),
 so every generated XSLT follows it without hand edits.

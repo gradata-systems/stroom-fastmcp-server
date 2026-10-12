@@ -132,7 +132,14 @@ async def test_check_reports_changes_and_unchecked_component_templates():
     body = template({**GOOD, 'source': {'properties': {'ip': {'type': 'ip'}}}}, composed_of=['ecs-base'])
     with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'})), \
             patch('tools.indexing._documents', AsyncMock(return_value=DOCS)):
-        result = await indexing.check_index_template(ctx(), 'p1', f"PUT _index_template/ecs-acme\n{json.dumps(body)}", [8])
+        # Asked for by the user: the fields a template maps are its own and its components' together, so a component
+        # not given is asked for before anything is checked.
+        asked = await indexing.check_index_template(ctx(), 'p1', f"PUT _index_template/ecs-acme\n{json.dumps(body)}", [8])
+        assert asked['status'] == 'needs_components' and asked['missing'] == ['ecs-base']
+        assert asked['request'] == 'GET _component_template/ecs-base'
+        # The user can't get it: checked without it, and said so.
+        result = await indexing.check_index_template(ctx(), 'p1', f"PUT _index_template/ecs-acme\n{json.dumps(body)}", [8],
+                                                     without_components=['ecs-base'])
         with pytest.raises(ToolError, match='not valid JSON'):
             await indexing.check_index_template(ctx(), 'p1', '{', [8])
     assert not result['compatible'] and result['template_name'] == 'ecs-acme'
@@ -521,3 +528,120 @@ def test_a_record_with_an_empty_time_counts_as_without_one():
     out, note = discovery_data_stream(body, [{'@timestamp': ('string', '2026-10-11T08:00:00Z')},
                                              {'@timestamp': ('string', ' ')}], 'ts')
     assert 'data_stream' not in out and '1 of 2' in note
+
+
+def test_every_component_but_the_built_in_ecs_one_is_asked_for():
+    from tools.indexing import components_wanted
+    example = {'composed_of': ['ecs@mappings', 'ecs-base', 'ecs-source', 'logs@settings']}
+    asked = components_wanted(example, {'ecs-base': {}})
+    assert asked['missing'] == ['ecs-source', 'logs@settings']
+    assert asked['request'] == 'GET _component_template/ecs-source,logs@settings'
+    assert components_wanted(example, {'ecs-base': {}}, ['ecs-source', 'logs@settings']) is None
+    assert components_wanted({'index_patterns': ['x*']}, {}) is None          # composed of nothing
+
+
+def test_a_component_is_referenced_only_if_the_pipeline_writes_a_field_it_maps():
+    # Asked for by the user: the example's component templates are referenced, their fields left to them (not mapped
+    # again here), and only those mapping a field this pipeline writes.
+    from utils.templatecheck import from_example, parse_component_templates
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',
+                     fields=[PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    planned = plan.elastic_template('ecs-acme-v2')['body']
+    example = parse_template(EXAMPLE)[1]
+    example['composed_of'] = ['ecs-base', 'ecs-source', 'ilm-90d', 'ecs@mappings']
+    components = parse_component_templates(COMPONENTS + [
+        'PUT _component_template/ilm-90d\n{"template": {"settings": {"index.lifecycle.name": "logs-90d"}}}'])
+    body, notes = from_example(planned, example, components)
+    # ecs-base maps @timestamp, which the pipeline writes: referenced, and @timestamp left to it. ecs-source maps only
+    # source.ip, which it doesn't write: not referenced. The lifecycle component has no fields: referenced, said so.
+    assert body['composed_of'] == ['ecs-base', 'ilm-90d']
+    assert '@timestamp' not in body['template']['mappings']['properties']
+    assert any("not referenced" in n and "['ecs-source', 'ecs@mappings']" in n for n in notes)
+    assert any('ilm-90d (settings only, no fields)' in n for n in notes)
+
+
+def test_ecs_mappings_is_referenced_when_a_field_is_left_to_it():
+    from utils.templatecheck import components_used
+    assert components_used(['ecs@mappings'], {}, {'user.name': {}}, ['user.name']) == (['ecs@mappings'], [], {})
+    assert components_used(['ecs@mappings'], {}, {'x': {}}, []) == ([], ['ecs@mappings'], {})
+    # One the user couldn't give, and every one of a discovery index: referenced, unweighed.
+    assert components_used(['mine'], {}, {'x': {}}, []) == (['mine'], [], {'mine': 'not given'})
+    used, _, unsure = components_used(['a'], {'a': {'template': {'mappings': {'properties': {'z': {'type': 'keyword'}}}}}},
+                                      {'x': {}}, [], discovery=True)
+    assert used == ['a'] and 'discovery' in unsure['a']
+
+
+def test_agents_docs_say_which_component_templates_to_include_or_exclude():
+    # Asked for by the user: standing instructions about component templates are followed, the more specific last.
+    from tools.instructions import component_rules
+    rules = component_rules([
+        {'folder': 'System', 'instructions': '## Component templates\n- include: org-base, ilm-90d\n- exclude: legacy\n'},
+        {'folder': 'System/Feeds/Acme', 'instructions': '## Component templates\n- never: ilm-90d\n- note: not a rule\n'}])
+    assert [r['name'] for r in rules['include']] == ['org-base']
+    assert sorted(r['name'] for r in rules['exclude']) == ['ilm-90d', 'legacy']
+
+
+def test_nominated_components_are_referenced_and_excluded_ones_are_not():
+    from utils.templatecheck import from_example, parse_component_templates
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',
+                     fields=[PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    planned = plan.elastic_template('ecs-acme-v2')['body']
+    example = parse_template(EXAMPLE)[1]          # composed of ecs-base (maps @timestamp) and ecs-source
+    components = parse_component_templates(COMPONENTS + [
+        'PUT _component_template/org-users\n{"template": {"mappings": {"properties": {"user": {"properties": '
+        '{"name": {"type": "keyword"}, "email": {"type": "keyword"}}}}}}}',
+        'PUT _component_template/org-extra\n{"template": {"mappings": {"properties": {"zzz": {"type": "keyword"}}}}}'])
+    body, notes = from_example(planned, example, components, include=['org-users', 'org-extra'], exclude=['ecs-base'])
+    # ecs-base excluded; ecs-source unused; both nominated referenced, org-extra though it maps nothing written.
+    assert body['composed_of'] == ['org-users', 'org-extra']
+    props = body['template']['mappings']['properties']
+    assert 'user' not in props                                  # user.name left to org-users
+    assert props['@timestamp'] == {'type': 'date'}              # ecs-base excluded: mapped here
+    assert any('excluded by standing instructions' in n and 'ecs-base' in n for n in notes)
+
+
+def test_a_template_from_the_plan_alone_composes_nominated_components_too():
+    from utils.templatecheck import with_components
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',
+                     fields=[PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    body = plan.elastic_template('ecs-acme-v2')['body']
+    org = {'template': {'mappings': {'properties': {'user': {'properties': {'name': {'type': 'keyword'}}}}}}}
+    out, notes = with_components(body, {'org-users': org}, ['org-users'])
+    assert out['composed_of'][-1] == 'org-users' and 'user' not in out['template']['mappings']['properties']
+    assert any("['user.name']" in n for n in notes)
+
+
+async def test_the_users_own_nomination_wins_over_an_instruction_to_exclude():
+    from tools import indexing
+    rules = {'include': [{'name': 'org-base', 'from': 'System'}],
+             'exclude': [{'name': 'legacy', 'from': 'System'}, {'name': 'mine', 'from': 'System'}]}
+    with patch('tools.instructions.components_ruled', AsyncMock(return_value=rules)):
+        include, exclude, notes = await indexing._component_choices(None, 'p', ['mine'])
+    assert include == ['mine', 'org-base'] and exclude == ['legacy']
+    assert not any("'mine'" in n for n in notes)
+
+
+async def test_a_users_template_is_checked_against_the_component_rules():
+    from tools import indexing
+    body = template(GOOD, composed_of=['legacy-base'])
+    legacy = 'PUT _component_template/legacy-base\n{"template": {"mappings": {}}}'
+    rules = {'include': [{'name': 'org-ilm', 'from': 'System'}], 'exclude': [{'name': 'legacy-base', 'from': 'System'}]}
+    with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'})), \
+            patch('tools.indexing._documents', AsyncMock(return_value=DOCS)), \
+            patch('tools.instructions.components_ruled', AsyncMock(return_value=rules)),             patch('tools.indexing._agree', AsyncMock(return_value=None)):
+        result = await indexing.check_index_template(ctx(), 'p1', f"PUT _index_template/ecs-acme\n{json.dumps(body)}", [8],
+                                                     component_templates=[legacy])
+    assert "composed_of lacks 'org-ilm', which standing instructions include" in result['notes']
+    assert "composed_of has 'legacy-base', which standing instructions exclude" in result['notes']
+
+
+def test_a_flat_template_leaves_nominated_components_fields_to_them_too():
+    from utils.templatecheck import with_components
+    body = {'index_patterns': ['x*'], 'template': {'mappings': {'subobjects': False, 'properties': {
+        'user.name': {'type': 'keyword'}, 'host.name': {'type': 'keyword'}}}}}
+    org = {'template': {'mappings': {'properties': {'user': {'properties': {'name': {'type': 'keyword'}}}}}}}
+    out, _ = with_components(body, {'org-users': org}, ['org-users'])
+    assert out['composed_of'] == ['org-users'] and list(out['template']['mappings']['properties']) == ['host.name']

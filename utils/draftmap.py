@@ -16,6 +16,7 @@ from utils.actions import action_rules, described, read
 from utils.dsgen import SplitterSpec, dry_run, infer_spec
 from utils.profile import _flatten, profile, profile_many, value_type, xml_fragments
 from utils.samples import as_named_samples
+from utils.timefmt import EPOCH_NAMES
 
 # Field-name patterns, tried in order; the first field matching a home takes it.
 HOMES = [
@@ -271,9 +272,33 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     date_only = time_field and 'H' not in types[time_field] and 'h' not in types[time_field]
     clock = next((n for n in names if n != time_field and values[n]
                   and all(re.fullmatch(r'\d{1,2}:\d{2}(:\d{2})?(\.\d+)?', v.strip()) for v in values[n])), None)
+    # The most precise time the records hold: a time whose values carry fractions of a second wins over one without
+    # (seen in production: a Bluecoat log's date and time columns were joined, dropping the milliseconds its epoch
+    # column had). Read from the values and their patterns, not the fields' names.
+    def sub_second(name: str | None) -> bool:
+        if not name:
+            return False
+        kind = types[name]
+        if kind in ('timestamp (epoch milliseconds)', 'timestamp (epoch microseconds)', 'timestamp (epoch nanoseconds)'):
+            return True
+        if kind == 'timestamp (epoch seconds)':
+            return any('.' in v for v in values[name])
+        return kind.startswith('timestamp') and 'S' in kind
+    chosen_precise = sub_second(clock) if (time_field and date_only and clock) else sub_second(time_field)
+    if time_field and not chosen_precise:
+        precise = next((n for n in names if n != time_field and sub_second(n)
+                        and ('H' in types[n] or 'epoch' in types[n])), None)
+        if precise:
+            notes.append(f"'{precise}' holds the time to a fraction of a second, so it is EventTime/TimeCreated rather "
+                         f"than '{time_field}'" + (f" and '{clock}'" if date_only and clock else '') + '.')
+            time_field, date_only, clock = precise, False, None
     if time_field and date_only and clock:
         date_pattern = types[time_field][len('timestamp ('):-1]
         seconds = ':ss' if all(v.count(':') == 2 for v in values[clock]) else ''
+        # A fraction of a second the clock values carry is kept, at their width.
+        widths = {len(v.strip().split('.', 1)[1]) for v in values[clock] if '.' in v}
+        if seconds and len(widths) == 1 and all('.' in v for v in values[clock] if v.strip()):
+            seconds += '.' + 'S' * widths.pop()
         common.append({'path': 'EventTime/TimeCreated',
                        'xpath': f"concat({_selector(mapping, time_field)}, ' ', {_selector(mapping, clock)})",
                        'time_format': f'{date_pattern} HH:mm{seconds}', 'timezone': 'UTC'})
@@ -284,10 +309,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         pattern = types[time_field][len('timestamp ('):-1]
         entry: dict[str, Any] = {'path': 'EventTime/TimeCreated', 'field': time_field}
         read_from(entry, covering(time_field, lambda n: types[n] == types[time_field]))
-        if pattern == 'epoch seconds':
-            entry['time_format'] = 'epoch_s'
-        elif pattern == 'epoch milliseconds':
-            entry['time_format'] = 'epoch_ms'
+        if pattern in EPOCH_NAMES:
+            entry['time_format'] = EPOCH_NAMES[pattern]
         else:
             entry['time_format'] = pattern
             if not any(z in pattern for z in ('X', 'Z', 'z', 'O', 'V')):
@@ -295,6 +318,22 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                 notes.append(f"'{time_field}' has no time zone: timezone is set to UTC; change it if the source writes local time.")
         common.append(entry)
         taken.add(time_field)
+        if 'VV' in pattern and 'field' in entry:
+            # The time names its region (Australia/Sydney): converted to UTC by it, and the zone kept with the event,
+            # where the schema has it (asked for by the user).
+            mapping.setdefault('extract', []).append({'field': time_field, 'regex': r'([A-Z][a-z]+/[A-Za-z_]+)\]?\s*$',
+                                                      'names': ['time_zone']})
+            common.append({'path': 'EventSource/Device/Location/TimeZoneName', 'field': 'time_zone'})
+            notes.append(f"'{time_field}' names its time zone: kept as EventSource/Device/Location/TimeZoneName.")
+    zone_field = next((n for n in names if n not in taken and values[n]
+                       and all(re.fullmatch(r'[A-Z][a-z]+/[A-Za-z_]+(?:/[A-Za-z_]+)?', v.strip()) for v in values[n] if v.strip())
+                       and any(v.strip() for v in values[n])), None)
+    if zone_field and not any(e.get('path') == 'EventSource/Device/Location/TimeZoneName' for e in common):
+        # A field of IANA zone names (by its values): the zone the source's times are in, kept with the event.
+        common.append({'path': 'EventSource/Device/Location/TimeZoneName', 'field': zone_field})
+        taken.add(zone_field)
+        notes.append(f"'{zone_field}' holds time zone names: kept as EventSource/Device/Location/TimeZoneName; if the "
+                     f"times have no zone of their own, read them in it (timezone on EventTime/TimeCreated).")
     else:
         notes.append("No timestamp field was recognised: map EventTime/TimeCreated yourself (time_format from the profile).")
     common.append({'path': 'EventSource/System/Name', 'value': system_name or source_name or 'TODO system name'})

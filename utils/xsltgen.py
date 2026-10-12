@@ -108,6 +108,10 @@ class FieldMapping(BaseModel):
                                                        "for sources whose variants name the same thing differently.")
     value: str | None = Field(None, description="A constant, e.g. 'Logon'.")
     xpath: str | None = Field(None, description="Advanced: an XPath expression relative to the record.")
+    meta: str | None = Field(None, description="A stream meta attribute (a receipt header the stream was sent with, "
+                                               "e.g. 'MyHostName', 'RemoteHost', 'Feed'; describe_stream lists a "
+                                               "stream's), read with stroom:meta(): for values the records don't "
+                                               "hold, such as the sending host.")
     lookup: Lookup | None = Field(None, description="The value reference data holds for a key field.")
     dictionary: str | None = Field(None, description="With field (the key): the value a Dictionary doc of this name "
                                                      "gives it, one key=value per line (save_dictionary). Keys "
@@ -127,7 +131,8 @@ class FieldMapping(BaseModel):
     scope: Scope | None = Field(None, description="With for_each: 'record' when the input is the record's, not the "
                                                   "item's (the default inside for_each).")
     time_format: str | None = Field(None, description="Input time pattern (Java, e.g. \"yyyy-MM-dd'T'HH:mm:ss\", "
-                                                      "from profile_sample), or 'epoch_ms' / 'epoch_s'.")
+                                                      "from profile_sample), or 'epoch_ms' / 'epoch_s' / 'epoch_us' "
+                                                      "/ 'epoch_ns'. Finer than milliseconds is rounded to them.")
     timezone: str | None = Field(None, description="Input time zone when the time has none, e.g. '+10:00' or 'UTC'.")
     map: dict[str, str] | None = Field(None, description="Input value -> output value, e.g. {'ok': 'true', 'fail': 'false'}.")
     default: str | None = Field(None, description="Output when the field is empty (or, with map, matches no key). "
@@ -136,6 +141,15 @@ class FieldMapping(BaseModel):
 
     @model_validator(mode='after')
     def one_source(self):
+        if self.meta is not None:
+            # Stream meta is read as stroom:meta('Name'), which the generator, the documentation and rebuild_mapping
+            # already handle as an xpath: kept in that one form (asked for by the user: values like MyHostName).
+            others = [k for k in ('field', 'any_of', 'value', 'xpath', 'lookup') if getattr(self, k) is not None]
+            if others or not self.meta.strip() or "'" in self.meta:
+                raise ValueError(f"'{self.path}': meta names one stream meta attribute (e.g. 'MyHostName'), and is "
+                                 f"the entry's only input" + (f" (given {', '.join(others)} too)" if others else ''))
+            object.__setattr__(self, 'xpath', f"stroom:meta('{self.meta.strip()}')")
+            object.__setattr__(self, 'meta', None)
         spilled = re.search(r'[^\w/@.-]', self.path)
         if spilled:
             # Seen: 'EventDetail/View/User/Id**,xpath:': the call's JSON ran the next key into the path's string, and
@@ -198,6 +212,24 @@ SAFE_JSON = (f'<xsl:function xmlns:xsl="{XSL}" xmlns:mcp="{MCP_NS}" name="mcp:js
              '<xsl:variable name="json" select="string(($text)[1])"/>'
              '<xsl:if test="normalize-space($json)"><xsl:try><xsl:sequence select="json-to-xml($json)"/>'
              '<xsl:catch/></xsl:try></xsl:if></xsl:function>')
+
+
+# A time with digits below the millisecond (microseconds, nanoseconds), rounded half up to the event-logging schema's
+# three digits (asked for by the user): stroom:format-date truncates them (seen on the local stack: .456789 -> .456,
+# 08:07:00.9996 -> 08:07:00.999), so a millisecond is added where the first digit it drops is 5 or more, carried into
+# the second, minute and day as xs:dateTime arithmetic carries it.
+SUB_MS = re.compile(r'S{4,}')
+FRACTION_DIGIT = r'^.*\d[.,]\d{3}(\d)\d*(\D.*)?$'      # the fraction's fourth digit: its last run of four or more
+TIME_MS = (f'<xsl:function xmlns:xsl="{XSL}" xmlns:mcp="{MCP_NS}" xmlns:stroom="stroom" xmlns:xs="{XS}" '
+           'name="mcp:time-ms" as="xs:string?">'
+           '<xsl:param name="value" as="xs:string?"/><xsl:param name="pattern" as="xs:string"/>'
+           '<xsl:param name="zone" as="xs:string"/>'
+           '<xsl:variable name="time" select="if ($zone) then stroom:format-date($value, $pattern, $zone) '
+           'else stroom:format-date($value, $pattern)"/>'
+           f'<xsl:sequence select="if (matches($value, \'{FRACTION_DIGIT}\') '
+           f'and replace($value, \'{FRACTION_DIGIT}\', \'$1\') ge \'5\') '
+           'then format-dateTime(xs:dateTime($time) + xs:dayTimeDuration(\'PT0.001S\'), '
+           '\'[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001]Z\') else $time"/></xsl:function>')
 
 
 # XML held in a field, read safely: an empty value, or one that isn't XML, gives nothing rather than stopping the
@@ -576,6 +608,10 @@ class TranslationMapping(BaseModel):
                     entry.data_name = data_name_in(entry.data_name, self.style.data_names)
         return self
 
+    imports: list[str] = Field(default_factory=list, description=(
+        "Shared XSLTs imported (xsl:import) for their template rules or because standing instructions require "
+        "them (an AGENTS doc's Required imports), e.g. 'Stream-Meta-V1'. Named templates from them are called "
+        "with shared entries."))
     shared: list[SharedTemplate] = Field(default_factory=list, description=(
         "Named templates from shared XSLTs (xsl:import) that the environment's other translations call, e.g. one "
         "writing EventSource/Device from stream meta: the XSLT imports them and calls each in its element's place, "
@@ -755,12 +791,23 @@ def in_dictionary_text(src: str, variable: str) -> str:
 
 
 def time_expr(fmt: str, tz: str | None, one: str) -> str:
-    """One value in a time format, as Stroom's ISO 8601 time."""
+    """One value in a time format, as Stroom's ISO 8601 time, to the millisecond: finer digits rounded half up."""
     if fmt == 'epoch_ms':
         return f"stroom:format-date(string({one}))"
-    if fmt == 'epoch_s':
-        return f"stroom:format-date(string(xs:integer(xs:decimal({one}) * 1000)))"
+    if fmt in EPOCH_SCALE:
+        return f"stroom:format-date(string(xs:integer(round(xs:decimal({one}) {EPOCH_SCALE[fmt]}))))"
+    if SUB_MS.search(fmt):
+        return time_ms_text(fmt, tz or '', one)
     return f"stroom:format-date({one}, {literal(fmt)}{', ' + literal(tz) if tz else ''})"
+
+
+# Epoch values other than milliseconds, to milliseconds: seconds (a fraction kept), microseconds and nanoseconds.
+EPOCH_SCALE = {'epoch_s': '* 1000', 'epoch_us': 'div 1000', 'epoch_ns': 'div 1000000'}
+EPOCH_FORMATS = ('epoch_ms', *EPOCH_SCALE)
+
+
+def time_ms_text(fmt: str, tz: str, one: str) -> str:
+    return f"mcp:time-ms(string({one}), {literal(fmt)}, {literal(tz)})"
 
 
 def input_namespace(m: 'TranslationMapping') -> str:
@@ -951,7 +998,8 @@ class _Generator:
             if conversion[0] == 'transform':
                 base = conversion[1]
             else:
-                base = {'epoch_ms': 'from-epoch-ms', 'epoch_s': 'from-epoch-s'}.get(conversion[1], 'parse-time')
+                base = {'epoch_ms': 'from-epoch-ms', 'epoch_s': 'from-epoch-s', 'epoch_us': 'from-epoch-us',
+                        'epoch_ns': 'from-epoch-ns'}.get(conversion[1], 'parse-time')
             names[conversion] = unique_name(style_name(base, naming), set(names.values()) | {'json-to-xml'}, naming)
         return names
 
@@ -1358,7 +1406,7 @@ class _Generator:
         if kind == 'dateTime' and entry.value is None and not entry.time_format:
             self._note(self.warnings, f"{where}: {child.name} is a date-time; give time_format (from profile_sample) "
                                       f"unless the input is already yyyy-MM-ddTHH:mm:ss.SSSZ")
-        if entry.time_format and entry.time_format not in ('epoch_ms', 'epoch_s'):
+        if entry.time_format and entry.time_format not in EPOCH_FORMATS:
             problem = pattern_problem(entry.time_format)
             if problem:
                 self._note(self.problems, f"{where}: {problem}")
@@ -1988,17 +2036,20 @@ class _Generator:
                                       f"it (a Data entry if nothing else fits), or leave it out of names ('').")
 
         uses_dict_map = any(e.dictionary for e in m.common + [f for r in m.events for f in r.fields])
+        self._sub_ms = any(e.time_format and SUB_MS.search(e.time_format)
+                           for e in m.common + [f for r in m.events for f in r.fields])
         uses_json = bool(m.json_fields) or bool(m.xml_fields) \
             or bool(JSON_CALL.search(json.dumps(m.model_dump(exclude_none=True)))) \
             or bool(self._own_functions) or bool(self._keyed_functions) \
-            or self._data_function_wanted                                       # the mcp prefix: its own functions
+            or self._data_function_wanted \
+            or self._sub_ms                                                     # the mcp prefix: its own functions
         bound = {f.prefix: f.namespace for f in m.functions}
         nsmap = {None: EVT, 'xsl': XSL, 'xsi': XSI, 'stroom': 'stroom', 'xs': XS, **({'fn': FN} if m.extract else {}),
                  **({'map': MAP_NS} if uses_dict_map else {}), **({'mcp': MCP_NS} if uses_json else {}), **bound}
         sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
         sheet.set('xpath-default-namespace', input_namespace(m))
         # Imports come first in a stylesheet: one per document, for its named templates or its functions.
-        for href in dict.fromkeys([u.href for u in m.shared] + [f.href for f in m.functions]):
+        for href in dict.fromkeys([u.href for u in m.shared] + [f.href for f in m.functions] + list(m.imports)):
             etree.SubElement(sheet, f'{{{XSL}}}import', href=href)
         own = ['stroom', 'xs'] + (['fn'] if m.extract else []) + (['map'] if uses_dict_map else []) \
             + (['mcp'] if uses_json else [])
@@ -2007,6 +2058,8 @@ class _Generator:
             sheet.append(etree.fromstring(SAFE_JSON))
         if m.xml_fields:
             sheet.append(etree.fromstring(SAFE_XML))
+        if self._sub_ms:
+            sheet.append(etree.fromstring(TIME_MS))
         root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=m.root or DEFAULT_ROOT.get(m.input, ''))
         events = etree.SubElement(root_template, f'{{{EVT}}}Events', Version=version)
         events.set(f'{{{XSI}}}schemaLocation', f'{EVT} file://event-logging-v{version}.xsd')

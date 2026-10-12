@@ -1,6 +1,8 @@
 """Tools for builds: the workspace folder, Documentation docs, and promotion out of the workspace."""
 import asyncio
+import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -65,8 +67,9 @@ async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
     contents = await guard.folder_contents(build)
     kept = (await build_record.load(guard, build))['docs'] if contents else {}
     for doc in contents:
-        copy_of = (kept.get(doc['uuid']) or {}).get('copy_of')
-        docs.append({k: doc[k] for k in ('type', 'uuid', 'name', 'path')} | {'working_copy_of': copy_of})
+        entry = kept.get(doc['uuid']) or {}
+        docs.append({k: doc[k] for k in ('type', 'uuid', 'name', 'path')}
+                    | {'working_copy_of': entry.get('copy_of'), 'version_of': entry.get('version_of')})
     # A stable order: approvals are bound to the exact plan built from this list.
     return sorted(docs, key=lambda d: (d['type'], d['name'], d['uuid']))
 
@@ -588,13 +591,17 @@ async def write_documentation(
     if existing:
         doc = await write(existing)
     elif beside:
-        ref = await guard.create('Documentation', name, build, copy_of=beside['uuid'])
+        from tools.templates import pipeline_role
+        ref = await guard.create('Documentation', name, build, copy_of=beside['uuid'],
+                                 role=await pipeline_role(stroom, pipeline_uuid))
         copy, current = await stroom.get_doc('Documentation', ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
         copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
         await stroom.put_doc(copy)
         doc = await write(ref)
     else:
-        doc = await guard.create_filled('Documentation', name, build, write)
+        from tools.templates import pipeline_role
+        # Beside the pipeline it documents, in the same role subfolder.
+        doc = await guard.create_filled('Documentation', name, build, write, role=await pipeline_role(stroom, pipeline_uuid))
     if not copy_of and not any(d['uuid'] == pipeline_uuid for d in in_build) and beside:
         # Not the build's plan (it has no pipeline of its own to make): what happens to this doc.
         return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': True,
@@ -695,13 +702,13 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
         doc = await write(existing)
     elif beside:
         # A working copy of the doc beside the index doc: its change log carries on, and promotion writes it back.
-        copy_ref = await guard.create('Documentation', ref['name'], build, copy_of=beside['uuid'])
+        copy_ref = await guard.create('Documentation', ref['name'], build, copy_of=beside['uuid'], role='Indexing')
         copy, current = await stroom.get_doc('Documentation', copy_ref['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
         copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
         await stroom.put_doc(copy)
         doc = await write(copy_ref)
     else:
-        doc = await guard.create_filled('Documentation', ref['name'], build, write)
+        doc = await guard.create_filled('Documentation', ref['name'], build, write, role='Indexing')
     destination = (f"written back into the existing doc beside the index doc ({folder}), after a backup" if beside
                    else f"beside the index doc ({folder}) unless they choose another folder "
                         f"(destinations={{'Documentation': '<folder>'}})")
@@ -734,6 +741,109 @@ def _path(path: Any) -> str:
     """An explorer path ('System / A / B', or a list of parts) as 'System/A/B'."""
     parts = path if isinstance(path, list) else str(path or '').split('/')
     return '/'.join(str(p.get('name', p) if isinstance(p, dict) else p).strip() for p in parts if str(p).strip())
+
+
+_VERSION = re.compile(r'(?i)(?<![A-Za-z0-9])v\d+(?:\.\d+)*(?![A-Za-z0-9])')
+
+
+async def _version_folders(stroom, docs: list[dict[str, Any]],
+                           destinations: dict[str, str]) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """For each new version of a production document (copy_pipeline: version_of), a version subfolder beside its
+    predecessor, named by the version in its own name (…-V1.1-Events: V1.1), so old and new are told apart at a
+    glance (asked for by the user). Beside the predecessor, in its folder's parent, when that folder is itself a
+    version's. Documents given a destination of their own keep it. ({doc uuid: version folder}, {predecessor's
+    folder: version folders})."""
+    out: dict[str, str] = {}
+    beside: dict[str, set[str]] = {}
+    for doc in docs:
+        if not doc.get('version_of') or doc['uuid'] in destinations or doc.get('working_copy_of'):
+            continue
+        try:
+            before = await stroom.get_doc(doc['type'], doc['version_of'])
+        except ToolError:
+            continue
+        folder = await _folder_of(stroom, {'type': doc['type'], 'uuid': doc['version_of'], 'name': before.get('name')})
+        found = _VERSION.findall(doc['name'])
+        if not folder or not found:
+            continue
+        parent, last = folder.rsplit('/', 1) if '/' in folder else ('', folder)
+        out[doc['uuid']] = f"{parent}/{found[-1]}" if _VERSION.fullmatch(last) else f"{folder}/{found[-1]}"
+        beside.setdefault(folder, set()).add(out[doc['uuid']])
+    return out, beside
+
+
+def _joining(beside: dict[str, set[str]]) -> dict[str, str]:
+    """Where a version's other new documents go: those headed for its predecessor's folder, or the version folder's
+    parent, go in the version folder with it (its index, documentation and dashboard: seen in e2e, the new pipeline in
+    v2/ and its index beside v1). Only where one version folder is meant for that place."""
+    joins: dict[str, set[str]] = {}
+    for folder, versions in beside.items():
+        for version in versions:
+            for place in (folder, version.rsplit('/', 1)[0]):
+                joins.setdefault('/'.join(folder_parts(place)), set()).add(version)
+    return {place: next(iter(v)) for place, v in joins.items() if len(v) == 1}
+
+
+async def promotion_tree(stroom, plan: list[dict[str, Any]], creating: list[str]) -> str:
+    """Where a promotion puts each document, as a tree of the destination folders (new folders marked), with the
+    documents written back over production ones and those left in the workspace after it."""
+    placed: dict[str, list[str]] = {}
+    written, kept = [], []
+    for step in plan:
+        doc = step['doc']
+        if step['action'] == 'move':
+            placed.setdefault(step['target'], []).append(f"{doc['name']}  ({doc['type']})")
+        elif step['action'] == 'write back':
+            try:
+                original = await stroom.get_doc(doc['type'], step['target'])
+                where = await _folder_of(stroom, {'type': doc['type'], 'uuid': step['target'],
+                                                  'name': original.get('name')})
+                placed.setdefault(where or '(its folder)', []).append(
+                    f"{original.get('name')}  ({doc['type']}: updated from its working copy, backed up first)")
+            except ToolError:
+                written.append(f"{doc['name']} ({doc['type']})")
+        elif step['action'] == 'keep':
+            kept.append(f"{doc['name']} ({doc['type']})")
+    tree: dict[str, Any] = {}
+    for folder, items in placed.items():
+        node = tree
+        for part in folder.split('/'):
+            node = node.setdefault(part + '/', {})
+        for item in sorted(items):
+            node[item] = None
+    new = {path.split('/')[-1] + '/' for path in creating}
+    lines: list[str] = []
+
+    def walk(node: dict[str, Any], prefix: str, path: str) -> None:
+        keys = list(node)
+        for n, key in enumerate(keys):
+            last = n == len(keys) - 1
+            here = f"{path}{key}"
+            mark = '  (new)' if key.endswith('/') and here.rstrip('/') in creating else ''
+            lines.append(f"{prefix}{'└── ' if last else '├── '}{key}{mark}")
+            if node[key]:
+                walk(node[key], prefix + ('    ' if last else '│   '), here)
+    # From the deepest folder all destinations share, so the tree starts where they part.
+    root, node = '', tree
+    while len(node) == 1 and isinstance(next(iter(node.values())), dict) and len(next(iter(node.values()))) == 1 \
+            and isinstance(next(iter(next(iter(node.values())).values())), dict):
+        key = next(iter(node))
+        root += key
+        node = node[key]
+    first = next(iter(node)) if len(node) == 1 else None
+    if first and isinstance(node[first], dict):
+        lines.append(f"{root}{first}" + ('  (new)' if (root + first).rstrip('/') in creating else ''))
+        walk(node[first], '', root + first)
+    else:
+        lines.append(root or '/')
+        walk(node, '', root)
+    del new
+    out = '\n'.join(lines)
+    if written:
+        out += '\n\nUpdated from working copies: ' + ', '.join(written)
+    if kept:
+        out += '\n\nLeft in the workspace: ' + ', '.join(kept)
+    return out
 
 
 async def _folder_of(stroom, ref: dict[str, Any]) -> str | None:
@@ -788,15 +898,22 @@ async def promote_build(
         destinations: Annotated[dict[str, str], Field(
             description="Destination folder per document type or per document UUID, e.g. {'Feed': "
                         "'System/Feeds/Events/Acme', 'Pipeline': 'System/Feeds/Events/Acme', 'XSLT': ...}. "
-                        "Working copies ignore this: they are written back over their originals. 'keep' for a "
-                        "document UUID leaves it in the build's workspace folder, not promoted (a test feed made "
-                        "while fixing, say).")],
+                        "Working copies ignore this: they are written back over their originals. A new version of a "
+                        "production document (copy_pipeline) goes in a version subfolder beside it unless given here. "
+                        "'keep' for a document UUID leaves it in the build's workspace folder, not promoted (a test "
+                        "feed made while fixing, say).")] = {},
+        reviewed: Annotated[bool, Field(description="True once the user has been shown the layout (the tree a "
+                                                    "needs_review reply gives) in the chat and confirmed it: they then "
+                                                    "approve it in a short form.")] = False,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Promote a build out of the workspace, after approval. New documents and new versions are moved to their
-    destination folders (UUIDs are kept, so filters and references keep working); destination folders that
-    don't exist yet are listed in the approval and created first. A working copy is written back over its
+    Promote a build out of the workspace, after the user has seen where everything goes and approved it. The first
+    call returns the layout as a tree (needs_review) to show in the chat; once the user confirms it (or after the
+    destinations they asked for), call again with reviewed=true for a short approval bound to that layout. New
+    documents are moved to their destination folders (UUIDs are kept, so filters and references keep working); a
+    new version of a production pipeline (copy_pipeline) goes in a version subfolder beside its predecessor, with
+    its index, documentation and dashboard; destination folders that don't exist yet are created first. A working copy is written back over its
     original after the original is backed up to <workspace>/backups, then the copy is deleted. The build's
     workspace folder is removed afterwards if nothing is left in it. What build_status says is missing goes in the
     approval, except documentation the build's own change left behind: write_documentation again first (once
@@ -813,6 +930,8 @@ async def promote_build(
         docs = await _build_docs(ctx, build)
     if not docs:
         raise ToolError(f"Build '{build}' has no documents")
+    proposed, beside = await _version_folders(stroom, docs, destinations)
+    joins = _joining(beside)
     plan = []
     for doc in docs:
         if doc['working_copy_of'] and doc['type'] == 'Pipeline':
@@ -825,7 +944,7 @@ async def promote_build(
             # to leave it out the agent never promoted the fix.
             plan.append({'doc': doc, 'action': 'keep', 'target': 'left in the workspace'})
         else:
-            target = destinations.get(doc['uuid']) or destinations.get(doc['type'])
+            target = destinations.get(doc['uuid']) or proposed.get(doc['uuid']) or destinations.get(doc['type'])
             if not target and doc['type'] == 'Documentation' and (
                     doc['name'].endswith(' source notes') or ' reference - ' in doc['name']):
                 # The source's notes and reference documents: beside the feed, where later work on it looks.
@@ -835,7 +954,8 @@ async def promote_build(
                 # The documentation of a pipeline promoted with it: wherever that pipeline goes.
                 same = next((d for d in docs if d['type'] == 'Pipeline' and d['name'] == doc['name']
                              and not d['working_copy_of']), None)
-                target = (destinations.get(same['uuid']) or destinations.get('Pipeline')) if same else None
+                target = (destinations.get(same['uuid']) or proposed.get(same['uuid'])
+                          or destinations.get('Pipeline')) if same else None
             if not target and doc['type'] == 'Dashboard':
                 # A verification dashboard: wherever the index it searches goes (seen in VS Code: promotion stopped
                 # for want of its destination), else beside the pipelines.
@@ -858,7 +978,10 @@ async def promote_build(
                 target = await _folder_of(stroom, outside[0]) if len(outside) == 1 else None
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
-            plan.append({'doc': doc, 'action': 'move', 'target': '/'.join(folder_parts(target))})
+            target = '/'.join(folder_parts(target))
+            if doc['uuid'] not in destinations and doc['type'] != 'Feed' and target in joins:
+                target = joins[target]          # with the version it belongs to
+            plan.append({'doc': doc, 'action': 'move', 'target': target})
     # Every destination is resolved before approval, so a missing folder can't stop a promotion halfway.
     folders: dict[str, dict[str, Any]] = {}       # path -> folder node, for those that exist
     creating: list[str] = []                      # paths to create, each after its parent
@@ -889,8 +1012,28 @@ async def promote_build(
                                                  (t.get('docRef') or {}).get('name') or '?' for t in e['extra_terms']
                                                  if t.get('field') == 'Pipeline'))
             for e in processing]
-    gate = await consent_from(ctx).require(ctx, 'approval', 'promote_build', f"Promote build '{build}'", details,
-                                           approval_id)
+    tree = await promotion_tree(stroom, plan, creating)
+    if not reviewed and not approval_id:
+        # Shown in the chat first: a list of moves crammed into a form was hard to read, and where things would go
+        # wasn't plain (asked for by the user).
+        return {'status': 'needs_review', 'build': build, 'layout': tree,
+                **({'warnings': details['warnings']} if details.get('warnings') else {}),
+                **({'processing_after_promotion': details['processing after promotion (created disabled, new data only)']}
+                   if processing else {}),
+                'hint': "Show the user the layout in the chat exactly as it is (a code block), with any warnings and "
+                        "the processing after promotion, and ask them to confirm it or say what to change (a folder: "
+                        "destinations by type or document uuid). Then promote_build again with the same destinations "
+                        "and reviewed=true: they approve it in a short form."}
+    # The form stays short; the approval is bound to the exact layout shown, through its digest.
+    promoting = sum(1 for p in plan if p['action'] in ('move', 'write back'))
+    short = {'build': build, 'layout': f"{promoting} document(s), as shown in the chat "
+                                       f"({hashlib.sha256(tree.encode()).hexdigest()[:12]})",
+             'folders': sorted({p['target'] for p in plan if p['action'] == 'move'}),
+             **({'warnings': details['warnings']} if details.get('warnings') else {}),
+             **({'processing after promotion': details['processing after promotion (created disabled, new data only)']}
+                if processing else {})}
+    gate = await consent_from(ctx).require(ctx, 'approval', 'promote_build',
+                                           f"Promote build '{build}' as shown in the chat", short, approval_id)
     if gate:
         return gate
 
@@ -961,7 +1104,18 @@ async def promote_build(
     if await guard.remove_build_folder_if_empty(build):
         done.append("removed the build's workspace folder, now empty")
     filters =await create_promotion_filters(ctx, processing, started_ms)
-    result: dict[str, Any] = {'build': build, 'promoted': done}
+    # The layout the user approved, as promoted, with a link to open each folder in Stroom (asked for by the user).
+    links = [{'folder': path, 'link': doc_link(stroom.settings, 'Folder', folders[path]['uuid'])}
+             for path in sorted({p['target'] for p in plan if p['action'] == 'move'})
+             if (folders.get(path) or {}).get('uuid')]
+    updated = [{'document': f"{p['doc']['name']} ({p['doc']['type']})",
+                'link': doc_link(stroom.settings, p['doc']['type'], p['target'])}
+               for p in plan if p['action'] == 'write back']
+    result: dict[str, Any] = {'build': build, 'layout': tree, 'folders': links,
+                              **({'updated_in_place': updated} if updated else {}), 'promoted': done,
+                              'hint': "Show the user the layout as promoted, exactly as it is (a code block, the same "
+                                      "tree they approved), with each folder's link to open it in Stroom"
+                                      + (" and each document updated in place" if updated else '') + "."}
     if warnings:
         result['promoted_with_warnings'] = warnings
     if filters:

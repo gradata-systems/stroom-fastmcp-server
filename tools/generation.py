@@ -179,6 +179,83 @@ async def _kept_mapping(ctx: Context, target: str, uuid: str | None) -> tuple[di
     return await _mapping_to_change(ctx, target, None), None
 
 
+async def _required_for(ctx: Context, stage: str, build: str | None, feeds: Any = ()) -> list[dict[str, str]]:
+    """The imports standing instructions require of this stage's XSLTs, for the build and its feeds."""
+    from tools.instructions import imports_required
+    from security.guard import guard_from
+    folders = []
+    if build:
+        try:
+            folder = await guard_from(ctx).build_folder(build, create=False)
+            folders = [folder['_path']] if folder else []
+        except Exception:
+            folders = []
+    feeds = [feeds] if isinstance(feeds, str) else list(feeds or [])
+    try:
+        return await imports_required(ctx, stage, folders=folders, feeds=feeds)
+    except Exception:
+        return []
+
+
+async def _import_notes(ctx: Context, required: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Each required import, with what it offers: its named templates (called with shared entries where they write)
+    and template rules (which apply without a call)."""
+    from utils.sharedxslt import describe
+    from utils.stroom import gateway_from
+    stroom = gateway_from(ctx)
+    out = []
+    for r in required:
+        note: dict[str, Any] = {'import': r['href'], 'required_by': f"the AGENTS doc in {r['from'] or '(root)'}"}
+        try:
+            found = (await stroom.find_documents(r['href'], ['XSLT'], 10)).get('values') or []
+            ref = next((v['docRef'] for v in found if v['docRef'].get('name') == r['href']), None)
+            if ref is None:
+                note['problem'] = f"no XSLT named '{r['href']}' in Stroom: the import will fail until it exists"
+            else:
+                described = describe((await stroom.get_doc('XSLT', ref['uuid'])).get('data') or '')
+                note['named_templates'] = {name: t.get('writes') for name, t in (described.get('templates') or {}).items()}
+                note['template_rules'] = len(described.get('rules') or [])
+        except Exception:
+            pass
+        out.append(note)
+    return out
+
+
+def zone_not_kept(mapping: TranslationMapping) -> list[str]:
+    """A time read in a named zone (timezone 'Australia/Sydney') with that zone nowhere in the event: the schema has
+    a place for it (asked for by the user). From the mapping's own setting, not field names."""
+    entries = list(mapping.common) + [e for rule in mapping.events for e in rule.fields]
+    zones = sorted({e.timezone for e in entries if e.path.endswith('TimeCreated') and e.timezone and '/' in e.timezone})
+    if not zones or any(e.path.endswith('TimeZoneName') for e in entries):
+        return []
+    return [f"times are read in {', '.join(zones)}, which the event doesn't keep: map EventSource/Device/Location/"
+            f"TimeZoneName (value '{zones[0]}') so the event says which zone its source writes in"]
+
+
+META_CALL = re.compile(r"stroom:meta\(\s*'([^']+)'\s*\)")
+
+
+async def _meta_not_sent(ctx: Context, mapping: TranslationMapping, stream_ids: list[int]) -> list[str]:
+    """Stream meta the mapping reads (stroom:meta('Name')) that no sample stream carries: the element would stay empty.
+    Compared with the streams' own attributes, whatever the header is called."""
+    from tools.streams import get_stream_attributes
+    entries = list(mapping.common) + [e for rule in mapping.events for e in rule.fields]
+    xpaths = [e.xpath for e in entries if e.xpath] + [x.xpath for x in mapping.extract if x.xpath]
+    wanted = sorted({name for xpath in xpaths for name in META_CALL.findall(xpath)})
+    if not wanted:
+        return []
+    carried: set[str] = set()
+    for stream_id in list(stream_ids)[:3]:
+        try:
+            got = await get_stream_attributes(ctx, int(stream_id))
+        except Exception:
+            return []           # attributes unreadable: nothing to say either way
+        carried |= {k.lower() for k in list((got.get('attributes') or {})) + list((got.get('stream') or {}))}
+    missing = [n for n in wanted if n.lower() not in carried]
+    return [f"stroom:meta('{n}') is not among the sample streams' attributes ({', '.join(sorted(carried)) or 'none'}): "
+            f"the element stays empty unless the source sends it as a header" for n in missing]
+
+
 async def build_translation_xslt(
         ctx: Context,
         mapping: Annotated[TranslationMapping | dict[str, Any] | list[Any] | str | None, Field(
@@ -317,8 +394,15 @@ async def build_translation_xslt(
                             "mapping you have; to start again, draft_translation_mapping (stream_ids=the sample streams) "
                             "gives one." + (" A whole mapping looks like: " + json.dumps(MAPPING_EXAMPLE) if structural else '')) from e
     schema = await event_schema(ctx, version)
+    required = await _required_for(ctx, 'translation', build, feeds)
+    missing = [r['href'] for r in required if r['href'] not in
+               {*mapping.imports, *(u.href for u in mapping.shared), *(f.href for f in mapping.functions)}]
+    if missing:
+        mapping = mapping.model_copy(update={'imports': [*mapping.imports, *missing]})
     result = generate(mapping, schema, version)
     result['schema_version'] = version
+    if required:
+        result['required_imports'] = await _import_notes(ctx, required)
     if unknown_keys:
         result['warnings'].append(f"mapping keys ignored, as a mapping has no such key: {unknown_keys} (it has "
                                   f"{sorted(TranslationMapping.model_fields)})")
@@ -338,6 +422,9 @@ async def build_translation_xslt(
     elif sample is not None:
         for text in (sample if isinstance(sample, list) else [sample]):
             check_sample(text)
+    if stream_ids:
+        result['warnings'] += await _meta_not_sent(ctx, mapping, stream_ids)
+    result['warnings'] += zone_not_kept(mapping)
     inferred = False
     if sample and mapping.input == 'data_splitter' and splitter is None:
         # Without the spec no record could be read, so nothing was checked: the rule for the rest went to the user
@@ -606,6 +693,8 @@ async def build_reference_xslt(
                                                                "and value fields per map.")],
         schema_version: Annotated[str | None, Field(description="reference-data schema version; defaults to the "
                                                                 "newest this Stroom holds.")] = None,
+        build: Annotated[str | None, Field(description="The build it will be saved in: the shared XSLTs standing "
+                                                       "instructions require of reference XSLTs there are imported.")] = None,
 ) -> dict[str, Any]:
     """
     Write the XSLT of a reference-data pipeline (a child of the reference-data template) from a mapping: for
@@ -617,10 +706,17 @@ async def build_reference_xslt(
         cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx)))
         ids = [s for s in await cache.system_ids() if 'reference-data' in s]
         version = ids[-1].split('-v')[-1].removesuffix('.xsd') if ids else '2.0.1'
+    required = [r for r in await _required_for(ctx, 'reference', build) if r['href'] not in mapping.imports] \
+        if build else []
+    if required:
+        mapping = mapping.model_copy(update={'imports': [*mapping.imports, *(r['href'] for r in required)]})
     result = generate_reference(mapping, version)
     result['schema_version'] = version
+    if required:
+        result['required_imports'] = await _import_notes(ctx, required)
     result['hint'] = ("Fix the problems and call again." if not result['ok'] else
-                      "save_xslt it; create_pipeline from the reference-data template (find_pipeline_templates "
+                      "save_xslt it (give build here first, so the imports standing instructions require are in "
+                      "it); create_pipeline from the reference-data template (find_pipeline_templates "
                       "stage=reference) with combinedParser.textConverter (if the feed is text) and translationFilter.xslt; "
                       "create_processor_filter on the Raw Reference stream; wait_for_processing output_type='Reference'. "
                       "Then give the events pipeline references=[{feed, loader_pipeline}].")

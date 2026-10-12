@@ -14,6 +14,7 @@ from tools.instructions import applicable_instructions
 from tools.streams import SampleStreams
 from utils import cef
 from utils.params import ONE_OR_MORE
+from security.guard import guard_from
 from utils.stroom import gateway_from
 
 CUSTOM_QUESTION = ("May the CEF output use keys outside ArcSight's CEF dictionary (e.g. myCustomField1)? ArcSight "
@@ -378,8 +379,15 @@ async def draft_cef_mapping(
             result['saved'] = None
             result['hint'] = "Not saved: fix the problems (overrides, header, topic) and call again."
             return result
+        from tools.generation import _required_for
         from tools.translation import create_xslt, update_xslt
         target = uuid or ((await _kept_xslt(ctx, pipeline_uuid)) if pipeline_uuid else None)
+        # The imports standing instructions require of CEF XSLTs, added as the plan writes it.
+        where = build or await guard_from(ctx).build_of({'type': 'XSLT', 'uuid': target})
+        required = [r['href'] for r in await _required_for(ctx, 'cef', where) if r['href'] not in plan.imports]
+        if required:
+            plan = plan.model_copy(update={'imports': [*plan.imports, *required]})
+            result['required_imports'] = required
         said = change or (('CEF plan changes: ' + '; '.join(done)) if target and done else
                           'Saved again from its CEF plan' if target else 'Created from its CEF plan')
         saved = await (update_xslt(ctx, target, plan.xslt(), cef_plan=plan, change=said,

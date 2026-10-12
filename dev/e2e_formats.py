@@ -55,6 +55,10 @@ def logon_rules(kind_field: str, logon: str | list[str], logoff: str | None, use
     return rules
 
 
+UTC_MS = ['2026-10-01T08:00:00.123Z', '2026-10-01T08:05:00.456Z', '2026-10-01T08:07:00.789Z']
+UTC_ROUNDED = ['2026-10-01T08:00:00.123Z', '2026-10-01T08:05:00.457Z', '2026-10-01T08:07:01.000Z']
+
+
 # Each case: the format the profile names, the template, the user field (the agent maps it where the draft didn't),
 # the users expected in order, and any decision the agent makes beyond the draft.
 CASES = {
@@ -79,6 +83,22 @@ CASES = {
     'kv_quoted': {'format': 'key=value', 'template': TEXT, 'user': 'user', 'users': ['alice', 'bob smith', 'carol']},
     'json_lines': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS},
     'json_array_nested': {'format': 'json array', 'template': JSON, 'user': 'actor.user', 'users': USERS},
+    # Times converted to UTC with their milliseconds, whatever the offset or zone (asked for by the user); a zone the
+    # source names kept as TimeZoneName; the sending host read from stream meta (MyHostName) into an element.
+    'json_offsets': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS,
+                     'headers': {'MyHostName': 'gw-host-01'}, 'meta': {'EventSource/Device/HostName': 'MyHostName'},
+                     'values': {'TimeCreated': UTC_MS, 'HostName': ['gw-host-01'] * 3}},
+    'csv_zone_names': {'format': 'delimited', 'template': TEXT, 'user': 'user', 'users': USERS,
+                       'values': {'TimeCreated': UTC_MS,
+                                  'TimeZoneName': ['Australia/Sydney', 'Europe/London', 'America/New_York']}},
+    'json_epoch_fraction': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS,
+                            'values': {'TimeCreated': UTC_MS}},
+    'json_micros': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS,
+                    'values': {'TimeCreated': UTC_ROUNDED}},
+    'json_epoch_micros': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS,
+                          'values': {'TimeCreated': UTC_ROUNDED}},
+    'json_epoch_s_micros': {'format': 'json lines', 'template': JSON, 'user': 'user.name', 'users': USERS,
+                            'values': {'TimeCreated': UTC_ROUNDED}},
     'xml_records': {'format': 'xml', 'template': XML, 'user': 'user', 'users': USERS},
     'xml_attributes': {'format': 'xml', 'template': XML, 'user': '@user', 'users': USERS},
     'xml_namespaced': {'format': 'xml', 'template': XML, 'user': 'User', 'users': USERS},
@@ -92,6 +112,9 @@ def decide(mapping: dict, case: dict) -> dict:
     m = copy.deepcopy(mapping)
     common = m.setdefault('common', [])
     paths = {e['path'] for e in common}
+    for path, attribute in (case.get('meta') or {}).items():
+        common.append({'path': path, 'meta': attribute})      # a value the stream was sent with, not the records
+        paths.add(path)
     if not any(p.startswith('EventSource/Device/') for p in paths):
         common.append({'path': 'EventSource/Device/HostName', 'value': 'acme-gw01'})
     if 'EventSource/User/Id' not in paths:
@@ -111,7 +134,7 @@ async def onboard(ctx, name: str, case: dict, stamp: str) -> None:
     profile = await feeds.profile_sample(ctx, sample)
     e2e.check(profile['format'] == case['format'], f"profiled as {profile['format']}: {profile.get('suggested_parser', '')[:90]}")
     await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=feed)
-    raw = (await feeds.upload_sample(ctx, feed, sample))['stream_id']
+    raw = (await feeds.upload_sample(ctx, feed, sample, headers=case.get('headers')))['stream_id']
     splitter = None
     if case['template'] == TEXT:
         ds = await generation.build_data_splitter(ctx, stream_ids=[raw], spec=case.get('spec'), save_as=feed, build=build)

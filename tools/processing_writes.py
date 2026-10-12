@@ -177,12 +177,48 @@ async def _events_source(ctx: Context, pipeline: dict[str, Any], source_uuid: st
             return gate
     if await _is_indexing(stroom, source_uuid):
         raise ToolError(f"'{source['name']}' is an indexing pipeline, not the events pipeline that produced the Events")
-    foreign = sorted(m['id'] for m in metas if m.get('pipelineUuid') != source_uuid)
+    await _refuse_superseded(stroom, metas)
+    foreign = [m for m in metas if m.get('pipelineUuid') != source_uuid]
     missing = sorted(set(stream_ids or []) - {m['id'] for m in metas})
     if foreign or missing:
-        raise ToolError(f"Stream(s) {foreign + missing} were not produced by '{source['name']}'"
-                        + (f" ({missing} not found)" if missing else '') + ": only its Events can be indexed here")
+        producers = sorted({m.get('pipelineUuid') for m in foreign if m.get('pipelineUuid')})
+        names = []
+        for uuid in producers[:3]:
+            try:
+                names.append(f"'{(await stroom.get_doc('Pipeline', uuid)).get('name')}' ({uuid})")
+            except Exception:       # the name is extra: the refusal stands without it
+                names.append(uuid)
+        raise ToolError(f"Stream(s) {sorted(m['id'] for m in foreign) + missing} were not produced by '{source['name']}'"
+                        + (f" ({missing} not found)" if missing else '')
+                        + (f"; they were produced by {', '.join(names)}: if the events pipeline was updated as a new "
+                           f"version, give that version as source_pipeline_uuid" if names else '')
+                        + ": only the source pipeline's Events can be indexed here")
     return {'type': 'Pipeline', 'uuid': source['uuid'], 'name': source['name']}
+
+
+async def _refuse_superseded(stroom: StroomGateway, metas: list[dict[str, Any]]) -> None:
+    """Events streams Stroom marked deleted when their raw stream was processed again (an events pipeline updated
+    and reprocessed), named with the Events now in their place. Seen in production: after the parent events pipeline
+    was updated, indexing was given the earlier Events streams' ids, and the filter selected streams Stroom no longer
+    processes."""
+    gone = [m for m in metas if str(m.get('status') or '').upper() == 'DELETED']
+    if not gone:
+        return
+    current: dict[int, list[int]] = {}
+    for m in gone:
+        parent = m.get('parentMetaId')
+        if parent is None:
+            continue
+        rows = (await stroom.find_meta([_term('Parent Id', parent), _term('Type', m.get('typeName') or 'Events')],
+                                       20)).get('values') or []
+        current[m['id']] = sorted(r['meta']['id'] for r in rows
+                                  if str(r['meta'].get('status') or '').upper() != 'DELETED'
+                                  and r['meta'].get('pipelineUuid') == m.get('pipelineUuid'))
+    told = '; '.join(f"{i} -> {current.get(i) or 'none yet'}" for i in sorted(m['id'] for m in gone))
+    raise ToolError(f"Events stream(s) {sorted(m['id'] for m in gone)} were superseded: their raw streams were processed "
+                    f"again (the events pipeline was updated), and Stroom marked them deleted. The Events now in their "
+                    f"place: {told}. Use those ids; 'none yet' means processing hasn't finished (wait_for_processing on "
+                    f"the events pipeline first).")
 
 
 async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: list[int] | None,

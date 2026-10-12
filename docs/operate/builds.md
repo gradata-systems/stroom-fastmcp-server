@@ -31,9 +31,22 @@ up a promotion.
 
 ## What promotion does
 
-1. The user confirms a destination folder for each document, proposed from where sibling sources live, for
-   example `System/Feeds/Events/<Source>` for the feed and events pipeline.
-2. The user approves the move.
+1. The agent shows the layout in the chat, a tree of where each document will go, with new folders marked:
+
+    ```
+    System/Feeds/Events/Acme/
+    ├── V1.1/  (new)
+    │   ├── ACME-V1.1-Events  (Pipeline)
+    │   └── ACME-V1.1-Events  (XSLT)
+    └── ACME-V1.0-Events  (Pipeline: updated from its working copy, backed up first)
+    ```
+
+    A new version of a production document goes in a version subfolder beside it, named by the version in its own
+    name, so old and new are told apart at a glance. The version's new index, documentation and dashboard go in
+    with it. Brand-new documents go where the agent proposes, following
+    where sibling sources live, for example `System/Feeds/Events/<Source>`. Ask for any folder to change, and the
+    agent shows the tree again.
+2. The user approves the layout they confirmed, in a short form.
 3. New documents are moved into place. Their UUIDs don't change, so references keep working. They lose
    `mcp-managed` and keep `mcp-generated`.
 4. Working copies are written back over the production documents they copy. Each production document is backed up
@@ -42,6 +55,9 @@ up a promotion.
    feed task limit (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**.
 
 ## After promotion
+
+The agent shows the layout again as promoted, the same tree you approved, with a link to open each destination
+folder in Stroom (and each production document updated in place).
 
 - **Enable processing yourself.** Review the pipeline through the link the server gives, disable any earlier
   version that processes the same feed, then enable the new filter.

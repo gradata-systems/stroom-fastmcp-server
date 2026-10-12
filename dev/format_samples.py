@@ -53,6 +53,34 @@ SAMPLES = {
         '{"ts": "2026-10-01T08:00:00Z", "user": {"name": "alice"}, "src": "10.0.0.5", "event": "login"}\n'
         '{"ts": "2026-10-01T08:05:00Z", "user": {"name": "bob"}, "src": "10.0.0.6", "event": "logout"}\n'
         '{"ts": "2026-10-01T08:07:00Z", "user": {"name": "carol"}, "src": "10.0.0.7", "event": "login"}\n'),
+    # Times as sources write them: offsets, named zones, epoch seconds with a fraction. Each record is the same UTC
+    # instant as json_lines' (08:00, 08:05, 08:07 on 1 October 2026), with milliseconds.
+    'json_offsets': (
+        '{"ts": "2026-10-01T18:00:00.123+10:00", "user": {"name": "alice"}, "event": "login"}\n'
+        '{"ts": "2026-10-01T03:05:00.456-05:00", "user": {"name": "bob"}, "event": "logout"}\n'
+        '{"ts": "2026-10-01T08:07:00.789+00:00", "user": {"name": "carol"}, "event": "login"}\n'),
+    'csv_zone_names': (
+        'time,user,action\n'
+        '2026-10-01 18:00:00.123 Australia/Sydney,alice,login\n'
+        '2026-10-01 09:05:00.456 Europe/London,bob,logout\n'
+        '2026-10-01 04:07:00.789 America/New_York,carol,login\n'),
+    'json_epoch_fraction': (
+        '{"ts": 1790841600.123, "user": {"name": "alice"}, "event": "login"}\n'
+        '{"ts": 1790841900.456, "user": {"name": "bob"}, "event": "logout"}\n'
+        '{"ts": 1790842020.789, "user": {"name": "carol"}, "event": "login"}\n'),
+    # Microseconds, rounded to the schema's milliseconds (asked for by the user): half up, and carried into the second.
+    'json_micros': (
+        '{"ts": "2026-10-01T08:00:00.123456Z", "user": {"name": "alice"}, "event": "login"}\n'
+        '{"ts": "2026-10-01T08:05:00.456789Z", "user": {"name": "bob"}, "event": "logout"}\n'
+        '{"ts": "2026-10-01T08:07:00.999600Z", "user": {"name": "carol"}, "event": "login"}\n'),
+    'json_epoch_micros': (
+        '{"ts": 1790841600123456, "user": {"name": "alice"}, "event": "login"}\n'
+        '{"ts": 1790841900456789, "user": {"name": "bob"}, "event": "logout"}\n'
+        '{"ts": 1790842020999600, "user": {"name": "carol"}, "event": "login"}\n'),
+    'json_epoch_s_micros': (
+        '{"ts": 1790841600.123456, "user": {"name": "alice"}, "event": "login"}\n'
+        '{"ts": 1790841900.456789, "user": {"name": "bob"}, "event": "logout"}\n'
+        '{"ts": 1790842020.9996, "user": {"name": "carol"}, "event": "login"}\n'),
     'json_array_nested': (
         '[{"time": "2026-10-01T08:00:00Z", "actor": {"user": "alice", "ip": "10.0.0.5"}, "action": "login", "tags": ["vpn"]},\n'
         ' {"time": "2026-10-01T08:05:00Z", "actor": {"user": "bob", "ip": "10.0.0.6"}, "action": "logout", "tags": []},\n'

@@ -10,6 +10,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field, model_validator
 
+from security import record as build_record
 from security.guard import MANAGED, guard_from
 from tools.pipelines import chain_order, merge_layers
 from utils.consent import consent_from, edited
@@ -462,7 +463,8 @@ async def create_pipeline(
     if gate:
         return gate
     name = edited(ctx, 'name', name)       # the user may have corrected it in the form
-    ref = await guard_from(ctx).create('Pipeline', name, build)
+    from tools.templates import pipeline_role
+    ref = await guard_from(ctx).create('Pipeline', name, build, role=await pipeline_role(stroom, template_uuid))
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
     if description:
@@ -522,7 +524,7 @@ async def _standalone_kafka(ctx: Context, build: str, name: str, description: st
     if gate:
         return gate
     name = edited(ctx, 'name', name)
-    ref = await guard_from(ctx).create('Pipeline', name, build)
+    ref = await guard_from(ctx).create('Pipeline', name, build, role='CEF')
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     if description:
         doc['description'] = description
@@ -595,13 +597,17 @@ async def copy_pipeline(
     if gate:
         return gate
 
+    from tools.templates import pipeline_role
+    role = await pipeline_role(stroom, source_uuid)
     copies: dict[str, dict[str, Any]] = {}
     for entity in owned:
         if entity['uuid'] in copies:
             continue
         original = await stroom.get_doc(entity['type'], entity['uuid'])
         ref = await guard.create(entity['type'], names[entity['uuid']], build,
-                                 copy_of=entity['uuid'] if working_copy else None)
+                                 copy_of=entity['uuid'] if working_copy else None, role=role)
+        if not working_copy:
+            await build_record.update(guard, build, ref, lambda e, v=entity['uuid']: e.update(version_of=v))
         doc = await stroom.get_doc(entity['type'], ref['uuid'])
         for key in ('data', 'converterType', 'description'):
             if key in original:
@@ -615,7 +621,9 @@ async def copy_pipeline(
     for prop in set_properties:
         _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
 
-    ref = await guard.create('Pipeline', new_name, build, copy_of=source_uuid if working_copy else None)
+    ref = await guard.create('Pipeline', new_name, build, copy_of=source_uuid if working_copy else None, role=role)
+    if not working_copy:
+        await build_record.update(guard, build, ref, lambda e: e.update(version_of=source_uuid))
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = source.get('parentPipeline')
     doc['description'] = source.get('description')

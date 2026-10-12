@@ -210,7 +210,7 @@ def test_time_formats_become_stroom_format_date():
     xslt = generate(mapping(common=common), SCHEMA, '4.1.0')['xslt']
     assert "stroom:format-date(data[@name='time']/@value[1], 'yyyy-MM-dd''T''HH:mm:ss', 'UTC')" in xslt
     epoch = [{'path': 'EventTime/TimeCreated', 'field': 'time', 'time_format': 'epoch_s'}] + BASE[1:]
-    assert 'xs:integer(xs:decimal(' in generate(mapping(common=epoch), SCHEMA, '4.1.0')['xslt']
+    assert 'xs:integer(round(xs:decimal(' in generate(mapping(common=epoch), SCHEMA, '4.1.0')['xslt']
 
 
 @pytest.mark.parametrize('change, expected', [

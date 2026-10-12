@@ -101,12 +101,23 @@ Each value has one source and optional modifiers:
 | `value` | A constant |
 | `lookup: {map, field, path?}` | What reference data holds for the key (see the reference-data guide) |
 | `xpath` | A computed value (embedded JSON: `json-to-xml(...)/*/*[@key='x']`) |
+| `meta` | A stream meta attribute, the headers a stream was sent with: `{"path": "EventSource/Device/HostName", "meta": "MyHostName"}` reads `stroom:meta('MyHostName')`. `describe_stream` lists a stream's; given the sample streams, `build_translation_xslt` warns of one none carries |
 
 | Modifier | Meaning |
 | --- | --- |
 | `transform` | `lower`, `upper`, `trim`, `strip_domain` (`DOMAIN\user`, `user@domain` → `user`), `domain`, `digits`, `unescape_quotes` (a quoted CSV value's doubled quotes as one), `strip_control` (ANSI colour codes and other control characters out, from a log written for a terminal) |
 | `dictionary: name` | The value a Dictionary of key=value lines gives the field |
 | `map`, `default`, `time_format`, `timezone` | As before: a value map, a fallback, time parsing |
+
+Times: `time_format` is the profile's pattern, which reads an offset (`XXX`, `Z`) or a zone (`VV` for
+`Australia/Sydney`, `z` for `AEST`) in the value, so Stroom converts the time to UTC, daylight saving included;
+fractions of a second are kept (`.SSS`; epoch seconds with a fraction as `epoch_s`), and finer ones (`.SSSSSS`,
+epoch microseconds `epoch_us`, nanoseconds `epoch_ns`) are rounded half up to the schema's three digits: Stroom's
+`format-date` alone would cut them off. Only a time with no zone of its
+own takes `timezone`, the zone the source writes in (UTC unless the user says otherwise). A zone the source names is
+kept with the event as `EventSource/Device/Location/TimeZoneName` (an IANA name: the draft maps it from the value or
+a field of zone names); a time read with an IANA `timezone` that isn't kept is warned about. A bare offset (`+10:00`)
+isn't an IANA name, so there is nowhere in the schema to keep it.
 
 Conditions test a field with `equals`, `one_of`, `matches`, `present` or `in_dictionary` (a Dictionary of one
 entry per line). Write XSLT by hand only for what none of this expresses.

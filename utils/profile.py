@@ -10,7 +10,7 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 from lxml import etree
 
-from utils.timefmt import check_time_format, infer_time_pattern
+from utils.timefmt import EPOCH_NAMES, check_time_format, infer_time_pattern
 
 SYSLOG_5424 = re.compile(r'^<\d{1,3}>1 \S+ \S+ \S+ \S+ \S+')
 SYSLOG_3164 = re.compile(r'^(<\d{1,3}>)?[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \S+ ')
@@ -28,6 +28,8 @@ TIMESTAMPS = [
     (re.compile(r'^[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}$'), 'MMM d HH:mm:ss'),
     (re.compile(r'^1\d{9}$'), 'epoch seconds'),
     (re.compile(r'^1\d{12}$'), 'epoch milliseconds'),
+    (re.compile(r'^1\d{15}$'), 'epoch microseconds'),
+    (re.compile(r'^1\d{18}$'), 'epoch nanoseconds'),
 ]
 
 
@@ -177,7 +179,9 @@ def value_type(value: Any) -> str:
     if isinstance(value, bool):
         return 'boolean'
     if isinstance(value, (int, float)):
-        return 'number'
+        # A number can be a time too (epoch seconds, with or without a fraction, or milliseconds): read as its text.
+        pattern = infer_time_pattern(repr(value) if isinstance(value, float) else str(value))
+        return f'timestamp ({pattern})' if pattern in EPOCH_NAMES else 'number'
     if isinstance(value, (dict, list)):
         return 'object' if isinstance(value, dict) else 'array'
     text = str(value).strip()

@@ -7,6 +7,7 @@ everywhere. Where several apply, they are returned from the most general to the 
 specific one reads last. The user's own request takes precedence, and no instruction can lift an approval or
 the write guard: those are enforced by the server whatever a doc says.
 """
+import re
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -93,6 +94,89 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
                  f"No {name} docs apply. Users can add one: a Documentation doc named {name} in a folder applies to that "
                  "folder and below."),
     }
+
+
+# A standing instruction the server applies, not only hands back (asked for by the user): shared XSLTs every XSLT of a
+# stage imports, e.g. Raw Events to Events translations importing Stream-Meta-V1. In an AGENTS doc:
+#   ## Required imports
+#   - translation: Stream-Meta-V1
+#   - indexing: Common-Index-V1, Lookups-V2
+_REQUIRED = re.compile(r'^#{1,6}\s*required imports\s*$', re.I | re.M)
+STAGES = {'translation': 'translation', 'translations': 'translation', 'events': 'translation',
+          'raw events to events': 'translation', 'raw event to event': 'translation', 'records': 'records',
+          'raw records to records': 'records', 'raw record to record': 'records', 'indexing': 'indexing',
+          'reference': 'reference', 'reference data': 'reference', 'cef': 'cef', 'forwarding': 'cef'}
+
+
+def required_imports(applying: list[dict[str, Any]]) -> dict[str, list[dict[str, str]]]:
+    """The imports the applicable AGENTS docs require, by stage: [{'href', 'from'}], the doc's folder. A line naming no
+    known stage is left out."""
+    out: dict[str, list[dict[str, str]]] = {}
+    for entry in applying:
+        text = entry.get('instructions') or ''
+        found = _REQUIRED.search(text)
+        if not found:
+            continue
+        section = re.split(r'^#{1,6}\s', text[found.end():], maxsplit=1, flags=re.M)[0]
+        for line in section.splitlines():
+            m = re.match(r'^\s*[-*]\s*([^:]+):\s*(.+)$', line)
+            stage = STAGES.get(m.group(1).strip().strip('`*').lower()) if m else None
+            if not stage:
+                continue
+            for href in (h.strip().strip('`').strip() for h in m.group(2).split(',')):
+                if href and href not in {r['href'] for r in out.get(stage, [])}:
+                    out.setdefault(stage, []).append({'href': href, 'from': entry.get('folder', '')})
+    return out
+
+
+# Component templates an environment's index templates always or never compose (asked for by the user), applied by
+# the server:
+#   ## Component templates
+#   - include: logs-ilm-90d, org-base
+#   - exclude: legacy-base
+_COMPONENTS = re.compile(r'^#{1,6}\s*component templates\s*$', re.I | re.M)
+_COMPONENT_RULES = {'include': 'include', 'always': 'include', 'add': 'include', 'use': 'include',
+                    'exclude': 'exclude', 'never': 'exclude', 'omit': 'exclude', 'drop': 'exclude'}
+
+
+def component_rules(applying: list[dict[str, Any]]) -> dict[str, list[dict[str, str]]]:
+    """{'include': [{'name', 'from'}], 'exclude': [...]} from the applicable AGENTS docs' Component templates
+    sections, the most general first; a more specific doc's rule for a name overrides a more general one's."""
+    rules: dict[str, tuple[str, str]] = {}
+    for entry in applying:
+        text = entry.get('instructions') or ''
+        found = _COMPONENTS.search(text)
+        if not found:
+            continue
+        section = re.split(r'^#{1,6}\s', text[found.end():], maxsplit=1, flags=re.M)[0]
+        for line in section.splitlines():
+            m = re.match(r'^\s*[-*]\s*([^:]+):\s*(.+)$', line)
+            kind = _COMPONENT_RULES.get(m.group(1).strip().strip('`*').lower()) if m else None
+            if not kind:
+                continue
+            for name in (n.strip().strip('`').strip() for n in m.group(2).split(',')):
+                if name:
+                    rules[name] = (kind, entry.get('folder', ''))
+    out: dict[str, list[dict[str, str]]] = {'include': [], 'exclude': []}
+    for name, (kind, folder) in rules.items():
+        out[kind].append({'name': name, 'from': folder})
+    return out
+
+
+async def components_ruled(ctx: Context, pipeline_uuid: str) -> dict[str, list[dict[str, str]]]:
+    """The Component templates rules of the AGENTS docs that apply where this pipeline is."""
+    try:
+        name = (await gateway_from(ctx).get_doc('Pipeline', pipeline_uuid)).get('name') or ''
+        found = await applicable_instructions(ctx, docs=[{'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name}])
+    except Exception:
+        return {'include': [], 'exclude': []}
+    return component_rules(found['instructions'])
+
+
+async def imports_required(ctx: Context, stage: str, folders: list[str] = (), feeds: list[str] = ()) -> list[dict[str, str]]:
+    """The shared XSLTs every XSLT of this stage must import where these folders or feeds are."""
+    found = await applicable_instructions(ctx, folders=list(folders), feeds=list(feeds))
+    return required_imports(found['instructions']).get(stage, [])
 
 
 ALL_TOOLS = [get_instructions]

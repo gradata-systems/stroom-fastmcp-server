@@ -133,29 +133,32 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
 
 async def test_every_page_of_documents_is_read_when_there_are_more_than_one():
     from utils.stroom import StroomGateway
-    pages = [[{'docRef': {'uuid': str(n)}} for n in range(start, min(start + 3, 7))] for start in (0, 3, 6)]
+    # Stroom returns folders of the name whatever the types (a build's Indexing subfolder, for the 'Indexing'
+    # template): dropped, but counted in the paging, which follows what Stroom returned.
+    kind = lambda n: 'Folder' if n == 4 else 'Pipeline'
+    pages = [[{'docRef': {'uuid': str(n), 'type': kind(n)}} for n in range(start, min(start + 3, 7))] for start in (0, 3, 6)]
     calls = []
 
     async def find(name, types, limit, offset=0):
         calls.append(offset)
         return {'values': pages[offset // 3], 'pageResponse': {'total': 7}}
     gateway = StroomGateway.__new__(StroomGateway)
-    gateway.find_documents = find
+    gateway._find = find
     found = await StroomGateway.find_all_documents(gateway, 'type:Pipeline', ['Pipeline'], page=3)
-    assert [v['docRef']['uuid'] for v in found] == [str(n) for n in range(7)] and calls == [0, 3, 6]
+    assert [v['docRef']['uuid'] for v in found] == ['0', '1', '2', '3', '5', '6'] and calls == [0, 3, 6]
 
 
 
 async def test_paging_stops_when_stroom_returns_the_same_page_again():
     from utils.stroom import StroomGateway
-    page = [{'docRef': {'uuid': str(n)}} for n in range(3)]
+    page = [{'docRef': {'uuid': str(n), 'type': 'Pipeline'}} for n in range(3)]
     calls = []
 
     async def find(name, types, limit, offset=0):
         calls.append(offset)
         return {'values': page}               # the offset ignored, and no total
     gateway = StroomGateway.__new__(StroomGateway)
-    gateway.find_documents = find
+    gateway._find = find
     found = await StroomGateway.find_all_documents(gateway, 'type:Pipeline', ['Pipeline'], page=3)
     assert [v['docRef']['uuid'] for v in found] == ['0', '1', '2'] and calls == [0, 3]
 
@@ -205,11 +208,16 @@ async def test_a_document_can_be_kept_in_the_workspace_rather_than_promoted():
         asked.update(details)
         return {'status': 'needs_approval'}
     with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)),             patch.object(builds, 'guard_from', lambda c: guard),             patch.object(builds, 'promotion_processing', AsyncMock(return_value=[])),             patch.object(builds, 'build_checks', AsyncMock(return_value=[])),             patch.object(builds, 'consent_from', lambda c: SimpleNamespace(require=require)):
+        shown = await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                           destinations={'Pipeline': 'System/Feeds/Acme', 'f': 'keep'})
+        # First the layout, a tree for the chat (asked for by the user: a list in a form was hard to read).
+        assert shown['status'] == 'needs_review' and not asked
+        assert shown['layout'] == ('System/Feeds/Acme/\n└── ACME-Events  (Pipeline)\n\n'
+                                   'Left in the workspace: ACME-TEST (Feed)')
         gate = await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
-                                          destinations={'Pipeline': 'System/Feeds/Acme', 'f': 'keep'})
+                                          destinations={'Pipeline': 'System/Feeds/Acme', 'f': 'keep'}, reviewed=True)
     assert gate['status'] == 'needs_approval'
-    assert asked['plan'] == ["move Pipeline 'ACME-Events' -> System/Feeds/Acme",
-                             "keep Feed 'ACME-TEST' -> left in the workspace"]
+    assert asked['folders'] == ['System/Feeds/Acme'] and asked['layout'].startswith('1 document(s), as shown in the chat')
 
 
 async def test_schema_validation_is_never_changed_only_the_output():
@@ -226,3 +234,28 @@ async def test_schema_validation_is_never_changed_only_the_output():
             await pipeline_writes.set_pipeline_property(ctx, 'p', pipeline_writes.PropertyValue(
                 element='schemaFilter', name='schemaValidation', value='false'))
     assert stroom.put_doc.await_count == 0
+
+
+async def test_a_search_for_one_type_finds_no_folder_of_the_name():
+    # Seen on the local stack: with role subfolders, the 'Indexing' template pipeline's search found builds' Indexing
+    # folders too (Stroom returns folders whatever the types), and reading one as a pipeline failed.
+    from utils.stroom import StroomGateway
+    gateway = StroomGateway.__new__(StroomGateway)
+
+    async def find(name, types, limit, offset=0):
+        return {'values': [{'docRef': {'uuid': 'f', 'type': 'Folder', 'name': 'Indexing'}},
+                           {'docRef': {'uuid': 'p', 'type': 'Pipeline', 'name': 'Indexing'}}]}
+    gateway._find = find
+    found = await StroomGateway.find_documents(gateway, 'Indexing', ['Pipeline'], 10)
+    assert [v['docRef']['uuid'] for v in found['values']] == ['p']
+    assert len((await StroomGateway.find_documents(gateway, 'Indexing', None, 10))['values']) == 2   # no types: all
+
+
+async def test_a_delimited_streams_header_comes_back_with_its_records():
+    # Seen in e2e (evaluate_and_fix): the header line was dropped from the records and given nowhere.
+    from tools import streams
+    text = 'time,user,host\n2026-09-28T10:00:00,alice,ws01\n2026-09-28T10:05:00,bob,ws02\n'
+    with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(text, False))):
+        out = await streams._split_raw(None, None, 1, 0, 5, 10_000)
+    assert out['header'] == 'time,user,host' and out['records'][0] == '2026-09-28T10:00:00,alice,ws01'
+    assert 'is header' in out['records_are']

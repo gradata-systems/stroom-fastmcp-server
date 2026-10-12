@@ -155,8 +155,12 @@ async def _split_raw(ctx: Context, stroom: StroomGateway, stream_id: int, first:
         out.append(record[:char_budget - used])
         used += len(out[-1])
     total = len(whole)
+    # The header line names the columns: given apart from the records (seen in e2e: it was dropped from the records
+    # and given nowhere, so the fields a translation never reads couldn't be named).
     return {'records': out, 'total_records': None if truncated else total,
-            'records_are': (f"split from the stream's text ({chunk.format}{', a header line first' if chunk.header else ''}"
+            **({'header': chunk.header} if chunk.header else {}),
+            'records_are': (f"split from the stream's text ({chunk.format}"
+                            f"{'; its header line, naming the columns, is header' if chunk.header else ''}"
                             f"), as Stroom holds it as one record"
                             + (f"; only its first {len(text):,} characters were read, holding {total} records"
                                if truncated else '')),

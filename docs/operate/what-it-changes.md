@@ -21,11 +21,14 @@ System
 └── MCP Workspace
     ├── onboard-acme-vpn               ← a build
     │   ├── ACME-VPN-V1.0              (Feed)
-    │   ├── ACME-VPN-V1.0-Events       (Pipeline, XSLT, Text Converter)
-    │   ├── ACME-VPN-V1.0 - Indexing   (Pipeline, XSLT, Index)
-    │   ├── ACME-VPN-V1.0-VERIFY       (Dashboard)
-    │   ├── ...Documentation docs
-    │   └── Build record               (Documentation: the server's record of the build)
+    │   ├── Build record               (Documentation: the server's record of the build)
+    │   ├── Events                     (Records, for a Raw Records feed)
+    │   │   └── ACME-VPN-V1.0-Events   (Pipeline, XSLT, Text Converter, Documentation)
+    │   ├── Indexing
+    │   │   ├── ACME-VPN-V1.0 - Indexing  (Pipeline, XSLT, Index, Documentation)
+    │   │   └── ACME-VPN-V1.0-VERIFY   (Dashboard)
+    │   ├── CEF                        (CEF output pipelines, when there are any)
+    │   └── Reference                  (reference-data pipelines, when there are any)
     └── backups                        ← production docs as they were before a working copy replaced them
 ```
 
@@ -33,9 +36,9 @@ Content moves out of the workspace only when the user approves [promotion](build
 
 !!! warning "Leave build folders as they are"
     Don't move or rename anything in a build's folder, or the folder itself, until the build is promoted. A
-    document's build is the folder it is in, and the folder's `Build record` doc refers to the documents in it. A
-    document moved out of the folder drops out of the build, and promotion leaves it behind. A renamed folder is a
-    different build.
+    document's build is the top folder it is in under the workspace (its role subfolders, Events or Records, Indexing,
+    CEF and Reference, are part of it), and the folder's `Build record` doc refers to the documents in it. A document
+    moved out of the build drops out of it, and promotion leaves it behind. A renamed folder is a different build.
 
     Editing a document's content in Stroom is fine: the server notices hand edits and keeps them.
 

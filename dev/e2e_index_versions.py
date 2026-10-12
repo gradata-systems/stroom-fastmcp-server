@@ -196,8 +196,13 @@ async def update(ctx, stroom: StroomGateway, es: httpx.AsyncClient, prod: dict) 
     result = await e2e.agreed(builds.promote_build, ctx=ctx, build=build, destinations={
         t: prod['folder'] for t in ('Pipeline', 'XSLT', 'Documentation', 'ElasticIndex', 'Dashboard')})
     print(f"    {result['promoted']}")
-    e2e.check(any(f"moved Pipeline '{v2_name}' to {prod['folder']}" == p for p in result['promoted']),
-              'v2 promoted beside v1')
+    # A new version in a version subfolder beside v1, all of it together (asked for by the user: old and new told
+    # apart at a glance).
+    versioned = f"{prod['folder']}/v2"
+    e2e.check(any(f"moved Pipeline '{v2_name}' to {versioned}" == p for p in result['promoted']),
+              f'v2 promoted into {versioned}, beside v1')
+    e2e.check(all(f" to {versioned}" in p for p in result['promoted'] if p.startswith('moved ')),
+              f"its index, documentation and dashboard with it: {[p for p in result['promoted'] if p.startswith('moved ')]}")
     after = {u: (await stroom.get_doc(t, u)).get('version') for u, t in ((prod['v1']['uuid'], 'Pipeline'),)}
     v1_filter = await stroom.get(f"/processorFilter/v1/{prod['filters'][prod['v1']['name']]['filter_id']}")
     e2e.check(after == versions and v1_filter.get('enabled') is True, 'v1 unchanged and still running')

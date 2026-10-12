@@ -556,3 +556,18 @@ async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(
             'children': [{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': 'ACME'}]}}}}]}))
     with pytest.raises(ToolError, match='already selects these streams'):
         await processing_writes._refuse_duplicate(processing_writes.gateway_from(ctx), 'tp', expression, None)
+
+
+async def test_superseded_events_streams_are_refused_naming_the_events_now_in_their_place():
+    # Seen in production: after the parent events pipeline was updated and reprocessed, indexing was given the
+    # earlier Events streams' ids, which Stroom had marked deleted, and the filter selected nothing it would process.
+    gone = {'id': 3808, 'typeName': 'Events', 'status': 'DELETED', 'parentMetaId': 3807, 'pipelineUuid': 'ev'}
+    live = {'values': [{'meta': {'id': 3815, 'status': 'UNLOCKED', 'pipelineUuid': 'ev'}},
+                       {'meta': {'id': 3808, 'status': 'DELETED', 'pipelineUuid': 'ev'}},
+                       {'meta': {'id': 3820, 'status': 'UNLOCKED', 'pipelineUuid': 'other'}}]}
+    stroom = SimpleNamespace(find_meta=AsyncMock(return_value=live))
+    with pytest.raises(ToolError, match=r'\[3808\] were superseded.*3808 -> \[3815\]'):
+        await processing_writes._refuse_superseded(stroom, [gone])
+    terms = stroom.find_meta.call_args.args[0]
+    assert {'field': 'Parent Id', 'value': '3807'}.items() <= terms[0].items()
+    await processing_writes._refuse_superseded(stroom, [{**gone, 'status': 'UNLOCKED'}])     # a live stream: fine

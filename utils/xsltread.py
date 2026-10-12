@@ -28,7 +28,7 @@ from utils.xpathtree import (Node, XPathParser, expr_slot, first_of, is_nil_chec
 from utils.xsltgen import (EVT, INPUT_NAMESPACE, JSON_RECORDS, MCP_NS, XSL, Condition, FieldMapping, TranslationMapping,
                            any_of_text, default_text, dictionary_lookup_text, dictionary_text, equals_text, field_text,
                            group_text, has_value_text, in_dictionary_text, key_text, keyed_text, literal, lookup_text,
-                           map_lookup_text, map_step_text, matches_text, one_of_text, parts_text, time_expr,
+                           map_lookup_text, map_step_text, matches_text, one_of_text, parts_text, time_expr, time_ms_text,
                            transform_expr)
 from utils.xsltversion import strip
 
@@ -465,6 +465,11 @@ SHAPES = {
     'time, zone': shape(time_expr(_l(1), _l(2), f'{_e(1)}[1]')),
     'epoch_ms': shape(time_expr('epoch_ms', None, f'{_e(1)}[1]')),
     'epoch_s': shape(time_expr('epoch_s', None, f'{_e(1)}[1]')),
+    'epoch_us': shape(time_expr('epoch_us', None, f'{_e(1)}[1]')),
+    'epoch_ns': shape(time_expr('epoch_ns', None, f'{_e(1)}[1]')),
+    # Before seconds' fraction was rounded: still epoch_s.
+    'epoch_s, truncated': shape(f"stroom:format-date(string(xs:integer(xs:decimal({_e(1)}[1]) * 1000)))"),
+    'time, ms': shape(time_ms_text(_l(1), _l(2), f'{_e(1)}[1]')),
 }
 # one_of_text, its values any number of strings: its shape with one value, the value's place taking any expression.
 _ONE = shape(one_of_text(_e(1), [_l(1)]))
@@ -628,13 +633,14 @@ class _Idioms:
                 if inner:
                     return {**inner, 'map': self.r.maps[m.expr(1).value],
                             **({'default': m.string(1)} if name == 'map lookup, default' else {})}
-        for name in ('time, zone', 'time', 'epoch_ms', 'epoch_s'):
+        for name in ('time, zone', 'time', 'time, ms', 'epoch_ms', 'epoch_s', 'epoch_us', 'epoch_ns', 'epoch_s, truncated'):
             m = unify(SHAPES[name], node)
             if m:
                 inner = self.converted(m.expr(1))
                 if inner:
-                    fmt = name if name.startswith('epoch') else m.string(1)
-                    return {**inner, 'time_format': fmt, **({'timezone': m.string(2)} if name == 'time, zone' else {})}
+                    fmt = name.split(',')[0] if name.startswith('epoch') else m.string(1)
+                    zone = m.string(2) if name in ('time, zone', 'time, ms') else None
+                    return {**inner, 'time_format': fmt, **({'timezone': zone} if zone else {})}
         return self.converted(node)
 
     def converted(self, node: Node) -> dict[str, Any] | None:

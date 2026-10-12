@@ -51,6 +51,30 @@ def _node_in(nodes: list[dict[str, Any]], uuid: str) -> dict[str, Any] | None:
     return None
 
 
+# A build's documents by role, each in a subfolder of the build (asked for by the user): the build is still the top
+# folder under the workspace, so a document in any of them is in the build. Feeds, the build's record and its notes
+# stay at the build's top. A translation's folder is named for what it translates (asked for by the user): Events for
+# a Raw Events source, Records for a Raw Records one.
+ROLES = ('Events', 'Records', 'Indexing', 'CEF', 'Reference')
+SOURCE_ROLES = ('Events', 'Records')
+STAGE_ROLES = {'translation': 'Events', 'records': 'Records', 'indexing': 'Indexing',
+               'discovery': 'Indexing', 'reference': 'Reference', 'forwarding': 'CEF'}
+
+
+async def source_role(stroom: StroomGateway, contents: list[dict[str, Any]], role: str) -> str:
+    """Events or Records for a translation, from the stream type of the build's feeds (a Raw Records feed: Records);
+    the role given (from the pipeline's stage, say) where the build has no feed of its own."""
+    types = set()
+    for feed in (d for d in contents if d['type'] == 'Feed'):
+        try:
+            types.add(((await stroom.get_doc('Feed', feed['uuid'])).get('streamType') or '').lower())
+        except Exception:
+            continue
+    if not types:
+        return role
+    return 'Records' if any('records' in t for t in types) else 'Events'
+
+
 class WriteGuard:
     def __init__(self, stroom: StroomGateway, workspace: str):
         self._stroom = stroom
@@ -158,15 +182,27 @@ class WriteGuard:
             return None
         return {**folder, '_open': [system['uniqueKey'], workspace['uniqueKey'], folder['uniqueKey']]}
 
+    async def role_folder(self, build: str, role: str) -> dict[str, Any]:
+        """The build's subfolder for a role (Events, Records, Indexing, CEF, Reference), made if needed."""
+        if role not in ROLES:
+            raise ToolError(f"Unknown role {role!r}: one of {', '.join(ROLES)}")
+        return await self._child_folder(await self.build_folder(build), role)
+
     async def folder_contents(self, build: str, with_record: bool = False) -> list[dict[str, Any]]:
-        """The documents in a build folder, read from the explorer tree (the search index lags new docs); the
-        build's own record only with_record."""
+        """The documents in a build folder and its role subfolders, read from the explorer tree (the search index
+        lags new docs); the build's own record only with_record."""
         from security.record import NAME as RECORD
         folder, node = await self._build_node(build)
         if folder is None:
             return []
         docs = {c['uuid']: {'type': c['type'], 'uuid': c['uuid'], 'name': c['name'], 'tags': c.get('tags') or [],
                             'path': folder['_path']} for c in node.get('children') or [] if c['type'] != 'Folder'}
+        for sub in node.get('children') or []:
+            if sub['type'] == 'Folder' and sub.get('name') in ROLES:
+                docs.update({c['uuid']: {'type': c['type'], 'uuid': c['uuid'], 'name': c['name'],
+                                         'tags': c.get('tags') or [], 'path': f"{folder['_path']}/{sub['name']}",
+                                         'role': sub['name']}
+                             for c in sub.get('children') or [] if c['type'] != 'Folder'})
         # The tree can briefly leave out a doc whose node was just updated (a tag added, say), and a promotion that
         # missed it would leave it behind: the managed docs the search index has in the build folder are added too.
         tagged = explorer_filter(None, '*')
@@ -174,13 +210,15 @@ class WriteGuard:
         found = await self._stroom.post('/explorer/v2/find', {'filter': tagged, 'pageRequest': {'offset': 0, 'length': 1000}})
         for value in found.get('values') or []:
             ref = value.get('docRef') or {}
-            if ref.get('type') == 'Folder' or ref.get('uuid') in docs \
-                    or (value.get('path') or '').replace(' / ', '/') != folder['_path']:
+            where = (value.get('path') or '').replace(' / ', '/')
+            if ref.get('type') == 'Folder' or ref.get('uuid') in docs or not (
+                    where == folder['_path'] or where in {f"{folder['_path']}/{r}" for r in ROLES}):
                 continue
             node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
             if node:
                 docs[ref['uuid']] = {'type': ref['type'], 'uuid': ref['uuid'], 'name': ref.get('name'),
-                                     'tags': node.get('tags') or [], 'path': folder['_path']}
+                                     'tags': node.get('tags') or [], 'path': where,
+                                     **({'role': where.rsplit('/', 1)[1]} if where != folder['_path'] else {})}
         return [d for d in docs.values() if with_record or not (d['type'] == 'Documentation' and d['name'] == RECORD)]
 
     async def build_of(self, ref: dict[str, Any]) -> str | None:
@@ -225,7 +263,11 @@ class WriteGuard:
                 return False
             if await self.folder_contents(build):
                 return False    # docs are left (one the tree left out would go with the folder)
-            if node and not node.get('children') and 'L' in (node.get('nodeFlags') or []):
+            kids = (node or {}).get('children') or []
+            # Only empty role subfolders left, or nothing at all: Stroom deletes the folder with them.
+            only_empty_roles = kids and all(c['type'] == 'Folder' and c.get('name') in ROLES and not c.get('children')
+                                            for c in kids)
+            if node and (only_empty_roles or (not kids and 'L' in (node.get('nodeFlags') or []))):
                 break
             # Nothing is listed in it, but the tree doesn't show it empty yet: right after docs are moved out it
             # still lists them for a moment.
@@ -265,10 +307,22 @@ class WriteGuard:
                 if hit:
                     return hit
             return None
-        return folder, find(tree['rootNodes']) or {}
+        node = find(tree['rootNodes']) or {}
+        roles = [c['uniqueKey'] for c in node.get('children') or []
+                 if c.get('type') == 'Folder' and c.get('name') in ROLES and c.get('uniqueKey')]
+        if roles:
+            # Its role subfolders opened too, so their documents are listed.
+            tree = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
+                'openItems': [*folder['_open'], *roles], 'temporaryOpenedItems': [], 'minDepth': 1,
+                'ensureVisible': None, 'showAlerts': False,
+                'filter': {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
+                           'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False,
+                           'recentItems': None}})
+            node = find(tree['rootNodes']) or node
+        return folder, node
 
     async def create(self, doc_type: str, name: str, build: str, copy_of: str | None = None,
-                     record: bool = False) -> dict[str, Any]:
+                     record: bool = False, role: str | None = None) -> dict[str, Any]:
         """Create an empty document in the build folder and tag it as the agent's; copy_of, the production document it
         is a working copy of, goes in the build's record. A name the build already has for that type is refused,
         naming the one there: after a long conversation was summarised, an agent made the same indexing pipeline
@@ -276,12 +330,14 @@ class WriteGuard:
         from security import record as build_record
         if doc_type == 'Documentation' and name == build_record.NAME and not record:
             raise ToolError(f"'{name}' is the server's own record of the build: give the Documentation another name")
-        twin = next((d for d in await self.folder_contents(build, with_record=True)
-                     if d['type'] == doc_type and d['name'] == name), None)
+        contents = await self.folder_contents(build, with_record=True)
+        twin = next((d for d in contents if d['type'] == doc_type and d['name'] == name), None)
         if twin:
             raise ToolError(f"A {doc_type} named '{name}' is already in build {build} (uuid {twin['uuid']}): carry on "
                             f"with that one (build_status lists the build's documents), or give the new one another name.")
-        folder = await self.build_folder(build)
+        if role in SOURCE_ROLES:
+            role = await source_role(self._stroom, contents, role)
+        folder = await self.role_folder(build, role) if role else await self.build_folder(build)
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': doc_type, 'docName': name, 'destinationFolder': _strip(folder),
             'permissionInheritance': 'DESTINATION'})
@@ -291,10 +347,11 @@ class WriteGuard:
         return _ref(node)
 
     async def create_filled(self, doc_type: str, name: str, build: str,
-                            fill: Callable[[dict[str, Any]], Awaitable[Any]], record: bool = False) -> Any:
+                            fill: Callable[[dict[str, Any]], Awaitable[Any]], record: bool = False,
+                            role: str | None = None) -> Any:
         """Create a document and fill it with fill(ref). Stroom creates documents empty, so if filling fails
         the document is deleted again rather than left behind empty, and the error is raised."""
-        ref = await self.create(doc_type, name, build, record=record)
+        ref = await self.create(doc_type, name, build, record=record, role=role)
         try:
             return await fill(ref)
         except Exception:

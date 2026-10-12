@@ -313,8 +313,8 @@ Samples:
    Events: its approval asks them to confirm the template is committed. Backfilling older streams is the user's.
    Lucene: process sample Events. Then wait_for_processing expect_events=false; create_index_doc (Elasticsearch);
    verify_index with pipeline_uuid = v2 and searches on the new fields.
-5. write_documentation for v2, saying what changed from v1; promote_build. v1 stays running; switching readers to v2,
-   and retiring v1, is the user's.
+5. write_documentation for v2, saying what changed from v1; promote_build (v2 goes in a version subfolder beside v1).
+   v1 stays running; switching readers to v2, and retiring v1, is the user's.
 
 {_RULES}"""
 

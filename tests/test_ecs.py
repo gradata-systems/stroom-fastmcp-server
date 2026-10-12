@@ -197,3 +197,23 @@ def test_a_field_stroom_cant_list_is_said_when_a_template_maps_it_so():
         "map 'message' in the template as text")
     body['template']['mappings']['properties']['message'] = {'type': 'text'}
     assert compare(body, docs, 'ecs-acme-v1')['notes'] == []
+
+
+def test_an_earlier_templates_ecs_fields_mapped_as_the_component_does_are_left_to_it():
+    # Asked for by the user: an amended indexing pipeline's template, built from v1's, mapped the ECS base fields
+    # again, explicitly. Mapped just as ecs@mappings does, they are left to it; mapped otherwise, they are kept.
+    from utils.templatecheck import from_example
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress'),
+                             PlannedField(name='host.name', type='keyword', source='EventSource/Device/HostName'),
+                             PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    planned = plan.elastic_template('ecs-acme-v2', leave_to_component=False)['body']
+    v1 = {'index_patterns': ['ecs-acme-v1*'], 'composed_of': ['ecs@mappings'], 'template': {'mappings': {'properties': {
+        'source': {'properties': {'ip': {'type': 'ip'}}},
+        'host': {'properties': {'name': {'type': 'keyword', 'ignore_above': 1024}}},
+        'user': {'properties': {'name': {'type': 'keyword', 'ignore_above': 256}}}}}}}
+    body, notes = from_example(planned, v1, {})
+    properties = body['template']['mappings']['properties']
+    assert 'source' not in properties and 'host' not in properties                 # as ecs@mappings maps them
+    assert properties['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 256}    # an override
+    assert body['composed_of'] == ['ecs@mappings']

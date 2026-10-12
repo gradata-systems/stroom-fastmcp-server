@@ -83,6 +83,50 @@ def parse_component_templates(texts: list[str]) -> dict[str, dict[str, Any]]:
     return found
 
 
+def with_components(body: dict[str, Any], components: dict[str, dict[str, Any]], include: list[str] = (),
+                    exclude: list[str] = ()) -> tuple[dict[str, Any], list[str]]:
+    """A template built from the field plan alone, composing the nominated components (and not the excluded): the
+    fields they map are left to them, not mapped here again."""
+    body = copy.deepcopy(body)
+    composed_of = composition(list(body.get('composed_of') or []), include, exclude)
+    notes = []
+    mappings = (body.get('template') or {}).get('mappings') or {}
+    left = []
+    for name in include:
+        fields = read_mapping(((components.get(name) or {}).get('template') or {}).get('mappings') or {}).fields
+        for path, spec in fields.items():
+            if spec.get('type') != 'object' and _drop(mappings.get('properties') or {}, path,
+                                                      flat=mappings.get('subobjects') is False):
+                left.append(path)
+    if composed_of:
+        body['composed_of'] = composed_of
+    else:
+        body.pop('composed_of', None)
+    if include:
+        notes.append(f"component templates nominated (by the user or their standing instructions), referenced: "
+                     f"{list(dict.fromkeys(include))}")
+    if left:
+        notes.append(f"left to the component templates (they map them): {sorted(left)}")
+    return body, notes
+
+
+def _drop(properties: dict[str, Any], path: str, flat: bool = False) -> bool:
+    """Remove a field from nested (or, flat, dotted) properties, and objects it leaves empty."""
+    if flat:
+        return properties.pop(path, None) is not None
+    head, _, rest = path.partition('.')
+    if head not in properties:
+        return False
+    if not rest:
+        del properties[head]
+        return True
+    inner = properties[head].get('properties') or {}
+    dropped = _drop(inner, rest)
+    if dropped and not inner:
+        del properties[head]
+    return dropped
+
+
 def _merge(into: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     for key, value in other.items():
         if isinstance(value, dict) and isinstance(into.get(key), dict):
@@ -447,8 +491,50 @@ def _nest(fields: dict[str, dict[str, Any]], objects: dict[str, dict[str, Any]] 
     return properties
 
 
+def components_used(composed_of: list[str], components: dict[str, dict[str, Any]], leaves: dict[str, Any],
+                    to_ecs: list[str], discovery: bool = False,
+                    nominated: list[str] = ()) -> tuple[list[str], list[str], dict[str, str]]:
+    """(used, unused, unsure): the example's component templates the new template references, in their order. A
+    component is referenced only if it maps a field the pipeline writes (asked for by the user); ecs@mappings, if a
+    field is left to it. Those whose fields can't be weighed are referenced, saying why (unsure): one holding settings
+    alone (a lifecycle policy, shards), one mapping by dynamic templates only, one the user couldn't give, and every
+    one for a discovery index, whose fields are only known as documents arrive."""
+    from utils import ecs
+    used, unused, unsure = [], [], {}
+    for name in composed_of:
+        if name in nominated:
+            pass                # the user's, or their standing instructions': referenced whatever it maps
+        elif discovery:
+            unsure[name] = 'a discovery index: its fields arrive with its documents'
+        elif name == ecs.COMPONENT:
+            if not to_ecs:
+                unused.append(name)
+                continue
+        elif name not in components:
+            unsure[name] = 'not given'
+        else:
+            mappings = ((components[name].get('template') or {}).get('mappings')) or {}
+            fields = {p for p, spec in read_mapping(mappings).fields.items() if spec.get('type') != 'object'}
+            if not fields:
+                unsure[name] = ('dynamic templates only' if mappings.get('dynamic_templates') else
+                                'settings only, no fields')
+            elif not fields & set(leaves):
+                unused.append(name)
+                continue
+        used.append(name)
+    return used, unused, unsure
+
+
+def composition(example_composed_of: list[str], include: list[str] = (), exclude: list[str] = ()) -> list[str]:
+    """The components a new template may compose: the example's, less those excluded, then those nominated (by the
+    user, or their standing instructions) that the example doesn't already compose, in the order given."""
+    names = [n for n in example_composed_of if n not in exclude]
+    return names + [n for n in dict.fromkeys(include) if n not in names]
+
+
 def from_example(planned: dict[str, Any], example: dict[str, Any], components: dict[str, dict[str, Any]],
-                 discovery: bool = False) -> tuple[dict[str, Any], list[str]]:
+                 discovery: bool = False, include: list[str] = (),
+                 exclude: list[str] = ()) -> tuple[dict[str, Any], list[str]]:
     """(body, notes): the final index template for the new index, built from the field plan's template and the
     user's example (an index template or an index's mapping, with the component templates it is composed of): the
     new index's own pattern; the example's composed_of, settings, priority, data_stream and top-level mapping
@@ -456,7 +542,7 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     type, and the rest are typed from the plan. Aliases and _meta name the example's own indices: not copied."""
     notes = []
     own = ((example.get('template') or {}).get('mappings')) or {}
-    composed_of = list(example.get('composed_of') or [])
+    composed_of = composition(list(example.get('composed_of') or []), include, exclude)
     from_components: dict[str, dict[str, Any]] = {}
     for name in composed_of:
         if name in components:
@@ -480,11 +566,13 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     # The example composes Elastic's ECS component, mapping as documents bring them: the ECS fields it maps as ECS
     # says are left to it, as an ECS plan's own template leaves them (asked for by the user).
     by_component = ecs.COMPONENT in composed_of and str(own.get('dynamic', True)).lower() == 'true'
-    final, left, kept, new, styled, aliased = {}, [], [], [], [], []
+    final, left, kept, new, styled, aliased, to_ecs = {}, [], [], [], [], [], []
     for path, spec in leaves.items():
         if path in from_components or (by_component and path not in in_example
                                         and ecs.left_to_component(path, spec.get('type', ''))):
             left.append(path)
+            if path not in from_components:
+                to_ecs.append(path)
         elif path in in_example and in_example[path].get('type') == 'alias':
             # Seen in VS Code: the example's User.Id was an alias of User.Name. Copied, the new index had an alias of a
             # field it lacks (Elasticsearch refused the template), and documents can't write to an alias anyway: the
@@ -492,6 +580,14 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
             target = in_example.get(in_example[path].get('path') or '') or {}
             final[path] = (copy.deepcopy(target) if target.get('type') not in (None, 'alias', 'object') else spec)
             aliased.append(path)
+        elif (by_component and path in in_example and ecs.component_type(path) == in_example[path].get('type')
+              and set(in_example[path]) <= {'type', 'ignore_above'}
+              and in_example[path].get('ignore_above', 1024) == 1024      # ecs@mappings' own for keywords
+              and ecs.left_to_component(path, spec.get('type', ''))):
+            # The example maps an ECS field just as ecs@mappings does: left to the component, not copied (asked for by
+            # the user: an amended indexing pipeline's template mapped the ECS base fields again, explicitly).
+            left.append(path)
+            to_ecs.append(path)
         elif path in in_example:
             final[path] = in_example[path]
             kept.append(path)
@@ -525,8 +621,9 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
         template = {'settings': merged, **template}
     body: dict[str, Any] = {'index_patterns': planned['index_patterns'],
                             'priority': example.get('priority', planned.get('priority', 200))}
-    if composed_of:
-        body['composed_of'] = composed_of
+    used, unused, unsure = components_used(composed_of, components, leaves, to_ecs, discovery, include)
+    if used:
+        body['composed_of'] = used
     if 'data_stream' in example:
         body['data_stream'] = copy.deepcopy(example['data_stream'])
         notes.append("a data stream, as the example is")
@@ -537,6 +634,18 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     body['template'] = template
     if left:
         notes.append(f"left to the component templates (they map them): {left}")
+    if unused:
+        notes.append(f"component templates of the example not referenced: none of the fields they map is written by "
+                     f"this pipeline: {unused}")
+    if include:
+        notes.append(f"component templates nominated (by the user or their standing instructions), referenced: "
+                     f"{list(dict.fromkeys(include))}")
+    dropped = [n for n in example.get('composed_of') or [] if n in exclude]
+    if dropped:
+        notes.append(f"component templates of the example excluded by standing instructions: {dropped}")
+    if unsure:
+        notes.append("component templates referenced though their fields can't be weighed: "
+                     + '; '.join(f"{name} ({why})" for name, why in unsure.items()))
     if kept:
         notes.append(f"typed as in the example: {kept}")
     if aliased:

@@ -15,7 +15,9 @@ it (`ecs_check`: a name in an ECS field set that ECS doesn't define, or a known 
 composes Elastic's `ecs@mappings` and leaves the standard ECS fields to it (mapping only the rest, with dynamic
 mapping on, which the component needs; `message` and other fields it maps as `match_only_text` are mapped as `text`,
 as Stroom can't list or search a `match_only_text`, `flattened`, `geo_point` or `search_as_you_type` field), and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
-name one ECS's way. A field of the user's own goes outside ECS's field sets.
+name one ECS's way. A template built from an earlier one (a new version of an index) leaves the ECS fields that
+template maps just as `ecs@mappings` does to the component too: only overrides are mapped explicitly. To drop
+explicit mappings, never remove `ecs@mappings` from `composed_of`: it is what maps those fields. A field of the user's own goes outside ECS's field sets.
 
 The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
 index_plan=... uuid=`). The XSLT is written as an Events translation is, in the plan's `style` (from an XSLT style
@@ -35,7 +37,18 @@ a field renamed but read from the same place is covered), with how often the sam
 about those. There's no need to read the old XSLT; `describe_document` gives an indexing XSLT by its fields.
 
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
-index's mapping) and the component templates it is composed of. Give it to `draft_index_mapping` as well as to
+index's mapping) and the component templates it is composed of. The fields a template maps are its own and all of
+its components' together, and the server can't read Elasticsearch, so an example whose `composed_of` names
+components not given gets a `needs_components` reply: ask the user to run the request it gives (`GET
+_component_template/<names>`) and paste the whole response, then call again with `component_templates`. Elastic's
+`ecs@mappings` is known to the server. Only if the user can't get one, pass its name in `without_components`. The
+proposed template references a component only if it maps a field the pipeline writes, and leaves those fields to
+it rather than mapping them again; a component with settings alone (a lifecycle policy), one mapping by dynamic
+templates only, and one not given are referenced, and the notes say they weren't weighed. Components the user
+wants besides the example's (or without one) go in `include_components` (with their content in
+`component_templates`): referenced whatever they map, their fields left to them. An AGENTS doc's `## Component
+templates` section (`- include: ...`, `- exclude: ...`) is applied the same way; the user's own nomination wins
+over an instruction to exclude it, and `check_index_template` notes a template that breaks the instructions. Give it to `draft_index_mapping` as well as to
 `propose_index_template`: the plan's field names then follow it (the example's `User.Id` for the user and `TypeId`
 for the event type, not the convention profile's `user.name`), fields it has no name for are named in its style
 (PascalCase, camelCase or ECS-style, dotted or run together as it is), and sample paths it maps are added. The

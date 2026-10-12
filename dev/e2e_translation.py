@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
+# A promotion layout is a tree drawn with box characters: a Windows console (cp1252) cannot print them.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, str(ROOT))
 
 from config import Settings  # noqa: E402
@@ -236,8 +238,9 @@ async def agreed(call, **kwargs):
         if not (isinstance(result, dict) and str(result.get('status', '')).startswith('needs_')):
             return result
         if result['status'] == 'needs_review':
-            # Shown to the user in the chat (an index template), then confirmed in a form.
-            print(f"    needs_review: {(result.get('dev_tools') or '').splitlines()[0]}")
+            # Shown to the user in the chat (an index template, a promotion's layout), then confirmed in a form.
+            shown = result.get('layout') or result.get('dev_tools') or ''
+            print(f"    needs_review:\n" + '\n'.join(f'      {line}' for line in shown.splitlines()[:30]))
             kwargs['reviewed'] = True
             continue
         key = 'confirmation_id' if result['status'] == 'needs_confirmation' else 'approval_id'
@@ -347,6 +350,11 @@ async def promotion(ctx, csv: dict, stamp: str):
     result = await agreed(builds.promote_build, ctx=ctx, build=csv['build'], destinations=everything)
     check('promoted_with_warnings' not in result, 'promoted without warnings')
     check(len(result['promoted']) >= 5, f"promoted: {result['promoted']}")
+    # Asked for by the user: the same layout they approved, and a link to open each folder in Stroom.
+    links = result.get('folders') or []
+    check(result.get('layout', '').startswith(f'System/E2E Promoted {stamp}/Events/')
+          and any(f['folder'] == f'System/E2E Promoted {stamp}/Events' and 'docType=Folder&docUuid=' in f['link']
+                  for f in links), f"the layout as promoted, with the folder's link: {links}")
     if not LIVE:
         check(result['promoted'][:2] == [f'created folder System/E2E Promoted {stamp}',
                                          f'created folder System/E2E Promoted {stamp}/Events'],

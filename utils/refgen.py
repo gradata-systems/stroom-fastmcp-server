@@ -52,6 +52,8 @@ class ReferenceMapping(BaseModel):
     root: str | None = Field(None, description="Root to match; defaults as for build_translation_xslt.")
     record: str | None = Field(None, description="Record elements; defaults as for build_translation_xslt.")
     maps: list[ReferenceMap] = Field(min_length=1)
+    imports: list[str] = Field(default_factory=list, description=(
+        "Shared XSLTs imported (xsl:import), e.g. those an AGENTS doc's Required imports name: added for you."))
     drop_when: list[DropRule] = Field(default_factory=list, description="Records to leave out of the reference data "
                                                                         "(disabled accounts, say); each entry's conditions "
                                                                         "must all hold.")
@@ -92,6 +94,8 @@ def generate_reference(mapping: ReferenceMapping, schema_version: str = '2.0.1')
     sheet = etree.Element(f'{{{XSL}}}stylesheet', nsmap=nsmap, version='3.0')
     sheet.set('xpath-default-namespace', INPUT_NAMESPACE[mapping.input])
     sheet.set('exclude-result-prefixes', 'stroom')
+    for href in dict.fromkeys(mapping.imports):         # imports come first in a stylesheet
+        etree.SubElement(sheet, f'{{{XSL}}}import', href=href)
     root_match = mapping.root or ('records' if mapping.input == 'data_splitter' else '/')
     records = mapping.record or ('record' if mapping.input == 'data_splitter' else JSON_RECORDS[mapping.json_layout])
     root_template = etree.SubElement(sheet, f'{{{XSL}}}template', match=root_match)

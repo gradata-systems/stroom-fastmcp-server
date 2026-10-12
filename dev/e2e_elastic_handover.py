@@ -151,6 +151,57 @@ def change_template(body: dict) -> dict:
     return changed
 
 
+async def component_choices(ctx, stroom: StroomGateway, build: str, pipeline: dict, plan, events: list[int], base: str):
+    """Asked for by the user: components of their choosing, and their AGENTS doc's rules for them, followed. An AGENTS
+    doc in the build's folder includes org-ilm and excludes legacy-base; the user nominates org-users. The example
+    composes ecs-base (maps @timestamp), ecs-unused (maps nothing written) and legacy-base."""
+    from security.guard import guard_from
+    print('\n### component templates: the example\'s, the user\'s and their standing instructions\'')
+    folder = {k: v for k, v in (await guard_from(ctx).build_folder(build)).items() if not k.startswith('_')}
+    node = await stroom.post('/explorer/v2/create', {'docType': 'Documentation', 'docName': 'AGENTS',
+                                                     'destinationFolder': folder, 'permissionInheritance': 'DESTINATION'})
+    agents = {'type': 'Documentation', 'uuid': node.get('docRef', node)['uuid'], 'name': 'AGENTS'}
+    doc = await stroom.get_doc('Documentation', agents['uuid'])
+    doc['data'] = '## Component templates\n- include: org-ilm\n- exclude: legacy-base\n'
+    await stroom.put_doc(doc)
+    try:
+        example = ('PUT _index_template/ecs-sibling-v1\n' + json.dumps({
+            'index_patterns': ['ecs-sibling-v1*'], 'composed_of': ['ecs-base', 'ecs-unused', 'legacy-base'],
+            'template': {'mappings': {'properties': {'event': {'properties': {'kind': {'type': 'keyword'}}}}}}}))
+        unused = 'PUT _component_template/ecs-unused\n' + json.dumps({'template': {'mappings': {'properties': {
+            'zzz_never_written': {'type': 'keyword'}}}}})
+        users = 'PUT _component_template/org-users\n' + json.dumps({'template': {'mappings': {'properties': {
+            'user': {'properties': {'name': {'type': 'keyword'}}}}}}})
+        ilm = 'PUT _component_template/org-ilm\n' + json.dumps({'template': {'settings': {'index.lifecycle.name': 'logs-90d'}}})
+        asked = None
+        for _ in range(15):     # the explorer search finds a new AGENTS doc after a short delay
+            asked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=example,
+                                                          component_templates=[base], include_components=['org-users'])
+            if asked.get('status') == 'needs_components' and 'org-ilm' in asked['missing']:
+                break
+            await asyncio.sleep(2)
+        e2e.check(asked.get('status') == 'needs_components'
+                  and asked['missing'] == ['ecs-unused', 'org-users', 'org-ilm'],
+                  f"every component without its content is asked for first, legacy-base (excluded) not: "
+                  f"{asked.get('missing')}, {asked.get('request')}")
+        shown = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=example,
+                                                      component_templates=[base, unused, users, ilm],
+                                                      include_components=['org-users'])
+        # Shown for review: the template is its Dev Tools request.
+        body = json.loads(shown['dev_tools'].split('\n', 1)[1]) if shown.get('dev_tools') else {}
+        e2e.check(body.get('composed_of') == ['ecs-base', 'org-users', 'org-ilm'],
+                  f"composes ecs-base (used), org-users (nominated) and org-ilm (instructed); not ecs-unused (unused) "
+                  f"or legacy-base (excluded): {body.get('composed_of')}")
+        props = ((body.get('template') or {}).get('mappings') or {}).get('properties') or {}
+        e2e.check('user' not in props and '@timestamp' not in props,
+                  f"fields the components map left to them: {sorted(props)}")
+        notes = shown.get('from_example') or []
+        e2e.check(any('AGENTS doc' in n and 'org-ilm' in n for n in notes) and any('excluded by standing' in n for n in notes),
+                  f"the notes say which standing instructions applied: {[n[:90] for n in notes[:3]]}")
+    finally:
+        await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [agents]})
+
+
 async def main():
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
@@ -303,6 +354,7 @@ async def main():
                              'name': {'type': 'keyword', 'ignore_above': 256}}}}}}}))
         base = 'PUT _component_template/ecs-base\n' + json.dumps({'template': {'mappings': {'properties': {
             '@timestamp': {'type': 'date'}}}}})
+        await component_choices(ctx, stroom, csv['build'], pipeline, plan, events, base)
         asked = await indexing.propose_index_template(ctx, pipeline['uuid'], plan, events, example_template=example,
                                                       component_templates=[base])
         e2e.check(asked.get('status') == 'needs_review' and asked['dev_tools'].startswith(f'PUT _index_template/{index}\n'),

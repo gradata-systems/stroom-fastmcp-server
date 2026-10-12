@@ -30,9 +30,9 @@ from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.stroom import doc_link, gateway_from, set_body_text
 from utils.sharedxslt import json_values
-from utils.templatecheck import (compare, compose, from_example, json_xml_documents, names_from_example,
+from utils.templatecheck import (compare, compose, composition, from_example, json_xml_documents, names_from_example,
                                  parse_component_templates, read_mapping_fields,
-                                 parse_template)
+                                 parse_template, with_components)
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
 INDEX_TYPE = {'lucene': 'Index', 'elasticsearch': 'ElasticIndex'}
@@ -84,7 +84,7 @@ async def _keep_example(ctx: Context, build: str, index_name: str, example: str,
     if there:
         await write(there)
     else:
-        await guard.create_filled('Documentation', name, build, write)
+        await guard.create_filled('Documentation', name, build, write, role='Indexing')
 
 
 async def _kept_example(ctx: Context, pipeline_uuid: str, index_names: list[str]) -> tuple[str, list[str]] | None:
@@ -443,6 +443,9 @@ async def draft_index_mapping(
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only if the example lists any in composed_of: those component templates, as the user gave "
                         "them.")] = [],
+        without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Only when the user can't give some of the example's component templates: their names. The "
+                        "template is then built without their fields, which it may repeat or contradict.")] = [],
         shared: Annotated[list[SharedTemplate] | str, ONE_OR_MORE, Field(
             description="Named templates from shared XSLTs that sibling indexing XSLTs call (describe_template's "
                         "shared_xslt): each writes a field (at, e.g. 'guid'), which the XSLT then does not write.")] = [],
@@ -614,6 +617,9 @@ async def draft_index_mapping(
                                                    else list(component_templates))
         except ValueError as e:
             raise ToolError(str(e)) from e
+        wanted = components_wanted(example, components, without_components)
+        if wanted:
+            return wanted
         composed, _ = compose(example, components)
         known: dict[str, set[str]] = {}
         for other in profiles.values():
@@ -870,7 +876,7 @@ async def create_index_doc(
     name = edited(ctx, 'name', name)
     index_name = edited(ctx, 'index_name', index_name) if index_name else index_name
     doc_type = INDEX_TYPE[backend]
-    ref = await guard_from(ctx).create(doc_type, name, build)
+    ref = await guard_from(ctx).create(doc_type, name, build, role='Indexing')
     doc = await stroom.get_doc(doc_type, ref['uuid'])
     if backend == 'lucene':
         doc.update(volumeGroupName=volume_group, timeField=time_field, partitionBy='MONTH', partitionSize=1,
@@ -1150,7 +1156,7 @@ async def create_verification_dashboard(
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
     source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
-    ref = await guard_from(ctx).create('Dashboard', name, build)
+    ref = await guard_from(ctx).create('Dashboard', name, build, role='Indexing')
     doc = await stroom.get_doc('Dashboard', ref['uuid'])
     doc['dashboardConfig'] = dashboard_config(source, list(fields), time_field, window)
     doc = await stroom.put_doc(doc)
@@ -1556,6 +1562,44 @@ async def _documents(ctx: Context, pipeline_uuid: str, stream_ids: list[int], ca
     return docs
 
 
+async def _component_choices(ctx: Context, pipeline_uuid: str,
+                             nominated: list[str] | str = ()) -> tuple[list[str], list[str], list[str]]:
+    """(include, exclude, notes): the components the user nominated, with those their standing instructions (an AGENTS
+    doc's Component templates) include, and those the instructions exclude. The user's own nomination wins over an
+    instruction to exclude it: their request takes precedence."""
+    from tools.instructions import components_ruled
+    nominated = [nominated] if isinstance(nominated, str) else list(nominated or [])
+    rules = await components_ruled(ctx, pipeline_uuid)
+    include = list(dict.fromkeys(nominated + [r['name'] for r in rules['include']]))
+    exclude = [r['name'] for r in rules['exclude'] if r['name'] not in nominated]
+    notes = [f"standing instructions (the AGENTS doc in {r['from'] or '(root)'}) {kind} component template "
+             f"'{r['name']}'" for kind in ('include', 'exclude') for r in rules[kind]
+             if not (kind == 'exclude' and r['name'] in nominated)]
+    return [n for n in include if n not in exclude], exclude, notes
+
+
+def components_wanted(example: dict[str, Any], components: dict[str, Any],
+                      without: list[str] | str = ()) -> dict[str, Any] | None:
+    """A needs_components reply while the example is composed of component templates not given (asked for by the
+    user): the fields an index template maps are those of it and every component together, and this server doesn't
+    read Elasticsearch, so it can't see them otherwise. Elastic's ecs@mappings is known here; those the user can't
+    give (without) are let go."""
+    from utils import ecs
+    without = [without] if isinstance(without, str) else list(without or [])
+    composed_of = list(example.get('composed_of') or [])
+    missing = [n for n in composed_of if n not in components and n != ecs.COMPONENT and n not in without]
+    if not missing:
+        return None
+    return {'status': 'needs_components', 'ok': False, 'composed_of': composed_of, 'given': sorted(components),
+            'missing': missing, 'request': f"GET _component_template/{','.join(missing)}",
+            'hint': ("The example is composed of component templates whose fields can't be seen here without them: the "
+                     "fields it maps are those of the index template and all of its components together. Ask the user "
+                     "to run the request in Kibana Dev Tools and paste the whole response, then call again with "
+                     "component_templates= every component given so far and this one. If the user can't get one, "
+                     "call again with without_components= its name: the template is then built without its fields, "
+                     "which it may repeat or contradict.")}
+
+
 def _component_notes(missing: list[str]) -> list[str]:
     """This server doesn't read Elasticsearch: component templates the user hasn't given can't be checked."""
     return [f"composed_of {missing} not given, so not checked: their fields aren't seen here. Ask the user for them "
@@ -1647,6 +1691,13 @@ async def propose_index_template(
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only if the example lists any in composed_of: those component templates, as the user gave them (GET "
                         "_component_template/<name>, or PUT _component_template/<name> {...}).")] = [],
+        without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Only when the user can't give some of the example's component templates: their names. The "
+                        "template is then built without their fields, which it may repeat or contradict.")] = [],
+        include_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Component templates the user wants the new template to compose besides the example's (or "
+                        "without one), by name: referenced whatever they map, their fields left to them. Give their "
+                        "content in component_templates too (but ecs@mappings, known here).")] = [],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
         priority: Annotated[int, Field(ge=0)] = 200,
         without_example: Annotated[bool, Field(
@@ -1675,6 +1726,7 @@ async def propose_index_template(
     name = template_name or index
     body = plan.model_copy(update={'index_name': index}).elastic_template(name, priority)['body']
     notes, components = [], {}
+    include, exclude, ruled = await _component_choices(ctx, pipeline_uuid, include_components)
     kept_note = None
     if not without_example and (not example_template or not _is_template(example_template)):
         kept = await _kept_example(ctx, pipeline_uuid, [index, plan.index_name])
@@ -1689,9 +1741,15 @@ async def propose_index_template(
                                                    else list(component_templates))
         except ValueError as e:
             raise ToolError(str(e)) from e
+        wanted = components_wanted({'composed_of': composition(example.get('composed_of') or [], include, exclude)},
+                                   components, without_components)
+        if wanted:
+            return wanted
         # Every planned field: the example says what it is composed of, and so which fields are left to that.
         full = plan.model_copy(update={'index_name': index}).elastic_template(name, priority, leave_to_component=False)
-        body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None)
+        body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None,
+                                   include=include, exclude=exclude)
+        notes = ruled + notes
         if kept_note:
             notes.insert(0, kept_note)
         if plan.convention == 'ecs' and ECS_COMPONENT not in (body.get('composed_of') or []):
@@ -1709,6 +1767,18 @@ async def propose_index_template(
                         "source's index") + " uses, exactly as the user pasted it, and its component templates. If "
                         "it is not in this conversation, ask the user to paste it and end your turn. Only if they say "
                         "they have none: without_example=true, and they confirm the template built from the plan."}
+    plan_notes = []
+    if not example_template and (include or exclude):
+        try:
+            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
+                                                   else list(component_templates))
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        wanted = components_wanted({'composed_of': include}, components, without_components)
+        if wanted:
+            return wanted
+        body, plan_notes = with_components(body, components, include, exclude)
+        plan_notes = ruled + plan_notes
     await _require_input(ctx, pipeline_uuid, events_stream_ids, plan)
     docs = await _documents(ctx, pipeline_uuid, events_stream_ids, 50)
     time_note = None
@@ -1721,7 +1791,7 @@ async def propose_index_template(
     text = json.dumps(body, indent=2)
     if not example_template:
         notes = ["built from the field plan alone: the user has no example index template"] + (
-            [time_note] if time_note else [])
+            [time_note] if time_note else []) + plan_notes
     result = {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
               'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
               **({'from_example': notes} if example_template else {}),
@@ -1753,6 +1823,9 @@ async def check_index_template(
         component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only if the index template lists any in composed_of: those component templates, as the user gave them: each a Dev "
                         "Tools request (PUT _component_template/name {...}) or GET _component_template output.")] = [],
+        without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Only when the user can't give some of the example's component templates: their names. The "
+                        "template is then built without their fields, which it may repeat or contradict.")] = [],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
         reviewed: Annotated[bool, Field(description="True once the user has been shown the template (dev_tools) in the "
                                                     "chat, after a needs_review reply: they then confirm it in a form.")] = False,
@@ -1773,12 +1846,20 @@ async def check_index_template(
                                                else list(component_templates))
     except ValueError as e:
         raise ToolError(str(e)) from e
+    wanted = components_wanted(body, components, without_components)
+    if wanted:
+        return wanted
+    include, exclude, _ = await _component_choices(ctx, pipeline_uuid)
+    ruled = [f"composed_of lacks '{n}', which standing instructions include" for n in include
+             if n not in (body.get('composed_of') or [])] + \
+            [f"composed_of has '{n}', which standing instructions exclude" for n in exclude
+             if n in (body.get('composed_of') or [])]
     body, missing = compose(body, components)
     destination = await _destination(ctx, pipeline_uuid)
     await _require_input(ctx, pipeline_uuid, events_stream_ids)
     result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
                      destination['index name'])
-    result['notes'] = _component_notes(missing) + result['notes']
+    result['notes'] = ruled + _component_notes(missing) + result['notes']
     if components:
         result['component_templates'] = sorted(components)
     result.update({'template_name': name, 'index': destination['index name'], 'cluster': destination['cluster'],

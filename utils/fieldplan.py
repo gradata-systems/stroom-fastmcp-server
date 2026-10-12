@@ -187,6 +187,8 @@ class FieldPlan(BaseModel):
         "XPath tests on an Event (event-logging:3 is the default namespace) for events the index must not hold, e.g. "
         "\"EventDetail/TypeId = 'Heartbeat'\" or \"EventSource/User/Id = 'monitor'\"; any that holds drops the event."))
     discovery: Discovery | None = Field(default=None, description="Set for a discovery index (draft_index_mapping).")
+    imports: list[str] = Field(default_factory=list, description=(
+        "Shared XSLTs imported (xsl:import) with no call, e.g. those an AGENTS doc's Required imports name."))
     shared: list[SharedTemplate] = Field(default_factory=list, description=(
         "Named templates from shared XSLTs (xsl:import) the environment's indexing XSLTs call, each writing a field "
         "(at: its name, e.g. 'guid'); the XSLT calls them instead of writing those fields itself."))
@@ -227,7 +229,8 @@ class FieldPlan(BaseModel):
         return next((u for u in self.shared if name == u.at or name.startswith(u.at + '.')), None)
 
     def _imports(self) -> str:
-        return ''.join(f'  <xsl:import href="{h}" />\n' for h in dict.fromkeys(u.href for u in self.shared))
+        return ''.join(f'  <xsl:import href="{h}" />\n'
+                       for h in dict.fromkeys([u.href for u in self.shared] + list(self.imports)))
 
     def required(self) -> list[str]:
         """Problems that would stop indexing or verification from working."""

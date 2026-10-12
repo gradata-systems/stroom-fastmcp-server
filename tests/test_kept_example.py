@@ -19,7 +19,7 @@ class Store:
         return [{'type': 'Documentation', 'uuid': u, 'name': d['name'], 'tags': [], 'path': build}
                 for u, d in self.docs.items()]
 
-    async def create_filled(self, doc_type, name, build, fill):
+    async def create_filled(self, doc_type, name, build, fill, **_):
         uuid = f'd{len(self.docs) + 1}'
         self.docs[uuid] = {'uuid': uuid, 'name': name, 'data': ''}
         return await fill({'type': doc_type, 'uuid': uuid, 'name': name})

@@ -215,6 +215,8 @@ class CefPlan(BaseModel):
         "Per kind of event, by its action element (Authenticate, View, Network, ...): the fields it adds."))
     not_sent: list[dict[str, str]] = Field(default_factory=list, description=(
         "Event values the sample holds that no key takes, with why: documented as not sent."))
+    imports: list[str] = Field(default_factory=list, description=(
+        "Shared XSLTs imported (xsl:import), e.g. those an AGENTS doc's Required imports name: added for you."))
     style: XsltStyle = Field(default_factory=XsltStyle, description=(
         "How the CEF XSLT is written, as an Events translation's is (naming, variables, layout): from an XSLT style "
         "section in the standing instructions (AGENTS docs); otherwise the defaults."))
@@ -631,12 +633,14 @@ def render_xslt(plan: CefPlan) -> str:
     <xsl:sequence select="concat(string-join($header, '|'), '|', string-join($extension, ' '))" />
   </xsl:template>
 '''
+    # Imports come first in a stylesheet.
+    imports = ''.join(f'\n  <xsl:import href="{_attr(h)}" />' for h in dict.fromkeys(plan.imports))
     if plan.output == 'kafka':
         key = (f'\n      <key><xsl:value-of select="{_attr(plan.kafka_key)}" /></key>' if plan.kafka_key else '')
         top = f'''<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns="kafka-records:1" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
     xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cef="urn:stroom-mcp:cef" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    exclude-result-prefixes="xs cef" version="3.0">
+    exclude-result-prefixes="xs cef" version="3.0">{imports}
   <!-- CEF for ArcSight: one Kafka record per Event (kafka-records:1 takes one a document: split one Event a record),
        its value the flattened CEF line. -->
   <xsl:template match="/Events">
@@ -657,7 +661,7 @@ def render_xslt(plan: CefPlan) -> str:
     else:
         top = f'''<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xpath-default-namespace="event-logging:3" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
-    xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cef="urn:stroom-mcp:cef" exclude-result-prefixes="xs cef" version="3.0">
+    xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cef="urn:stroom-mcp:cef" exclude-result-prefixes="xs cef" version="3.0">{imports}
   <!-- CEF for ArcSight: one flattened CEF line per Event, as text. -->
   <xsl:output method="text" />
   <xsl:template match="/Events">

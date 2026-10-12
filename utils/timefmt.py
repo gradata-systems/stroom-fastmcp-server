@@ -15,14 +15,26 @@ _MONTH_FULL = {'january', 'february', 'march', 'april', 'may', 'june', 'july', '
 _ZONE_NAME = re.compile(r'(?:UTC|GMT|Z(?![a-z])|[A-Z]{3,4}T|[A-Z][a-z]+/[A-Z][A-Za-z_]+)')
 
 
+# What profiling calls an epoch value -> its time_format.
+EPOCH_NAMES = {'epoch seconds': 'epoch_s', 'epoch milliseconds': 'epoch_ms', 'epoch microseconds': 'epoch_us',
+               'epoch nanoseconds': 'epoch_ns'}
+
+
 def infer_time_pattern(value: str) -> str | None:
     """A Java date pattern that parses `value`, e.g. '28/Sep/2026:10:00:00 +0000' -> 'dd/MMM/yyyy:HH:mm:ss Z';
     None when the value does not look like a date and time. Epoch values give 'epoch seconds' / 'epoch milliseconds'."""
     text = value.strip()
-    if re.fullmatch(r'1\d{9}', text):
+    # Epoch seconds may carry a fraction (1791712800.123: a Bluecoat column, GELF's timestamp), which epoch_s keeps.
+    # Seen in production: a fraction made the value a plain decimal, the time was mapped by hand, and its milliseconds
+    # were dropped.
+    if re.fullmatch(r'1\d{9}(\.\d{1,9})?', text):
         return 'epoch seconds'
     if re.fullmatch(r'1\d{12}', text):
         return 'epoch milliseconds'
+    if re.fullmatch(r'1\d{15}', text):
+        return 'epoch microseconds'
+    if re.fullmatch(r'1\d{18}', text):
+        return 'epoch nanoseconds'
     if re.fullmatch(r'\d{14}', text):
         return 'yyyyMMddHHmmss'
     if re.fullmatch(r'\d{8}', text):
@@ -98,7 +110,9 @@ def infer_time_pattern(value: str) -> str | None:
             low = word.lower()
             if seen_time and (_ZONE_NAME.match(rest) or low in ('z',)):
                 zm = _ZONE_NAME.match(rest)
-                out.append('X' if word == 'Z' else 'z')   # X parses a literal Z as UTC, as a zone offset would be
+                # X parses a literal Z as UTC, as a zone offset would be; a region (Australia/Sydney) is a zone id, VV;
+                # an abbreviation (AEST, UTC) a zone name, z.
+                out.append('X' if word == 'Z' else 'VV' if zm and '/' in zm.group() else 'z')
                 i += zm.end() if zm else 1
                 continue
             if word == 'T' and seen_date and not seen_time:
@@ -123,6 +137,12 @@ def infer_time_pattern(value: str) -> str | None:
                 continue
             return None
         ch = text[i]
+        bracketed = re.match(r'\[([A-Z][a-z]+/[A-Z][A-Za-z_]+)\]', rest)
+        if bracketed and seen_time:
+            # An offset with its region after it, as Java writes a zoned time: 2026-10-01T18:00:00+10:00[Australia/Sydney]
+            out.append("'['VV']'")
+            i += bracketed.end()
+            continue
         if ch in '+-' and seen_time and re.match(r'[+-]\d{2}:?\d{2}', rest):
             out.append('XXX' if ':' in rest[:6] else 'Z')
             i += 6 if ':' in rest[:6] else 5
@@ -190,10 +210,12 @@ def pattern_regex(pattern: str) -> re.Pattern | None:
 
 def check_time_format(pattern: str, values: list[str]) -> str | None:
     """Why `pattern` does not fit the sample's values, or None when every non-empty value matches it."""
-    if pattern in ('epoch_ms', 'epoch_s', 'epoch seconds', 'epoch milliseconds'):
+    if pattern in EPOCH_NAMES or pattern in EPOCH_NAMES.values():
         # Seconds may carry a fraction (GELF's timestamp, 1791676803.7), which epoch_s reads as a decimal; milliseconds
-        # are whole.
-        allowed = r'\d{9,13}(\.\d+)?' if pattern in ('epoch_s', 'epoch seconds') else r'\d{9,13}'
+        # and finer are whole.
+        allowed = (r'\d{9,13}(\.\d+)?' if pattern in ('epoch_s', 'epoch seconds') else
+                   r'\d{12,16}' if pattern in ('epoch_us', 'epoch microseconds') else
+                   r'\d{15,19}' if pattern in ('epoch_ns', 'epoch nanoseconds') else r'\d{9,13}')
         bad = [v for v in values if v.strip() and not re.fullmatch(allowed, v.strip())]
         return (f"time_format {pattern!r} expects digits only{' (a fraction of a second allowed)' if '.' in allowed else ''}; "
                 f"the sample has {bad[:3]}") if bad else None
