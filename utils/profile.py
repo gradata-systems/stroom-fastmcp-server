@@ -303,6 +303,18 @@ def _array_head(text: str, limit: int) -> list[Any] | None:
 _NAME_CELL = re.compile(r'^[A-Za-z_][A-Za-z0-9_.-]{0,40}$')
 
 
+def _typed(value: str) -> bool:
+    """A value of a type a column name never is: a time, a number, an IP address."""
+    if re.fullmatch(r'-?\d+(\.\d+)?', value):
+        return True
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    return infer_time_pattern(value) is not None
+
+
 def _names_a_header(rows: list[list[str]]) -> bool:
     """A first line of names (user, src_ip, eventTime), each unique, over columns whose values aren't names like it:
     a header the sniffer missed because every column is text (seen: user,name,department,site over people's names,
@@ -310,6 +322,13 @@ def _names_a_header(rows: list[list[str]]) -> bool:
     first, body = rows[0], [r for r in rows[1:] if r]
     if len(set(first)) != len(first) or not all(_NAME_CELL.match(c.strip()) for c in first):
         return False
+    # A column whose every value is typed (a time, a number, an IP address) under a first cell that is a plain name:
+    # a header, whatever the other columns hold (seen: time,user,host,action over ISO times and words, the header
+    # read as a record, as only one column of four differed).
+    for n, name in enumerate(first):
+        values = [r[n].strip() for r in body if n < len(r) and r[n].strip()]
+        if len(values) >= 2 and all(_typed(v) for v in values) and not _typed(name.strip()):
+            return True
     differing = 0
     for n, name in enumerate(first):
         values = [r[n].strip() for r in body if n < len(r)]

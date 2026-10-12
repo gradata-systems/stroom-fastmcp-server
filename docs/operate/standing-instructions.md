@@ -20,7 +20,8 @@ them, per stage, and the server applies it rather than only handing it to the ag
 - indexing: Common-Index-V1, Lookups-V2
 ```
 
-Stages are `translation` (Raw Events to Events), `indexing`, `reference` and `cef`. XSLTs the server generates get
+Stages are `translation` (Raw Events to Events), `records` (pipelines writing Records), `indexing`, `reference` and
+`cef`. XSLTs the server generates get
 the imports, and the agent is told the named templates each offers, to call where they write; an XSLT written by
 hand without them is refused when it is saved. Like any standing instruction, the section applies in its doc's
 folder and below.

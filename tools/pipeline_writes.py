@@ -464,7 +464,14 @@ async def create_pipeline(
         return gate
     name = edited(ctx, 'name', name)       # the user may have corrected it in the form
     from tools.templates import pipeline_role
-    ref = await guard_from(ctx).create('Pipeline', name, build, role=await pipeline_role(stroom, template_uuid))
+    from security.guard import SOURCE_ROLES
+    role = await pipeline_role(stroom, template_uuid)
+    ref = await guard_from(ctx).create('Pipeline', name, build, role=role)
+    if role in SOURCE_ROLES:
+        # The build's text converter and XSLT it runs, made before it, go where it went: Events or Records.
+        for prop in properties:
+            if prop.doc_type in ('TextConverter', 'XSLT') and prop.doc_uuid:
+                await guard_from(ctx).move_to_role(build, {'type': prop.doc_type, 'uuid': prop.doc_uuid}, role)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
     if description:

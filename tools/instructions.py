@@ -104,7 +104,7 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
 _REQUIRED = re.compile(r'^#{1,6}\s*required imports\s*$', re.I | re.M)
 STAGES = {'translation': 'translation', 'translations': 'translation', 'events': 'translation',
           'raw events to events': 'translation', 'raw event to event': 'translation', 'records': 'records',
-          'raw records to records': 'records', 'raw record to record': 'records', 'indexing': 'indexing',
+          'raw events to records': 'records', 'raw event to record': 'records', 'indexing': 'indexing',
           'reference': 'reference', 'reference data': 'reference', 'cef': 'cef', 'forwarding': 'cef'}
 
 

@@ -159,3 +159,14 @@ def test_a_translation_read_back_keeps_its_time_formats():
     assert unify(SHAPES['epoch_s, truncated'],
                  shape("stroom:format-date(string(xs:integer(xs:decimal(data[@name='ts']/@value[1]) * 1000)))"))
     assert unify(SHAPES['time, ms'], shape("mcp:time-ms(string(data[@name='ts']/@value[1]), 'yyyy SSSSSS', 'UTC')"))
+
+
+def test_a_header_over_a_column_of_times_is_a_header():
+    # Seen in e2e: time,user,host,action over ISO times and words was read as a record (only the time column
+    # differed from its name), and the columns were called col1 to col4.
+    from utils.dsgen import infer_spec
+    spec, _ = infer_spec('time,user,host,action\n2026-10-01T08:00:00Z,alice,ws01,start\n'
+                         '2026-10-01T08:05:00Z,bob,ws02,stop\n')
+    assert spec.header is True
+    assert infer_spec('alice,ws01,start\nbob,ws02,stop\ncarol,ws03,start\n')[0].header == ['col1', 'col2', 'col3']
+    assert infer_spec('2026-10-01T08:00:00Z,alice\n2026-10-01T08:05:00Z,bob\n')[0].header == ['col1', 'col2']

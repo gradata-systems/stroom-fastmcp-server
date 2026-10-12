@@ -41,7 +41,7 @@ Short, concrete rules the agent can apply and you can check:
 ```
 
 A `## Required imports` section names shared XSLTs every XSLT of a stage imports (`- translation: Stream-Meta-V1`,
-`- indexing: Common-Index-V1`; stages translation, indexing, reference, cef). The server applies it: generated XSLTs
+`- indexing: Common-Index-V1`; stages translation, records, indexing, reference, cef). The server applies it: generated XSLTs
 get the imports (`build_translation_xslt`, `save_xslt index_plan=`, the CEF plan's save and `build_reference_xslt
 build=` add them, and say which named templates each
 offers: call them with `shared` entries where they write), and a hand-written XSLT without them is refused at save.

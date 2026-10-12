@@ -156,7 +156,7 @@ def xslt_role(code: str) -> str | None:
                                                          and 'event-logging:' in code):
         return 'Indexing'           # documents for an index, from Events
     if re.search(r'<(?:\w+:)?records[\s/>]', code):
-        return 'Records'            # records from a source's own: a Raw Records translation (Events if the feed is)
+        return 'Records'            # records from a source's own: written as a Records stream
     return None
 
 
@@ -200,7 +200,8 @@ async def create_text_converter(
     """
     _check_converter(converter_type, code)
     stroom = gateway_from(ctx)
-    ref = await guard_from(ctx).create('TextConverter', name, build, role='Events')     # Records for a Raw Records feed
+    # Events until a pipeline writing Records runs it (create_pipeline moves it there).
+    ref = await guard_from(ctx).create('TextConverter', name, build, role='Events')
     doc = await stroom.get_doc('TextConverter', ref['uuid'])
     doc.update(converterType=converter_type, data=code)
     from tools.plan import with_next
@@ -311,7 +312,7 @@ async def create_xslt(
     is generated from it.
     """
     await _checked(ctx, code, build)
-    # A plan says what an XSLT is for; a discovery XSLT reads a source's records, as a Raw Records translation does.
+    # A plan says what an XSLT is for; a discovery XSLT reads a source's records, as one writing Records does.
     role = 'Indexing' if index_plan is not None else 'CEF' if cef_plan is not None else xslt_role(code)
     await _refuse_without_required_imports(ctx, code, build, role)
     stroom = gateway_from(ctx)

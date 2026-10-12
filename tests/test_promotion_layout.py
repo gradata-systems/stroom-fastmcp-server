@@ -47,15 +47,25 @@ async def test_the_layout_is_a_tree_of_the_destination_folders_with_new_ones_mar
                     'Left in the workspace: ACME-MCP-TEST (Feed)')
 
 
-async def test_a_translation_is_filed_under_events_or_records_by_its_source():
-    # Asked for by the user: Events for a Raw Events feed, Records for a Raw Records one.
-    from security.guard import source_role
-    feeds = {'raw': {'streamType': 'Raw Records'}, 'ev': {'streamType': 'Raw Events'}}
-    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda kind, uuid: feeds[uuid]))
-    feed = lambda uuid: {'type': 'Feed', 'uuid': uuid}
-    assert await source_role(stroom, [feed('raw')], 'Events') == 'Records'
-    assert await source_role(stroom, [feed('ev')], 'Records') == 'Events'
-    assert await source_role(stroom, [], 'Records') == 'Records'      # no feed of its own: the pipeline's stage
+def test_a_translation_is_filed_under_what_it_writes():
+    # Asked for by the user: Events, or Records for a pipeline writing Records streams. Live: STROOM_PROXY-RECEIVE-EVENTS
+    # (its own stream type Raw Events) is made Records by 'Stroom Proxy Receive Events', which this server reads as
+    # the records stage: so the feed's stream type can't say, and the pipeline's stage does.
+    from security.guard import STAGE_ROLES
+    assert STAGE_ROLES['translation'] == 'Events' and STAGE_ROLES['records'] == 'Records'
+
+
+async def test_a_converter_made_before_its_pipeline_moves_to_where_the_pipeline_went():
+    from security.guard import WriteGuard
+    guard = WriteGuard.__new__(WriteGuard)
+    moved = []
+    guard._stroom = SimpleNamespace(post=AsyncMock(return_value={'uuid': 'tc'}),
+                                    request=AsyncMock(side_effect=lambda *a: moved.append(a)))
+    guard.folder_contents = AsyncMock(return_value=[{'type': 'TextConverter', 'uuid': 'tc', 'name': 'X', 'role': 'Events'}])
+    guard.role_folder = AsyncMock(return_value={'uuid': 'rec', 'type': 'Folder', 'name': 'Records'})
+    assert await guard.move_to_role('b', {'type': 'TextConverter', 'uuid': 'tc'}, 'Records')
+    assert moved[0][1] == '/explorer/v2/move' and moved[0][2]['destinationFolder']['uuid'] == 'rec'
+    assert not await guard.move_to_role('b', {'type': 'TextConverter', 'uuid': 'tc'}, 'Events')      # already there
 
 
 def test_an_xslt_is_filed_by_what_it_writes():

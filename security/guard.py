@@ -53,26 +53,13 @@ def _node_in(nodes: list[dict[str, Any]], uuid: str) -> dict[str, Any] | None:
 
 # A build's documents by role, each in a subfolder of the build (asked for by the user): the build is still the top
 # folder under the workspace, so a document in any of them is in the build. Feeds, the build's record and its notes
-# stay at the build's top. A translation's folder is named for what it translates (asked for by the user): Events for
-# a Raw Events source, Records for a Raw Records one.
+# stay at the build's top. A translation's folder is named for what it writes (asked for by the user): Events, or
+# Records for a pipeline writing Records streams (live: STROOM_PROXY-RECEIVE-EVENTS, Raw Events made Records by
+# 'Stroom Proxy Receive Events', its feed's own stream type Raw Events all the same).
 ROLES = ('Events', 'Records', 'Indexing', 'CEF', 'Reference')
 SOURCE_ROLES = ('Events', 'Records')
 STAGE_ROLES = {'translation': 'Events', 'records': 'Records', 'indexing': 'Indexing',
                'discovery': 'Indexing', 'reference': 'Reference', 'forwarding': 'CEF'}
-
-
-async def source_role(stroom: StroomGateway, contents: list[dict[str, Any]], role: str) -> str:
-    """Events or Records for a translation, from the stream type of the build's feeds (a Raw Records feed: Records);
-    the role given (from the pipeline's stage, say) where the build has no feed of its own."""
-    types = set()
-    for feed in (d for d in contents if d['type'] == 'Feed'):
-        try:
-            types.add(((await stroom.get_doc('Feed', feed['uuid'])).get('streamType') or '').lower())
-        except Exception:
-            continue
-    if not types:
-        return role
-    return 'Records' if any('records' in t for t in types) else 'Events'
 
 
 class WriteGuard:
@@ -187,6 +174,19 @@ class WriteGuard:
         if role not in ROLES:
             raise ToolError(f"Unknown role {role!r}: one of {', '.join(ROLES)}")
         return await self._child_folder(await self.build_folder(build), role)
+
+    async def move_to_role(self, build: str, ref: dict[str, Any], role: str) -> bool:
+        """Move one of the build's documents into another role's subfolder: a text converter or translation XSLT, made
+        before its pipeline, goes where the pipeline writing Events or Records went. True if it moved."""
+        here = next((d for d in await self.folder_contents(build) if d['uuid'] == ref.get('uuid')), None)
+        if here is None or here.get('role') == role:
+            return False
+        folder = await self.role_folder(build, role)
+        node = await self._stroom.post('/explorer/v2/getFromDocRef',
+                                       {k: here.get(k) for k in ('type', 'uuid', 'name')})
+        await self._stroom.request('PUT', '/explorer/v2/move', {'explorerNodes': [node], 'destinationFolder': _strip(folder),
+                                                                'permissionInheritance': 'DESTINATION'})
+        return True
 
     async def folder_contents(self, build: str, with_record: bool = False) -> list[dict[str, Any]]:
         """The documents in a build folder and its role subfolders, read from the explorer tree (the search index
@@ -335,8 +335,6 @@ class WriteGuard:
         if twin:
             raise ToolError(f"A {doc_type} named '{name}' is already in build {build} (uuid {twin['uuid']}): carry on "
                             f"with that one (build_status lists the build's documents), or give the new one another name.")
-        if role in SOURCE_ROLES:
-            role = await source_role(self._stroom, contents, role)
         folder = await self.role_folder(build, role) if role else await self.build_folder(build)
         node = await self._stroom.post('/explorer/v2/create', {
             'docType': doc_type, 'docName': name, 'destinationFolder': _strip(folder),

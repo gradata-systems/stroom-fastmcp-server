@@ -22,7 +22,7 @@ System
     ├── onboard-acme-vpn               ← a build
     │   ├── ACME-VPN-V1.0              (Feed)
     │   ├── Build record               (Documentation: the server's record of the build)
-    │   ├── Events                     (Records, for a Raw Records feed)
+    │   ├── Events                     (Records, for a pipeline writing Records)
     │   │   └── ACME-VPN-V1.0-Events   (Pipeline, XSLT, Text Converter, Documentation)
     │   ├── Indexing
     │   │   ├── ACME-VPN-V1.0 - Indexing  (Pipeline, XSLT, Index, Documentation)
