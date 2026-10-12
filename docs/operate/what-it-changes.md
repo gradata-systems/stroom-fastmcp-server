@@ -67,6 +67,12 @@ Anything else is refused by the server's write guard, whatever the model asks fo
 - **Reprocess with production pipelines.** Promoted pipelines are refused by the write guard. Reprocessing
   production data is yours to do.
 - **Manage users, permissions, nodes or volumes.**
+- **Save XSLT that reaches outside the record.** XSLT runs on Stroom's nodes with Stroom's access, so code that
+  reads the environment, files or URLs (`doc()`, `document()`, `unparsed-text()`, `environment-variable()` and
+  the like), writes or loads documents by URI (`xsl:result-document`, `xsl:source-document`), evaluates an XPath
+  made at run time (`xsl:evaluate`, `function-lookup()`), or imports by URL is refused, whether the agent wrote it
+  or a mapping generated it. Functions of a shared XSLT the code imports (`geo:lookup-ip()`) are its own, whatever
+  their names. A working copy keeps what its production XSLT already did: only new calls are refused.
 
 ## Tags
 

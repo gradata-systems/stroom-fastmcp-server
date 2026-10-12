@@ -338,12 +338,12 @@ async def draft_cef_mapping(
         if events:
             # The lines the plan writes for the sample, for the documentation's examples and a review of its own.
             try:
-                from saxonche import PySaxonProcessor
+                from utils.saxon import processor
                 xml = etree.tostring(etree.fromstring(
                     b'<Events xmlns="event-logging:3">' + b''.join(etree.tostring(e) for e in events[:cap]) + b'</Events>'))
-                with PySaxonProcessor(license=False) as proc:
-                    out = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=plan.xslt()).transform_to_string(
-                        xdm_node=proc.parse_xml(xml_text=xml.decode()))
+                proc = processor()
+                out = proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=plan.xslt()).transform_to_string(
+                    xdm_node=proc.parse_xml(xml_text=xml.decode()))
                 lines = cef.lines_in(out)
                 examples = cef.examples_from(plan, lines, events)
                 checked = cef.review(lines, events, allowed)

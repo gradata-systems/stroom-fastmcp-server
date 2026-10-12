@@ -197,9 +197,11 @@ async def _required_for(ctx: Context, stage: str, build: str | None, feeds: Any 
         return []
 
 
-async def _import_notes(ctx: Context, required: list[dict[str, str]]) -> list[dict[str, Any]]:
+async def _import_notes(ctx: Context, required: list[dict[str, str]], functions: bool = False) -> list[dict[str, Any]]:
     """Each required import, with what it offers: its named templates (called with shared entries where they write)
-    and template rules (which apply without a call)."""
+    and template rules (which apply without a call); with functions (a translation, whose xpaths can call them), its
+    xsl:functions and the functions entry that binds their prefix. A required import may define functions an agent
+    told only of its templates never calls (e.g. geo:lookup-ip() in GeoIP-V1)."""
     from utils.sharedxslt import describe
     from utils.stroom import gateway_from
     stroom = gateway_from(ctx)
@@ -215,6 +217,14 @@ async def _import_notes(ctx: Context, required: list[dict[str, str]]) -> list[di
                 described = describe((await stroom.get_doc('XSLT', ref['uuid'])).get('data') or '')
                 note['named_templates'] = {name: t.get('writes') for name, t in (described.get('templates') or {}).items()}
                 note['template_rules'] = len(described.get('rules') or [])
+                offered = described.get('functions') or {}
+                if functions and offered:
+                    note['functions'] = {name: {k: v for k, v in f.items() if k in ('params', 'returns')}
+                                         for name, f in offered.items()}
+                    note['functions_entries'] = [{'href': r['href'], 'prefix': prefix, 'namespace': namespace}
+                                                 for prefix, namespace in dict.fromkeys(
+                                                     (f['prefix'], f['namespace']) for f in offered.values()
+                                                     if f.get('prefix') and f.get('namespace'))]
         except Exception:
             pass
         out.append(note)
@@ -402,7 +412,7 @@ async def build_translation_xslt(
     result = generate(mapping, schema, version)
     result['schema_version'] = version
     if required:
-        result['required_imports'] = await _import_notes(ctx, required)
+        result['required_imports'] = await _import_notes(ctx, required, functions=True)
     if unknown_keys:
         result['warnings'].append(f"mapping keys ignored, as a mapping has no such key: {unknown_keys} (it has "
                                   f"{sorted(TranslationMapping.model_fields)})")

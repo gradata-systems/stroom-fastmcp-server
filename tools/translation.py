@@ -12,6 +12,7 @@ from utils.consent import consent_from
 from tools.validation import check_xslt
 from utils.fieldplan import FieldPlan
 from utils.mappingstore import normalise_xslt, with_mapping
+from utils.saxon import unsafe_in_xslt
 from utils.stroom import gateway_from
 from utils.xsltgen import TranslationMapping
 
@@ -127,7 +128,9 @@ async def _generated(index_plan: FieldPlan | None) -> str:
     return index_plan.xslt()
 
 
-async def _checked(ctx: Context, xslt: str, build: str | None = None) -> None:
+async def _checked(ctx: Context, xslt: str, build: str | None = None, previous: str | None = None) -> None:
+    """check_xslt, or ToolError. previous: the code being replaced, whose refused calls and instructions (utils/saxon.py)
+    stay allowed: a working copy keeps what its production XSLT already did, written by a person."""
     input_namespace = None
     if build:
         # A source's own XML in no namespace: its <records><record> are not a Data Splitter's records:2.
@@ -139,8 +142,13 @@ async def _checked(ctx: Context, xslt: str, build: str | None = None) -> None:
         if sample and sample.get('format') == 'xml':
             input_namespace = sample.get('namespace') or ''
     result = await check_xslt(ctx, xslt, input_namespace=input_namespace)
-    if not result['ok']:
-        raise ToolError(f"XSLT not saved: {'; '.join(result['errors'])}")
+    errors = result['errors']
+    if previous:
+        from tools.validation import _unescaped
+        kept = {what for what, _ in unsafe_in_xslt(previous)}
+        errors = [e for e in errors if e not in {why for what, why in unsafe_in_xslt(_unescaped(xslt)[0]) if what in kept}]
+    if errors:
+        raise ToolError(f"XSLT not saved: {'; '.join(errors)}")
 
 
 def xslt_role(code: str) -> str | None:
@@ -487,9 +495,9 @@ async def update_xslt(
     the change is to a field the edit changed too, the user is asked whether to keep their edit or overwrite it: the
     question comes back instead of the saved doc (anything without a uuid), for the caller to return.
     """
-    await _checked(ctx, code)
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('XSLT', uuid)
+    await _checked(ctx, code, previous=doc.get('data'))
     ref = {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')}
     await guard_from(ctx).check_managed(ref)
     build = await guard_from(ctx).build_of(ref)

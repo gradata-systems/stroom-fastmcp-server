@@ -12,6 +12,7 @@ from lxml import etree
 from pydantic import Field
 
 from utils.params import ONE_OR_MORE
+from utils.saxon import unsafe_in_xslt
 from utils.schemas import SchemaCache, declared_system_id, errors_for, event_logging_system_id
 from utils.stroom import gateway_from
 
@@ -234,8 +235,10 @@ async def check_xslt(
     namespace declared and only real stroom: functions used (an unknown one comes back with the nearest real
     name), match and select expressions that would select nothing because the input's namespace is not
     declared, event-logging elements the schema has no place for (e.g. EventDetail/ServerEvent), and
-    xsl:import / xsl:include targets that exist as XSLT documents in Stroom. Full compilation happens when
-    the pipeline is stepped.
+    xsl:import / xsl:include targets that exist as XSLT documents in Stroom. Calls that read the environment, files
+    or network (doc(), unparsed-text(), environment-variable() and the like), instructions that read or write a
+    document by URI (xsl:result-document, xsl:evaluate, ...) and imports by URL are refused. Full compilation
+    happens when the pipeline is stepped.
     """
     xslt, escaped = _unescaped(xslt)
     try:
@@ -249,6 +252,7 @@ async def check_xslt(
         errors.append("xsl:stylesheet needs a version attribute (Stroom supports 2.0 and 3.0)")
     function_errors, calls = _function_problems(xslt, root)
     errors += function_errors
+    errors += [why for _, why in unsafe_in_xslt(xslt)]
     errors += _namespace_problems(root, input_namespace)
     warnings += _unguarded_json(root)
     if root.find(f'.//{{{EVT}}}*') is not None:

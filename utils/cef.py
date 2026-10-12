@@ -16,6 +16,7 @@ from typing import Any, Literal
 from lxml import etree
 from pydantic import BaseModel, Field, model_validator
 
+from utils.saxon import refused
 from utils.xsltgen import XSL, XsltStyle, _comment, style_name
 
 EL = 'event-logging:3'
@@ -221,8 +222,20 @@ class CefPlan(BaseModel):
         "How the CEF XSLT is written, as an Events translation's is (naming, variables, layout): from an XSLT style "
         "section in the standing instructions (AGENTS docs); otherwise the defaults."))
 
+    def expressions(self) -> list[tuple[str, str]]:
+        """(where, XPath) for each expression the XSLT evaluates: header sources, fields and the Kafka key."""
+        found = [(f"header {said}", getattr(self, name).source) for name, said, _ in HEADER
+                 if getattr(self, name).source is not None]
+        found += [(f"[{kind}] {f.key}", f.path)
+                  for kind, fields in [('common', self.common)] + list(self.events.items()) for f in fields]
+        return found + ([('kafka_key', self.kafka_key)] if self.kafka_key else [])
+
+    def unsafe(self) -> list[str]:
+        """The expressions the server won't run (utils/saxon.py), each with why."""
+        return [f"{where} {path}: {refused(path)}" for where, path in self.expressions() if refused(path)]
+
     def problems(self) -> list[str]:
-        out = []
+        out = self.unsafe()
         if self.output == 'kafka' and not self.topic:
             out.append("output kafka needs topic: the Kafka topic ArcSight reads (ask the user, or the standing "
                        "instructions may name it)")
@@ -592,6 +605,8 @@ def render_xslt(plan: CefPlan) -> str:
     kind of event's keys, the keys every event gets), in its own mode, or named, or inline (plan.style.layout), named
     in the style's naming, each with a comment; an input read often, a variable."""
     from utils.xsltstyle import parse, part_name, serialize, variables
+    if plan.unsafe():
+        raise ValueError(f"The CEF XSLT isn't written: {'; '.join(plan.unsafe())}")
     style, taken = plan.style, set()
     header = ', '.join(f"cef:h({_header_expr(getattr(plan, name))}, {length})" for name, _, length in HEADER)
     line_mode, ext_mode, common_mode = (part_name(n, style, taken) for n in ('cef-line', 'cef-extension', 'cef-common'))

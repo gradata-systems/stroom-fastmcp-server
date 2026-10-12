@@ -134,3 +134,36 @@ async def test_a_reference_xslt_built_for_a_build_gets_the_required_imports():
                                                       schema_version='2.0.1', build='b')
     assert '<xsl:import href="Ref-Common-V1"/>' in built['xslt'] and built['required_imports']
     assert required.await_args.args[1:] == ('reference', 'b')
+
+
+GEOIP = '''<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:geo="http://example.com/geo"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema" version="3.0">
+  <xsl:function name="geo:lookup-ip" as="xs:string"><xsl:param name="ip" as="xs:string"/><xsl:sequence select="$ip"/></xsl:function>
+  <xsl:function name="geo:document"><xsl:param name="ip"/><xsl:sequence select="$ip"/></xsl:function>
+</xsl:stylesheet>'''
+
+
+async def test_a_required_imports_functions_are_offered_with_the_entry_that_binds_them():
+    # An AGENTS doc can require a shared XSLT for its functions, not only its templates.
+    from tools.generation import _import_notes
+    stroom = SimpleNamespace(
+        find_documents=AsyncMock(return_value={'values': [{'docRef': {'type': 'XSLT', 'uuid': 'g', 'name': 'GeoIP-V1'}}]}),
+        get_doc=AsyncMock(return_value={'data': GEOIP}))
+    required = [{'href': 'GeoIP-V1', 'from': 'System/Feeds'}]
+    with patch('utils.stroom.gateway_from', lambda c: stroom):
+        [note] = await _import_notes(None, required, functions=True)
+        [reference] = await _import_notes(None, required)
+    assert note['functions'] == {'geo:lookup-ip': {'params': ['ip as xs:string'], 'returns': 'xs:string'},
+                                 'geo:document': {'params': ['ip']}}
+    assert note['functions_entries'] == [{'href': 'GeoIP-V1', 'prefix': 'geo', 'namespace': 'http://example.com/geo'}]
+    assert 'functions' not in reference      # a reference mapping has no functions entries to call them with
+
+    # Bound so, its functions are called whatever their names; the import is written once.
+    from tests.test_xsltgen import BASE, mapping
+    m = mapping(imports=['GeoIP-V1'], functions=note['functions_entries'],
+                common=BASE + [{'path': 'EventSource/Device/Location/Country',
+                                'xpath': "geo:document(geo:lookup-ip(data[@name='host']/@value))"}])
+    result = generate(m, SCHEMA, '4.1.0')
+    assert result['ok'] and result['xslt'].count('href="GeoIP-V1"') == 1
+    from utils.saxon import unsafe_in_xslt
+    assert unsafe_in_xslt(result['xslt']) == []     # saved as it is: geo is the XSLT's, not fn

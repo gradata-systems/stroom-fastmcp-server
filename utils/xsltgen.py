@@ -27,6 +27,7 @@ from lxml import etree
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from utils.eventschema import Child, EventSchema
+from utils.saxon import refused
 
 XSL = 'http://www.w3.org/1999/XSL/Transform'
 XSI = 'http://www.w3.org/2001/XMLSchema-instance'
@@ -611,7 +612,7 @@ class TranslationMapping(BaseModel):
     imports: list[str] = Field(default_factory=list, description=(
         "Shared XSLTs imported (xsl:import) for their template rules or because standing instructions require "
         "them (an AGENTS doc's Required imports), e.g. 'Stream-Meta-V1'. Named templates from them are called "
-        "with shared entries."))
+        "with shared entries, and their xsl:functions with a functions entry for the same href."))
     shared: list[SharedTemplate] = Field(default_factory=list, description=(
         "Named templates from shared XSLTs (xsl:import) that the environment's other translations call, e.g. one "
         "writing EventSource/Device from stream meta: the XSLT imports them and calls each in its element's place, "
@@ -651,6 +652,11 @@ KNOWN_PREFIXES = {'xsl': XSL, 'xsi': XSI, 'xs': XS, 'stroom': 'stroom', 'fn': 'h
                   'map': 'http://www.w3.org/2005/xpath-functions/map', 'array': 'http://www.w3.org/2005/xpath-functions/array',
                   'math': 'http://www.w3.org/2005/xpath-functions/math', 'mcp': 'stroom-mcp:functions'}
 FUNCTION_PREFIX = re.compile(r'(?<![\w.:$@-])([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*\s*\(')
+
+
+def mapping_namespaces(m: 'TranslationMapping') -> dict[str, str]:
+    """The function prefixes a mapping's xpaths can call: the XSLT's own and those its functions entries bind."""
+    return {**KNOWN_PREFIXES, **{f.prefix: f.namespace for f in m.functions}}
 
 
 def mapping_xpaths(m: 'TranslationMapping') -> list[str]:
@@ -959,6 +965,10 @@ class _Generator:
         self._xsl_maps = {items for items, used in paths.items()
                           if len(used) > 1 or len(items) > mapping.style.inline_map_max_keys}
         self._check_functions()
+        bound = mapping_namespaces(self.m)
+        for x in dict.fromkeys(mapping_xpaths(self.m)):
+            if refused(x, bound):
+                self._note(self.problems, f"xpath {x!r}: {refused(x, bound)}")
         self._own_functions = self._choose_functions()
         self._keyed, self._keyed_functions = self._choose_keyed()
         # mcp:data writes a Data entry only when its value is present: one line a Data entry instead of an xsl:if

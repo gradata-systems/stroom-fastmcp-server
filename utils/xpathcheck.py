@@ -17,18 +17,9 @@ from lxml import etree
 
 from utils.dsgen import SplitterSpec, dry_run
 from utils.localcheck import sample_records
-from utils.xsltgen import TranslationMapping, input_namespace
+from utils.saxon import processor as _saxon, refused
+from utils.xsltgen import TranslationMapping, input_namespace, mapping_namespaces
 
-_processor = None
-
-
-def _saxon():
-    global _processor
-    if _processor is None:
-        # A runtime dependency: it was a dev one, and build_translation_xslt failed in a deployed image.
-        from saxonche import PySaxonProcessor
-        _processor = PySaxonProcessor(license=False)
-    return _processor
 
 
 def json_xml(value: Any, key: str | None = None) -> str:
@@ -255,6 +246,9 @@ def check_extractions(mapping: TranslationMapping, sample: str | list[str], spli
         if ex.field and mapping.input in ('data_splitter', 'json'):
             texts = [str(v) for v in (_value_of(r, ex.field) for r in records if isinstance(r, dict)) if v not in (None, '')]
         else:
+            if refused(source, mapping_namespaces(mapping)):
+                problems.append(f"{where}: {refused(source, mapping_namespaces(mapping))}.")
+                continue
             if documents is None:
                 documents = [proc.parse_xml(xml_text=d) for d in record_documents(mapping, sample, splitter)[:200]]
             for doc in documents:
@@ -302,15 +296,18 @@ def check_xpaths(mapping: TranslationMapping, sample: str | list[str], splitter:
     if mapping.for_each:
         return []
     inputs = xpath_inputs(mapping)
+    bound = mapping_namespaces(mapping)
+    warnings = [f"xpath {_shown(x, 200)} (used for {used[0]}{' and more' if len(used) > 1 else ''}) was not evaluated: "
+                f"{refused(x, bound)}." for x, used in inputs.items() if refused(x, bound)]
+    inputs = {x: used for x, used in inputs.items() if not refused(x, bound)}
     if not inputs:
-        return []
+        return warnings
     documents = record_documents(mapping, sample, splitter)
     if not documents:
-        return []
+        return warnings
     proc = _saxon()
     ns = input_namespace(mapping)
     parsed = [proc.parse_xml(xml_text=d) for d in documents]
-    warnings = []
     for x, used in inputs.items():
         found, error = False, None
         for doc in parsed:

@@ -22,7 +22,8 @@ them, per stage, and the server applies it rather than only handing it to the ag
 
 Stages are `translation` (Raw Events to Events), `records` (pipelines writing Records), `indexing`, `reference` and
 `cef`. XSLTs the server generates get
-the imports, and the agent is told the named templates each offers, to call where they write; an XSLT written by
+the imports, and the agent is told the named templates each offers, to call where they write, and for a
+translation the functions it defines (`geo:lookup-ip()`, say), to call in its xpaths; an XSLT written by
 hand without them is refused when it is saved. Like any standing instruction, the section applies in its doc's
 folder and below.
 
