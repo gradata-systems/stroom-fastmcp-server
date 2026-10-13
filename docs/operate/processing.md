@@ -8,7 +8,7 @@ Every processor filter the server creates or enables needs the user's approval, 
 | --- | --- | --- |
 | Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
 | Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
-| A promoted pipeline's feed | Everything on its feed the pipeline hasn't processed, existing data included, **created disabled** | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
+| A promoted pipeline's feed | Everything on its feed, existing data included, except the streams the pipeline already processed in its build (`NOT Id IN ...`), **created disabled** | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 
 Other limits:
 

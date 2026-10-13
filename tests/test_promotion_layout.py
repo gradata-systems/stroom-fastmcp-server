@@ -83,6 +83,9 @@ def test_a_versions_other_new_documents_join_its_folder():
     # A predecessor already in a version folder: the new one beside it, and documents meant for either place join it.
     assert builds._joining({'System/Prod/door/v2': {'System/Prod/door/v3'}}) == {
         'System/Prod/door/v2': 'System/Prod/door/v3', 'System/Prod/door': 'System/Prod/door/v3'}
+    # The predecessor in a role subfolder: documents given the source's folder join the version too.
+    assert builds._joining({'System/Prod/door/Indexing': {'System/Prod/door/Indexing/v2'}}) == {
+        'System/Prod/door/Indexing': 'System/Prod/door/Indexing/v2', 'System/Prod/door': 'System/Prod/door/Indexing/v2'}
     # Two versions meant for one place: neither is guessed.
     assert builds._joining({'System/A': {'System/A/v2', 'System/A/v3'}}) == {}
 

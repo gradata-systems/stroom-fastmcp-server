@@ -836,10 +836,16 @@ def _joining(beside: dict[str, set[str]]) -> dict[str, str]:
     """Where a version's other new documents go: those headed for its predecessor's folder, or the version folder's
     parent, go in the version folder with it (its index, documentation and dashboard: seen in e2e, the new pipeline in
     v2/ and its index beside v1). Only where one version folder is meant for that place."""
+    from security.guard import ROLES
     joins: dict[str, set[str]] = {}
     for folder, versions in beside.items():
         for version in versions:
-            for place in (folder, version.rsplit('/', 1)[0]):
+            places = [folder, version.rsplit('/', 1)[0]]
+            if '/' in folder and folder.rsplit('/', 1)[1] in ROLES:
+                # The predecessor in a role subfolder its promotion kept (…/Acme/Indexing): the source's folder is
+                # meant too (seen in e2e: v2's documentation and dashboard, given …/Acme, left out of Indexing/v2).
+                places.append(folder.rsplit('/', 1)[0])
+            for place in places:
                 joins.setdefault('/'.join(folder_parts(place)), set()).add(version)
     return {place: next(iter(v)) for place, v in joins.items() if len(v) == 1}
 

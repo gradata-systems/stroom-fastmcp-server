@@ -63,8 +63,9 @@ up a promotion.
    to `MCP Workspace/backups` first.
 5. Each promoted pipeline gets a processor filter on its feed, with the feed task limit
    (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**. It has no minimum stream creation
-   time: enabled, it processes everything on the feed that the pipeline hasn't processed yet, existing data
-   included. For a build on an existing feed the filter names that feed, never a test feed.
+   time: enabled, it processes everything on the feed, existing data included, except the streams the pipeline
+   already processed in the build (Stroom would otherwise process those again, replacing their Events, and an index
+   would hold them twice). For a build on an existing feed the filter names that feed, never a test feed.
 
 ## After promotion
 

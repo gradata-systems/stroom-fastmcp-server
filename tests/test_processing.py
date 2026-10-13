@@ -535,7 +535,12 @@ async def test_promotion_plans_new_data_filters_from_sample_filters_and_surveys(
     # No minimum creation time (asked for by the user): enabled, it processes the feed's existing data too.
     assert body['enabled'] is False and body['minMetaCreateTimeMs'] is None and body['maxProcessingTasks'] == 2
     children = body['queryData']['expression']['children']
-    assert [c['field'] for c in children] == ['Type', 'Pipeline'] and children[1] == PIPELINE_TERM
+    assert [c.get('field') for c in children[:2]] == ['Type', 'Pipeline'] and children[1] == PIPELINE_TERM
+    # Not what it already processed in the build: Stroom would do those again for a new filter (seen on the local
+    # stack: the sample's Events marked deleted and replaced, and indexed twice).
+    assert children[2] == {'type': 'operator', 'op': 'NOT', 'children': [{'type': 'operator', 'op': 'OR', 'children': [
+        {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '8'}]}]}
+    assert made[0]['except_processed_in_build'] == [8]
     assert made[0]['pipeline_link'].endswith('docUuid=ip')
 
 

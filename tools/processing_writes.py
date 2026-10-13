@@ -305,9 +305,11 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], so
     for pipeline in pipelines:
         own = await stroom.processor_filters(pipeline['uuid'])
         targets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        done: set[int] = set()
         for f in own:
             expression = (f.get('queryData') or {}).get('expression')
             ids = sorted(_selected_ids(expression))
+            done |= set(ids)
             metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in ids], len(ids), op='OR')
                                          ).get('values') or []] if ids else []
             for meta in metas:
@@ -329,9 +331,11 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], so
                 # feed among them), as the pipeline's Events are those meant.
                 if (stream_type, sources_of) not in by_source:
                     by_source.add((stream_type, sources_of))
-                    plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra})
+                    plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra,
+                                 'done': sorted(done)})
             elif feed and not _test_feed(feed, tests):
-                plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra})
+                plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra,
+                             'done': sorted(done)})
     return plan
 
 
@@ -341,17 +345,23 @@ def _test_feed(feed: str | None, tests: set[str]) -> bool:
 
 async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Feed-wide filters for promoted pipelines, created disabled for the user. No minimum stream creation time (asked
-    for by the user): enabled, a filter processes what is on its feed that the pipeline hasn't processed yet."""
+    for by the user): enabled, a filter processes the feed's data, existing data included, except the streams the
+    pipeline already processed in its build. Stroom doesn't skip those for a new filter: seen on the local stack, the
+    sample's raw stream processed again, its Events marked deleted and replaced (and an index would hold them twice)."""
     stroom = gateway_from(ctx)
     made = []
     for entry in plan:
+        done = entry.get('done') or []
         expression = {'type': 'operator', 'op': 'AND', 'children': (
             [await _feed_term(stroom, entry['feed'])] if entry['feed'] else []) + [
-            _term('Type', entry['stream_type']), *entry['extra_terms']]}
+            _term('Type', entry['stream_type']), *entry['extra_terms']] + ([
+                {'type': 'operator', 'op': 'NOT', 'children': [
+                    {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in done]}]}] if done else [])}
         created = await _create_filter(stroom, entry['pipeline'], expression, 10, stroom.settings.max_feed_filter_tasks,
                                        None, enabled=False)
         made.append({'filter_id': created['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
                      'stream_type': entry['stream_type'], 'enabled': False,
+                     **({'except_processed_in_build': done} if done else {}),
                      'pipeline_link': doc_link(stroom.settings, 'Pipeline', entry['pipeline']['uuid'])})
     return made
 

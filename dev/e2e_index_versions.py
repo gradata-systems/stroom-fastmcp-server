@@ -96,6 +96,16 @@ async def production(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: s
     e2e.check('not created by this server' in refused, "the server will not switch on a promoted pipeline's filter")
     for f in made.values():
         await stroom.request('PUT', f"/processorFilter/v1/{f['filter_id']}/enabled", True)
+    # No minimum creation time, so the feed's existing data is theirs too, but not what the build already processed:
+    # Stroom would process the sample again for a new filter, mark its Events deleted and index them twice.
+    e2e.check(all(f.get('except_processed_in_build') for f in made.values()),
+              f"each promoted filter leaves out what its pipeline processed in the build: "
+              f"{[f.get('except_processed_in_build') for f in made.values()]}")
+    await asyncio.sleep(30)
+    rows = (await stroom.find_meta([{'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(i)}
+                                    for i in events], len(events), op='OR')).get('values') or []
+    e2e.check(rows and all(r['meta'].get('status') != 'DELETED' for r in rows),
+              f"30 s after they are enabled, the sample's Events {events} are still the current ones, not processed again")
     return {'csv': csv, 'events': events, 'v1': v1, 'v1_index': index, 'v1_doc': index_doc, 'cluster': cluster,
             'filters': made, 'folder': folder, 'stamp': stamp}
 
@@ -198,9 +208,9 @@ async def update(ctx, stroom: StroomGateway, es: httpx.AsyncClient, prod: dict) 
     print(f"    {result['promoted']}")
     # A new version in a version subfolder beside v1, all of it together (asked for by the user: old and new told
     # apart at a glance).
-    versioned = f"{prod['folder']}/v2"
+    versioned = f"{prod['folder']}/Indexing/v2"    # beside v1, in the Indexing folder its promotion kept
     e2e.check(any(f"moved Pipeline '{v2_name}' to {versioned}" == p for p in result['promoted']),
-              f'v2 promoted into {versioned}, beside v1 (all of it Indexing: no role subfolder)')
+              f'v2 promoted into {versioned}, beside v1 (all of it Indexing: no role subfolder of its own)')
     e2e.check(all(f" to {versioned}" in p for p in result['promoted'] if p.startswith('moved ')),
               f"its index, documentation and dashboard with it: {[p for p in result['promoted'] if p.startswith('moved ')]}")
     after = {u: (await stroom.get_doc(t, u)).get('version') for u, t in ((prod['v1']['uuid'], 'Pipeline'),)}
