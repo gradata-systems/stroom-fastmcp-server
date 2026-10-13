@@ -2164,6 +2164,37 @@ async def verify_index(
 
 
 _FIND_COLUMNS = 8
+_ALL_STREAMS = 10_000      # Events streams find_events lists with all_streams
+
+
+async def _affected(stroom, index: dict[str, Any], by_stream: list[dict[str, Any]], total: int | None) -> dict[str, Any]:
+    """What a translation change to these events reaches: the Events streams holding them, the raw streams they were
+    made from (to reprocess, the user's to do), and for Elasticsearch the request that deletes their old documents
+    before they are indexed again (or they are indexed twice)."""
+    ids = []
+    for row in by_stream:
+        try:
+            ids.append(int(float(row['stream_id'])))
+        except (TypeError, ValueError):
+            continue
+    raw: set[int] = set()
+    for start in range(0, len(ids), 500):
+        batch = ids[start:start + 500]
+        terms = [{'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(i)} for i in batch]
+        rows = (await stroom.find_meta(terms, len(batch), op='OR')).get('values') or []
+        raw |= {r['meta']['parentMetaId'] for r in rows if r['meta'].get('parentMetaId')}
+    out: dict[str, Any] = {'events': total, 'events_streams': ids, 'raw_streams': sorted(raw),
+                           'reprocess': "The raw streams are the user's to reprocess, once the change is promoted: "
+                                        "exactly these, not the whole feed."}
+    if len(ids) >= _ALL_STREAMS:
+        out['note'] = f"Stopped at {_ALL_STREAMS} Events streams: narrow the time range and search again for the rest."
+    if index.get('indexName'):
+        out['elasticsearch_delete'] = (
+            f"POST {index['indexName']}/_delete_by_query "
+            f'{{"query": {{"terms": {{"StreamId": {json.dumps(ids)}}}}}}}')
+        out['delete_when'] = ("The cluster's admin runs it just before the raw streams are reprocessed (the new Events "
+                              "are then indexed again): otherwise the index holds these events twice.")
+    return out
 
 
 class FindTerm(BaseModel):
@@ -2186,6 +2217,10 @@ async def find_events(
             description="Index fields to show for each hit beside StreamId, EventId and the time (the searched ones "
                         "are shown too).")] = [],
         limit: Annotated[int, Field(ge=1, le=20, description="Hits to return, newest first.")] = 10,
+        all_streams: Annotated[bool, Field(
+            description="Every Events stream holding a match (not only the 20 with the most), with the raw stream "
+                        "each was made from: the streams to reprocess once a translation change is promoted, and for "
+                        "Elasticsearch the request that deletes their old documents first.")] = False,
 ) -> dict[str, Any]:
     """
     Find events in an index through Stroom, as the user would on a dashboard (with their permissions; nothing is
@@ -2246,16 +2281,22 @@ async def find_events(
     total, count_errors = await _count(ctx, probe(columns, limit), expression)
     hits = [{k: (str(v)[:120] if v is not None else None) for k, v in row.items()} for row in found['rows'][:limit]]
     by_stream: list[dict[str, Any]] = []
+    affected: dict[str, Any] | None = None
     if 'StreamId' in listed:
+        streams = _ALL_STREAMS if all_streams else 20
         grouped = await _search(ctx, probe([
             {**_column('StreamId'), 'group': 0},
             {'id': 'mcp-n', 'name': 'events', 'expression': 'count()', 'format': {'type': 'NUMBER'}, 'visible': True,
-             'sort': {'order': 0, 'direction': 'DESCENDING'}}], 50), expression, length=50)
+             'sort': {'order': 0, 'direction': 'DESCENDING'}}], streams), expression, length=streams)
         by_stream = [{'stream_id': r.get('StreamId'), 'events': r.get('events')} for r in grouped['rows']]
+        if all_streams:
+            affected = await _affected(stroom, index, by_stream, total)
+            by_stream = by_stream[:20]
     errors = list(dict.fromkeys(str(e) for e in found['errors'] + count_errors))
     result: dict[str, Any] = {
         'index': {**ref, 'backend': backend}, 'searched': [f"{c['field']} {c['condition']} {c['value']}" for c in children],
         'total': total if total is not None else len(hits), 'hits': hits, 'by_stream': by_stream,
+        **({'affected': affected} if affected else {}),
         **({'errors': errors} if errors else {})}
     if not hits:
         result['next'] = ("Nothing matches. Check the conditions with the user (the values as the dashboard shows them; "

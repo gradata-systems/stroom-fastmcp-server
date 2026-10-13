@@ -719,13 +719,16 @@ async def _outputs(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: list[
 async def compare_outputs(
         ctx: Context,
         pipeline_uuid: PipelineUuid,
-        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams whose records to compare.")],
+        stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams whose records to compare.")] = [],
         draft_code: DraftCode = None,
         other_pipeline_uuid: Annotated[str | None, Field(
             description="Compare against this pipeline instead of draft code, e.g. a v2 copy.")] = None,
         element: Annotated[str | None, Field(
             description="Element whose output to compare. Defaults to the pipeline's own XSLT step.")] = None,
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
+        events: Annotated[list[dict[str, int]] | str, ONE_OR_MORE, Field(
+            description="Indexed events whose records to compare, each {stream_id, event_id} as find_events gives "
+                        "them (with stream_ids too, or instead).")] = [],
 ) -> dict[str, Any]:
     """
     Step the same records through the current pipeline and a candidate (draft code, or another pipeline
@@ -733,15 +736,37 @@ async def compare_outputs(
     records gained, lost or changed a value, with examples. Use it to prove a change touches only the fields
     it should.
     """
+    locations = None
+    if events:
+        from tools.diagnosis import EventRef, event_locations
+        locations = await event_locations(ctx, [EventRef.model_validate(e) if isinstance(e, dict) else e for e in events])
+    return await compare(ctx, pipeline_uuid, stream_ids, draft_code, other_pipeline_uuid, element, max_records, locations)
+
+
+async def compare(ctx: Context, pipeline_uuid: str, stream_ids: list[int], draft_code: dict[str, str] | None,
+                  other_pipeline_uuid: str | None, element: str | None, max_records: int = 50,
+                  locations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """compare_outputs over streams and located records ({raw, part, record}, from event_locations)."""
     if not draft_code and not other_pipeline_uuid:
         raise ToolError("Give draft_code or other_pipeline_uuid to compare against")
     stroom = gateway_from(ctx)
     base = await _Pipeline.load(stroom, pipeline_uuid)
     other = await _Pipeline.load(stroom, other_pipeline_uuid) if other_pipeline_uuid else base
     element = element or base.default_outputs()[0]
-    before = await _outputs(stroom, base, stream_ids, element, None, max_records)
-    after = await _outputs(stroom, other, stream_ids, element if element in other.types else other.default_outputs()[0],
-                           draft_code if not other_pipeline_uuid else None, max_records)
+    if not stream_ids and not locations:
+        raise ToolError("Give stream_ids, or events (from find_events), whose records to compare")
+    other_element = element if element in other.types else other.default_outputs()[0]
+    candidate = draft_code if not other_pipeline_uuid else None
+    before = await _outputs(stroom, base, stream_ids, element, None, max_records) if stream_ids else {}
+    after = await _outputs(stroom, other, stream_ids, other_element, candidate, max_records) if stream_ids else {}
+    for loc in locations or []:
+        # Exactly the located events' records, wherever they are (asked for by the user: a fix proven on what a
+        # search found).
+        where = {'metaId': loc['raw'], 'partIndex': loc['part'], 'recordIndex': loc['record']}
+        key = record_key(loc['raw'], where)
+        for out, pipeline, at, code in ((before, base, element, None), (after, other, other_element, candidate)):
+            stepped = await _step(stroom, pipeline, loc['raw'], 'REFRESH', where, code)
+            out[key] = (((stepped.get('stepData') or {}).get('elementMap') or {}).get(at) or {}).get('output', '')
     by_path: dict[str, dict[str, Any]] = {}
     changed_records = 0
     for record, old_xml in before.items():

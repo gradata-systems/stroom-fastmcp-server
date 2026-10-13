@@ -11,10 +11,11 @@ from typing import Annotated, Any
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from tools.pipelines import CODE_PROPERTIES, merge_layers, translation_docs  # noqa: F401
-from tools.stepping import _field_values, _markers, _Pipeline, _step, compare_outputs, step_sample
+from tools.stepping import (RecordLocation, _field_values, _markers, _Pipeline, _step, compare, step_records,
+                            step_sample)
 from tools.streams import _meta, _term
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, gateway_from
@@ -53,6 +54,49 @@ async def _resolve(stroom: StroomGateway, stream_id: int, pipeline_uuid: str | N
         raise ToolError(f"Stream {stream_id} ({kind}) has no Events output; give pipeline_uuid to step it")
     return {'reported': {'id': stream_id, 'type': kind}, 'raw': stream_id,
             'pipeline': pipeline_uuid or pipelines[0], 'events': outputs[0]['id'] if outputs else None}
+
+
+class EventRef(BaseModel):
+    """An indexed event, as find_events or a dashboard row gives it."""
+    stream_id: int = Field(description="Its Events stream (the StreamId an index holds).")
+    event_id: int = Field(ge=1, description="The event within it (EventId), from 1.")
+
+
+async def event_locations(ctx: Context, events: list[EventRef]) -> list[dict[str, Any]]:
+    """Each event's raw record ({stream_id, event_id, raw, part, record}), found by stepping its raw stream with the
+    pipeline that produced it and counting the events each record gives (a record can give none, or several). Events
+    of one raw stream are found in one pass. Asked for by the user: proving a fix on the events a search found, across
+    many streams, not on whole streams."""
+    stroom = gateway_from(ctx)
+    by_stream: dict[int, list[int]] = {}
+    for e in events:
+        by_stream.setdefault(int(e.stream_id), []).append(int(e.event_id))
+    out: list[dict[str, Any]] = []
+    for stream_id, wanted in by_stream.items():
+        found = await _resolve(stroom, stream_id, None)
+        if found['events'] != stream_id:
+            raise ToolError(f"Stream {stream_id} is not an Events stream: give each event's Events stream (StreamId)")
+        pipeline = await _Pipeline.load(stroom, found['pipeline'])
+        output_element = pipeline.default_outputs()[-1]
+        targets = sorted(set(wanted))
+        cap, seen, steps = stroom.settings.max_sample_records * 4, 0, 0
+        step = await _step(stroom, pipeline, found['raw'], 'FIRST', None, None)
+        while step.get('foundRecord') and targets and steps < cap:
+            steps += 1
+            elements = (step.get('stepData') or {}).get('elementMap') or {}
+            produced = len(_EVENT.findall((elements.get(output_element) or {}).get('output', '')))
+            location = step['foundLocation']
+            while targets and seen < targets[0] <= seen + produced:
+                out.append({'stream_id': stream_id, 'event_id': targets.pop(0), 'raw': found['raw'],
+                            'part': location.get('partIndex') or 0, 'record': location.get('recordIndex')})
+            seen += produced
+            if targets:
+                step = await _step(stroom, pipeline, found['raw'], 'FORWARD', location, None)
+        if targets:
+            raise ToolError(f"Event(s) {targets} of Events stream {stream_id} were not found in the first {steps} records "
+                            f"of raw stream {found['raw']} ({seen} events produced): the pipeline may have changed "
+                            f"since it was processed")
+    return out
 
 
 def _nth_event(xml: str, n: int) -> str | None:
@@ -160,10 +204,14 @@ async def summarise_fix(
         element: Annotated[str, Field(description="Element whose XSLT or text converter the fix changes.")],
         draft: Annotated[str, Field(description="The complete fixed XSLT or text converter.")],
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
-            description="Raw streams to prove it on: the reported one plus recent production streams.")],
+            description="Raw streams to prove it on: the reported one plus recent production streams.")] = [],
         expected_paths: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="Output field paths the fix should change, e.g. ['Event/EventSource/User/Id'].")],
+            description="Output field paths the fix should change, e.g. ['Event/EventSource/User/Id'].")] = [],
         issue: Annotated[str, Field(description="The problem in the user's words, for the write-up.")] = '',
+        events: Annotated[list[EventRef] | str, ONE_OR_MORE, Field(
+            description="Indexed events to prove it on, each {stream_id, event_id} as find_events gives them: "
+                        "exactly those records are stepped, whatever streams they are in (with stream_ids too, or "
+                        "instead).")] = [],
 ) -> dict[str, Any]:
     """
     Prove a drafted fix and package it for the user. Steps every record of the streams with the draft,
@@ -172,6 +220,11 @@ async def summarise_fix(
     user whether to apply it (update_events_pipeline's copy, update and promote) or do it themselves.
     """
     stroom = gateway_from(ctx)
+    events = [EventRef.model_validate(e) if isinstance(e, dict) else e for e in events]
+    if not stream_ids and not events:
+        raise ToolError("Give stream_ids (raw streams) or events (from find_events) to prove the fix on")
+    if not expected_paths:
+        raise ToolError("Give expected_paths: the output fields the fix should change")
     docs = {d['element']: d for d in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid))}
     if element not in docs:
         raise ToolError(f"Element '{element}' has no XSLT or text converter; elements with code: {sorted(docs)}")
@@ -183,12 +236,13 @@ async def summarise_fix(
     if not diff:
         raise ToolError("The draft is the same as the saved code")
     code = {element: draft}
-    comparison = await compare_outputs(ctx, pipeline_uuid, stream_ids, draft_code=code, element=element
-                                       if target['doc']['type'] == 'XSLT' else None)
-    stepped = await step_sample(ctx, pipeline_uuid, stream_ids, draft_code=code)
+    located = await event_locations(ctx, events) if events else []
+    comparison = await compare(ctx, pipeline_uuid, stream_ids, code, None,
+                               element if target['doc']['type'] == 'XSLT' else None, locations=located)
+    stepped = await _stepped(ctx, pipeline_uuid, stream_ids, located, code)
     # The saved code stepped too: blocking errors it already has are not the fix's doing, and must not stop a fix
     # for something else (a pipeline can have more than one problem); errors only the draft has are.
-    before = await step_sample(ctx, pipeline_uuid, stream_ids)
+    before = await _stepped(ctx, pipeline_uuid, stream_ids, located, None)
 
     def key(group: dict[str, Any]) -> tuple:
         example = (group.get('examples') or [{}])[0].get('message') or group.get('reason') or ''
@@ -214,8 +268,9 @@ async def summarise_fix(
     manual = [
         f"Open the {kind} '{target['doc']['name']}' (uuid {target['doc']['uuid']}) in Stroom.",
         "Apply the change in 'diff' below (or paste the complete fixed code), then save.",
-        f"Open pipeline '{name}', enter stepping on raw stream(s) {stream_ids} and check the reported record "
-        f"now gives the expected output with no errors.",
+        f"Open pipeline '{name}', enter stepping on raw stream(s) "
+        f"{sorted(set(stream_ids) | {loc['raw'] for loc in located})} and check the reported record now gives the "
+        f"expected output with no errors.",
         "Reprocess the affected streams yourself if you want existing events corrected; new data picks up "
         "the fix automatically.",
     ]
@@ -239,6 +294,21 @@ async def summarise_fix(
                  "pipeline or give them the manual steps." if not problems else
                  "Revise the draft and call summarise_fix again."),
     }
+
+
+async def _stepped(ctx: Context, pipeline_uuid: str, stream_ids: list[int], located: list[dict[str, Any]],
+                   code: dict[str, str] | None) -> dict[str, Any]:
+    """One verdict over the streams (step_sample) and the located events' records (step_records)."""
+    parts = []
+    if stream_ids:
+        parts.append(await step_sample(ctx, pipeline_uuid, stream_ids, draft_code=code))
+    if located:
+        parts.append(await step_records(ctx, pipeline_uuid, [RecordLocation(stream=loc['raw'], part=loc['part'],
+                                                                            record=loc['record']) for loc in located],
+                                        draft_code=code))
+    order = ['clean', 'review', 'blocking']
+    return {'verdict': max((p['verdict'] for p in parts), key=order.index),
+            'groups': [g for p in parts for g in p['groups']]}
 
 
 ALL_TOOLS = [locate_event, summarise_fix]

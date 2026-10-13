@@ -259,7 +259,7 @@ async def fed_by_a_plan(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     return prod, doc
 
 
-async def find_one(ctx, doc: dict) -> None:
+async def find_one(ctx, doc: dict, prod: dict) -> None:
     """Asked for by the user: one rare event among many indexed streams, which sampling would miss, found as the user
     would on a dashboard and traced to its raw record."""
     print('\n### 2a. an event the user describes, found in the index and traced to its raw record')
@@ -274,6 +274,22 @@ async def find_one(ctx, doc: dict) -> None:
     located = await locate_event(ctx, int(float(hit['StreamId'])), int(float(hit['EventId'])))
     e2e.check('alice' in located.get('record_input', '') and 'alice' in located.get('stored_event', ''),
               f"traced to its raw record: stream {located['raw_stream']}, record {located['location']}")
+    # A fix proven on exactly the events found, wherever they are: their records stepped through the events pipeline
+    # and a candidate (here the same pipeline, so nothing may differ).
+    from tools import stepping
+    events = [{'stream_id': int(float(h['StreamId'])), 'event_id': int(float(h['EventId']))} for h in hits]
+    pipeline = prod['csv']['pipeline']['uuid']
+    compared = await stepping.compare_outputs(ctx, pipeline, events=events, other_pipeline_uuid=pipeline)
+    e2e.check(compared['records_compared'] == len({(e['stream_id'], e['event_id']) for e in events})
+              and compared['records_changed'] == 0,
+              f"compared at the {compared['records_compared']} found event(s)' records, nothing else stepped")
+    every = await indexing.find_events(ctx, doc['uuid'], where=[{'field': 'user.name', 'value': 'alice'}],
+                                       all_streams=True)
+    affected = every.get('affected') or {}
+    e2e.check(located['raw_stream'] in affected.get('raw_streams', [])
+              and 'StreamId' in (affected.get('elasticsearch_delete') or ''),
+              f"what a change to them reaches: raw streams {affected.get('raw_streams')} to reprocess, and the "
+              f"delete for their old documents")
     try:
         await indexing.find_events(ctx, doc['uuid'], where=[{'field': 'user.nmae', 'value': 'alice'}])
         refused = ''
@@ -394,7 +410,7 @@ async def main():
                 await wide(ctx, stroom, es, stamp)
             if '--plan' in only:
                 prod, doc = await fed_by_a_plan(ctx, stroom, es, stamp)
-                await find_one(ctx, doc)
+                await find_one(ctx, doc, prod)
                 await new_field(ctx, stroom, es, stamp, prod, doc)
             if '--lucene' in only:
                 await lucene(ctx, stroom, stamp)

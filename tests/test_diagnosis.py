@@ -63,7 +63,7 @@ async def test_a_fix_is_held_back_only_by_errors_it_brings_not_those_already_the
         steps = AsyncMock(side_effect=[{'verdict': 'blocking' if draft_groups else 'clean', 'groups': draft_groups},
                                        {'verdict': 'blocking' if saved_groups else 'clean', 'groups': saved_groups}])
         with patch.object(diagnosis, 'gateway_from', return_value=stroom), \
-                patch.object(diagnosis, 'compare_outputs', AsyncMock(return_value=changed)), \
+                patch.object(diagnosis, 'compare', AsyncMock(return_value=changed)), \
                 patch.object(diagnosis, 'step_sample', steps):
             return await diagnosis.summarise_fix(None, 'p', 'translationFilter', '<new/>', [1], ['Event/EventDetail/X'])
     unrelated = await run([schema], [schema])            # there before too: not the fix's doing
