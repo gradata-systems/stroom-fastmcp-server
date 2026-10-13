@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     stroom_audience: str = 'stroom'
     # Base URL of the Stroom UI for links shown to users (defaults to stroom_url).
     stroom_ui_url: str | None = None
+    # The name people know this Stroom by (e.g. PROD, DEV): told to clients, so an agent with several Stroom servers
+    # connected knows which one this is, and in every refusal of a feed or document that isn't here.
+    cluster_name: str = ''
     stroom_api_key: SecretStr | None = None
     # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs.
     stroom_ca_certs: Path | None = None
@@ -106,6 +109,12 @@ class Settings(BaseSettings):
     tls_certfile: Path | None = None
     tls_keyfile: Path | None = None
     tls_terminated_upstream: bool = False
+
+    @property
+    def stroom_label(self) -> str:
+        """This Stroom as people know it: its name and URL, e.g. Stroom 'PROD' (https://stroom.example.com)."""
+        url = (self.stroom_ui_url or self.stroom_url).rstrip('/')
+        return f"Stroom '{self.cluster_name}' ({url})" if self.cluster_name else f"the Stroom at {url}"
 
     @field_validator('request_state_keys', mode='before')
     @classmethod

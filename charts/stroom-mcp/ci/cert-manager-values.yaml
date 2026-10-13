@@ -22,4 +22,4 @@ build: {defaultConvention: mini}
 audit:
   file:
     enabled: true
-    persistence: {enabled: true, size: 5Gi}
+    persistence: {enabled: true, size: 5Gi, fixPermissions: true}

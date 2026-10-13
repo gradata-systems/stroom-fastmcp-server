@@ -1,7 +1,8 @@
 # Pipeline documentation
 
 Every pipeline built, changed or evaluated gets a Documentation doc with the pipeline's name, written with
-`write_documentation` in Markdown. The same content is returned in the chat. On an update, revise the sections
+`write_documentation` in Markdown. Its title (the `# ` line) is the doc's name, set by the tool: start with your first
+section, and don't put a version in a heading of your own. The same content is returned in the chat. On an update, revise the sections
 that changed; the tool keeps the `## Version control` block at the end, with an `Unreleased` row previewing the
 build's changes until it is promoted (give `change`: what changed and why; a new
 doc's is "Created"). Changes made while a build is worked on wait there, hidden, and become one row (version, date,
@@ -83,7 +84,11 @@ and who searches it; say what you do not know. The tool adds a "Data surveyed" s
 documents and time span of the whole index, its source feeds and the pipelines that produced and index them. Give the user the reply's link;
 `promote_build` puts the doc beside the index doc, or where the user chooses. Documenting an index again changes
 the doc beside it (through a working copy, written back with its version control). A wide index is surveyed in groups
-of columns; past 600 fields the rest are listed as not surveyed. Leave out `stream_ids` and `accept_errors`: they
+of columns; past 600 fields the rest are listed as not surveyed. Every field a feeding pipeline's plan writes must be
+in the index (Stroom lists it for the index doc); if one isn't, the documentation is refused, naming it, rather than
+written without it. Tell the user and ask them to reindex, or to check again in a minute (Stroom can be slow to list
+a field only just indexed). Only if they want the doc now anyway (no event carries a value for it yet, say):
+`document_missing_fields=true`, which lists it as not in the index. Leave out `stream_ids` and `accept_errors`: they
 are for a pipeline's documentation.
 
 ## Errors: generated, with the ones the user accepted

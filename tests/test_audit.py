@@ -90,3 +90,10 @@ async def test_a_requests_wait_before_the_tool_is_measured_from_its_arrival():
         assert _waited_ms(arrived + 1.5) == 1500
     with patch('fastmcp.server.dependencies.get_http_request', side_effect=RuntimeError('no request')):
         assert _waited_ms(time.perf_counter()) is None
+
+
+def test_an_audit_log_the_server_cant_write_stops_it_saying_how_to_fix_it(tmp_path):
+    # Seen in production: a persistent volume left owned by root (its storage ignores fsGroup), and a bare
+    # PermissionError at start.
+    with pytest.raises(SystemExit, match=r"Can't write the audit log .*audit\.file\.persistence\.fixPermissions=true"):
+        audit_module.configure_audit_log(tmp_path / 'missing-dir' / 'audit.jsonl')

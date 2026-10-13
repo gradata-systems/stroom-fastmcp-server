@@ -142,6 +142,41 @@ def _fix_hint(uuid: str | None, build: str | None, name: str | None) -> str:
                         ", or the whole mapping") + ".")
 
 
+UNKNOWN_AGREED = 'unknown agreed'
+
+
+def _unknown_key(rule: Any) -> str:
+    """What the user agreed to in keeping a rule as Unknown: its conditions and the reason given."""
+    return json.dumps({'when': [c.model_dump(exclude_none=True) for c in rule.when], 'reason': rule.allow_unknown,
+                       'keep': rule.keep_unknown}, sort_keys=True)
+
+
+async def _unknown_agreed(ctx: Context, uuid: str | None, build: str | None, name: str | None) -> dict[str, str]:
+    """The rules the user agreed to keep as Unknown in this XSLT (uuid, or the build's XSLT of that name), kept with
+    it: {rule name: what they agreed to}."""
+    from utils.mappingstore import read_block
+    try:
+        if not uuid and build and name:
+            from security.guard import guard_from
+            uuid = next((d['uuid'] for d in await guard_from(ctx).folder_contents(build)
+                         if d['type'] == 'XSLT' and d['name'] == name), None)
+        if not uuid:
+            return {}
+        found = read_block((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'), UNKNOWN_AGREED)
+    except Exception:   # nothing known to have been agreed: the user is asked
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+async def _remember_unknown_agreed(ctx: Context, uuid: str, agreed: dict[str, str]) -> str | None:
+    """Keep the rules agreed as Unknown with the saved XSLT (only those it still keeps); its new version."""
+    from utils.mappingstore import with_block
+    stroom = gateway_from(ctx)
+    doc = await stroom.get_doc('XSLT', uuid)
+    doc['description'] = with_block(doc.get('description'), UNKNOWN_AGREED, agreed)
+    return (await stroom.put_doc(doc)).get('version')
+
+
 async def _mapping_to_change(ctx: Context, target: str, uuid: str | None) -> dict[str, Any]:
     from tools.plan import _user
     try:
@@ -502,8 +537,14 @@ async def build_translation_xslt(
                                          "For a preview once the mapping is settled: field_mapping=true with "
                                          "pipeline_uuid and stream_ids (it steps the sample: slow).")
     saved = None
+    agreed_now: dict[str, str] = {}
     if result['ok'] and (build or uuid):
         kept = kept_unknown(mapping)
+        # Once per rule: what the user agreed to for this XSLT is kept with it, and only a rule not agreed yet, or whose
+        # conditions or reason changed since, is put to them (seen in production: asked again on every save).
+        agreed_before = await _unknown_agreed(ctx, uuid, build, name) if kept else {}
+        agreed_now = {r.name: _unknown_key(r) for r in kept if agreed_before.get(r.name) == _unknown_key(r)}
+        kept = [r for r in kept if r.name not in agreed_now]
         if kept:
             # Unknown says what happened is not known: the user agrees to that per rule, seeing what its records hold
             # (a form when the client has them, so the model cannot agree for them).
@@ -539,6 +580,7 @@ async def build_translation_xslt(
                                                    details, confirmation_id)
             if gate:
                 return gate
+            agreed_now.update({r.name: _unknown_key(r) for r in kept})
         from tools.translation import create_xslt, update_xslt
         said = change or ('Mapping changes: ' + '; '.join(applied) if applied else
                           'Saved again from its mapping' if uuid else 'Created from its mapping')
@@ -551,6 +593,8 @@ async def build_translation_xslt(
             saved = await create_xslt(ctx, build, name, result['xslt'], mapping=mapping, change=said)
         else:
             raise ToolError("To save the XSLT give name (a new XSLT in the build) or uuid (the one saved before)")
+        if agreed_now:
+            saved = {**saved, 'version': await _remember_unknown_agreed(ctx, saved['uuid'], agreed_now)}
         result['saved'] = {k: saved[k] for k in ('type', 'uuid', 'name', 'version')}
         _remember_mapping(ctx, saved['uuid'], mapping)
         result.update({k: saved[k] for k in ('next', 'done') if k in saved})

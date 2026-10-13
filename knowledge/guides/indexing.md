@@ -147,7 +147,9 @@ completes without errors. Reprocessing does not remove the documents a stream al
 ## Verifying
 
 Verify through Stroom, not by querying the backend: `verify_index` makes the dashboard once and runs the test
-searches: the sample stream ids, an exact match on each key field, and a time range.
+searches: the sample stream ids, an exact match on each key field, and a time range. With `pipeline_uuid` it also
+checks that every field the pipeline writes for those Events is in the index (Stroom lists it for the index doc);
+one that isn't fails verification: tell the user, who reindexes or has you check again in a minute.
 
 The dashboard is for the people who will search the index. Suggest its columns (the time field and the key fields:
 user, host, address, event type, outcome) and confirm them with the user; `verify_index` asks before making it.

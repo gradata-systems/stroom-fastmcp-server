@@ -331,3 +331,58 @@ def test_the_summary_goes_under_the_agents_own_purpose():
                           '### Data surveyed\n\n- x\n')
     assert text.index('Proxy logs.') < text.index('### Data surveyed') < text.index('## Field mapping')
     assert _below_section('## Field mapping\n\nT\n', 'Purpose and data', '### S\n').startswith('## Purpose and data\n\n### S')
+
+
+def test_a_field_the_plan_writes_that_the_index_lacks_is_said_when_the_user_chose_to_document_it():
+    # Seen in production: Stroom didn't list a field the pipeline writes, and the doc left it out, unsaid. Refused by
+    # default (write_documentation); when the user chooses to document anyway, it is listed as not in the index.
+    from utils.fielddoc import existing_index_markdown, not_listed
+    planned = {'user.name': PlannedField(name='user.name', type='keyword', source='EventSource/User/Id'),
+               'user.role': PlannedField(name='user.role', type='keyword', source='EventSource/User/Role',
+                                         description='The role the user acted in.')}
+    survey = _survey([{'name': 'Web - Indexing', 'uuid': 'p', 'plan': {'fields': []}}])
+    assert not_listed(survey, planned) == ['user.role']
+    text = existing_index_markdown(survey, planned, None)
+    assert ('| `user.role` | The role the user acted in. | keyword | `EventSource/User/Role` | not in the index | - |'
+            in text)
+
+
+async def test_fields_a_pipeline_writes_that_the_index_lacks_are_looked_for_again_then_named(monkeypatch):
+    # Asked for by the user: an error to put to them (reindex, or check again), not a doc that leaves the field out.
+    from tools import indexing
+    looks = iter([[{'name': 'user.name'}], [{'name': 'user.name'}], [{'name': 'user.name'}, {'name': 'user.role'}]])
+    monkeypatch.setattr(indexing, '_index_fields', lambda s, t, r: _awaitable(next(looks)))
+    monkeypatch.setattr(indexing, '_FIELD_WAITS', (0, 0))
+    ref = {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'web'}
+    # Listed on the third look (Stroom slow to list a field just indexed): nothing missing.
+    assert await indexing.fields_not_in_index(None, 'ElasticIndex', ref, {'Web - Indexing': ['user.name', 'user.role']}) == {}
+    monkeypatch.setattr(indexing, '_index_fields', lambda s, t, r: _awaitable([{'name': 'user.name'}]))
+    missing = await indexing.fields_not_in_index(None, 'ElasticIndex', ref, {'Web - Indexing': ['user.name', 'user.role']})
+    assert missing == {'Web - Indexing': ['user.role']}
+    said = indexing.missing_fields_said(missing, 'web-v1')
+    assert "has no field user.role (written by 'Web - Indexing')" in said
+    assert 'reindex' in said and 'check again' in said
+
+
+async def _awaitable(value):
+    return value
+
+
+async def test_verification_expects_only_the_fields_the_events_give_a_value(monkeypatch):
+    # A field no event fills is never mapped where the mapping is dynamic: not a field the index lacks.
+    from types import SimpleNamespace
+    from tools import builds, indexing, streams
+    plan = {'backend': 'elasticsearch', 'index_name': 'web', 'time_field': '@timestamp', 'fields': [
+        {'name': 'StreamId', 'type': 'id', 'source': '@StreamId'},
+        {'name': 'user.name', 'type': 'keyword', 'source': 'EventSource/User/Id'},
+        {'name': 'user.role', 'type': 'keyword', 'source': 'EventSource/User/Role'},
+        {'name': 'host.name', 'type': 'keyword', 'source': 'EventSource/Device/HostName'}]}
+    monkeypatch.setattr(builds, 'kept_mapping', lambda c, u: _awaitable({'kind': 'index', 'payload': plan}))
+    monkeypatch.setattr(streams, 'summarise_events', lambda c, s, n: _awaitable({'path_population': {
+        'EventSource/User/Id': 100.0, 'EventSource/Device/HostName': 50.0}}))
+    monkeypatch.setattr(indexing, '_index_fields', lambda s, t, r: _awaitable([{'name': 'StreamId'}, {'name': 'user.name'}]))
+    monkeypatch.setattr(indexing, '_FIELD_WAITS', ())
+    stroom = SimpleNamespace(get_doc=lambda t, u: _awaitable({'name': 'Web - Indexing'}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    lacking = await indexing._fields_written_not_indexed(ctx, 'p', {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'web'}, [9])
+    assert lacking == {'Web - Indexing': ['host.name']}          # user.role: no event has a role, so not expected

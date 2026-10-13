@@ -24,6 +24,9 @@ stroom:
   url: ""
   # Base URL of the Stroom UI in links shown to users; defaults to stroom.url.
   uiUrl: ""
+  # The name people know this Stroom by (e.g. PROD, DEV): told to clients, so an agent with a server per
+  # cluster connected knows which one this is, and named when a feed or document isn't found here.
+  clusterName: ""
   # Stroom's client id: every call to Stroom forwards the user's token, so its aud claim must include
   # this as well as oidc.audience.
   audience: stroom
@@ -116,6 +119,12 @@ audit:
     # settings can't be changed once created.
     persistence:
       enabled: false
+      # Storage that ignores the pod's fsGroup (NFS, some CSI drivers) leaves the claim owned by root, and
+      # the server, running as podSecurityContext.runAsUser, can't write the file: it stops, saying so.
+      # true adds an init container that gives the directory to that user and fsGroup first. It runs as
+      # root with CHOWN and FOWNER, which a namespace enforcing the restricted Pod Security Standard
+      # refuses: there, have the volume's ownership set by its provisioner instead.
+      fixPermissions: false
       size: 1Gi
       # Empty: the cluster's default storage class.
       storageClassName: ""

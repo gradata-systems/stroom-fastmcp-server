@@ -80,6 +80,58 @@ async def feeds_named(stroom: StroomGateway, name: str) -> list[dict[str, Any]]:
             if (v.get('docRef') or {}).get('type') == 'Feed' and (v['docRef'].get('name') or '').lower() == name.lower()]
 
 
+NOT_LISTED = "None of these: I'll correct the name (or the cluster)"
+
+
+def closest_feeds(name: str, names: list[str], count: int = 3) -> list[str]:
+    """The feed names most like the one given: one holding the other first, then by how alike they are."""
+    import difflib
+    want = name.lower()
+
+    def score(other: str) -> float:
+        low = other.lower()
+        return difflib.SequenceMatcher(None, want, low).ratio() + (0.5 if want in low or low in want else 0)
+    ranked = sorted({n for n in names if n}, key=lambda n: (-score(n), n))
+    return [n for n in ranked if score(n) >= 0.5][:count]
+
+
+async def resolve_feed(ctx: Context, name: str) -> Any:
+    """The feed the user named, as Stroom spells it. Not here by that name: up to three close matches offered in a
+    form, with a fourth choice to correct the name, the pick returned (a form to return on a modern connection);
+    none close, or no form, refused, naming this Stroom (asked for by the user: a feed of another cluster must stop
+    the work, not lead the agent to use or make another)."""
+    from utils.stroom import not_found
+    stroom = gateway_from(ctx)
+    name = name.strip()
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')
+    except ToolError:
+        ref = None
+    if (ref or {}).get('uuid'):
+        return ref.get('name') or name
+    twins = await feeds_named(stroom, name)
+    if twins:
+        return twins[0]['name']     # the same name in another case
+    every = [v['docRef']['name'] for v in await stroom.find_all_documents('*', ['Feed'])
+             if (v.get('docRef') or {}).get('name')]
+    near = closest_feeds(name, every)
+    if not near:
+        raise ToolError(not_found(stroom.settings, f"No feed named '{name}', nor any like it,"))
+    chosen = await consent_from(ctx).choose(
+        ctx, 'feed_name', f"There is no feed named '{name}' in {stroom.settings.stroom_label}. Did you mean one of "
+                          f"these?", near + [NOT_LISTED], title='Which feed?')
+    if chosen is not None and not isinstance(chosen, str):
+        return chosen       # the form, on a modern connection: the answer comes with the repeated call
+    if chosen in near:
+        return chosen
+    if chosen == NOT_LISTED:
+        raise ToolError(f"The user said '{name}' is none of {near}: ask them for the feed's exact name, and whether "
+                        f"{stroom.settings.stroom_label} is the cluster they mean. Don't go on until they say.")
+    raise ToolError(not_found(stroom.settings, f"No feed named '{name}'")
+                    + f" The closest here: {', '.join(near)}. Ask the user which they meant, offering these and a "
+                      f"fourth choice to correct the name; don't pick one yourself.")
+
+
 async def _refuse_case_twin(stroom: StroomGateway, name: str) -> None:
     """Seen (Qwen, VS Code): DELINEA-SECRETSERVER-V1.0 made beside an earlier Delinea-SecretServer-V1.0; its sample
     stream was filed under the earlier spelling, processing refused it as another build's feed, and the agent spent the

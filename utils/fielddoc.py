@@ -507,7 +507,21 @@ def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], sch
             held = f'{100 * count / len(documents):.0f}% of documents' if documents else 'no documents'
             values = _values([v for vs in per_document for v in vs])
         lines.append(_row(f'`{f}`', description, field['type'], f'`{source}`' if source else '(not recorded)', held, values))
+    # Written by a feeding pipeline's plan, but not in the fields Stroom lists for the index: only documented when the
+    # user chose to (write_documentation refuses otherwise), and said as such rather than left out.
+    for name in not_listed(survey, planned):
+        plan = planned[name]
+        what = getattr(plan, 'description', '') or (schema_description(schema, plan.source) if plan.source else '')
+        lines.append(_row(f'`{name}`', field_description(what, None) or 'Written by the pipeline that feeds the index.',
+                          getattr(plan, 'type', ''), f'`{plan.source}`' if plan.source else '(not recorded)',
+                          'not in the index', '-'))
     return '\n'.join(lines) + '\n'
+
+
+def not_listed(survey: dict[str, Any], planned: dict[str, Any]) -> list[str]:
+    """Fields a feeding pipeline's plan writes that Stroom doesn't list for the index."""
+    listed = {f['name'] for f in survey.get('fields') or []}
+    return [n for n in planned if n not in listed]
 
 
 def written_fields_markdown(documents: list[dict[str, list[str]]]) -> str:

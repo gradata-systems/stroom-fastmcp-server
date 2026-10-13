@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import json
 import re
-import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -54,9 +53,30 @@ async def start_build(
     Create (or find) the build's workspace folder. Every write tool creates documents there. Returns the
     standing instructions (AGENTS docs) that apply, which the work must follow.
     """
-    folder = await guard_from(ctx).build_folder(build)
+    guard = guard_from(ctx)
+    folder = await guard.build_folder(build)
+    # Feeds that exist outside the build are what it works from (an existing feed's data, a production pipeline's
+    # feed): recorded, so the plan doesn't send it to create a feed and upload samples (seen in VS Code: a test feed
+    # made and a workspace file uploaded though the user chose production streams), and promotion's filters name them.
+    from tools.feeds import feeds_named
+    feeds = [feeds] if isinstance(feeds, str) else feeds
+    existing, missing = [], []
+    for name in feeds:
+        named = await feeds_named(gateway_from(ctx), name)
+        if not named:
+            missing.append(name)
+        for found in named:
+            if await guard.build_of(found) != build:
+                existing.append(found['name'])
+                break
+    if existing:
+        await build_record.add_source_feeds(guard, build, existing)
     from tools.plan import checklist, next_step
+    from utils.stroom import not_found
     return {'build': build, 'folder': folder['_path'], 'uuid': folder['uuid'],
+            **({'works_from': existing} if existing else {}),
+            **({'not_found': not_found(gateway_from(ctx).settings, f"No feed named {', '.join(map(repr, missing))}")
+                + " (A feed this build is to create is fine: it doesn't exist yet.)"} if missing else {}),
             'standing_instructions': await applicable_instructions(ctx, folders, feeds),
             'plan': checklist(), 'next': await next_step(ctx, build), 'done': False}
 
@@ -69,7 +89,8 @@ async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:
     for doc in contents:
         entry = kept.get(doc['uuid']) or {}
         docs.append({k: doc[k] for k in ('type', 'uuid', 'name', 'path')}
-                    | {'working_copy_of': entry.get('copy_of'), 'version_of': entry.get('version_of')})
+                    | {'working_copy_of': entry.get('copy_of'), 'version_of': entry.get('version_of'),
+                       'role': doc.get('role')})
     # A stable order: approvals are bound to the exact plan built from this list.
     return sorted(docs, key=lambda d: (d['type'], d['name'], d['uuid']))
 
@@ -136,6 +157,10 @@ def mapping_digest(kept: dict[str, Any]) -> str:
 # doc trying to fix it). Not when the XSLT was changed by hand: that stays a warning, so a user's own edits never
 # hold a promotion up.
 BLOCKS = ' (promotion waits for this)'
+# What each promoted pipeline goes on processing. No minimum stream creation time (asked for by the user): enabled, a
+# filter processes the feed's data this pipeline hasn't processed yet, existing data included.
+PROCESSING = 'processing after promotion (filters created disabled; enabled, they process the whole feed)'
+TEST_FEED = '-MCP-TEST'
 
 
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
@@ -320,6 +345,15 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
     return section.rstrip() + '\n\n' + DOC_MARK.format(digest=mapping_digest(kept))
 
 
+_TITLE = re.compile(r'\A\s*#[ \t]+[^\n]*(?:\n|\Z)')
+
+
+def titled(markdown: str, name: str) -> str:
+    """The documentation with its name as its title, in place of any title the agent gave it. Seen in production: a
+    title naming V1.2 on the documentation of the V1.1 pipeline, whose name the doc carries."""
+    return f"# {name}\n\n" + _TITLE.sub('', markdown or '', count=1).lstrip('\n')
+
+
 def _with_change(ctx: Context, text: str, old: str, change: str, kept: dict[str, Any] | None) -> str:
     """The doc's new text: its version control rows as they were, and this change pending until the build is
     promoted, when the build's changes become one row."""
@@ -461,6 +495,10 @@ async def write_documentation(
             description="Instead of a pipeline, an existing index to document: its Elastic Index or Lucene Index doc, "
                         "confirmed with the user. The Field mapping section is generated from a survey of the index "
                         "through Stroom (describe_document shows it), and the doc is named after the index doc.")] = None,
+        document_missing_fields: Annotated[bool, Field(
+            description="With index_uuid: document the index though fields its feeding pipelines write aren't in it "
+                        "(listed as not in the index). Only when the user chooses it over reindexing or checking "
+                        "again: by default that is refused, saying which fields.")] = False,
 ) -> dict[str, Any]:
     """
     Create or update the Documentation doc for a pipeline in the build (same name as the pipeline), or, with
@@ -492,7 +530,8 @@ async def write_documentation(
         if stream_ids or accept_errors:
             raise ToolError("stream_ids and accept_errors are for a pipeline's documentation; an existing index is "
                             "surveyed through Stroom instead. Leave them out with index_uuid.")
-        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id)
+        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id,
+                                     document_missing_fields)
     if not pipeline_uuid:
         raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
     stroom = gateway_from(ctx)
@@ -564,7 +603,7 @@ async def write_documentation(
         accepted = merge_accepted(read_accepted(old), new_entries)
         # Only the generated section: the agent's own sections on errors (an evaluation's analysis) stay as written.
         text = replace_section(body, 'Errors', _errors_section(errors_markdown, accepted), exact=True)
-        set_body_text(doc, _with_change(ctx, text, old, change, kept))
+        set_body_text(doc, _with_change(ctx, titled(text, doc['name']), old, change, kept))
         return await stroom.put_doc(doc)
 
     name, beside = pipeline['name'], None
@@ -638,7 +677,7 @@ async def _raw_parents(stroom, stream_ids: list[int], pipeline_uuid: str) -> tup
 
 
 async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, change: str,
-                          confirmation_id: str | None) -> dict[str, Any]:
+                          confirmation_id: str | None, document_missing_fields: bool = False) -> dict[str, Any]:
     """The documentation of an existing index, its Field mapping section generated from a survey through Stroom. A doc
     already beside the index doc is changed through a working copy, written back (after a backup) on promotion."""
     from tools.indexing import _path_of, survey_index
@@ -686,7 +725,24 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
             schema = await event_schema(ctx, stroom.settings.event_logging_version)
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
-    section = existing_index_markdown(survey, planned, schema)
+    # Every field a feeding pipeline writes must be in the index, or the doc would leave it out unsaid.
+    from tools.indexing import fields_not_in_index, missing_fields_said
+    expected = {p['name']: [f.name for f in FieldPlan.model_validate(p['plan']).fields]
+                for p in survey['fed_by'] if p['plan'] and not FieldPlan.model_validate(p['plan']).discovery}
+    listed = {f['name'] for f in survey['fields']}
+    missing_by = {}
+    if any(f not in listed for fields in expected.values() for f in fields):
+        missing_by = await fields_not_in_index(stroom, doc_type, ref, expected)
+        if not missing_by:
+            # Listed on a later look: surveyed again, so the doc has them and their values.
+            survey = await survey_index(ctx, doc_type, index_uuid)
+    if missing_by and not document_missing_fields:
+        raise ToolError("Not documented: " + missing_fields_said(missing_by, index.get('indexName') or ref['name'])
+                        + " If no event carries a value for a field yet (Elasticsearch maps a field only once a "
+                          "document has it) and the user wants the doc now: document_missing_fields=true, which "
+                          "lists them as not in the index.")
+    missing = list(dict.fromkeys(f for fields in missing_by.values() for f in fields))
+    section = existing_index_markdown(survey, planned, schema)     # fields not in the index: only as the user chose
     summary = existing_index_summary(survey)
     text = _below_section(replace_section(body, 'Field mapping', section), 'Purpose and data', summary)
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -694,7 +750,7 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     async def write(target: dict[str, Any]) -> dict[str, Any]:
         doc = await stroom.get_doc('Documentation', target['uuid'])
         old = body_text(doc)
-        set_body_text(doc, _with_change(ctx, text, old, change, None))
+        set_body_text(doc, _with_change(ctx, titled(text, doc['name']), old, change, None))
         return await stroom.put_doc(doc)
 
     guard = guard_from(ctx)
@@ -715,6 +771,10 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
             'link': doc_link(stroom.settings, 'Documentation', doc['uuid']), 'index': survey['index'],
             'field_mapping': section, 'data_surveyed': summary,
+            **({'not_in_index': missing, 'note': (
+                f"{', '.join(missing)}: written by the pipeline that feeds the index, but not in the index, documented "
+                f"as such (the user chose to). Once the index has them, write_documentation again for their "
+                f"values.")} if missing else {}),
             'next': f"Give the user the link to review the draft. Once they agree, promote_build build='{build}': the "
                     f"doc is {destination}."}
 
@@ -905,6 +965,10 @@ async def promote_build(
         reviewed: Annotated[bool, Field(description="True once the user has been shown the layout (the tree a "
                                                     "needs_review reply gives) in the chat and confirmed it: they then "
                                                     "approve it in a short form.")] = False,
+        role_subfolders: Annotated[bool, Field(
+            description="Keep the build's role subfolders (Events or Records, Indexing, CEF, Reference) under each "
+                        "destination, as the layout shows them by default; false puts each document straight in its "
+                        "destination folder. The user decides when they review the layout.")] = True,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -932,8 +996,13 @@ async def promote_build(
         raise ToolError(f"Build '{build}' has no documents")
     proposed, beside = await _version_folders(stroom, docs, destinations)
     joins = _joining(beside)
+    from tools.plan import source_feeds
+    # A build on data already in Stroom: its own feeds are test feeds, which stay in the workspace, and its pipelines'
+    # filters name the feeds it works from (seen in VS Code: the promoted filter selected the test feed).
+    sources = await source_feeds(ctx, build, docs)
     plan = []
     for doc in docs:
+        beside_production = False
         if doc['working_copy_of'] and doc['type'] == 'Pipeline':
             # The copied pipeline only existed to step the working copies; the original keeps running.
             plan.append({'doc': doc, 'action': 'discard', 'target': 'deleted after write-back'})
@@ -943,6 +1012,9 @@ async def promote_build(
             # Seen (fix_errors, Haiku): a test feed the agent made had nowhere to go but production, and with no way
             # to leave it out the agent never promoted the fix.
             plan.append({'doc': doc, 'action': 'keep', 'target': 'left in the workspace'})
+        elif doc['type'] == 'Feed' and doc['uuid'] not in destinations and (sources or doc['name'].endswith(TEST_FEED)):
+            # Promoted only when the user gives it a folder of its own (a new feed version, say).
+            plan.append({'doc': doc, 'action': 'keep', 'target': 'left in the workspace: a test feed'})
         else:
             target = destinations.get(doc['uuid']) or proposed.get(doc['uuid']) or destinations.get(doc['type'])
             if not target and doc['type'] == 'Documentation' and (
@@ -966,8 +1038,15 @@ async def promote_build(
                 except ToolError:
                     searched = set()
                 index = next((d for d in docs if d['type'] in ('ElasticIndex', 'Index') and d['uuid'] in searched), None)
-                target = ((destinations.get(index['uuid']) or destinations.get(index['type'])) if index else None) \
-                    or destinations.get('Pipeline')
+                target = ((destinations.get(index['uuid']) or destinations.get(index['type'])) if index else None)
+                if not target and not index:
+                    # An index from outside the build (a new version writing to an existing index doc): the dashboard
+                    # goes with the build's indexing pipeline, into its version folder.
+                    feeding = [d for d in docs if d['type'] == 'Pipeline' and not d['working_copy_of']
+                               and await _shape_stage(stroom, d['uuid']) in ('indexing', 'discovery')]
+                    if len(feeding) == 1:
+                        target = destinations.get(feeding[0]['uuid']) or proposed.get(feeding[0]['uuid'])
+                target = target or destinations.get('Pipeline')
             if not target and doc['type'] == 'Documentation':
                 # The documentation of a production pipeline (an in-place change's) or an existing index: beside it.
                 kinds = ('Pipeline', 'ElasticIndex', 'Index')
@@ -976,12 +1055,22 @@ async def promote_build(
                            and v['docRef'].get('type') in kinds
                            and not any(d['uuid'] == v['docRef'].get('uuid') for d in docs)]
                 target = await _folder_of(stroom, outside[0]) if len(outside) == 1 else None
+                beside_production = bool(target)
             if not target:
                 raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
             target = '/'.join(folder_parts(target))
             if doc['uuid'] not in destinations and doc['type'] != 'Feed' and target in joins:
                 target = joins[target]          # with the version it belongs to
-            plan.append({'doc': doc, 'action': 'move', 'target': target})
+            plan.append({'doc': doc, 'action': 'move', 'target': target,
+                         'role': doc.get('role') if doc['uuid'] not in destinations and not beside_production else None})
+    # The build's role subfolders kept in production (asked for by the user), unless they say otherwise: where they
+    # tell stages apart, so only when it promotes documents of more than one role (an index documented, or a new
+    # indexing version, is all Indexing: a subfolder there only adds a level).
+    roles_moved = {p['doc'].get('role') for p in plan if p['action'] == 'move' and p['doc'].get('role')}
+    if role_subfolders and len(roles_moved) > 1:
+        for p in plan:
+            if p.get('role'):
+                p['target'] = f"{p['target']}/{p['role']}"
     # Every destination is resolved before approval, so a missing folder can't stop a promotion halfway.
     folders: dict[str, dict[str, Any]] = {}       # path -> folder node, for those that exist
     creating: list[str] = []                      # paths to create, each after its parent
@@ -993,8 +1082,9 @@ async def promote_build(
             if path not in creating:
                 creating.append(path)
     moving = [p['doc'] for p in plan if p['action'] == 'move' and p['doc']['type'] == 'Pipeline']
-    surveys = [d['name'][:-len(' - Survey')] for d in docs if d['type'] == 'Documentation' and d['name'].endswith(' - Survey')]
-    processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], surveys)
+    kept_feeds = [p['doc']['name'] for p in plan if p['action'] == 'keep' and p['doc']['type'] == 'Feed']
+    processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], sources,
+                                            kept_feeds)
     details = {'build': build, 'plan': [f"create folder {path}" for path in creating]
                + [f"{p['action']} {p['doc']['type']} '{p['doc']['name']}' -> {p['target']}" for p in plan]}
     warnings = await build_checks(ctx, docs)
@@ -1006,38 +1096,44 @@ async def promote_build(
         # Shown in the approval, so the user decides with them in view.
         details['warnings'] = warnings
     if processing:
-        details['processing after promotion (created disabled, new data only)'] = [
+        details[PROCESSING] = [
             f"{e['pipeline']['name']}: " + (f"feed {e['feed']} ({e['stream_type']})" if e['feed'] else
                                              f"{e['stream_type']} from pipeline " + ', '.join(
                                                  (t.get('docRef') or {}).get('name') or '?' for t in e['extra_terms']
                                                  if t.get('field') == 'Pipeline'))
             for e in processing]
     tree = await promotion_tree(stroom, plan, creating)
+    roles = len(roles_moved) > 1          # the question applies: documents of several roles
     if not reviewed and not approval_id:
         # Shown in the chat first: a list of moves crammed into a form was hard to read, and where things would go
         # wasn't plain (asked for by the user).
         return {'status': 'needs_review', 'build': build, 'layout': tree,
                 **({'warnings': details['warnings']} if details.get('warnings') else {}),
-                **({'processing_after_promotion': details['processing after promotion (created disabled, new data only)']}
+                **({'processing_after_promotion': details[PROCESSING]}
                    if processing else {}),
                 'hint': "Show the user the layout in the chat exactly as it is (a code block), with any warnings and "
                         "the processing after promotion, and ask them to confirm it or say what to change (a folder: "
-                        "destinations by type or document uuid). Then promote_build again with the same destinations "
-                        "and reviewed=true: they approve it in a short form."}
+                        "destinations by type or document uuid)"
+                        + ("; and whether to keep the build's role subfolders under each destination, as shown "
+                           "(role_subfolders=false puts each document straight in its folder: show the tree again)"
+                           if roles else '')
+                        + ". Then promote_build again with the same destinations"
+                        + (" and role_subfolders" if roles else '') + " and reviewed=true: they approve it in a "
+                        "short form."}
     # The form stays short; the approval is bound to the exact layout shown, through its digest.
     promoting = sum(1 for p in plan if p['action'] in ('move', 'write back'))
     short = {'build': build, 'layout': f"{promoting} document(s), as shown in the chat "
                                        f"({hashlib.sha256(tree.encode()).hexdigest()[:12]})",
              'folders': sorted({p['target'] for p in plan if p['action'] == 'move'}),
+             **({'role subfolders': 'kept under each destination' if role_subfolders else 'not kept'} if roles else {}),
              **({'warnings': details['warnings']} if details.get('warnings') else {}),
-             **({'processing after promotion': details['processing after promotion (created disabled, new data only)']}
+             **({'processing after promotion': details[PROCESSING]}
                 if processing else {})}
     gate = await consent_from(ctx).require(ctx, 'approval', 'promote_build',
                                            f"Promote build '{build}' as shown in the chat", short, approval_id)
     if gate:
         return gate
 
-    started_ms = int(time.time() * 1000)
     # The build is done: its changes become one line of each XSLT's version history and one row of each doc's.
     versioned = await consolidate_versions(ctx, docs)
     done = []
@@ -1103,7 +1199,7 @@ async def promote_build(
     await build_record.forget(guard, build, [p['doc']['uuid'] for p in plan if p['action'] != 'keep'])
     if await guard.remove_build_folder_if_empty(build):
         done.append("removed the build's workspace folder, now empty")
-    filters =await create_promotion_filters(ctx, processing, started_ms)
+    filters = await create_promotion_filters(ctx, processing)
     # The layout the user approved, as promoted, with a link to open each folder in Stroom (asked for by the user).
     links = [{'folder': path, 'link': doc_link(stroom.settings, 'Folder', folders[path]['uuid'])}
              for path in sorted({p['target'] for p in plan if p['action'] == 'move'})
@@ -1120,9 +1216,11 @@ async def promote_build(
         result['promoted_with_warnings'] = warnings
     if filters:
         result['processing_filters'] = filters
-        result['next'] = ("Tell the user each promoted pipeline has a processing filter for new data, created disabled: "
-                          "review the pipeline (pipeline_link) and enable it on its Processors tab when ready. If an "
-                          "earlier version still processes the same feed, disable that one first.")
+        result['next'] = ("Tell the user each promoted pipeline has a processing filter, created disabled: review the "
+                          "pipeline (pipeline_link) and enable it on its Processors tab when ready. Enabled, it processes "
+                          "everything on its feed the pipeline hasn't processed yet, existing data included: if an "
+                          "earlier version still processes the same feed, it processes that history again, so decide "
+                          "with them first (disable the earlier one, or limit the filter in Stroom).")
     return result
 
 

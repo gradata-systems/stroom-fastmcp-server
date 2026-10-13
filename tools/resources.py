@@ -35,9 +35,12 @@ _RULES = """Rules for every run:
 - While developing a pipeline in the build, reprocess sample streams after a fix with reprocess_streams (at most
   10 per call, one task at a time) and wait_for_processing with its filter_id. Reprocessing production data, and
   switching readers from one index version to the next, are the user's.
-- A translation pipeline only processes the build's own feeds: step production records in place (step_records) or
-  copy them into a test feed. Promotion pre-creates each pipeline's filter for new data, disabled: give the user
-  the pipeline link to review and enable it.
+- A translation pipeline only processes the build's own feeds: step production records in place (step_sample with
+  their stream ids, step_records) or copy them into a test feed. A build on data already in Stroom (an existing
+  feed, a production pipeline's new version or working copy) creates no feed and uploads nothing unless the user
+  brings new samples; its test feeds stay in the workspace, and promotion's filters name the feed it works from.
+  Promotion creates each pipeline's processor filter, disabled, with no minimum creation time: give the user the
+  pipeline link to review and enable it, and say that enabled it processes the feed's existing data too.
 - Elasticsearch indexing in the workspace runs in batches of 10 (create_processor_filter and reprocess_streams set
   it), so a document Elasticsearch rejects is reported whole, with its reason; wait_for_processing restores the
   template's batch size once indexing completes without errors.
@@ -67,7 +70,9 @@ Tools: a tool this server names (in `next`, a hint or a refusal) may not be in y
 hide part of a server's tools behind tools that enable a group of them (VS Code: activate_*). Call the one in your
 tool list whose description names it, then the named tool. Only names your list shows: the client makes them up per
 session, and a guessed one only fails. If none names it, ask the user to enable it. Never work around a hidden tool
-with others.
+with others. A result your client saved to a file ("Large tool result ... written to file", VS Code: over 8 KB): read
+it with your client's file-reading tool (read_file), which needs no approval, never with a terminal command
+(Get-Content, cat), which asks the user every time.
 
 Samples: ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
 create_feed, upload_sample files=[the same paths], and start_onboarding again with the build and stream_ids, which
@@ -275,8 +280,11 @@ Sample:
 1. Find it (find_documents) and describe_document the pipeline and its XSLT.
 2. Ask the user whether this is a new version (e.g. V1.2 to V1.3) or an in-place change, and confirm the names.
    New version: copy_pipeline with rename (e.g. {{'V1.2': 'V1.3'}}). In place: copy_pipeline working_copy=true.
-3. Test records: new samples go to a test feed in the build (create_feed, upload_sample), never the production feed;
-   for a reported issue, find example records in the production feed (find_streams, read_stream, step_pipeline).
+3. Test records: ask the user which to use, and keep to their answer. Production records (recent streams on the
+   feed, or a reported issue's examples: find_streams, read_stream, step_pipeline) are stepped where they are
+   (step_sample with their stream ids, step_records): no feed is created and nothing uploaded. Only new samples the
+   user brings go to a test feed in the build (create_feed, upload_sample), never the production feed; a test feed
+   stays in the workspace at promotion.
 4. Draft the change and prove it with compare_outputs (draft_code) on the test records and recent production
    records: only the targeted fields may change. step_sample must stay clean.
 5. Save the change on the copy: build_translation_xslt (uuid=..., change=<what and why>) from the changed mapping, or
@@ -300,7 +308,8 @@ Samples:
 
 1. describe_document to find its XSLT, index doc and index name (and, for Elasticsearch, the index template agreed
    for it, kept in the pipeline's description); work out the next version from the naming convention (e.g. -v1 to
-   -v2) and confirm it and the cluster or volume group with the user.
+   -v2) and confirm it and the cluster or volume group with the user. start_build with the Events feed (feeds=): the
+   build works from the Events already in Stroom, so it creates no feed and uploads nothing.
 2. copy_pipeline as a new version (not a working copy), with rename (e.g. {{'-v1': '-v2'}}) and set_properties for the
    v2 index (indexName, or the Lucene index doc). draft_index_mapping with the requested fields as extra_fields
    (Elasticsearch: with v1's agreed template as example_template, so v2 follows it); save_xslt index_plan=plan with
@@ -385,7 +394,8 @@ Guide: stroom://guide/cef
     @mcp.prompt(description="Index an existing Events feed (stage 2 only).")
     def index_event_data(events_feed: str, index_pattern: str = '') -> str:
         return f"""Index the events in feed "{events_feed}"{f' into {index_pattern}' if index_pattern else ''}.
-Find recent Events streams (find_streams feed={events_feed} stream_type=Events) and run stage 2 of
+start_build feeds=[{events_feed}] (the build works from its Events: no feed to create, nothing to upload). Find
+recent Events streams (find_streams feed={events_feed} stream_type=Events) and run stage 2 of
 onboard_data_source on them: backend and convention with the user, index doc, field plan, indexing pipeline,
 stepping, processing, verification searches, documentation, promotion.
 
@@ -507,7 +517,9 @@ every field, what it holds and the values it has. Change nothing except the docu
 
 1. start_build feeds=[{feed}], then survey_feed feed={feed} build=<the build>: it samples streams spread over the feed's lifetime, reading only the head of each (big
    streams are fine), and groups records into kinds of event (shapes), with counts, examples and where each example
-   is, and keeps them in the build's '{feed} - Survey' doc. Not every kind appears in every stream.
+   is, and keeps them in the build's '{feed} - Survey' doc. Not every kind appears in every stream. A larger sample
+   when the user asks for one: max_streams (streams a call, 10 by default, up to 100), max_records_per_stream (1,000,
+   up to 10,000) and max_chars_per_stream (250,000, up to 5,000,000), on every survey_feed call.
 2. Draft the text converter if needed and the translation with build_translation_xslt (feeds=[{feed}]), one rule per shape, then
    create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped
    where they are. Create no feed, upload nothing and process nothing.

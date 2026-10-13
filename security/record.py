@@ -81,6 +81,8 @@ def render(build: str, state: dict[str, Any]) -> str:
         lines.append(f"| {entry.get('name') or uuid} | {entry.get('type') or ''} | {entry.get('copy_of') or '-'} | "
                      f"{digests(entry, 'stepped')} | {digests(entry, 'verified')} | {digests(entry, 'validated')} | "
                      f"{'yes' if entry.get('sample_files') else '-'} |")
+    if state.get('source_feeds'):
+        lines += ['', f"Works from existing feeds: {', '.join(state['source_feeds'])}."]
     lines += ['', '## Record', '', 'Read by the server; do not edit.', '',
               '```json build-record', json.dumps(state, indent=1, sort_keys=True), '```', '']
     return '\n'.join(lines)
@@ -125,6 +127,15 @@ async def update(guard: Any, build: str, doc: dict[str, Any], change: Callable[[
     """Change one document's entry (change(entry) edits it in place) and save the record."""
     def apply(state: dict[str, Any]) -> None:
         change(_entry(state, doc))
+    found = _record_doc(await guard.folder_contents(build, with_record=True))
+    return await _save(guard, build, found, apply)
+
+
+async def add_source_feeds(guard: Any, build: str, feeds: list[str]) -> dict[str, Any]:
+    """Record existing feeds the build works from (start_build feeds=...): the build then builds on their data, not on
+    samples it uploads, and promotion's filters name them, not a test feed."""
+    def apply(state: dict[str, Any]) -> None:
+        state['source_feeds'] = list(dict.fromkeys([*state.get('source_feeds', []), *feeds]))
     found = _record_doc(await guard.folder_contents(build, with_record=True))
     return await _save(guard, build, found, apply)
 

@@ -41,7 +41,8 @@ def test_guides_and_instructions_name_tools_that_exist():
     for name, text in {**GUIDES, **PROMPTS}.items():
         unknown = tool_like(text) - TOOLS - {'onboard_data_source', 'onboard_existing_feed', 'update_events_pipeline',
                                              'update_indexing_pipeline', 'index_event_data', 'create_discovery_index',
-                                             'evaluate_events_pipeline', 'fix_pipeline_issue', 'document_index'}
+                                             'evaluate_events_pipeline', 'fix_pipeline_issue', 'document_index',
+                                             'read_file'}      # the client's own, named in the instructions
         assert not unknown, (name, unknown)
 
 

@@ -47,7 +47,18 @@ async def test_a_single_stream_id_is_taken_as_a_list_of_one():
 
 
 def ctx_and_patches():
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    # XSLT docs by uuid: what the server keeps in their descriptions (rules agreed as Unknown, say).
+    docs: dict = {}
+
+    async def get_doc(kind, uuid):
+        return dict(docs.setdefault(uuid, {'type': kind, 'uuid': uuid, 'description': '', 'version': 'v'}))
+
+    async def put_doc(doc):
+        docs[doc['uuid']] = {**doc, 'version': doc.get('version', 'v') + "'"}
+        return docs[doc['uuid']]
+    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'), get_doc=get_doc, put_doc=put_doc,
+                             docs=docs)
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     return ctx, (patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)),
                  patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})))
 
@@ -185,6 +196,15 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
         create.reset_mock()
         saved = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=logins)
         assert saved['saved']['uuid'] == 'x-1' and create.await_count == 1
+    # Asked once per rule (seen in production: asked again on every save). Saved again with the same rule, nothing is
+    # asked; with its conditions or reason changed, it is.
+    with schema, instructions, patch.object(translation, 'update_xslt', AsyncMock(return_value={
+            'type': 'XSLT', 'uuid': 'x-1', 'name': 'N', 'version': 'v'})) as update:
+        again = await generation.build_translation_xslt(ctx, kept, uuid='x-1', sample=sample)
+        assert again['saved']['uuid'] == 'x-1' and update.await_count == 1
+        changed = kept.model_copy(deep=True)
+        changed.events[1].allow_unknown = 'heartbeats only'
+        assert (await generation.build_translation_xslt(ctx, changed, uuid='x-1', sample=sample))['status'] ==             'needs_confirmation'
 
 
 async def test_a_field_an_inferred_splitter_lacks_is_a_warning_not_a_refusal():

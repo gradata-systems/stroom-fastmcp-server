@@ -40,6 +40,38 @@ behind `activate_*` group tools that the model has to call first. The server tel
 model can still stop. Switch off tools you don't need for this work in the tools picker, or raise
 `github.copilot.chat.virtualTools.threshold`. See [Sign-in and VS Code](../admin/vscode.md#4-vs-code).
 
+## Every large result asks to run Get-Content
+
+VS Code saves a tool result over 8 KB to a file (`content.json` under its `workspaceStorage`) and tells the model to
+read it with `read_file`, which needs no approval for those files. Some models read it with a terminal command
+instead (`Get-Content … content.json | ConvertFrom-Json`), and every one asks you to approve it. The server tells the
+model to use `read_file`; if one still uses the terminal, tell it to in the chat. To keep large results in the chat
+instead, raise `github.copilot.chat.agent.largeToolResultsToDisk.thresholdBytes` (8192 by default), at the cost of
+more of the model's context. Don't approve terminal commands wholesale for this.
+
+## A feed or UUID "isn't in" Stroom
+
+The server refuses a feed or document it can't find, naming the Stroom it is connected to (its
+`STROOM_MCP_CLUSTER_NAME` and URL). With a server for each cluster, the agent may have used the wrong one: check the
+cluster, then ask again naming it. For a feed name that isn't found, the server offers the three closest names in a
+form, with a fourth choice to correct the name. See [several Stroom clusters](../admin/vscode.md#several-stroom-clusters).
+
+## The server stops at start: "Can't write the audit log"
+
+The audit log file's directory isn't writable by the server's user (uid 10001 in the image). On Kubernetes the pod's
+`fsGroup` normally gives it, but some storage ignores `fsGroup` (NFS, some CSI drivers) and leaves the volume owned by
+root. Set `audit.file.persistence.fixPermissions=true` in the Helm chart (an init container gives the directory to
+the server's user; it runs as root, which a namespace enforcing the restricted Pod Security Standard refuses), have
+the volume's ownership set by its provisioner, or leave the audit log on stdout.
+
+## Documenting an index is refused: "the index has no field"
+
+A pipeline that feeds the index writes a field Stroom doesn't list for it. Either the index's data was written
+before the pipeline wrote that field (reindex it: for Elasticsearch, have the index template map the field first),
+or the field was only just indexed and Stroom hasn't listed it yet (check again in a minute or two). The agent asks
+you which. If no event carries a value for the field yet and you want the documentation now, the agent can write it
+with the field marked as not in the index. `verify_index` fails the same way for a pipeline in a build.
+
 ## Sign-in works, but Stroom calls fail with 401 or 403
 
 - **401 from Stroom**: the user's token lacks Stroom's audience. Tokens must carry both the server's audience and
@@ -71,8 +103,9 @@ document's build is the folder it is in: see
 
 ## Processing didn't start after promotion
 
-That is by design: the filter for new data is created disabled. Review the pipeline, disable any earlier version on
-the same feed, and enable the new filter.
+That is by design: the promoted pipeline's filter is created disabled. Review the pipeline and enable the filter. It
+has no minimum creation time, so it processes the feed's existing data as well: if an earlier version still processes
+the same feed, disable it first, or set a minimum creation time on the new filter in Stroom.
 
 ## Stroom is busy with old processor filters
 

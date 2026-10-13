@@ -85,3 +85,80 @@ def test_a_versions_other_new_documents_join_its_folder():
         'System/Prod/door/v2': 'System/Prod/door/v3', 'System/Prod/door': 'System/Prod/door/v3'}
     # Two versions meant for one place: neither is guessed.
     assert builds._joining({'System/A': {'System/A/v2', 'System/A/v3'}}) == {}
+
+
+async def _review(docs, destinations, sources=(), stages=None, dashboard_searches=None, **kw):
+    """promote_build's first reply (needs_review) for a build of these documents."""
+    async def get_doc(kind, uuid):
+        if kind == 'Dashboard':
+            return {'dashboardConfig': {'components': [{'type': 'query', 'settings': {'dataSource': {
+                'uuid': dashboard_searches}}}]}}
+        return {'name': uuid}
+    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=get_doc), find_documents=AsyncMock(return_value={'values': []}))
+    guard = SimpleNamespace(resolve_folder=AsyncMock(side_effect=lambda path: ({'_path': path}, [])))
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)), \
+            patch.object(builds, 'guard_from', lambda c: guard), \
+            patch('tools.plan.source_feeds', AsyncMock(return_value=list(sources))), \
+            patch.object(builds, '_shape_stage', AsyncMock(side_effect=lambda s, u: (stages or {}).get(u, 'translation'))), \
+            patch.object(builds, 'promotion_processing', AsyncMock(return_value=[])), \
+            patch.object(builds, 'build_checks', AsyncMock(return_value=[])):
+        return await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                          destinations=destinations, **kw)
+
+
+def _doc(kind, uuid, name, role=None):
+    return {'type': kind, 'uuid': uuid, 'name': name, 'path': 'x', 'working_copy_of': None, 'version_of': None,
+            'role': role}
+
+
+async def test_role_subfolders_are_kept_under_each_destination_unless_the_user_says_not():
+    # Asked for by the user: the build's Events and Indexing subfolders in production too, as they confirm.
+    docs = [_doc('Feed', 'f', 'ACME'), _doc('Pipeline', 'ev', 'ACME-Events', 'Events'),
+            _doc('XSLT', 'x', 'ACME-Events', 'Events'), _doc('Pipeline', 'ix', 'ACME-Indexing', 'Indexing')]
+    shown = await _review(docs, {'Feed': 'System/Feeds/Acme', 'Pipeline': 'System/Feeds/Acme', 'XSLT': 'System/Feeds/Acme'})
+    assert shown['layout'] == ('System/Feeds/Acme/\n'
+                               '├── ACME  (Feed)\n'
+                               '├── Events/\n'
+                               '│   ├── ACME-Events  (Pipeline)\n'
+                               '│   └── ACME-Events  (XSLT)\n'
+                               '└── Indexing/\n'
+                               '    └── ACME-Indexing  (Pipeline)')
+    assert 'whether to keep the build\'s role subfolders' in shown['hint'] and 'role_subfolders' in shown['hint']
+    flat = await _review(docs, {'Feed': 'System/Feeds/Acme', 'Pipeline': 'System/Feeds/Acme', 'XSLT': 'System/Feeds/Acme'},
+                         role_subfolders=False)
+    assert 'Events/' not in flat['layout'] and 'Indexing/' not in flat['layout']
+    # A folder given for one document is where it goes, as given.
+    given = await _review(docs, {'Feed': 'System/Feeds/Acme', 'Pipeline': 'System/Feeds/Acme', 'XSLT': 'System/Feeds/Acme',
+                                 'ix': 'System/Elastic Indices/Acme'})
+    assert 'Elastic Indices/\n    └── Acme/\n        └── ACME-Indexing  (Pipeline)' in given['layout']
+
+
+async def test_a_build_on_an_existing_feed_leaves_its_test_feed_in_the_workspace():
+    # Seen in VS Code: onboarding from a feed already in Stroom, the agent copied records into a test feed (named like
+    # any other), and promotion would have made it production with the pipeline's filter selecting it.
+    docs = [_doc('Feed', 'f', 'ACME-COPY'), _doc('Pipeline', 'ev', 'ACME-Events', 'Events')]
+    shown = await _review(docs, {'Feed': 'System/Feeds/Acme', 'Pipeline': 'System/Feeds/Acme'}, sources=['ACME'])
+    assert shown['layout'].endswith('Left in the workspace: ACME-COPY (Feed)')
+    # Promoted when the user gives it a folder of its own (a new version of the feed, say).
+    moved = await _review(docs, {'f': 'System/Feeds/Acme', 'Pipeline': 'System/Feeds/Acme'}, sources=['ACME'])
+    assert 'Left in the workspace' not in moved['layout']
+
+
+async def test_a_dashboard_on_an_index_from_elsewhere_goes_with_the_builds_indexing_pipeline():
+    # Seen in production: a new indexing version verified through the existing index doc; its dashboard had no place.
+    docs = [_doc('Dashboard', 'dash', 'ACME-VERIFY', 'Indexing'), _doc('Pipeline', 'ix', 'ACME-V2-Indexing', 'Indexing')]
+    docs[1]['version_of'] = 'v1'
+    with patch.object(builds, '_version_folders', AsyncMock(return_value=({'ix': 'System/Indices/Acme/V2'},
+                                                                           {'System/Indices/Acme': {'System/Indices/Acme/V2'}}))):
+        shown = await _review(docs, {}, stages={'ix': 'indexing'}, dashboard_searches='prod-index', role_subfolders=False)
+    assert shown['layout'] == ('System/Indices/Acme/V2/\n'
+                               '├── ACME-V2-Indexing  (Pipeline)\n'
+                               '└── ACME-VERIFY  (Dashboard)')
+
+
+async def test_a_build_of_one_role_gets_no_role_subfolder():
+    # An index documented, or a new indexing version: all of it Indexing, so a subfolder would only add a level (and
+    # put a doc the user placed in a folder of their choosing one level down).
+    docs = [_doc('Documentation', 'd', 'ACME-Index', 'Indexing'), _doc('Pipeline', 'ix', 'ACME-Indexing', 'Indexing')]
+    shown = await _review(docs, {'Documentation': 'System/Docs', 'Pipeline': 'System/Docs'})
+    assert 'Indexing/' not in shown['layout'] and 'role_subfolders' not in shown['hint']

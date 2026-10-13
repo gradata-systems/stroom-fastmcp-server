@@ -267,6 +267,19 @@ async def elastic_destination(stroom: StroomGateway, pipeline_uuid: str) -> dict
     return {'index name': props.get('indexName'), 'cluster': (props.get('cluster') or {}).get('name')}
 
 
+def filter_feeds(expression: dict[str, Any] | None) -> list[str]:
+    """The feeds a filter's expression names (Feed IS_DOC_REF, or Feed EQUALS as earlier filters had it)."""
+    out = []
+    for child in (expression or {}).get('children') or []:
+        if child.get('type') == 'operator':
+            out += filter_feeds(child)
+        elif child.get('field') == 'Feed':
+            name = (child.get('docRef') or {}).get('name') or child.get('value')
+            if name:
+                out.append(str(name))
+    return out
+
+
 def _pipeline_terms(expression: dict[str, Any] | None) -> list[dict[str, Any]]:
     out = []
     for child in (expression or {}).get('children') or []:
@@ -277,14 +290,17 @@ def _pipeline_terms(expression: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]],
-                               survey_feeds: list[str]) -> list[dict[str, Any]]:
+async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], sources: list[str],
+                               test_feeds: list[str] = ()) -> list[dict[str, Any]]:
     """What each promoted pipeline should go on processing: the feeds and stream types of its sample filters.
 
-    A pipeline built by stepping only (from an existing feed) has no sample filters: it processes the
-    surveyed feed's Raw Events. Test feeds (-MCP-TEST) are left out: they only held samples.
+    A build on data already in Stroom works from its source feeds (the feed it surveyed, the one a production
+    pipeline it copies processes, those start_build was given): a translation pipeline processes those, never the
+    test feeds that held its copies of their records (seen in VS Code: the promoted filter selected the test feed,
+    named like any other). A pipeline built by stepping only has no sample filters: it processes the source feeds.
     """
     stroom = gateway_from(ctx)
+    tests = {f.lower() for f in test_feeds}
     plan = []
     for pipeline in pipelines:
         own = await stroom.processor_filters(pipeline['uuid'])
@@ -296,26 +312,36 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]],
                                          ).get('values') or []] if ids else []
             for meta in metas:
                 targets.setdefault((meta.get('feedName'), meta.get('typeName')), _pipeline_terms(expression))
-        if not own and not await _is_indexing(stroom, pipeline['uuid']):
-            for feed in survey_feeds:
-                # The feed's own stream type (a reference feed's is Raw Reference), not Raw Events assumed.
-                targets.setdefault((feed, await feed_stream_type(stroom, feed)), [])
+        indexing = await _is_indexing(stroom, pipeline['uuid'])
+        if not indexing:
+            tested = [key for key, extra in targets.items() if not extra and _test_feed(key[0], tests)]
+            for key in tested:
+                del targets[key]
+            if not targets:
+                for feed in sources:
+                    # The feed's own stream type (a reference feed's is Raw Reference), not Raw Events assumed.
+                    targets.setdefault((feed, await feed_stream_type(stroom, feed)), [])
         by_source: set[tuple] = set()
         for (feed, stream_type), extra in sorted(targets.items(), key=lambda t: (t[0][0] or '', t[0][1] or '')):
-            sources = tuple(sorted((t.get('docRef') or {}).get('uuid') or '' for t in extra if t.get('field') == 'Pipeline'))
-            if sources:
+            sources_of = tuple(sorted((t.get('docRef') or {}).get('uuid') or '' for t in extra if t.get('field') == 'Pipeline'))
+            if sources_of:
                 # Named by its source pipeline, not its feed: one filter whatever feeds the sample was in (a test
                 # feed among them), as the pipeline's Events are those meant.
-                if (stream_type, sources) not in by_source:
-                    by_source.add((stream_type, sources))
+                if (stream_type, sources_of) not in by_source:
+                    by_source.add((stream_type, sources_of))
                     plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra})
-            elif feed and not feed.endswith('-MCP-TEST'):
+            elif feed and not _test_feed(feed, tests):
                 plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra})
     return plan
 
 
-async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]], from_ms: int) -> list[dict[str, Any]]:
-    """Feed-wide filters for promoted pipelines, from the promotion time, created disabled for the user."""
+def _test_feed(feed: str | None, tests: set[str]) -> bool:
+    return bool(feed) and (feed.lower() in tests or feed.endswith('-MCP-TEST'))
+
+
+async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Feed-wide filters for promoted pipelines, created disabled for the user. No minimum stream creation time (asked
+    for by the user): enabled, a filter processes what is on its feed that the pipeline hasn't processed yet."""
     stroom = gateway_from(ctx)
     made = []
     for entry in plan:
@@ -323,7 +349,7 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]], fro
             [await _feed_term(stroom, entry['feed'])] if entry['feed'] else []) + [
             _term('Type', entry['stream_type']), *entry['extra_terms']]}
         created = await _create_filter(stroom, entry['pipeline'], expression, 10, stroom.settings.max_feed_filter_tasks,
-                                       from_ms, enabled=False)
+                                       None, enabled=False)
         made.append({'filter_id': created['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
                      'stream_type': entry['stream_type'], 'enabled': False,
                      'pipeline_link': doc_link(stroom.settings, 'Pipeline', entry['pipeline']['uuid'])})

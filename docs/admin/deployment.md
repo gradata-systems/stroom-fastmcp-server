@@ -93,6 +93,13 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   Turning persistence on or off for an existing release replaces the workload, restarting every pod. The claims
   outlive the release; delete them yourself when the audit files are no longer needed.
 
+  The server runs as uid 10001, and the pod's `fsGroup` gives it the claim. Storage that ignores `fsGroup` (NFS,
+  some CSI drivers) leaves the claim owned by root, and the server stops at start, saying it can't write the audit
+  log. There, set `audit.file.persistence.fixPermissions: true`: an init container, from the server's own image,
+  gives the directory to the server's user and group first. It runs as root with only the `CHOWN` and `FOWNER`
+  capabilities, which a namespace enforcing the restricted Pod Security Standard refuses; there, have the volume's
+  ownership set by its provisioner instead.
+
 ## Container
 
 ```
@@ -115,6 +122,7 @@ brackets.
 | `STROOM_URL` | required | Stroom base URL [`stroom.url`]. With several Stroom nodes, a URL that keeps a client on one node: a stepping session lives on the node that started it, and a slow step's follow-up must reach it. Through an ingress with cookie affinity (`affinity: cookie`) the follow-up carries the cookie its first response set; the in-cluster Service needs `sessionAffinity: ClientIP` |
 | `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom [`stroom.audience`] |
 | `STROOM_UI_URL` | `STROOM_URL` | Base of Stroom links shown to users [`stroom.uiUrl`] |
+| `CLUSTER_NAME` | none | The name people know this Stroom by (`PROD`, `DEV`): the server tells clients which Stroom it acts on, and names it when a feed or document isn't found there, so a user connected to several clusters knows which one answered [`stroom.clusterName`] |
 | `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |

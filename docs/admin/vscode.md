@@ -131,6 +131,39 @@ On first use VS Code opens a browser to sign in to the identity provider. Then, 
   view, switch off tools you don't need for this work in the tools picker (browser, notebook and terminal
   tools, other servers), or raise the threshold.
 
+### Several Stroom clusters
+
+Run one server per cluster, and give each its cluster's name (`STROOM_MCP_CLUSTER_NAME`, e.g. `PROD`, `DEV`;
+`stroom.clusterName` in the Helm chart). The server tells the model which Stroom it acts on, and to ask you when
+several are connected and you haven't said which cluster you mean. A feed or document that isn't in its Stroom is
+refused, naming the cluster, rather than worked around.
+
+In VS Code, name each server after its cluster in `mcp.json`:
+
+```json
+{
+  "servers": {
+    "stroom-prod": {"type": "http", "url": "https://stroom-mcp.prod.example.com/mcp", "oauth": {"clientId": "stroom-mcp-vscode"}},
+    "stroom-dev": {"type": "http", "url": "https://stroom-mcp.dev.example.com/mcp", "oauth": {"clientId": "stroom-mcp-vscode"}}
+  }
+}
+```
+
+VS Code prefixes each tool with its server's name (`mcp_stroom-prod_create_feed`) and each workflow too
+(`/mcp.stroom-prod.onboard_data_source`). Two servers' tools are still alike, and with many tools VS Code groups them
+behind `activate_*` tools by what they do, not by server, so a model can open the other cluster's group. Keep a
+chat to one cluster:
+
+- In the tools picker, tick only that cluster's server for the chat.
+- Or give each cluster a custom agent, `.github/agents/stroom-prod.agent.md`, whose `tools` list only that server
+  (`tools: ['stroom-prod/*', 'read', 'edit']` with the VS Code tools you use), and pick it for the chat.
+
+### Large results
+
+VS Code saves a tool result over 8 KB to a file and tells the model to read it with `read_file`, which needs no
+approval. A model that reads it with a terminal command (`Get-Content … content.json`) asks you to approve each one:
+the server tells models not to. See [Troubleshooting](../operate/troubleshooting.md#every-large-result-asks-to-run-get-content).
+
 ## What was checked locally (`dev/e2e_oauth.py`)
 
 With the dev Keycloak and Stroom trusting it: the server answers an unauthenticated request with 401 and its

@@ -145,6 +145,35 @@ async def sample_streams(ctx: Context, build: str, docs: list[dict[str, Any]] | 
     return found
 
 
+SURVEY = ' - Survey'
+
+
+async def source_feeds(ctx: Context, build: str, docs: list[dict[str, Any]]) -> list[str]:
+    """The existing feeds a build works from, rather than samples it uploads: those start_build was given (outside the
+    build), the feed a survey read (onboard_existing_feed), and the feeds the production pipelines it copies process
+    (a new version or a working copy). Never the build's own feeds: in such a build those are test feeds."""
+    found: list[str] = []
+    try:
+        from security import record as build_record
+        found += (await build_record.load(guard_from(ctx), build)).get('source_feeds') or []
+    except Exception:   # advice and promotion's filters: an unreadable record leaves the rest to go on
+        pass
+    found += [d['name'][:-len(SURVEY)] for d in docs if d['type'] == 'Documentation' and d['name'].endswith(SURVEY)]
+    from tools.processing_writes import filter_feeds
+    for doc in docs:
+        original = doc.get('working_copy_of') or doc.get('version_of')
+        if doc['type'] != 'Pipeline' or not original:
+            continue
+        try:
+            filters = await gateway_from(ctx).processor_filters(original)
+        except Exception:
+            continue
+        for f in filters:
+            found += filter_feeds((f.get('queryData') or {}).get('expression'))
+    own = {d['name'].lower() for d in docs if d['type'] == 'Feed'}
+    return [f for f in dict.fromkeys(found) if f.lower() not in own]
+
+
 async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The profiled format of the build's newest raw sample stream (its head), or None without one."""
     from tools.sampling import read_head
@@ -306,6 +335,27 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     discovery = bool([p for p in pipelines if p['stage'] == 'discovery']) and not translation
     indexing = [p for p in pipelines if p['stage'] in ('indexing', 'discovery')]
     documented = {d['name'] for d in by_type.get('Documentation', [])}
+    # A build on data already in Stroom (an existing feed, a production pipeline's new version or working copy) has no
+    # feed of its own to create and nothing to upload: its feeds, if any, are test feeds. Seen in VS Code: told to
+    # create_feed and upload_sample, the agent uploaded a workspace file though the user chose production streams, and
+    # made a new feed to build an indexing pipeline's next version.
+    sources = await source_feeds(ctx, build, docs)
+    copies = [p for p in pipelines if p.get('working_copy_of') or p.get('version_of')]
+    surveyed = any(d['name'].endswith(SURVEY) for d in by_type.get('Documentation', []))
+    existing = bool(sources or copies or surveyed)
+    own_feed = bool(by_type.get('Feed'))
+    # Which stages the build does: on existing data, those it has the pipelines (or survey, or index doc) for.
+    stage_1 = not existing or bool(translation) or surveyed
+    stage_2 = not existing or bool(indexing) or bool(by_type.get('Index') or by_type.get('ElasticIndex'))
+    for p in translation:
+        if p.get('working_copy_of'):
+            # A working copy's documentation is the production pipeline's, under its name.
+            try:
+                original = (await stroom.get_doc('Pipeline', p['working_copy_of'])).get('name')
+            except ToolError:
+                original = None
+            if original in documented:
+                documented.add(p['name'])
     events = []
     for feed in by_type.get('Feed', []):
         rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': feed['name']},
@@ -329,14 +379,18 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         'feed': bool(by_type.get('Feed')),
         'samples': bool(raw),
         'converter': (bool(by_type.get('TextConverter')) if fmt and fmt['needs_text_converter'] else None),
-        'translation': any(x['mapping'] == 'translation' for x in xslts),
+        # A copied pipeline's XSLT is there already, with its mapping or written by hand.
+        'translation': any(x['mapping'] == 'translation' for x in xslts)
+                       or (existing and bool(translation) and any(x['mapping'] != 'index' for x in xslts)),
         'pipeline': bool(translation) and not any(p['missing'] for p in translation),
         'stepped': any(p['stepped'] for p in translation),
         'processed': bool(events),
         'validated': bool(translation) and all([await validated(ctx, p) for p in translation]),
         'documented': bool(translation) and all(p['name'] in documented for p in translation) and not stale,
         # A discovery index's doc is made at verification, once documents are in it: its pipeline comes first.
-        'index': bool(by_type.get('Index') or by_type.get('ElasticIndex')) or (discovery and bool(indexing)),
+        # A new version of an indexing pipeline has its plan from the one it copies; its index doc comes once indexed.
+        'index': bool(by_type.get('Index') or by_type.get('ElasticIndex')) or (discovery and bool(indexing))
+                 or any(p in copies for p in indexing),
         'indexing_pipeline': bool(indexing),
         'index_template': agreed,
         'indexed': bool(indexing) and all([await verified(ctx, p) for p in indexing]),
@@ -347,6 +401,15 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     not_needed = {'converter', 'index_template'}
     # A discovery build indexes its raw streams: no events pipeline at all (a converter only for delimited text).
     skipped = {'translation', 'pipeline', 'stepped', 'processed', 'validated', 'documented'} if discovery else set()
+    stage_steps = {stage: {s['step'] for s in checklist() if s['stage'] == stage} for stage in ('1 events', '2 indexing')}
+    if existing and not own_feed:
+        # Nothing of its own to process: production records are stepped where they are (a test feed, if the build
+        # makes one, brings these steps back).
+        skipped |= {'feed', 'samples', 'processed', 'validated'}
+    if not stage_1:
+        skipped |= stage_steps['1 events']
+    if not stage_2:
+        skipped |= stage_steps['2 indexing']
     steps = []
     for item in checklist():
         state = done.get(item['step'])
@@ -373,10 +436,22 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                      'columns': await _suggested_columns(ctx, pending_ix['uuid'])}
         elif processing == 'finished':
             processing = 'no_index'    # searched through an index doc: a discovery build makes it now
+    named = ', '.join(sources) or 'the feed it works from'
+    raw_ids: Any = [m['id'] for m in raw] or (f"<recent raw streams of {named} (find_streams)>" if existing else [])
+    events_ids: Any = (raw_ids if discovery else events[:20]) or (
+        f"<recent Events streams from {named} (find_streams stream_type=Events)>" if existing else [])
     call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
-                           [m['id'] for m in raw], [m['id'] for m in raw] if discovery else events[:20],
+                           raw_ids, events_ids,
                            translation[0]['uuid'] if translation else None,
                            indexing[0]['uuid'] if indexing else None, processing, index)
+    if existing and not stage_1 and not stage_2:
+        # On existing data, before any pipeline: which stage comes next is the workflow's (a survey, a copy, an index).
+        nxt = None
+        call = {'tool': 'find_streams', 'arguments': {'feed': sources[0] if sources else '<the feed>'}}
+        then = ("this build works from data already in Stroom: create no feed and upload nothing. Carry on with the "
+                "workflow: onboard_existing_feed surveys the feed (survey_feed); an update copies the production "
+                "pipeline (copy_pipeline); index_event_data indexes its Events streams")
+        start = {'step': 'existing data', 'do': f"Work from {named}, already in Stroom", 'call': call, 'then': then}
     return {
         'build': build,
         'documents': docs,
@@ -388,7 +463,9 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         'events_streams': events[:20],
         'before_promotion': checks,
         'steps': steps,
+        **({'works_from': sources} if existing else {}),
         'next': {'step': nxt['step'], 'do': nxt['what'], 'call': call, 'then': then} if nxt else
+                start if existing and not stage_1 and not stage_2 else
                 {'step': 'promoted', 'do': 'Everything is in place: promote_build with the user\'s approval',
                  'call': call, 'then': then},
     }

@@ -174,7 +174,12 @@ reason when the XSLT is saved, seeing what those records hold). `allow_unknown` 
 connections or logons, or whose values give a rule for each of them, with the rules to use; a schema error in an
 action element is fixed, not avoided with `Unknown`. Only if the user, shown those rules, still wants Unknown (they
 can say so in the chat), set `keep_unknown: true` with `allow_unknown`: they confirm it in the form, which shows
-what the values suggest. Never set it to get past the refusal yourself.
+what the values suggest. Never set it to get past the refusal yourself. The user agrees once per rule: the XSLT keeps
+what they agreed to, and saving it again asks only about a rule not agreed yet, or whose conditions or reason changed.
+
+`EventDetail/TypeId` is required. Read from a field, it would be left out of events whose records lack that field (the
+rule for the rest, often): there the generator falls back to the rule's name and warns. Give TypeId a `default` to
+choose another value.
 
 A field no element of the schema means (a rule id, a byte count, a vendor's key) is carried as `Data` (a path ending
 `/Data`, with `data_name`) on the element it describes: `destination_key` under

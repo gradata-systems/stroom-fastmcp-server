@@ -200,7 +200,7 @@ async def update(ctx, stroom: StroomGateway, es: httpx.AsyncClient, prod: dict) 
     # apart at a glance).
     versioned = f"{prod['folder']}/v2"
     e2e.check(any(f"moved Pipeline '{v2_name}' to {versioned}" == p for p in result['promoted']),
-              f'v2 promoted into {versioned}, beside v1')
+              f'v2 promoted into {versioned}, beside v1 (all of it Indexing: no role subfolder)')
     e2e.check(all(f" to {versioned}" in p for p in result['promoted'] if p.startswith('moved ')),
               f"its index, documentation and dashboard with it: {[p for p in result['promoted'] if p.startswith('moved ')]}")
     after = {u: (await stroom.get_doc(t, u)).get('version') for u, t in ((prod['v1']['uuid'], 'Pipeline'),)}

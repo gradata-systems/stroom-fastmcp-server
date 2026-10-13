@@ -293,12 +293,11 @@ async def describe_feed(
     from security.guard import guard_from
     stroom = gateway_from(ctx)
     guard = guard_from(ctx)
-    named = await feeds_named(stroom, feed.strip())
-    if not named:
-        near = [v['docRef']['name'] for v in (await stroom.find_documents(feed.strip(), ['Feed'], 10)).get('values') or []
-                if v['docRef'].get('type') == 'Feed']
-        raise ToolError(f"No feed named '{feed}'" + (f"; feeds with a name like it: {', '.join(near)}" if near else
-                                                       "; find_documents type=Feed lists them"))
+    from tools.feeds import resolve_feed
+    resolved = await resolve_feed(ctx, feed)
+    if not isinstance(resolved, str):
+        return resolved     # the user picks the feed they meant in a form
+    named = await feeds_named(stroom, resolved)
     feed_doc = await stroom.get_doc('Feed', named[0]['uuid'])
     name = feed_doc.get('name') or named[0]['name']
     out: dict[str, Any] = {'feed': {'name': name, 'uuid': feed_doc.get('uuid'),

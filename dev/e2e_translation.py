@@ -375,7 +375,9 @@ async def promotion(ctx, csv: dict, stamp: str):
     check([(f['pipeline'], f['feed'], f['enabled']) for f in made] == [(csv['pipeline']['name'], csv['feed'], False)],
           f"promotion pre-creates the pipeline's filter for its feed, disabled: {made}")
     stored = await stroom.get(f"/processorFilter/v1/{made[0]['filter_id']}")
-    check(stored.get('enabled') is False and stored.get('minMetaCreateTimeMs'), 'the filter is disabled and only takes new data')
+    # No minimum creation time (asked for by the user): enabled, it processes the feed's existing data too.
+    check(stored.get('enabled') is False and not stored.get('minMetaCreateTimeMs'),
+          "the filter is disabled, with no minimum creation time")
     info = await stroom.post('/explorer/v2/info', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid']})
     check(info['explorerNode']['uuid'] == csv['pipeline']['uuid'], 'pipeline kept its UUID')
     tags = (await stroom.post('/explorer/v2/getFromDocRef', {'type': 'Pipeline', 'uuid': csv['pipeline']['uuid'],

@@ -524,10 +524,16 @@ async def test_promotion_plans_new_data_filters_from_sample_filters_and_surveys(
         ('Acme-Events', 'ACME', 'Raw Events', False),           # the test feed is left out
         ('Acme - Indexing', None, 'Events', True),              # its Pipeline condition, no feed
         ('Old-Events', 'OLD-FEED', 'Raw Events', False)]        # stepping-only build: the surveyed feed
+    # A build on an existing feed: its test feed, whatever it is called, gives way to the feed it works from (seen in
+    # VS Code: the promoted filter selected the test feed).
+    existing = await processing_writes.promotion_processing(ctx, [{'uuid': 'tp', 'name': 'Acme-Events'}],
+                                                            ['ACME-PROD'], ['ACME'])
+    assert [(e['feed'], e['stream_type']) for e in existing] == [('ACME-PROD', 'Raw Events')]
     create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 21}))
-    made = await processing_writes.create_promotion_filters(ctx, plan[1:2], 1790000000000)
+    made = await processing_writes.create_promotion_filters(ctx, plan[1:2])
     body = json.loads(create.calls.last.request.content)
-    assert body['enabled'] is False and body['minMetaCreateTimeMs'] == 1790000000000 and body['maxProcessingTasks'] == 2
+    # No minimum creation time (asked for by the user): enabled, it processes the feed's existing data too.
+    assert body['enabled'] is False and body['minMetaCreateTimeMs'] is None and body['maxProcessingTasks'] == 2
     children = body['queryData']['expression']['children']
     assert [c['field'] for c in children] == ['Type', 'Pipeline'] and children[1] == PIPELINE_TERM
     assert made[0]['pipeline_link'].endswith('docUuid=ip')
@@ -541,7 +547,7 @@ async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(
     create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 22}))
     pipeline = {'uuid': 'tp', 'name': 'Acme-Events'}
     await processing_writes.create_promotion_filters(
-        ctx, [{'pipeline': pipeline, 'feed': 'ACME', 'stream_type': 'Raw Events', 'extra_terms': []}], 1790000000000)
+        ctx, [{'pipeline': pipeline, 'feed': 'ACME', 'stream_type': 'Raw Events', 'extra_terms': []}])
     feed = json.loads(create.calls.last.request.content)['queryData']['expression']['children'][0]
     assert feed == {'type': 'term', 'field': 'Feed', 'condition': 'IS_DOC_REF',
                     'docRef': {'type': 'Feed', 'uuid': 'feed-uuid', 'name': 'ACME'}}

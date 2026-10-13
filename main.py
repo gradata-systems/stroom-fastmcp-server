@@ -74,8 +74,12 @@ request_state_security = (
     RequestStateSecurity(keys=[k.get_secret_value() for k in settings.request_state_keys], audience='stroom')
     if settings.request_state_keys else None)
 
+# Which Stroom this is, first: with several Stroom servers connected (one per cluster), an agent acted on the wrong one
+# when the user didn't say which (seen in VS Code).
+INSTRUCTIONS = (f"This server acts on {settings.stroom_label} only. If other Stroom servers are connected too and the "
+                f"user hasn't said which cluster they mean, ask them before acting.\n\n" + SERVER_INSTRUCTIONS)
 # The version is reported to clients in serverInfo, and on /healthz.
-mcp = FastMCP("stroom", version=SERVER_VERSION, instructions=SERVER_INSTRUCTIONS, lifespan=lifespan, auth=auth,
+mcp = FastMCP("stroom", version=SERVER_VERSION, instructions=INSTRUCTIONS, lifespan=lifespan, auth=auth,
               middleware=[AuditMiddleware(), LenientArguments(), RepeatGuard()], request_state_security=request_state_security)
 
 

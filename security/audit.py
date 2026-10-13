@@ -49,7 +49,18 @@ def configure_audit_log(path: Path | None) -> None:
     The file is reopened when it has been moved or deleted, so logrotate (without copytruncate) can rotate it
     and no event is lost or written to the old file.
     """
-    handler = logging.handlers.WatchedFileHandler(path, encoding='utf-8') if path else logging.StreamHandler(sys.stdout)
+    try:
+        handler = logging.handlers.WatchedFileHandler(path, encoding='utf-8') if path else logging.StreamHandler(sys.stdout)
+    except OSError as e:
+        # Seen in production: a persistent volume whose storage ignores the pod's fsGroup left the directory owned by
+        # root, and the server stopped with a bare PermissionError.
+        import os
+        uid = f"uid {os.getuid()}, gid {os.getgid()}" if hasattr(os, 'getuid') else 'its user'
+        raise SystemExit(f"Can't write the audit log {path}: {e.strerror or e}. The server runs as {uid}, which needs "
+                         f"write access to {path.parent}. On Kubernetes, the pod's fsGroup gives it, on storage that "
+                         f"applies it; storage that doesn't (NFS, some CSI drivers): set "
+                         f"audit.file.persistence.fixPermissions=true in the Helm chart, or have the volume's owner "
+                         f"changed. Or leave STROOM_MCP_AUDIT_LOG_FILE unset to write it to stdout.") from e
     handler.setFormatter(logging.Formatter('%(message)s'))
     audit_logger.handlers[:] = [handler]
     audit_logger.setLevel(logging.INFO)

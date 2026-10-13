@@ -40,6 +40,19 @@ def set_body_text(doc: dict[str, Any], text: str) -> None:
     doc['data'] = text
 
 
+class DocumentNotFound(ToolError):
+    """A document asked for by UUID that this Stroom doesn't hold."""
+
+
+def not_found(settings: Settings, what: str) -> str:
+    """A refusal for a feed or document that isn't in this Stroom: the user may mean another cluster (asked for by the
+    user: a UUID from one cluster given to a server connected to another must stop the work, not lead to other
+    actions)."""
+    return (f"{what} in {settings.stroom_label}. If the user named it, this server may be connected to a different "
+            f"Stroom cluster from the one they mean: stop, tell them which Stroom this is, and ask them to check the "
+            f"cluster and the name or UUID. Don't look for another document to use instead, and don't create one.")
+
+
 def doc_link(settings: Settings, doc_type: str, uuid: str) -> str:
     """A URL that opens the document in the Stroom UI, as the explorer's 'Copy Link to Clipboard' makes."""
     base = (settings.stroom_ui_url or settings.stroom_url).rstrip('/')
@@ -238,7 +251,12 @@ class StroomGateway:
     async def get_doc(self, doc_type: str, uuid: str) -> dict[str, Any]:
         if doc_type not in RESOURCES:
             raise ToolError(f"Documents of type '{doc_type}' are not supported here")
-        return await self.get(f'/{RESOURCES[doc_type]}/{uuid}')
+        try:
+            return await self.get(f'/{RESOURCES[doc_type]}/{uuid}')
+        except ToolError as e:
+            if 'Document not found' not in str(e):
+                raise
+            raise DocumentNotFound(not_found(self.settings, f"No {doc_type} with UUID {uuid}")) from e
 
     async def put_doc(self, doc: dict[str, Any], expected_version: str | None = None) -> dict[str, Any]:
         """Save a document. With expected_version, refuse if someone else saved it since it was read."""

@@ -99,6 +99,8 @@ def test_a_lost_mapping_is_read_back_from_the_xslt_and_writes_the_same_events(ca
             # An extraction's name is the mapping's own, lost with it: read back named after its source.
             extracted = {n for e in m.extract for n in e.names}
             drop = {'scope', 'field'} if written[(f.path, f.data_name)]['field'] in extracted else {'scope'}
+            if f.path == 'EventDetail/TypeId':
+                drop |= {'default'}     # the generator's fallback (the rule's name), read back as the default it is
             assert {k: v for k, v in f.model_dump(exclude_defaults=True).items() if k not in drop} ==                 {k: v for k, v in written[(f.path, f.data_name)].items() if k not in drop}
 
 

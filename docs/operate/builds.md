@@ -46,22 +46,35 @@ up a promotion.
     with it. Brand-new documents go where the agent proposes, following
     where sibling sources live, for example `System/Feeds/Events/<Source>`. Ask for any folder to change, and the
     agent shows the tree again.
+
+    When a build promotes documents of more than one role, its role subfolders (Events or Records, Indexing, CEF,
+    Reference) are kept under each destination, as the tree shows them, so `…/V1.1/Events/` and `…/V1.1/Indexing/`
+    keep the two stages apart. A build of one role (an index documented, a new indexing version) gets none. The agent asks
+    whether you want them; say no, and each document goes straight into its folder. A folder you give for one
+    particular document is used as you give it.
+
+    A build that works from data already in Stroom (an existing feed, or a new version or working copy of a
+    production pipeline) keeps any feed it made in the workspace: those are test feeds, holding copies of
+    production records. Give one a folder of its own if it is really a new production feed (a new feed version, say).
 2. The user approves the layout they confirmed, in a short form.
 3. New documents are moved into place. Their UUIDs don't change, so references keep working. They lose
    `mcp-managed` and keep `mcp-generated`.
 4. Working copies are written back over the production documents they copy. Each production document is backed up
    to `MCP Workspace/backups` first.
-5. Each promoted pipeline gets a processor filter for new data on its feed, from the time of promotion, with the
-   feed task limit (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**.
+5. Each promoted pipeline gets a processor filter on its feed, with the feed task limit
+   (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**. It has no minimum stream creation
+   time: enabled, it processes everything on the feed that the pipeline hasn't processed yet, existing data
+   included. For a build on an existing feed the filter names that feed, never a test feed.
 
 ## After promotion
 
 The agent shows the layout again as promoted, the same tree you approved, with a link to open each destination
 folder in Stroom (and each production document updated in place).
 
-- **Enable processing yourself.** Review the pipeline through the link the server gives, disable any earlier
-  version that processes the same feed, then enable the new filter.
-- **Existing data is yours to process.** The new filter covers data arriving after promotion.
+- **Enable processing yourself.** Review the pipeline through the link the server gives, then enable the new
+  filter. It processes the feed's existing data too: where an earlier version still processes the same feed,
+  enabling the new one processes that history again. Disable the earlier one, or limit the new filter in Stroom
+  (its minimum creation time), first.
 - **Index versions are yours to switch.** Aliases, data views and retiring a previous index version are left to
   you.
 - **Later changes go through a working copy.** Promoted documents aren't `mcp-managed`, so the agent changes them

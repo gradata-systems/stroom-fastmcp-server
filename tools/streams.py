@@ -55,8 +55,14 @@ async def find_streams(
     Use it to locate a feed's recent Raw Events, or the Events and Error streams a pipeline produced.
     """
     terms = []
+    named = None
     if feed:
-        terms.append(_term('Feed', feed))
+        # A feed not here stops the work (another cluster's, perhaps), rather than reading as one with no streams.
+        from tools.feeds import resolve_feed
+        named = await resolve_feed(ctx, feed)
+        if not isinstance(named, str):
+            return named
+        terms.append(_term('Feed', named))
     if stream_type:
         terms.append(_term('Type', stream_type))
     if parent_id is not None:
@@ -69,7 +75,8 @@ async def find_streams(
     body = await gateway_from(ctx).find_meta(terms, limit)
     streams = [_stream(row['meta']) for row in body.get('values') or []]
     total = (body.get('pageResponse') or {}).get('total')
-    return {'total': total, 'returned': len(streams), 'streams': streams}
+    return {'total': total, 'returned': len(streams), 'streams': streams,
+            **({'feed': named} if named and named != feed.strip() else {})}
 
 
 async def get_stream_children(ctx: Context, stream_id: StreamId) -> dict[str, Any]:

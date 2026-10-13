@@ -49,8 +49,8 @@ samples/vpn.log to Stroom"*. A typical run:
 6. **Documentation.** The server writes Documentation docs for the pipelines, generated from the mapping and what
    processing produced.
 7. **Promotion.** `build_status` lists anything still missing. You approve promotion, and the content moves into
-   place. Each promoted pipeline gets a processor filter for new data, created disabled for you to review and
-   enable.
+   place. Each promoted pipeline gets a processor filter on its feed, created disabled for you to review and
+   enable; enabled, it processes the feed's existing data too.
 
 Every confirmation and approval is a form you answer. The model only sees the outcome. To find out what each step
 writes to Stroom, see [What it changes in Stroom](operate/what-it-changes.md).

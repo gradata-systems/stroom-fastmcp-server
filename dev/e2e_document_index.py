@@ -22,6 +22,10 @@ promotes it beside the index doc, or where the user chooses.
    columns joined on StreamId and EventId, every field with its values.
 2. an index a production pipeline feeds, from an index plan kept with its XSLT: the table also says where each
    field comes from in the events, described from the event-logging schema. Promoted where the user chooses.
+   Then the pipeline writes a new field the index doesn't have: documenting is refused, naming it, for the user to
+   reindex or check again; documented anyway only as the user chooses, the field said to be not in the index. Once
+   Elasticsearch maps it and a document carries it, how long Stroom takes to list it is checked, and the doc is
+   written again with its values.
 3. a Lucene index, fed by a pipeline whose XSLT was written by hand (no plan): surveyed and documented the same
    way, where the user chooses; a field that is not stored is shown as such, not as missing from the sample.
 """
@@ -252,6 +256,66 @@ async def fed_by_a_plan(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
               f"where each field comes from in the events, described from the schema: {rows['user.name'][0]!r}")
     chosen = f'System/E2E Docs/indexes-{stamp}'
     await promoted_to(ctx, stroom, build, written, chosen, {'Documentation': chosen})
+    return prod, doc
+
+
+async def new_field(ctx, stroom, es: httpx.AsyncClient, stamp: str, prod: dict, doc: dict) -> None:
+    """Seen in production: documenting an Elastic Index doc after a field was added to the pipeline that feeds it, and
+    once its data was indexed, Stroom didn't list the field; the doc came out without it, and the agent said the field
+    didn't exist. A minute later Stroom listed it."""
+    print('\n### 2b. a field the feeding pipeline now writes: before the index has it, and once it does')
+    from tools.builds import kept_mapping
+    from utils.mappingstore import with_mapping
+    index = prod['v1_index']
+    kept = await kept_mapping(ctx, prod['v1']['uuid'])
+    xslt = kept['xslt']
+    payload = {**kept['payload'], 'fields': [*kept['payload']['fields'], {'name': 'event.outcome', 'type': 'boolean',
+                                                                        'source': 'EventDetail/Authenticate/Outcome/Success'}]}
+    xslt['description'] = with_mapping(xslt.get('description'), 'index', payload)
+    await stroom.put_doc(xslt)
+    e2e.check(True, "v1's index plan now writes event.outcome (the pipeline updated), none of it indexed yet")
+    build = f'e2e-docindex-outcome-{stamp}'
+    markdown = '## Purpose and data\n\nCSV logons, indexed, now with whether each succeeded.\n'
+    # Not documented without it, unsaid: refused, naming the field, for the user to reindex or check again.
+    try:
+        await e2e.agreed(builds.write_documentation, ctx=ctx, build=build, index_uuid=doc['uuid'], markdown=markdown,
+                         change='event.outcome added')
+        refused = ''
+    except Exception as e:
+        refused = str(e)
+    e2e.check('has no field event.outcome' in refused and 'reindex' in refused and 'check again' in refused,
+              f"refused, naming the field, for the user to reindex or check again: {refused[:160]}")
+    # The user chooses to document it now: the field listed as not in the index.
+    before = await e2e.agreed(builds.write_documentation, ctx=ctx, build=build, index_uuid=doc['uuid'],
+                              markdown=markdown, change='event.outcome added', document_missing_fields=True)
+    rows = e2e.field_rows(before.get('field_mapping') or '')
+    e2e.check(before.get('not_in_index') == ['event.outcome'] and rows.get('event.outcome', [''])[-2:]
+              == ['not in the index', '-'], f"documented as the user chose: not in the index: {rows.get('event.outcome')}")
+    # Elasticsearch maps it (the template is strict: the mapping first, as an updated template would at rollover), a
+    # document carrying it is indexed, and the index is refreshed: searchable now.
+    mapped = await es.put(f'/{index}/_mapping', json={'properties': {'event': {'properties': {'outcome': {'type': 'boolean'}}}}})
+    e2e.check(mapped.status_code == 200, f'Elasticsearch maps event.outcome: {mapped.text[:120]}')
+    newest = (await es.post(f'/{index}/_search', json={'size': 1, 'sort': [{'@timestamp': 'desc'}]})).json()['hits']['hits'][0]
+    source = {**newest['_source'], 'EventId': 1000, 'event': {'outcome': True}}
+    added = await es.post(f'/{index}/_doc?refresh=true', json=source)
+    e2e.check(added.status_code in (200, 201), f'a document carrying it indexed and refreshed: {added.status_code}')
+    # How long Stroom takes to list it: the production case was a minute. Here it is checked against a bound, so a
+    # Stroom that starts to cache its field list shows up.
+    ref = {'type': 'ElasticIndex', 'uuid': doc['uuid'], 'name': doc['name']}
+    started, listed = time.time(), False
+    while time.time() - started < 120 and not listed:
+        listed = 'event.outcome' in {f['name'] for f in await indexing._index_fields(stroom, 'ElasticIndex', ref)}
+        if not listed:
+            await asyncio.sleep(2)
+    took = time.time() - started
+    e2e.check(listed and took < 10, f"Stroom lists the field {took:.0f} s after Elasticsearch mapped it "
+                                    f"(production: about a minute)")
+    after = await e2e.agreed(builds.write_documentation, ctx=ctx, build=build, index_uuid=doc['uuid'],
+                             markdown=markdown, change='event.outcome documented with its values')
+    rows = e2e.field_rows(after.get('field_mapping') or '')
+    e2e.check('not_in_index' not in after and 'not in the index' not in ' '.join(rows.get('event.outcome', []))
+              and '`true`' in ' '.join(rows.get('event.outcome', [])),
+              f"documented again: event.outcome with its values from the index: {rows.get('event.outcome')}")
 
 
 async def lucene(ctx, stroom, stamp: str) -> None:
@@ -305,7 +369,8 @@ async def main():
                 await nothing_feeds(ctx, stroom, es, stamp)
                 await wide(ctx, stroom, es, stamp)
             if '--plan' in only:
-                await fed_by_a_plan(ctx, stroom, es, stamp)
+                prod, doc = await fed_by_a_plan(ctx, stroom, es, stamp)
+                await new_field(ctx, stroom, es, stamp, prod, doc)
             if '--lucene' in only:
                 await lucene(ctx, stroom, stamp)
         print('\nALL PASSED')

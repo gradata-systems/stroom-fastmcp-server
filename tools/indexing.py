@@ -1194,6 +1194,58 @@ async def _index_fields(stroom, doc_type: str, ref: dict[str, Any]) -> list[dict
     return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower()} for f in found.get('values') or [] if f.get('fldName')]
 
 
+_FIELD_WAITS = (5, 5)   # seconds between looks at the index's fields, for a field Stroom hasn't listed yet
+
+
+async def fields_not_in_index(stroom, doc_type: str, ref: dict[str, Any], expected: dict[str, list[str]]) -> dict[str, list[str]]:
+    """{pipeline: fields it writes that Stroom doesn't list for the index}, of those expected ({pipeline: fields}),
+    after looking again a few times: a field just indexed can take Stroom a moment to list. Seen in production: the
+    documentation of an index came out without a field the pipeline writes, though its data was indexed and
+    refreshed, and nothing said so; a minute later Stroom listed it (asked for by the user: an error, not silence)."""
+    missing: dict[str, list[str]] = {}
+    for attempt in range(len(_FIELD_WAITS) + 1):
+        listed = {f['name'] for f in await _index_fields(stroom, doc_type, ref)}
+        missing = {p: [f for f in fields if f not in listed] for p, fields in expected.items()}
+        missing = {p: fields for p, fields in missing.items() if fields}
+        if not missing or attempt == len(_FIELD_WAITS):
+            return missing
+        await asyncio.sleep(_FIELD_WAITS[attempt])
+    return missing
+
+
+def missing_fields_said(missing: dict[str, list[str]], index_name: str | None) -> str:
+    """What the agent tells the user about fields a pipeline writes that the index doesn't have."""
+    said = '; '.join(f"{', '.join(fields)} (written by '{p}')" for p, fields in missing.items())
+    return (f"The index{f' {index_name}' if index_name else ''} has no field {said}: Stroom doesn't list them for it, "
+            f"though the pipeline writes them. Tell the user, and ask them to either reindex (the data was indexed "
+            f"before the pipeline wrote these fields, or without them: for Elasticsearch, the index template must map "
+            f"them before the data is indexed again), or check again in a minute or two (Stroom can be slow to list a "
+            f"field that was only just indexed). Then call again.")
+
+
+async def _fields_written_not_indexed(ctx: Context, pipeline_uuid: str, ref: dict[str, Any],
+                                      stream_ids: list[int]) -> dict[str, list[str]]:
+    """The fields an indexing pipeline's plan writes for these Events (their source populated in them: a field no
+    event fills is never mapped where the mapping is dynamic) that the index doesn't have."""
+    from tools.builds import kept_mapping
+    from tools.streams import summarise_events
+    from utils.fieldplan import population_of
+    stroom = gateway_from(ctx)
+    try:
+        kept = await kept_mapping(ctx, pipeline_uuid)
+        if not kept or kept['kind'] != 'index':
+            return {}
+        plan = FieldPlan.model_validate(kept['payload'])
+        if plan.discovery:
+            return {}
+        population = (await summarise_events(ctx, stream_ids, 200))['path_population']
+        name = (await stroom.get_doc('Pipeline', pipeline_uuid)).get('name') or pipeline_uuid
+    except ToolError:
+        return {}       # the searches decide; this check needs the plan and the Events
+    written = [f.name for f in plan.fields if f.source.startswith('@') or (population_of(f.source, population) or 0) > 0]
+    return await fields_not_in_index(stroom, ref['type'], ref, {name: written})
+
+
 async def feeding_pipelines(ctx: Context, doc_type: str, uuid: str, index: dict[str, Any]) -> list[dict[str, Any]]:
     """The pipelines that write to the index, each with the index plan kept with its XSLT when there is one. Found
     by content (a Lucene IndexingFilter names the doc, an Elasticsearch one the index name), then each confirmed
@@ -2002,7 +2054,8 @@ async def verify_index(
     returns what it should. The dashboard (created once per build, for an index the build made, after the user
     confirms its columns) has a query on the time field from the sample's earliest event (rounded back to a 30-day
     boundary) through the end of today, a table of the user's fields newest first, and a text pane on the selected row's record
-    with stepping. An index from elsewhere is searched without saving a dashboard.
+    with stepping. An index from elsewhere is searched without saving a dashboard, unless pipeline_uuid is the build's
+    own pipeline writing to it: the dashboard is then the build's, promoted with that pipeline.
     """
     searches = [SearchCheck.model_validate(s) if isinstance(s, dict) else s for s in searches]
     _searchable(backend, searches)
@@ -2033,7 +2086,11 @@ async def verify_index(
     time_field = index.get('timeField') or index.get('timeFieldName')
     source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
     contents = await guard_from(ctx).folder_contents(build)
-    ours = any(d['uuid'] == index_uuid for d in contents)
+    # The build's index, or one from elsewhere that the build's own indexing pipeline writes to (a new version writing
+    # through the existing index doc): the dashboard is the build's, and promoted with it (seen in production: a new
+    # version's verification left no dashboard to promote).
+    ours = any(d['uuid'] == index_uuid for d in contents) or any(
+        d['type'] == 'Pipeline' and d['uuid'] == pipeline_uuid for d in contents)
     existing = next((d for d in contents if d['type'] == 'Dashboard' and d['name'] == name), None)
     # The window starts at the sample's earliest event: found by searching its streams first, saving nothing.
     probe = {'uuid': str(uuidlib.uuid4()), 'name': name, 'dashboardConfig': dashboard_config(source, fields, time_field, None)}
@@ -2045,7 +2102,7 @@ async def verify_index(
               'text pane': "the selected row's record, with stepping; no extraction pipeline"}
     dashboard: dict[str, Any] | None = None
     if not ours:
-        # Another build's (or production's) index: searched through an unsaved dashboard, so nothing lands here.
+        # Another build's (or production's) index, not written by this build: searched through an unsaved dashboard.
         dashboard = {'uuid': probe['uuid'], 'name': name, 'saved': False}
         doc = {**probe, 'dashboardConfig': dashboard_config(source, fields, time_field, window)}
     elif existing:
@@ -2076,6 +2133,15 @@ async def verify_index(
         dashboard = {'uuid': made['uuid'], 'name': name, 'saved': True}
     searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
                                        searches=list(searches), pipeline_uuid=pipeline_uuid, dashboard_doc=doc)
+    if pipeline_uuid:
+        # Every field the pipeline writes for these Events must be in the index (asked for by the user: an index that
+        # lacks one is an error to put to them, not something its documentation leaves out unsaid).
+        lacking = await _fields_written_not_indexed(ctx, pipeline_uuid, source, stream_ids)
+        if lacking:
+            searched['checks'].append({'check': 'every field the pipeline writes for these Events is in the index',
+                                       'missing': lacking, 'pass': False,
+                                       'next': missing_fields_said(lacking, index.get('indexName') or index.get('name'))})
+            searched['passed'] = False
     # The link to give the user (seen in VS Code: the user had to ask for it); an unsaved dashboard has none.
     link = {'link': doc_link(stroom.settings, 'Dashboard', dashboard['uuid'])} if dashboard.get('saved') else {}
     result = {'dashboard': {**dashboard, **link, **design}, **searched}

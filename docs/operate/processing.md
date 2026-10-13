@@ -8,7 +8,7 @@ Every processor filter the server creates or enables needs the user's approval, 
 | --- | --- | --- |
 | Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
 | Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
-| A promoted pipeline's feed | New data on its feed, from promotion, **created disabled** | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
+| A promoted pipeline's feed | Everything on its feed the pipeline hasn't processed, existing data included, **created disabled** | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 
 Other limits:
 
@@ -21,7 +21,7 @@ Other limits:
   reprocessing, which Stroom handles by marking the earlier output deleted, so each raw stream keeps one Events
   stream.
 - **The right Events.** An indexing filter also carries `Pipeline IS_DOC_REF <events pipeline>`, so it indexes only
-  Events from the events pipeline built for the source, even on a shared feed. For new data it names that pipeline
+  Events from the events pipeline built for the source, even on a shared feed. After promotion it names that pipeline
   and the stream type, with no feed condition: the pipeline says which Events. Indexing Events from a pipeline the
   server didn't build needs the user's confirmation of that pipeline.
 - **By reference, not by name.** Filters name feeds and pipelines with `IS_DOC_REF`, by their UUID. Stroom lists the

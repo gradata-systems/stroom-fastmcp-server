@@ -1453,10 +1453,30 @@ class _Generator:
                 f"{json.dumps(suggested)} (Name and Value in the event, searchable as they are). A value with no element "
                 f"of its own is no reason to leave the event Unknown.")
 
+    def _type_id_fallback(self, rule: EventRule, by_key: dict[tuple[str, Any], 'FieldMapping']) -> None:
+        """TypeId is required by the schema. Read from an input with no default, it is left out of the events whose
+        records lack that input, and they fail validation: seen in production, Unknown events from the rule for the
+        rest, whose records didn't have the field the kinds were named by. Unless the rule's own conditions say the
+        input is there, its name is the fallback (a default of the user's choosing replaces it)."""
+        key = ('EventDetail/TypeId', None)
+        entry = by_key.get(key)
+        if entry is None or rule.drop or entry.value is not None or entry.default is not None:
+            return
+        read = {entry.field, *(entry.any_of or [])} - {None}
+        held = {c.field for c in rule.when if c.field and c.present is not False}
+        if read & held and not entry.map:
+            return
+        by_key[key] = entry.model_copy(update={'default': rule.name})
+        source = ' or '.join(sorted(read)) or 'its input'
+        self._note(self.warnings, f"[{rule.name}] TypeId is read from {source}, which its records may lack: those get "
+                                  f"TypeId '{rule.name}', as the schema requires one (without it the event fails "
+                                  f"validation). Give TypeId a default to choose another.")
+
     def tree(self, rule: EventRule) -> _Node:
         root = _Node(None, 'Event')
         by_key = {(e.path.strip('/'), e.data_name): e for e in self.m.common}
         by_key.update({(e.path.strip('/'), e.data_name): e for e in rule.fields})
+        self._type_id_fallback(rule, by_key)
         for (path, data_name), entry in by_key.items():
             where = f"[{rule.name}] {path}" + (f" (Data {data_name})" if data_name else '')
             try:

@@ -802,3 +802,25 @@ def test_data_entries_are_one_line_each_and_runs_several_rules_write_are_shared_
     assert canon(new_events) == canon(old_events)
     written = [d.get('Name') for d in new_events.iter('{event-logging:3}Data')]
     assert {'logid', 'srcintfrole', 'policyid'} <= set(written) and 'service' not in written   # a blank value: none
+
+
+def test_a_typeid_read_from_a_field_the_rest_may_lack_falls_back_to_the_rules_name():
+    # Seen in production: Unknown events from the rule for the rest had no TypeId (their records lacked the field the
+    # kinds were named by), and failed schema validation.
+    from utils.xsltgen import TranslationMapping, generate
+    m = TranslationMapping.model_validate({'input': 'json', 'common': [
+        {'path': 'EventTime/TimeCreated', 'field': 'time'},
+        {'path': 'EventSource/System/Name', 'value': 'Acme'}, {'path': 'EventSource/System/Environment', 'value': 'Prod'},
+        {'path': 'EventSource/Generator', 'value': 'Acme'}, {'path': 'EventSource/Device/HostName', 'field': 'host'},
+        {'path': 'EventDetail/TypeId', 'field': 'kind'}], 'events': [
+        {'name': 'logon', 'when': [{'field': 'kind', 'equals': 'LOGON'}], 'fields': [
+            {'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'},
+            {'path': 'EventDetail/Authenticate/User/Id', 'field': 'user'}]},
+        {'name': 'other', 'allow_unknown': 'no action element describes them',
+         'fields': [{'path': 'EventDetail/Unknown/Data', 'data_name': 'msg', 'field': 'msg'}]}]})
+    result = generate(m, SCHEMA_352, '3.5.2')
+    assert result['ok'], result['problems']
+    # The rule for the rest falls back to its name; the logon rule, whose condition says kind is there, doesn't.
+    assert "then *[@key='kind'] else 'other'" in result['xslt'] and "else 'logon'" not in result['xslt']
+    assert any(w.startswith("[other] TypeId is read from kind") for w in result['warnings'])
+    assert not any(w.startswith('[logon] TypeId') for w in result['warnings'])
