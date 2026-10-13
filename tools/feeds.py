@@ -163,8 +163,9 @@ async def _existing_feed(ctx: Context, name: str, build: str) -> dict[str, Any] 
                 'note': f"This build already has feed '{doc['name']}': nothing new was made; carry on with it."}
     where = next((f.get('path') for f in await feeds_named(stroom, name) if f.get('uuid') == ref['uuid']), None)
     raise ToolError(f"A feed named '{name}' already exists ({where or 'outside the workspace'}), and Stroom keeps one "
-                    f"feed per name. If it is the same source, use that feed (upload to it, or onboard_existing_feed for "
-                    f"the data it holds); if not, propose another name, such as the next version.")
+                    f"feed per name. If it is the same source, use that feed: upload to it, or build from the data it "
+                    f"holds (start_build feeds=['{name}'], then survey_feed with the build); if not, propose another "
+                    f"name, such as the next version.")
 
 
 async def create_feed(

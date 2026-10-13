@@ -956,8 +956,8 @@ async def _events_available(ctx: Context, build: str, events_stream_ids: list[in
             return
     if not events_stream_ids:
         raise ToolError(f"Build '{build}' has no events pipeline, and no events_stream_ids were given. An indexing "
-                        f"pipeline reads Events streams, not raw data: build the events pipeline first (stage 1 of "
-                        f"onboard_data_source: feed, translation XSLT, step, process), then index its Events. To "
+                        f"pipeline reads Events streams, not raw data: build the events pipeline first (stage 1: feed, "
+                        f"translation XSLT, step, process), then index its Events. To "
                         f"index Events an existing pipeline already produces, pass their stream ids as "
                         f"events_stream_ids. Raw structured data indexed as it is, with no translation, is a "
                         f"discovery template (find_pipeline_templates stage=discovery).")

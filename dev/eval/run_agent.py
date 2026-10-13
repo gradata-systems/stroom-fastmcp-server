@@ -124,7 +124,7 @@ async def render_prompt(url: str, case: dict[str, Any], with_docs: bool = True) 
     """The server's onboarding prompt for the case, as a client gets it, with the case's source documentation
     unless the run is measuring how the agent does without it."""
     from fastmcp import Client
-    args = {'sample': sample_text(case), 'source_name': case['name']}
+    args = {'samples': sample_text(case), 'source_name': case['name']}
     if with_docs and case.get('source_docs'):
         args['source_docs'] = case['source_docs']
     async with Client(url) as client:

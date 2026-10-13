@@ -207,17 +207,22 @@ async def evaluate(ctx, stroom: StroomGateway, prod: dict, stamp: str) -> None:
               f"## Field mapping\n\n| From | To |\n| --- | --- |\n"
               f"| user | EventSource/User/Id |\n\nNever read: agent.\n\n## Event types\n\nAuthenticate/Logon: 5.\n\n"
               f"## Suggestions\n\n1. Write IPAddress only for an address (proven: one record changes).\n")
-    await builds.write_documentation(ctx, build, pipeline['uuid'], report, 'Evaluation')
-    promoted = await e2e.agreed(builds.promote_build, ctx=ctx, build=build, destinations={'Documentation': prod['folder']})
+    saved = await builds.write_documentation(ctx, build, pipeline['uuid'], report, evaluation=True)
+    e2e.check(saved['name'] == f"{pipeline['name']} - Evaluation", f"its own doc: {saved['name']}")
+    # Beside the pipeline it evaluates, with no destination given.
+    promoted = await e2e.agreed(builds.promote_build, ctx=ctx, build=build)
     print('    ' + json.dumps(promoted.get('promoted'), default=str)[:400])
-    beside = [v['docRef'] for v in (await stroom.find_documents(pipeline['name'], ['Documentation'], 10)).get('values') or []]
+    def reports(values):
+        return [v['docRef'] for v in values if v['docRef'].get('name') == saved['name']
+                and v.get('path', '').replace(' / ', '/') == prod['folder']]
+    beside = reports((await stroom.find_documents(saved['name'], ['Documentation'], 10)).get('values') or [])
     for _ in range(10):
         if beside:
             break
         await asyncio.sleep(2)
-        beside = [v['docRef'] for v in (await stroom.find_documents(pipeline['name'], ['Documentation'], 10)).get('values') or []]
+        beside = reports((await stroom.find_documents(saved['name'], ['Documentation'], 10)).get('values') or [])
     text = (await stroom.get_doc('Documentation', beside[0]['uuid'])).get('data') or '' if beside else ''
-    e2e.check('Errors and schema conformance' in text, 'the report is beside the pipeline')
+    e2e.check('Errors and schema conformance' in text, 'the report is beside the pipeline, in its own doc')
     after = {u: (await stroom.get_doc(t, u)).get('version') for u, t in
              ((pipeline['uuid'], 'Pipeline'), (prod['xslt']['uuid'], 'XSLT'), (prod['tc']['uuid'], 'TextConverter'))}
     e2e.check(after == versions, 'the pipeline, its XSLT and its text converter are unchanged')

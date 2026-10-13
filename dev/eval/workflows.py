@@ -465,7 +465,7 @@ async def records_output_setup(ctx, stamp: str) -> dict[str, Any]:
     template = await fixture(ctx.lifespan_context['stroom'], ctx, RECORDS_TEMPLATE, RECORDS_DATA)
     build, feed, index = f'eval-assets-{stamp}', f'EVAL-ASSETS-{stamp}', f'eval-assets-{stamp}'
     return {'build': build, 'feed': feed, 'index': index, 'template': template,
-            'prompt_args': {'sample': ASSETS, 'timestamp_field': 'last_seen'},
+            'prompt_args': {'samples': ASSETS, 'timestamp_field': 'last_seen'},
             'request': (f"This is our asset inventory export (CSV, with a header): one record per device, not "
                         f"events, so no event-logging translation. Keep it in Stroom as Records (a pipeline writing "
                         f"Records streams from the raw CSV), then index those Records into Elasticsearch as they are, "

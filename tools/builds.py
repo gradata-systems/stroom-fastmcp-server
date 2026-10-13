@@ -511,6 +511,10 @@ async def write_documentation(
             description="With index_uuid: document the index though fields its feeding pipelines write aren't in it "
                         "(listed as not in the index). Only when the user chooses it over reindexing or checking "
                         "again: by default that is refused, saying which fields.")] = False,
+        evaluation: Annotated[bool, Field(
+            description="With pipeline_uuid: the markdown is an evaluation report, kept as its own doc, "
+                        "'<pipeline> - Evaluation', beside the pipeline once promoted; the pipeline's documentation is "
+                        "left as it is. Its sections are the report's, nothing generated.")] = False,
 ) -> dict[str, Any]:
     """
     Create or update the Documentation doc for a pipeline in the build (same name as the pipeline), or, with
@@ -546,6 +550,8 @@ async def write_documentation(
                                      document_missing_fields)
     if not pipeline_uuid:
         raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
+    if evaluation:
+        return await _write_evaluation(ctx, build, pipeline_uuid, body, change)
     stroom = gateway_from(ctx)
     pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
     kept = await kept_mapping(ctx, pipeline_uuid)
@@ -808,6 +814,51 @@ def _below_section(markdown: str, heading: str, text: str) -> str:
     if not found:
         return f"## {heading}\n\n{text.strip()}\n\n{markdown.lstrip()}"
     return markdown[:found.end(1)].rstrip() + f"\n\n{text.strip()}\n\n" + markdown[found.end(1):].lstrip()
+
+
+EVALUATION = ' - Evaluation'
+
+
+async def _write_evaluation(ctx: Context, build: str, pipeline_uuid: str, body: str, change: str) -> dict[str, Any]:
+    """An evaluation report, its own doc beside the pipeline (asked for by the user): saved as the pipeline's
+    documentation, it would have replaced that at promotion. An earlier report beside the pipeline is updated through
+    a working copy, written back at promotion after a backup."""
+    stroom, guard = gateway_from(ctx), guard_from(ctx)
+    pipeline = await stroom.get_doc('Pipeline', pipeline_uuid)
+    ref = {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}
+    copy_of = await guard.copy_of(ref)
+    target = {**ref, **({'uuid': copy_of, 'name': (await stroom.get_doc('Pipeline', copy_of))['name']} if copy_of else {})}
+    name = target['name'] + EVALUATION
+    folder = await _folder_of(stroom, target)
+    found = (await stroom.find_documents(name, ['Documentation'], 20)).get('values') or []
+    beside = next((v['docRef'] for v in found if v['docRef'].get('name') == name and folder
+                   and _path(v.get('path')) == folder), None)
+    in_build = await _build_docs(ctx, build)
+    existing = next((d for d in in_build if d['type'] == 'Documentation' and d['name'] == name), None)
+    if (existing or beside) and not change:
+        raise ToolError("This updates the pipeline's evaluation report: give change, one line on what is new")
+
+    async def write(doc_ref: dict[str, Any]) -> dict[str, Any]:
+        doc = await stroom.get_doc('Documentation', doc_ref['uuid'])
+        old = body_text(doc)
+        set_body_text(doc, _with_change(ctx, titled(body, doc['name']), old, change or 'Created', None))
+        return await stroom.put_doc(doc)
+    from tools.templates import pipeline_role
+    if existing:
+        doc = await write(existing)
+    elif beside:
+        made = await guard.create('Documentation', name, build, copy_of=beside['uuid'],
+                                  role=await pipeline_role(stroom, pipeline_uuid))
+        copy, current = await stroom.get_doc('Documentation', made['uuid']), await stroom.get_doc('Documentation', beside['uuid'])
+        copy.update({k: current[k] for k in ('data', 'documentation') if k in current})
+        await stroom.put_doc(copy)
+        doc = await write(made)
+    else:
+        doc = await guard.create_filled('Documentation', name, build, write, role=await pipeline_role(stroom, pipeline_uuid))
+    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
+            'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
+            'hint': f"Give the user the link. Once they approve, promote_build puts it beside pipeline "
+                    f"'{target['name']}'" + (" (over the earlier report, after a backup)" if beside else '') + "."}
 
 
 async def _documentation_beside(stroom, pipeline: dict[str, Any]) -> dict[str, Any] | None:
@@ -1077,8 +1128,10 @@ async def promote_build(
             if not target and doc['type'] == 'Documentation':
                 # The documentation of a production pipeline (an in-place change's) or an existing index: beside it.
                 kinds = ('Pipeline', 'ElasticIndex', 'Index')
-                found = (await stroom.find_documents(doc['name'], list(kinds), 20)).get('values') or []
-                outside = [v['docRef'] for v in found if v['docRef'].get('name') == doc['name']
+                # An evaluation report goes beside the pipeline it evaluates.
+                named = doc['name'][:-len(EVALUATION)] if doc['name'].endswith(EVALUATION) else doc['name']
+                found = (await stroom.find_documents(named, list(kinds), 20)).get('values') or []
+                outside = [v['docRef'] for v in found if v['docRef'].get('name') == named
                            and v['docRef'].get('type') in kinds
                            and not any(d['uuid'] == v['docRef'].get('uuid') for d in docs)]
                 target = await _folder_of(stroom, outside[0]) if len(outside) == 1 else None
