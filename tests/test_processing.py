@@ -125,28 +125,27 @@ async def test_streams_the_pipeline_already_processed_go_through_reprocessing(ct
 
 
 @respx.mock
-async def test_translation_pipeline_needs_only_approval(ctx):
+async def test_a_filter_is_created_disabled_for_the_user_to_enable(ctx):
+    # Asked for by the user: enabling a filter is theirs, in Stroom. Disabled, it changes nothing: no form.
     create = mock_stroom(elastic=False)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         gates, result = await gated_through(ctx, stream_ids=[6])
-    assert [g['status'] for g in gates] == ['needs_approval']
-    assert result['filter_id'] == 9 and create.call_count == 1
+    assert gates == [] and result['filter_id'] == 9 and create.call_count == 1
+    assert json.loads(create.calls.last.request.content)['enabled'] is False and result['enabled'] is False
+    assert 'docUuid=p1' in result['pipeline_link'] and result['enabling_it']['scope'] == 'streams [6]'
+    assert "enable filter 9 on its Processors tab" in result['hint'] and 'not before' in result['hint']
 
 
 @respx.mock
-async def test_elasticsearch_indexing_starts_once_the_template_is_applied(ctx):
-    # One approval, worded so the user confirms the admin applied the index template (propose_index_template built
-    # it), then processing starts: the filter is created enabled, for the agent to wait and verify.
+async def test_elasticsearch_indexing_is_enabled_by_the_user_once_the_template_is_committed(ctx):
+    # Disabled, with what must come first: the user enables it once the admin has committed the agreed template.
     create = mock_stroom(elastic=True)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    [approve] = [g for g in gates if g['status'] == 'needs_approval']
-    assert approve['summary'].startswith('Create processor filter and start processing\nIndex streams [6]')
-    assert approve['summary'].endswith("Approve only if the agreed index template 'ecs-acme-v2' for Elasticsearch "
-                                       "index 'ecs-acme-v2' is committed to cluster ES_DEV.")
-    assert approve['details']['index template'].startswith("the agreed index template 'ecs-acme-v2'")
-    assert json.loads(create.calls.last.request.content)['enabled'] is True and create.call_count == 1
-    assert result['filter_id'] and 'pipeline_link' not in result
+    assert gates == [] and json.loads(create.calls.last.request.content)['enabled'] is False and create.call_count == 1
+    assert result['before_enabling'] == ["the agreed index template 'ecs-acme-v2' for Elasticsearch index 'ecs-acme-v2' "
+                                         "is committed to cluster ES_DEV: enable it only once that is so"]
+    assert 'once what before_enabling says is done' in result['hint']
 
 
 @respx.mock
@@ -176,13 +175,28 @@ async def reprocessed(ctx, **kwargs):
 
 @respx.mock
 async def test_reprocessing_runs_one_task_at_a_time_and_leaves_superseding_to_stroom(ctx):
+    # An events pipeline in a build: the user approves, and the filter is created enabled (asked for by the user).
     create = mock_stroom(elastic=False, filtered=[5], with_output=[6])
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         gates, result = await reprocessed(ctx, stream_ids=[5, 6])
     assert [g['status'] for g in gates] == ['needs_approval'] and 'superseded' in gates[0]['details']['earlier outputs']
     body = json.loads(create.calls.last.request.content)
-    assert body['maxProcessingTasks'] == 1 and result['filter_id'] == 9 and 'filter_id=9' in result['hint']
+    assert body['maxProcessingTasks'] == 1 and body['enabled'] is True
+    assert result['filter_id'] == 9 and result['enabled'] is True and 'filter_id=9' in result['hint']
     assert not any(r.request.url.path.endswith('update/status') for r in respx.calls)
+
+
+@respx.mock
+@pytest.mark.parametrize('stage', ['forwarding', 'reference'])
+async def test_reprocessing_any_other_pipeline_leaves_its_filter_to_the_user(ctx, stage):
+    # Only events and indexing pipelines reprocess on the user's approval; a CEF output sends to Kafka.
+    create = mock_stroom(elastic=False, filtered=[5])
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': stage})):
+        gates, result = await reprocessed(ctx, stream_ids=[5])
+    assert gates == [] and json.loads(create.calls.last.request.content)['enabled'] is False
+    assert result['enabled'] is False and 'enable filter 9' in result['hint']
 
 
 @respx.mock
@@ -386,8 +400,8 @@ async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ct
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(
             check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
             build_of=build_of)):
-        gated = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
-    assert gated['status'] == 'needs_approval'
+        made = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
+    assert made['filter_id'] == 9 and create.call_count == 1
 
 
 @respx.mock
@@ -458,7 +472,6 @@ def waiting_on(filter_: dict) -> None:
      'filter 775 selects only streams created after 2026-10-09T22:06:40.000Z'),
     ({'enabled': True, 'terms': [('Feed', 'OTHER'), ('Type', 'Raw Events')]},
      'filter 775 selects Feed EQUALS OTHER, Type EQUALS Raw Events'),
-    ({'enabled': False, 'terms': [('Id', '6')]}, 'filter 775 is disabled'),
 ])
 async def test_waiting_ends_at_once_when_no_filter_will_process_the_stream(ctx, filter_, reason):
     # Seen (Gemma, VS Code): three timeouts of "tasks still running" for a filter whose tracker matched nothing.
@@ -470,6 +483,17 @@ async def test_waiting_ends_at_once_when_no_filter_will_process_the_stream(ctx, 
         f"No processor filter of this pipeline will process stream 6 (ACME, Raw Events, created "
         f"2026-10-09T21:07:40.000Z): {reason}"]
     assert result['hint'].startswith('Nothing will process these streams')
+
+
+@respx.mock
+async def test_waiting_on_a_disabled_filter_asks_for_the_user_to_enable_it(ctx):
+    # Filters are created disabled: nothing runs until the user enables one, so there is nothing to wait out.
+    waiting_on({'enabled': False, 'terms': [('Id', '6')]})
+    started = time.monotonic()
+    result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=60)
+    assert time.monotonic() - started < 5
+    assert result['gate'] == 'waiting' and result['waiting_for'] == 'the user to enable filter(s) [775]'
+    assert 'docUuid=p1' in result['pipeline_link'] and 'Processors tab' in result['hint']
 
 
 @respx.mock
@@ -490,12 +514,8 @@ async def test_indexing_events_from_another_pipeline_needs_the_users_confirmatio
     with patch('tools.processing_writes.guard_from', return_value=guard(built=False)):
         first = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev')
         assert first['status'] == 'needs_confirmation' and "which this server did not build" in first['summary']
-        second = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev',
-                                                                 source_confirmation_id=first['confirmation_id'])
-        assert second['status'] == 'needs_approval'
         done = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev',
-                                                               source_confirmation_id=first['confirmation_id'],
-                                                               approval_id=second['approval_id'])
+                                                               source_confirmation_id=first['confirmation_id'])
     assert done['events_from_pipeline'] == 'Acme-Events'
     assert json.loads(create.calls.last.request.content)['queryData']['expression']['children'][1] == PIPELINE_TERM
 

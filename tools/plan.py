@@ -220,6 +220,11 @@ async def _suggested_columns(ctx: Context, pipeline_uuid: str) -> list[str]:
     return chosen[:8]
 
 
+# Processor filters are created disabled: enabling one is the user's (asked for by the user).
+_ENABLE = "it is created disabled: give the user its pipeline_link and ask them to enable it on the pipeline's Processors tab"
+_ASK = "ask them to, on the pipeline's Processors tab, if they haven't said"
+
+
 def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
               translation: str | None, indexing: str | None, processing: str | None = None,
               index: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
@@ -245,7 +250,10 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
         'stepped': (('step_sample', {'pipeline_uuid': tr, 'stream_ids': raw}),
                     'until the verdict is clean: fix the mapping and build_translation_xslt uuid=... in between'),
         'processed': (('create_processor_filter', {'pipeline_uuid': tr, 'stream_ids': raw}),
-                      'then wait_for_processing and check_events'),
+                      f"{_ENABLE}; once they say they have, wait_for_processing and check_events"),
+        'processed:disabled': (('wait_for_processing', {'pipeline_uuid': tr, 'stream_ids': raw}),
+                               f"only once the user says they enabled its filter ({_ASK}); then check_events"),
+        'processed:running': (('wait_for_processing', {'pipeline_uuid': tr, 'stream_ids': raw}), 'then check_events'),
         'validated': (('check_events', {'stream_ids': events or '<the Events streams wait_for_processing gave>'}),
                       'the server reads the Events itself: never read them back to send them'),
         'documented': (('write_documentation', {'build': build, 'pipeline_uuid': tr, 'stream_ids': raw,
@@ -267,7 +275,10 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                                      'until the verdict is clean (fix the index plan and save_xslt in between); then '
                                      'propose_index_template with the user\'s example'),
         'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events, 'source_pipeline_uuid': tr}),
-                    'then wait_for_processing expect_events=false, and verify_index'),
+                    f"{_ENABLE} (Elasticsearch: once the agreed template is committed); once they say they have, "
+                    f"wait_for_processing expect_events=false, and verify_index"),
+        'indexed:disabled': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
+                             f"only once the user says they enabled its filter ({_ASK}); then verify_index"),
         'indexed:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),
                               'until the verdict is clean; then create_processor_filter'),
         'indexed:running': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
@@ -424,12 +435,17 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         # The template is checked against the documents a clean step writes, and processing needs one: step first.
         indexing = unstepped + [p for p in indexing if p not in unstepped]
         processing = 'unstepped'
+    elif nxt and nxt['step'] == 'processed' and translation:
+        # Its filter made, disabled until the user enables it (asked for by the user): wait for them, then for it.
+        filters = (await processing_status(ctx, translation[0]['uuid']))['filters']
+        processing = None if not filters else 'disabled' if not any(f.get('enabled') for f in filters) else 'running'
     elif nxt and nxt['step'] == 'indexed':
         # Which call indexing needs next: a processor filter, the wait for it, or the searches that verify it.
         pending_ix = [p for p in indexing if not await verified(ctx, p)][0]
         indexing = [pending_ix] + [p for p in indexing if p is not pending_ix]
         filters = (await processing_status(ctx, pending_ix['uuid']))['filters']
-        processing = None if not filters else 'finished' if all(f['finished'] for f in filters) else 'running'
+        processing = (None if not filters else 'disabled' if not any(f.get('enabled') for f in filters)
+                      else 'finished' if all(f['finished'] for f in filters) else 'running')
         found = (by_type.get('ElasticIndex') or by_type.get('Index') or [None])[0]
         if found:
             index = {'uuid': found['uuid'], 'backend': 'elasticsearch' if found['type'] == 'ElasticIndex' else 'lucene',

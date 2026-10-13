@@ -236,6 +236,11 @@ async def agreed(call, **kwargs):
                        if asked['details'].get(k) != (again.get('details') or {}).get(k)}
             raise ToolError(f"{e} -- details changed between asking and agreeing: {changed}") from e
         if not (isinstance(result, dict) and str(result.get('status', '')).startswith('needs_')):
+            if isinstance(result, dict) and result.get('filter_id') and result.get('enabled') is False and 'ctx' in kwargs:
+                # Filters are created disabled: the user enables them in Stroom (here through its API, as they would).
+                await kwargs['ctx'].lifespan_context['stroom'].request(
+                    'PUT', f"/processorFilter/v1/{result['filter_id']}/enabled", True)
+                print(f"    enabled filter {result['filter_id']}, as the user would in Stroom")
             return result
         if result['status'] == 'needs_review':
             # Shown to the user in the chat (an index template, a promotion's layout), then confirmed in a form.

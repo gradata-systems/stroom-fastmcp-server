@@ -166,11 +166,14 @@ async def test_an_index_is_indexed_once_verified_not_once_stepped():
     assert unagreed['next']['call']['arguments']['example_template'].startswith("<the user's example index template")
     # Agreed: the processor filter, then the wait while it runs, then verify_index; done once that passes.
     nxt = [(await _status_of(False, True, filters))['next'] for filters in
-           ([], [{'finished': False}], [{'finished': True}])]
-    assert [n['step'] for n in nxt] == ['indexed'] * 3
-    assert [n['call']['tool'] for n in nxt] == ['create_processor_filter', 'wait_for_processing', 'verify_index']
+           ([], [{'finished': False, 'enabled': True}], [{'finished': True, 'enabled': True}],
+            [{'finished': False, 'enabled': False}])]
+    assert [n['step'] for n in nxt] == ['indexed'] * 4
+    assert [n['call']['tool'] for n in nxt] == ['create_processor_filter', 'wait_for_processing', 'verify_index',
+                                                'wait_for_processing']
+    assert nxt[3]['then'].startswith('only once the user says they enabled its filter')
     assert nxt[2]['call']['arguments']['index_uuid'] == 'ix-doc' and nxt[2]['call']['arguments']['backend'] == 'elasticsearch'
-    done = await _status_of(True, True, [{'finished': True}])
+    done = await _status_of(True, True, [{'finished': True, 'enabled': True}])
     assert {s['step']: s['state'] for s in done['steps']}['indexed'] == 'done'
     assert done['next']['step'] == 'index_documented'
 
@@ -179,9 +182,12 @@ def test_every_indexing_call_takes_its_arguments():
     import inspect
     import main_tools
     tools = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
-    for processing in (None, 'running', 'finished'):
-        call, _ = plan.next_call('indexed', 'b', ['F'], [1], [2], 'p', 'q', processing, {'uuid': 'i', 'backend': 'lucene'})
+    for step, processing in [('indexed', p) for p in (None, 'running', 'finished', 'disabled')] + [
+            ('processed', p) for p in (None, 'running', 'disabled')]:
+        call, then = plan.next_call(step, 'b', ['F'], [1], [2], 'p', 'q', processing, {'uuid': 'i', 'backend': 'lucene'})
         assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), processing
+        # Filters are created disabled (asked for by the user): the next call never waits before the user enables it.
+        assert processing not in (None, 'disabled') or 'enable' in then, (step, processing)
 
 
 async def test_next_says_what_to_do_when_its_tool_is_hidden(monkeypatch):

@@ -251,8 +251,9 @@ def _found(value: Any, key: str) -> list[Any]:
 
 class UserSide:
     """What the user does outside the chat when the agent hands it over: runs the upload commands upload_sample gave
-    (each sends a file from their folder to its ticket's URL, as the curl command would), and has the cluster admin
-    apply an index template propose_index_template gave. Done once each; the agent is told what came of it."""
+    (each sends a file from their folder to its ticket's URL, as the curl command would), has the cluster admin
+    apply an index template propose_index_template gave, and enables in Stroom each processor filter the server made
+    disabled (enabling one is always the user's). Done once each; the agent is told what came of it."""
 
     def __init__(self, workdir: Path):
         self.workdir, self.done = workdir, set()
@@ -282,6 +283,19 @@ class UserSide:
                 response = await client.put(f"{ES}/{line.split(None, 1)[1].lstrip('/')}", content=body,
                                             headers={'Content-Type': 'application/json'})
                 said.append(f"The cluster admin applied {line}: HTTP {response.status_code}")
+            # A filter create_processor_filter or reprocess_streams made: not promotion's, which the user enables
+            # for production when they choose.
+            disabled = sorted({r['filter_id'] for r in results if isinstance(r, dict) and r.get('filter_id')
+                               and r.get('enabled') is False and f"filter {r['filter_id']}" not in self.done})
+            if disabled:
+                import e2e_translation as e2e  # noqa: E402 (dev/ is on the path, via run_eval)
+                key = e2e.env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
+                for filter_id in disabled:
+                    self.done.add(f"filter {filter_id}")
+                    response = await client.put(f"{STROOM_URL}/api/processorFilter/v1/{filter_id}/enabled",
+                                                content='true', headers={'Authorization': f'Bearer {key}',
+                                                                         'Content-Type': 'application/json'})
+                    said.append(f"I enabled processor filter {filter_id} in Stroom: HTTP {response.status_code}")
         if not said:
             return None
         return "I ran what you gave me. The output:\n" + '\n'.join(said)

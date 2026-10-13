@@ -29,6 +29,9 @@ from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, doc_link, gateway_from
 
 STREAM_STORE = {'type': 'StreamStore', 'uuid': '0', 'name': 'StreamStore'}
+# The pipelines whose reprocessing in a build runs on the user's approval (asked for by the user): events (or records)
+# and indexing. Every other filter is created disabled, for the user to enable.
+REPROCESS_STAGES = ('translation', 'records', 'indexing', 'discovery')
 INDEXING_ELEMENTS = {'IndexingFilter', 'ElasticIndexingFilter'}
 SourcePipeline = Annotated[str | None, Field(
     description="Indexing pipelines reading Events: the events pipeline that produced them (one this server built, "
@@ -49,7 +52,7 @@ async def _managed_pipeline(ctx: Context, uuid: str) -> dict[str, Any]:
 
 
 async def _create_filter(stroom: StroomGateway, pipeline: dict[str, Any], expression: dict[str, Any],
-                         priority: int, max_tasks: int, min_create_ms: int | None, enabled: bool = True) -> dict[str, Any]:
+                         priority: int, max_tasks: int, min_create_ms: int | None, enabled: bool) -> dict[str, Any]:
     return await stroom.post('/processorFilter/v1', {
         'pipeline': {'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']},
         'processorType': 'PIPELINE', 'enabled': enabled, 'priority': priority, 'autoPriority': False,
@@ -521,18 +524,18 @@ async def create_processor_filter(
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
-        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Create and enable a processor filter so Stroom processes streams through the pipeline. Scope it to the
-    sample stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task
-    count. Streams the pipeline already processed are refused: use reprocess_streams for those.
+    Create a processor filter, disabled, for Stroom to process streams through the pipeline once the user enables
+    it: enabling a filter is always the user's, in Stroom (the pipeline's Processors tab). Scope it to the sample
+    stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task count. Streams
+    the pipeline already processed are refused: use reprocess_streams for those.
     An indexing pipeline reading Events needs source_pipeline_uuid, and its filter only selects Events from
     exactly that events pipeline. For an Elasticsearch indexing pipeline, the index template for its destination
-    index must have been agreed with the user (propose_index_template, check_index_template), and the approval
-    asks the user to confirm it is committed to the cluster, so the index is created with it; processing then
-    starts. Filters are enabled after the user's approval.
+    index must have been agreed with the user (propose_index_template, check_index_template); the user enables the
+    filter only once it is committed to the cluster, so the index is created with it.
     A translation pipeline only processes the build's own feeds; sample filters run one task at a time.
+    Give the user the reply's pipeline_link and what enabling does; once they say it is enabled, wait_for_processing.
     """
     stroom = gateway_from(ctx)
     pipeline = await _managed_pipeline(ctx, pipeline_uuid)
@@ -592,43 +595,54 @@ async def create_processor_filter(
                             "(ArcSight, say) receives them")
 
     destination = await elastic_destination(stroom, pipeline_uuid)
-    # The first line is the form's heading, so it says what the user is agreeing to (asked for by the user: an
-    # Elasticsearch approval led with the template being committed, and the heading didn't say what it would do).
-    summary = f"Create processor filter and start processing\nProcess {scope} with pipeline '{pipeline['name']}'."
     if destination:
-        committed = await _committed(stroom, pipeline, destination)
-        details['index template'] = committed
-        summary = (f"Create processor filter and start processing\nIndex {scope} with pipeline '{pipeline['name']}'. "
-                   f"Approve only if {committed}.")
-    gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter', summary, details, approval_id)
-    if gate:
-        return gate
+        details['index template'] = await _committed(stroom, pipeline, destination)
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
-    created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms)
+    # Disabled, always (asked for by the user): enabling a filter, and so starting processing, is the user's. Made
+    # disabled, it changes nothing, so there is no approval form: enabling it in Stroom is the user's approval.
+    created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=False)
     consent_from(ctx).discard(source_confirmation_id)
     from tools.plan import build_of, with_next
-    result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': created.get('enabled'),
+    result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': False,
               **({'events_from_pipeline': source['name']} if source else {}),
-              **({'batch_size': _BATCH_NOTE} if small else {})}
+              **({'batch_size': _BATCH_NOTE} if small else {}),
+              **_for_the_user(stroom, pipeline, created['id'], details)}
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
+
+
+_FIRST = ('index template', 'already indexed')
+
+
+def _for_the_user(stroom: StroomGateway, pipeline: dict[str, Any], filter_id: int,
+                  details: dict[str, Any]) -> dict[str, Any]:
+    """What the user needs to enable a disabled filter: where, what it will do, and what must be done first."""
+    first = [f"{details[k]}: enable it only once that is so" if k == 'index template' else details[k]
+             for k in _FIRST if k in details]
+    return {
+        'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline['uuid']),
+        'enabling_it': {k: v for k, v in details.items() if k not in _FIRST},
+        **({'before_enabling': first} if first else {}),
+        'hint': (f"Filter {filter_id} is disabled: enabling it is the user's. Give them the pipeline_link and ask them "
+                 f"to enable filter {filter_id} on its Processors tab"
+                 + (", once what before_enabling says is done" if first else '')
+                 + f", and to tell you when they have. Then wait_for_processing (filter_id={filter_id}); not before.")}
 
 
 async def set_processor_filter_enabled(
         ctx: Context,
         filter_id: Annotated[int, Field(description="Processor filter id, e.g. from processing_status.")],
-        enabled: bool,
-        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
+        enabled: Annotated[bool, Field(description="false: disable it. true is refused: enabling is the user's.")] = False,
 ) -> dict[str, Any]:
-    """Enable (needs approval) or disable a processor filter on a pipeline this server created."""
+    """Disable a processor filter on a pipeline this server created. Enabling one is the user's, in Stroom: this
+    refuses it."""
     stroom = gateway_from(ctx)
     current = await stroom.get(f'/processorFilter/v1/{filter_id}')
     pipeline = await _managed_pipeline(ctx, current['pipelineUuid'])
     if enabled:
-        gate = await consent_from(ctx).require(ctx, 'approval', 'set_processor_filter_enabled',
-                                               f"Enable processor filter {filter_id} on '{pipeline['name']}'",
-                                               {'filter': filter_id, 'pipeline': pipeline['name']}, approval_id)
-        if gate:
-            return gate
+        # Asked for by the user: the server enables no filter, bar reprocessing in a build that the user approves.
+        raise ToolError(f"Enabling a processor filter is the user's: ask them to enable filter {filter_id} on the "
+                        f"Processors tab of pipeline '{pipeline['name']}' "
+                        f"({doc_link(stroom.settings, 'Pipeline', pipeline['uuid'])}), then wait_for_processing.")
     await stroom.request('PUT', f'/processorFilter/v1/{filter_id}/enabled', enabled)
     return {'filter_id': filter_id, 'enabled': enabled}
 
@@ -653,8 +667,10 @@ async def reprocess_streams(
     Process streams again through a pipeline under development, after changing it. At most
     max_reprocess_streams (default 10) per call, run one task at a time. Stroom marks the pipeline's earlier
     outputs for these streams deleted once the new ones are written; pass the returned filter_id to
-    wait_for_processing so only the new outputs count. Needs approval; for Elasticsearch indexing the user
-    approval also confirms the index template is applied on the cluster.
+    wait_for_processing so only the new outputs count. An events (or records) or indexing pipeline: the user
+    approves it in a form, then its filter is created enabled and processing starts (for Elasticsearch indexing
+    the approval also confirms the index template is applied on the cluster). Any other pipeline (CEF output,
+    reference data): the filter is created disabled, for the user to enable.
     Promoted pipelines are refused by the write guard: reprocessing production data is the user's.
     """
     stroom = gateway_from(ctx)
@@ -689,6 +705,14 @@ async def reprocess_streams(
                                       f"'{destination['index name']}': have the cluster admin delete them first, or "
                                       f"they are indexed twice: POST {destination['index name']}/_delete_by_query "
                                       f"{delete}")
+    # Reprocessing an events or indexing pipeline while it is developed in a build runs once the user approves it
+    # (asked for by the user); every other filter is made disabled, for the user to enable.
+    if not await _reprocess_runs(stroom, pipeline_uuid):
+        small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
+        created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=False)
+        return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
+                'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
+                **_for_the_user(stroom, pipeline, created['id'], details)}
     gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
                                            f"Create processor filter and reprocess streams\nReprocess "
                                            f"{len(stream_ids)} stream(s) with '{pipeline['name']}'.",
@@ -696,10 +720,19 @@ async def reprocess_streams(
     if gate:
         return gate
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
-    created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None)
+    created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=True)
     return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
-            **({'batch_size': _BATCH_NOTE} if small else {}),
+            'enabled': True, **({'batch_size': _BATCH_NOTE} if small else {}),
             'hint': f"wait_for_processing with filter_id={created['id']} so only this run's outputs count."}
+
+
+async def _reprocess_runs(stroom: StroomGateway, pipeline_uuid: str) -> bool:
+    """Whether reprocessing runs on the user's approval: an events (or records) or indexing pipeline."""
+    from tools.templates import _shape
+    try:
+        return (await _shape(stroom, pipeline_uuid)).get('stage') in REPROCESS_STAGES
+    except Exception:
+        return await _is_indexing(stroom, pipeline_uuid)
 
 
 def _selects(expression: dict[str, Any] | None, meta: dict[str, Any]) -> bool:
@@ -733,6 +766,22 @@ def _will_process(f: dict[str, Any], meta: dict[str, Any]) -> bool:
     created, earliest, latest = meta.get('createMs'), f.get('minMetaCreateTimeMs'), f.get('maxMetaCreateTimeMs')
     return (bool(f.get('enabled')) and _selects((f.get('queryData') or {}).get('expression'), meta)
             and not (created and earliest and created < earliest) and not (created and latest and created > latest))
+
+
+async def _disabled_only(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[int]:
+    """The disabled filters of the pipeline that would process these streams, where no enabled one will: processing
+    waits on the user enabling them."""
+    if not stream_ids:
+        return []
+    metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in stream_ids], len(stream_ids),
+                                                        op='OR')).get('values') or []]
+    filters = await stroom.processor_filters(pipeline_uuid)
+    waiting: set[int] = set()
+    for meta in metas:
+        selecting = [f for f in filters if _will_process({**f, 'enabled': True}, meta)]
+        if selecting and not any(f.get('enabled') for f in selecting):
+            waiting |= {f['id'] for f in selecting}
+    return sorted(waiting)
 
 
 async def _unselected(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[str]:
@@ -809,6 +858,17 @@ async def wait_for_processing(
             output_type = await output_stream_type(stroom, pipeline_uuid)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
         if checked is None:
+            disabled = await _disabled_only(stroom, pipeline_uuid, [raw for raw, metas in outputs.items() if not metas])
+            if disabled:
+                # Created disabled (asked for by the user): nothing runs until the user enables it, so waiting would
+                # only run out the timeout.
+                return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
+                    'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'waiting',
+                    'waiting_for': f"the user to enable filter(s) {disabled}",
+                    'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
+                    'hint': f"Processing hasn't started: filter(s) {disabled} are disabled, and enabling them is the "
+                            f"user's. Ask them to enable them on the pipeline's Processors tab (pipeline_link) and to "
+                            f"tell you when they have; then wait_for_processing again."})
             checked = await _unselected(stroom, pipeline_uuid, [raw for raw, metas in outputs.items() if not metas])
             if checked:
                 return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {

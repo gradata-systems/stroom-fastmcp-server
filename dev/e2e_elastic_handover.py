@@ -381,21 +381,29 @@ async def main():
         state = {s['step']: s['state'] for s in (await build_status(ctx, csv["build"]))['steps']}
         e2e.check(state['index_template'] == 'done' and state['indexed'] == 'to do', 'agreed; indexing still to do')
 
-        print('\n### the admin has committed it: indexing starts')
-        first = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
-                                                                source_pipeline_uuid=csv['pipeline']['uuid'])
-        e2e.check(first.get('status') == 'needs_approval'
-                  and first['summary'].startswith('Create processor filter and start processing\n')
-                  and first['summary'].endswith(f"Approve only if the agreed index template '{index}' for Elasticsearch "
-                                                f"index '{index}' is committed to cluster {cluster['name']}."),
-                  f"the approval says what it does, and asks whether the template is committed: {first.get('summary')}")
+        print('\n### the filter is made disabled: the user enables it once the admin has committed the template')
         started = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
-                                                                  source_pipeline_uuid=csv['pipeline']['uuid'],
-                                                                  approval_id=first['approval_id'])
+                                                                  source_pipeline_uuid=csv['pipeline']['uuid'])
         stored = await stroom.get(f"/processorFilter/v1/{started['filter_id']}")
-        e2e.check(stored.get('enabled') is True, f"filter {started['filter_id']} created enabled")
-        # No Elasticsearch here: stop it again, so it doesn't fail in the background.
-        await e2e.agreed(processing_writes.set_processor_filter_enabled, ctx=ctx, filter_id=started['filter_id'], enabled=False)
+        e2e.check(stored.get('enabled') is False and started.get('enabled') is False and 'status' not in started,
+                  f"filter {started['filter_id']} created disabled, with no form")
+        e2e.check(started.get('before_enabling') == [f"the agreed index template '{index}' for Elasticsearch index "
+                                                     f"'{index}' is committed to cluster {cluster['name']}: enable it "
+                                                     f"only once that is so"],
+                  f"what must come first is said: {started.get('before_enabling')}")
+        e2e.check('docUuid=' + pipeline['uuid'] in started.get('pipeline_link', '')
+                  and f"enable filter {started['filter_id']}" in started.get('hint', ''), 'the user is given the link')
+        try:
+            await processing_writes.set_processor_filter_enabled(ctx, started['filter_id'], enabled=True)
+            refused = ''
+        except ToolError as e:
+            refused = str(e)
+        e2e.check(refused.startswith("Enabling a processor filter is the user's"), f"the agent can't enable it: {refused[:60]}")
+        waited = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, timeout_seconds=30,
+                                                             expect_events=False)
+        e2e.check(waited.get('gate') == 'waiting' and str(started['filter_id']) in waited.get('waiting_for', ''),
+                  f"waiting says it waits on the user: {waited.get('waiting_for')}")
+        # No Elasticsearch here: left disabled, so it doesn't fail in the background.
 
         print("\n### an ECS field added by hand in Stroom's editor is kept through the agent's next change")
         # Asked by the user: the indexing XSLT edited by hand to write event.created too, then the plan regenerated

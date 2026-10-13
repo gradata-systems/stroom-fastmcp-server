@@ -29,7 +29,7 @@ def _events_streams():
 DONE = {
     'feed': True, 'samples': True, 'converter': True, 'translation': True, 'pipeline': True, 'ev_stepped': True,
     'events': True, 'ev_validated': True, 'ev_documented': True, 'index_doc': True, 'ix_pipeline': True, 'ix_stepped': True,
-    'agreed': True, 'filters': [{'finished': True}], 'verified': True, 'ix_documented': True,
+    'agreed': True, 'filters': [{'finished': True, 'enabled': True}], 'verified': True, 'ix_documented': True,
 }
 
 
@@ -81,7 +81,7 @@ async def status_of(f: dict) -> dict:
         return await plan.status(None, 'b')
 
 
-RUNNING, FINISHED = [{'finished': False}], [{'finished': True}]
+RUNNING, FINISHED = [{'finished': False, 'enabled': True}], [{'finished': True, 'enabled': True}]
 STATES = [
     # The path, in order: each state's next step and the call it names.
     ('nothing yet', facts('lucene', 'feed'), 'feed', 'create_feed'),
