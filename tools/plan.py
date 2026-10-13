@@ -59,6 +59,7 @@ STAGE_1 = [
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
     ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams; fix the mapping and build_translation_xslt uuid=... in between'),
+    ('covered', "An existing feed surveyed until covered: no new kind of event in a full batch, or every stream read; every location stepped clean", 'survey_feed build=..., step_records over every location'),
     ('processed', 'Sample streams processed into Events', 'create_processor_filter, wait_for_processing'),
     ('validated', 'Events validated against the schema and the quality rules', 'check_events'),
     ('documented', 'Events pipeline documented, with its Field mapping generated', 'write_documentation stream_ids=...'),
@@ -70,12 +71,24 @@ STAGE_2 = [
     ('indexed', "Sample Events indexed and found by verify_index's searches (stepping clean is not indexing)", 'create_processor_filter, wait_for_processing, verify_index'),
     ('index_documented', 'Indexing pipeline documented', 'write_documentation stream_ids=<Events streams>'),
 ]
+STAGE_3 = [
+    ('cef_mapping', 'CEF mapping drafted from the Events and saved with its XSLT', 'draft_cef_mapping stream_ids=<Events streams> build=... name=...'),
+    ('cef_pipeline', 'CEF output pipeline with its XSLT and KafkaConfig set', 'create_pipeline (a forwarding template, or standalone=kafka), update_pipeline'),
+    ('cef_stepped', 'The Events stepped clean through it (stepping sends nothing)', 'step_sample over Events streams'),
+    ('cef_documented', 'CEF pipeline documented', 'write_documentation stream_ids=<Events streams>'),
+]
 FINISH = [('promoted', 'Promoted beside sibling sources, filters handed over disabled', 'build_status, promote_build')]
 
 
 def checklist() -> list[dict[str, str]]:
     return [{'step': s, 'what': w, 'tools': t, 'stage': stage}
-            for stage, steps in (('1 events', STAGE_1), ('2 indexing', STAGE_2), ('finish', FINISH)) for s, w, t in steps]
+            for stage, steps in (('1 events', STAGE_1), ('2 indexing', STAGE_2), ('3 output', STAGE_3), ('finish', FINISH))
+            for s, w, t in steps]
+
+
+def onboarding_checklist() -> list[dict[str, str]]:
+    """A new source's steps: without an existing feed's survey rounds or CEF output, which other builds take."""
+    return [s for s in checklist() if s['step'] != 'covered' and s['stage'] != '3 output']
 
 
 def _user(ctx: Context) -> str:
@@ -146,6 +159,28 @@ async def sample_streams(ctx: Context, build: str, docs: list[dict[str, Any]] | 
 
 
 SURVEY = ' - Survey'
+
+
+async def _survey_state(stroom, surveys: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What the build's survey docs say: covered (saturated) when every one is, every example's location (for
+    step_records, at most 60), and examples of the records (to profile the feed's format)."""
+    from utils.stroom import body_text
+    from utils.surveydoc import read_state
+    states = []
+    for d in surveys:
+        try:
+            state = read_state(body_text(await stroom.get_doc('Documentation', d['uuid'])))
+        except Exception:   # a survey doc unreadable: the plan goes on without it
+            state = None
+        if state:
+            states.append(state)
+    if not states:
+        return None
+    examples = [e for s in states for shape in (s.get('shapes') or {}).values() for e in shape.get('examples') or []]
+    locations = [e['location'] for e in examples if e.get('location')]
+    return {'saturated': all(s.get('saturated') for s in states),
+            'locations': locations if 0 < len(locations) <= 60 else None,
+            'sample': '\n'.join(e['text'] for e in examples[:20]) or None}
 
 
 async def source_feeds(ctx: Context, build: str, docs: list[dict[str, Any]]) -> list[str]:
@@ -227,11 +262,15 @@ _ASK = "ask them to, on the pipeline's Processors tab, if they haven't said"
 
 def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
               translation: str | None, indexing: str | None, processing: str | None = None,
-              index: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
+              index: dict[str, Any] | None = None, *, sources: list[str] = (), discovery: bool = False,
+              locations: Any = None, cef: str | None = None, edited_xslt: str | None = None) -> tuple[dict[str, Any], str]:
     """The step's first call, with the arguments the build already gives and <...> for those still to decide, and what
     follows it. One call rather than a list of tools: a small model given several options deliberated between them
     until its context ran out."""
     tr, ix = translation or '<the events pipeline uuid>', indexing or '<the indexing pipeline uuid>'
+    # Indexing Events from a pipeline outside the build (an existing feed's): the one that wrote them.
+    source = translation or "<the events pipeline that wrote those Events (processing_status on their feed names it)>"
+    cx = cef or '<the CEF pipeline uuid>'
     calls = {
         'feed': (('create_feed', {'build': build, 'name': '<the feed name the user confirmed>'}),
                  'then upload_sample once per sample file'),
@@ -249,6 +288,13 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                      "then create_pipeline from the best candidate: it takes the build's converter and XSLT"),
         'stepped': (('step_sample', {'pipeline_uuid': tr, 'stream_ids': raw}),
                     'until the verdict is clean: fix the mapping and build_translation_xslt uuid=... in between'),
+        'stepped:surveyed': (('step_records', {'pipeline_uuid': tr, 'locations': locations}),
+                             "until clean: the feed's own records, stepped where they are; fix the mapping and "
+                             "build_translation_xslt uuid=... in between"),
+        'covered': (('survey_feed', {'feed': sources[0] if sources else '<the feed>', 'build': build}),
+                    "it carries on from the survey doc. New kinds of event: add rules (build_translation_xslt "
+                    "changes=), then step_records over every location so far; again until its coverage says covered. "
+                    "Kinds not worth translating: ask the user (set_shape_handling, a drop rule)"),
         'processed': (('create_processor_filter', {'pipeline_uuid': tr, 'stream_ids': raw}),
                       f"{_ENABLE}; once they say they have, wait_for_processing and check_events"),
         'processed:disabled': (('wait_for_processing', {'pipeline_uuid': tr, 'stream_ids': raw}),
@@ -265,7 +311,9 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                   f'{events}), and create_index_doc with plan= once the user confirms'),
         'indexing_pipeline': (('save_xslt', {'build': build, 'name': '<index name>-XSLT',
                                              'index_plan': '<the plan from draft_index_mapping>'}),
-                              'then create_indexing_pipeline with that XSLT and the index'),
+                              'then create_indexing_pipeline with that XSLT and the index'
+                              + ('' if translation or discovery else
+                                 f', and events_stream_ids={events} (no events pipeline in this build)')),
         'index_template': (('propose_index_template', {
             'pipeline_uuid': ix, 'plan': '<the index plan saved with the indexing XSLT>', 'events_stream_ids': events,
             'example_template': "<the user's example index template, exactly as they pasted it>"}),
@@ -274,7 +322,8 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
         'index_template:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),
                                      'until the verdict is clean (fix the index plan and save_xslt in between); then '
                                      'propose_index_template with the user\'s example'),
-        'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events, 'source_pipeline_uuid': tr}),
+        'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events,
+                                                 **({} if discovery else {'source_pipeline_uuid': source})}),
                     f"{_ENABLE} (Elasticsearch: once the agreed template is committed); once they say they have, "
                     f"wait_for_processing expect_events=false, and verify_index"),
         'indexed:disabled': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
@@ -298,6 +347,21 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
         'index_documented': (('write_documentation', {'build': build, 'pipeline_uuid': ix, 'stream_ids': events,
                                                       'markdown': '<the documentation, from the documentation guide>'}),
                              'the Field mapping section is generated'),
+        'documented:edited': (('rebuild_mapping', {'uuid': edited_xslt or '<the translation XSLT>', 'pipeline_uuid': tr}),
+                              'its XSLT was changed by hand (save_xslt, or in Stroom): this reads the mapping back from '
+                              'it, proven on the sample, so the documentation can be generated; then write_documentation'),
+        'cef_mapping': (('draft_cef_mapping', {'stream_ids': events, 'feeds': list(sources) or '<the Events feed>',
+                                               'build': build, 'name': '<the CEF XSLT name>'}),
+                        "show the user its tables and not-sent list; their changes go back as overrides"),
+        'cef_pipeline': (('create_pipeline', {'build': build, 'name': '<the CEF pipeline name>',
+                                              'template_uuid': '<a forwarding template, or one existing CEF pipelines inherit from>'}),
+                         "or standalone='kafka' when there is no template; set its XSLT and "
+                         "standardKafkaProducer.kafkaConfig (update_pipeline for one left unset)"),
+        'cef_stepped': (('step_sample', {'pipeline_uuid': cx, 'stream_ids': events}),
+                        'stepping sends nothing; then draft_cef_mapping pipeline_uuid= reviews what it writes'),
+        'cef_documented': (('write_documentation', {'build': build, 'pipeline_uuid': cx, 'stream_ids': events,
+                                                    'markdown': '<the documentation, from the documentation guide>'}),
+                           'the CEF section is generated'),
         'promoted': (('promote_build', {'build': build, 'destinations': '<the folders sibling sources use, by type>'}),
                      "with the user's approval"),
     }
@@ -332,7 +396,9 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     for d in by_type.get('XSLT', []):
         doc = await stroom.get_doc('XSLT', d['uuid'])
         kept = read_mapping(doc.get('description'))
-        xslts.append({'name': d['name'], 'uuid': d['uuid'], 'mapping': kept[0] if kept else None})
+        xslts.append({'name': d['name'], 'uuid': d['uuid'], 'mapping': kept[0] if kept else None,
+                      # A discovery plan: raw records indexed as they are, whatever parser reads them (XML too).
+                      'discovery': bool(kept and kept[0] == 'index' and (kept[1] or {}).get('discovery'))})
     pipelines = []
     from tools.pipeline_writes import open_slots
     from tools.pipelines import merge_layers
@@ -342,9 +408,15 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         pipelines.append({**d, 'stage': shape['stage'], 'parser': shape.get('parser'), 'stepped': await stepped_clean(ctx, d),
                           'missing': missing})
     translation = [p for p in pipelines if p['stage'] == 'translation']
-    # A discovery build indexes its raw streams as they are: no events pipeline, its discovery pipeline indexes.
-    discovery = bool([p for p in pipelines if p['stage'] == 'discovery']) and not translation
+    # A discovery build indexes its raw streams as they are: no events pipeline, its discovery pipeline indexes. Known
+    # by its pipeline's raw parser, or by its plan: an XML discovery pipeline from an XMLParser indexing template reads
+    # as indexing.
+    discovery = bool([p for p in pipelines if p['stage'] == 'discovery'] or any(x['discovery'] for x in xslts)) \
+        and not translation
     indexing = [p for p in pipelines if p['stage'] in ('indexing', 'discovery')]
+    # A CEF output build: Events sent on as CEF, a stage of its own (none of the events or indexing steps).
+    forwarding = [p for p in pipelines if p['stage'] == 'forwarding']
+    cef_build = bool(forwarding or any(x['mapping'] == 'cef' for x in xslts))
     documented = {d['name'] for d in by_type.get('Documentation', [])}
     # A build on data already in Stroom (an existing feed, a production pipeline's new version or working copy) has no
     # feed of its own to create and nothing to upload: its feeds, if any, are test feeds. Seen in VS Code: told to
@@ -352,13 +424,24 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     # made a new feed to build an indexing pipeline's next version.
     sources = await source_feeds(ctx, build, docs)
     copies = [p for p in pipelines if p.get('working_copy_of') or p.get('version_of')]
-    surveyed = any(d['name'].endswith(SURVEY) for d in by_type.get('Documentation', []))
-    existing = bool(sources or copies or surveyed)
+    surveys = [d for d in by_type.get('Documentation', []) if d['name'].endswith(SURVEY)]
+    surveyed = bool(surveys)
+    # A survey of the build's own feed (a new source's sample) leaves it a new source: only the feeds outside the build
+    # make it one on existing data (source_feeds leaves the build's own out). Seen: onboarding surveyed its sample
+    # with the build, and the plan skipped indexing as if the feed already existed.
+    existing = bool(sources or copies)
     own_feed = bool(by_type.get('Feed'))
-    # Which stages the build does: on existing data, those it has the pipelines (or survey, or index doc) for.
-    stage_1 = not existing or bool(translation) or surveyed
-    stage_2 = not existing or bool(indexing) or bool(by_type.get('Index') or by_type.get('ElasticIndex'))
-    for p in translation:
+    survey = await _survey_state(stroom, surveys) if surveys and existing else None
+    if survey and not fmt and survey.get('sample'):
+        # The format of an existing feed, from the survey's examples: whether a text converter is needed.
+        fmt = profile(survey['sample'])
+    # Which stages the build does: on existing data, those it has the pipelines (or survey, or index doc) for. A CEF
+    # output build does neither, whatever it works from.
+    cef_only = cef_build and not translation and not indexing and not surveyed
+    new_source = not existing and not cef_only
+    stage_1 = new_source or bool(translation) or surveyed
+    stage_2 = new_source or bool(indexing) or bool(by_type.get('Index') or by_type.get('ElasticIndex'))
+    for p in pipelines:
         if p.get('working_copy_of'):
             # A working copy's documentation is the production pipeline's, under its name.
             try:
@@ -395,6 +478,8 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                        or (existing and bool(translation) and any(x['mapping'] != 'index' for x in xslts)),
         'pipeline': bool(translation) and not any(p['missing'] for p in translation),
         'stepped': any(p['stepped'] for p in translation),
+        # Not recorded (not needed) unless the build surveys an existing feed.
+        'covered': (bool(survey.get('saturated')) if survey else None),
         'processed': bool(events),
         'validated': bool(translation) and all([await validated(ctx, p) for p in translation]),
         'documented': bool(translation) and all(p['name'] in documented for p in translation) and not stale,
@@ -404,15 +489,24 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                  or any(p in copies for p in indexing),
         'indexing_pipeline': bool(indexing),
         'index_template': agreed,
-        'indexed': bool(indexing) and all([await verified(ctx, p) for p in indexing]),
+        # A working copy of a production indexing pipeline is stepped clean in the build; indexing production Events
+        # into its index, after promotion, is the user's.
+        'indexed': bool(indexing) and all([(p.get('working_copy_of') and p['stepped']) or await verified(ctx, p)
+                                           for p in indexing]),
         'index_documented': bool(indexing) and all(p['name'] in documented for p in indexing),
+        'cef_mapping': any(x['mapping'] == 'cef' for x in xslts) or any(p.get('working_copy_of') for p in forwarding),
+        'cef_pipeline': bool(forwarding) and not any(p['missing'] for p in forwarding),
+        'cef_stepped': bool(forwarding) and all(p['stepped'] for p in forwarding),
+        'cef_documented': bool(forwarding) and all(p['name'] in documented for p in forwarding) and not stale,
         'promoted': False,
     }
     # Not needed when their state is None: a converter for a format that needs none, a template for Lucene.
-    not_needed = {'converter', 'index_template'}
+    not_needed = {'converter', 'index_template', 'covered'}
     # A discovery build indexes its raw streams: no events pipeline at all (a converter only for delimited text).
     skipped = {'translation', 'pipeline', 'stepped', 'processed', 'validated', 'documented'} if discovery else set()
     stage_steps = {stage: {s['step'] for s in checklist() if s['stage'] == stage} for stage in ('1 events', '2 indexing')}
+    if not survey:
+        skipped.add('covered')
     if existing and not own_feed:
         # Nothing of its own to process: production records are stepped where they are (a test feed, if the build
         # makes one, brings these steps back).
@@ -421,6 +515,8 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         skipped |= stage_steps['1 events']
     if not stage_2:
         skipped |= stage_steps['2 indexing']
+    if not cef_build:
+        skipped |= {s['step'] for s in checklist() if s['stage'] == '3 output'}
     steps = []
     for item in checklist():
         state = done.get(item['step'])
@@ -456,17 +552,32 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     raw_ids: Any = [m['id'] for m in raw] or (f"<recent raw streams of {named} (find_streams)>" if existing else [])
     events_ids: Any = (raw_ids if discovery else events[:20]) or (
         f"<recent Events streams from {named} (find_streams stream_type=Events)>" if existing else [])
+    edited = None
+    if nxt and nxt['step'] == 'documented' and translation and any('differs from what its mapping generates' in c
+                                                                   for c in checks):
+        # Changed by hand (save_xslt, or in Stroom): documentation would stay stale until the mapping is read back.
+        processing = 'edited'
+        kept = await kept_mapping(ctx, translation[0]['uuid'])
+        edited = ((kept or {}).get('xslt') or {}).get('uuid')
+    elif nxt and nxt['step'] == 'stepped' and survey:
+        processing = 'surveyed'
+    if cef_only or (cef_build and not raw):
+        events_ids = events_ids or (f"<recent Events streams from {named} (find_streams stream_type=Events)>")
     call, then = next_call(nxt['step'] if nxt else 'promoted', build, [d['name'] for d in by_type.get('Feed', [])],
                            raw_ids, events_ids,
                            translation[0]['uuid'] if translation else None,
-                           indexing[0]['uuid'] if indexing else None, processing, index)
-    if existing and not stage_1 and not stage_2:
-        # On existing data, before any pipeline: which stage comes next is the workflow's (a survey, a copy, an index).
+                           indexing[0]['uuid'] if indexing else None, processing, index,
+                           sources=sources, discovery=discovery, edited_xslt=edited,
+                           locations=(survey or {}).get('locations') or "<every location survey_feed gave>",
+                           cef=forwarding[0]['uuid'] if forwarding else None)
+    if existing and not stage_1 and not stage_2 and not cef_build:
+        # On existing data, before any pipeline: which stage comes next is the work's (a survey, a copy, an index).
         nxt = None
         call = {'tool': 'find_streams', 'arguments': {'feed': sources[0] if sources else '<the feed>'}}
-        then = ("this build works from data already in Stroom: create no feed and upload nothing. Carry on with the "
-                "workflow: onboard_existing_feed surveys the feed (survey_feed); an update copies the production "
-                "pipeline (copy_pipeline); index_event_data indexes its Events streams")
+        then = ("this build works from data already in Stroom: create no feed and upload nothing. Then, for what the "
+                "user asked: an events pipeline for the feed, survey_feed build=... (its kinds of event); a production "
+                "pipeline's new version or working copy, copy_pipeline; indexing its Events, get_field_conventions "
+                "and the index; sending its Events on as CEF, draft_cef_mapping")
         start = {'step': 'existing data', 'do': f"Work from {named}, already in Stroom", 'call': call, 'then': then}
     return {
         'build': build,
@@ -481,7 +592,7 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         'steps': steps,
         **({'works_from': sources} if existing else {}),
         'next': {'step': nxt['step'], 'do': nxt['what'], 'call': call, 'then': then} if nxt else
-                start if existing and not stage_1 and not stage_2 else
+                start if existing and not stage_1 and not stage_2 and not cef_build else
                 {'step': 'promoted', 'do': 'Everything is in place: promote_build with the user\'s approval',
                  'call': call, 'then': then},
     }
@@ -583,7 +694,7 @@ async def start_onboarding(
     fmt = profiled['format']
     parser = PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0]
     template = await templates_reading(ctx, fmt)
-    plan = checklist()
+    plan = onboarding_checklist()
     # Given streams, the feed and samples exist already: the build itself says what is next.
     nxt = await next_step(ctx, name) if stream_ids else None
     return {
@@ -632,7 +743,7 @@ async def _files_first(ctx: Context, source_name: str, files: list[str], build: 
     name = _build_name(source_name, build)
     folder = await guard_from(ctx).build_folder(name)
     remember_build(ctx, name)
-    plan = checklist()
+    plan = onboarding_checklist()
     step, do = 'feed', plan[0]['what']
     call, then = next_call('feed', name, [], [], [], None, None)
     return {
@@ -671,7 +782,7 @@ STEP_OF = {
 def annotate_tools(modules) -> None:
     """Prefix each core tool's description with its onboarding plan step, e.g. 'Onboarding step 5 of 14, the
     events pipeline: ...'. Done once, before registration."""
-    steps = [s['step'] for s in checklist()]
+    steps = [s['step'] for s in onboarding_checklist()]
     for module in modules:
         for tool in module.ALL_TOOLS:
             step = STEP_OF.get(tool.__name__)
