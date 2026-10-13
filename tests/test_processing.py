@@ -456,6 +456,7 @@ def waiting_on(filter_: dict) -> None:
     """Stream 6 of feed ACME, made a minute after the feed, with no output yet; p1 has the one filter given."""
     respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
         {'processorFilter': {'id': 775, 'pipelineUuid': 'p1', 'enabled': filter_['enabled'],
+                             'processor': {'id': 70, 'enabled': filter_.get('processor', True)},
                              'minMetaCreateTimeMs': filter_.get('min'), 'queryData': {'expression': {
                                  'type': 'operator', 'children': [
                                      {'type': 'term', 'field': f, 'condition': 'EQUALS', 'value': v}
@@ -494,6 +495,34 @@ async def test_waiting_on_a_disabled_filter_asks_for_the_user_to_enable_it(ctx):
     assert time.monotonic() - started < 5
     assert result['gate'] == 'waiting' and result['waiting_for'] == 'the user to enable filter(s) [775]'
     assert 'docUuid=p1' in result['pipeline_link'] and 'Processors tab' in result['hint']
+
+
+@respx.mock
+async def test_waiting_on_a_disabled_processor_asks_for_the_user_to_enable_it(ctx):
+    # A disabled processor runs none of its filters, enabled or not (seen on the local stack: the filter enabled, the
+    # processor Stroom made with it still disabled, and nothing processed).
+    waiting_on({'enabled': True, 'processor': False, 'terms': [('Id', '6')]})
+    result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=60)
+    assert result['gate'] == 'waiting' and result['waiting_for'].startswith(
+        'the user to enable the processor of filter(s) [775]')
+
+
+@respx.mock
+@pytest.mark.parametrize('existing, enabled, enables_processor', [
+    ([], False, True),     # the processor Stroom made with this filter: enabled, so the filter is the one choice
+    ([{'processorFilter': {'id': 5, 'pipelineUuid': 'p1'}}], False, False),  # one already there keeps its state
+    ([{'processorFilter': {'id': 5, 'pipelineUuid': 'p1'}}], True, True),    # unless the user approved this run
+])
+async def test_a_new_filter_s_disabled_processor(ctx, existing, enabled, enables_processor):
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': existing}))
+    respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={
+        'id': 9, 'enabled': enabled, 'processor': {'id': 70, 'enabled': False}}))
+    enable = respx.put(f'{API}/processor/v1/70/enabled').mock(return_value=httpx.Response(204))
+    await processing_writes._create_filter(processing_writes.gateway_from(ctx), {'uuid': 'p1', 'name': 'P'},
+                                           {'type': 'operator', 'op': 'AND', 'children': []}, 10, 1, None, enabled)
+    assert enable.called is enables_processor
+    if enables_processor:
+        assert json.loads(enable.calls.last.request.content) is True
 
 
 @respx.mock
@@ -569,6 +598,7 @@ async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(
     # Asked for by the user: Feed IS_DOC_REF, not EQUALS a name, so Stroom keeps the filter as a dependency of the feed.
     respx.get(f'{API}/feed/v1/getDocRefForName/ACME').mock(return_value=httpx.Response(
         200, json={'type': 'Feed', 'uuid': 'feed-uuid', 'name': 'ACME'}))
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
     create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 22}))
     pipeline = {'uuid': 'tp', 'name': 'Acme-Events'}
     await processing_writes.create_promotion_filters(

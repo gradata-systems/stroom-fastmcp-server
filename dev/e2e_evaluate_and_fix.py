@@ -117,7 +117,7 @@ async def production(ctx, stroom: StroomGateway, stamp: str) -> dict:
         [processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')], 10))['values'])
     # Its own processor filter on its feed, as production would have.
     await processing_writes._create_filter(stroom, pipeline, {'type': 'operator', 'op': 'AND', 'children': [
-        processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')]}, 10, 2, None)
+        processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')]}, 10, 2, None, enabled=True)
     done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], raw)
     events = [s['events'][0] for s in done['streams']]
     e2e.check(len(raw) == 2 and len(events) == 2, f'production: raw streams {raw}, Events {events}')

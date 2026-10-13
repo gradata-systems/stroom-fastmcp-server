@@ -53,12 +53,21 @@ async def _managed_pipeline(ctx: Context, uuid: str) -> dict[str, Any]:
 
 async def _create_filter(stroom: StroomGateway, pipeline: dict[str, Any], expression: dict[str, Any],
                          priority: int, max_tasks: int, min_create_ms: int | None, enabled: bool) -> dict[str, Any]:
-    return await stroom.post('/processorFilter/v1', {
+    had_processor = bool(await stroom.processor_filters(pipeline['uuid']))
+    created = await stroom.post('/processorFilter/v1', {
         'pipeline': {'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']},
         'processorType': 'PIPELINE', 'enabled': enabled, 'priority': priority, 'autoPriority': False,
         'reprocess': False, 'export': False, 'maxProcessingTasks': max_tasks,
         'minMetaCreateTimeMs': min_create_ms,
         'queryData': {'dataSource': STREAM_STORE, 'expression': expression}})
+    # Stroom gives a pipeline's new processor its first filter's enabled flag, and a disabled processor runs none of
+    # its filters: the user enabling the filter alone saw nothing processed. A processor whose filters are all
+    # disabled runs nothing, so the one this filter made is enabled and enabling stays the filter's, the user's
+    # choice. One already there keeps its state, unless the user approved this run.
+    processor = created.get('processor') or {}
+    if processor.get('id') and processor.get('enabled') is False and (enabled or not had_processor):
+        await stroom.request('PUT', f"/processor/v1/{processor['id']}/enabled", True)
+    return created
 
 
 def _selected_ids(expression: dict[str, Any] | None) -> set[int]:
@@ -772,20 +781,28 @@ def _will_process(f: dict[str, Any], meta: dict[str, Any]) -> bool:
             and not (created and earliest and created < earliest) and not (created and latest and created > latest))
 
 
-async def _disabled_only(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[int]:
-    """The disabled filters of the pipeline that would process these streams, where no enabled one will: processing
-    waits on the user enabling them."""
+async def _disabled_only(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> str:
+    """What the user must enable before the pipeline processes these streams ('' when something enabled will): its
+    disabled filters that would, or the disabled processor they hang on, which runs none of them."""
     if not stream_ids:
-        return []
+        return ''
     metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in stream_ids], len(stream_ids),
                                                         op='OR')).get('values') or []]
     filters = await stroom.processor_filters(pipeline_uuid)
     waiting: set[int] = set()
     for meta in metas:
         selecting = [f for f in filters if _will_process({**f, 'enabled': True}, meta)]
-        if selecting and not any(f.get('enabled') for f in selecting):
+        if selecting and not any(f.get('enabled') and (f.get('processor') or {}).get('enabled') is not False
+                                 for f in selecting):
             waiting |= {f['id'] for f in selecting}
-    return sorted(waiting)
+    if not waiting:
+        return ''
+    stopped = sorted(i for i in waiting if (next(f for f in filters if f['id'] == i).get('processor') or {})
+                     .get('enabled') is False)
+    disabled = sorted(i for i in waiting if not next(f for f in filters if f['id'] == i).get('enabled'))
+    return ' and '.join(([f"filter(s) {disabled}"] if disabled else [])
+                        + ([f"the processor of filter(s) {stopped} (the pipeline's processor row, above its "
+                            f"filters)"] if stopped else []))
 
 
 async def _unselected(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[str]:
@@ -868,11 +885,11 @@ async def wait_for_processing(
                 # only run out the timeout.
                 return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
                     'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'waiting',
-                    'waiting_for': f"the user to enable filter(s) {disabled}",
+                    'waiting_for': f"the user to enable {disabled}",
                     'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
-                    'hint': f"Processing hasn't started: filter(s) {disabled} are disabled, and enabling them is the "
-                            f"user's. Ask them to enable them on the pipeline's Processors tab (pipeline_link) and to "
-                            f"tell you when they have; then wait_for_processing again."})
+                    'hint': f"Processing hasn't started: {disabled} disabled, and enabling is the user's. Ask them to "
+                            f"enable it on the pipeline's Processors tab (pipeline_link) and to tell you when they "
+                            f"have; then wait_for_processing again."})
             checked = await _unselected(stroom, pipeline_uuid, [raw for raw, metas in outputs.items() if not metas])
             if checked:
                 return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
