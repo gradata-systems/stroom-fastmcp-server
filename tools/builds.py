@@ -1146,8 +1146,9 @@ async def promote_build(
     for path in creating:
         parent, name = path.rsplit('/', 1)
         # Production folders, so not managed: only generated, to show the server made them.
+        # One made since the review (by someone else, or in Stroom's UI while the form was open) is used, not twinned.
         folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
-        done.append(f"created folder {path}")
+        done.append(f"created folder {path}" if folders[path].get('_created') else f"used the existing folder {path}")
     done += versioned
     from tools.processing_writes import development_batch
     for step in plan:

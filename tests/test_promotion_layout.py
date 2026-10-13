@@ -11,7 +11,7 @@ def stroom_with(docs: dict[str, dict], folders: dict[str, str]) -> SimpleNamespa
     async def get_doc(kind, uuid):
         return docs[uuid]
 
-    async def find_documents(name, kinds, limit):
+    async def find_documents(name, kinds, limit, offset=0):
         return {'values': [{'docRef': {'uuid': uuid, 'name': d['name'], 'type': kinds[0]},
                             'path': folders[uuid].replace('/', ' / ')}
                            for uuid, d in docs.items() if d['name'] == name and uuid in folders]}

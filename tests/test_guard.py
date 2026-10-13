@@ -35,7 +35,7 @@ class FakeExplorer:
         self.folders[path] = node
         return node
 
-    async def find_documents(self, name, types, limit):
+    async def find_documents(self, name, types, limit, offset=0):
         return {'values': [{'docRef': n, 'path': p.rsplit('/', 1)[0].replace('/', ' / ')}
                            for p, n in self.folders.items() if n['name'] == name and n['type'] in types]}
 
@@ -69,6 +69,75 @@ async def test_resolve_folder_finds_what_exists_and_names_what_is_missing():
     assert node['_path'] == 'System/Feeds' and missing == []
     with pytest.raises(ToolError, match='starting with System/'):
         await guard.resolve_folder('Feeds/Events')
+
+
+async def test_a_folder_already_there_is_used_not_twinned():
+    # Stroom lets a parent hold several folders of the same name.
+    stroom = FakeExplorer('System/Feeds', 'System/Feeds/Events')
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    feeds = {**stroom.folders['System/Feeds'], '_path': 'System/Feeds'}
+    events = await guard.create_folder(feeds, 'Events', ['mcp-generated'])
+    assert events['uuid'] == stroom.folders['System/Feeds/Events']['uuid'] and not events.get('_created')
+    assert not [r for r in stroom.requests if r[1] in ('/explorer/v2/create', '/explorer/v2/addTags')]
+    acme = await guard.create_folder(feeds, 'Acme', ['mcp-generated'])
+    assert acme['_created'] and acme['_path'] == 'System/Feeds/Acme'
+
+
+async def test_a_folder_past_the_first_page_of_the_search_is_found():
+    # A name like Events matches hundreds of folders in production.
+    stroom = FakeExplorer('System/Feeds', 'System/Feeds/Events')
+    others = [{'docRef': {'type': 'Folder', 'uuid': f'o-{n}', 'name': 'Events'}, 'path': f'System / Source {n}'}
+              for n in range(500)]
+    mine = (await FakeExplorer.find_documents(stroom, 'Events', ['Folder'], 500))['values']
+
+    async def search(name, types, limit, offset=0):
+        return {'values': (others + mine)[offset:offset + limit]}
+    stroom.find_documents = search
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    found = await guard.create_folder({'uuid': 'u-1', 'name': 'Feeds', '_path': 'System/Feeds'}, 'Events', [])
+    assert found['uuid'] == stroom.folders['System/Feeds/Events']['uuid'] and not found.get('_created')
+
+
+async def test_a_folder_missing_from_a_stale_explorer_is_looked_for_again_before_one_is_made(monkeypatch):
+    # On the local stack: the first explorer read after any change came from Stroom's old tree model, however long
+    # after; the next was current.
+    class Stale(FakeExplorer):
+        reads = 0
+
+        async def find_documents(self, name, types, limit, offset=0):
+            self.reads += 1
+            return {'values': []} if self.reads == 1 else await super().find_documents(name, types, limit)
+
+    stroom = Stale('System/Feeds', 'System/Feeds/Events')
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    feeds = {**stroom.folders['System/Feeds'], '_path': 'System/Feeds'}
+    monkeypatch.setattr('security.guard._SETTLE', (1, 2))
+    with patch('security.guard.asyncio.sleep', AsyncMock()) as sleep:
+        events = await guard.create_folder(feeds, 'Events', [])
+    assert events['uuid'] == stroom.folders['System/Feeds/Events']['uuid'] and not events.get('_created')
+    assert sleep.await_count == 1
+    with patch('security.guard.asyncio.sleep', AsyncMock()) as sleep:
+        acme = await guard.create_folder(feeds, 'Acme', [])     # really not there: looked for three times, then made
+    assert acme['_created'] and sleep.await_count == 2
+    stroom = Stale('System/Feeds', 'System/Feeds/Events')
+    with patch('security.guard.asyncio.sleep', AsyncMock()) as sleep:      # a read only doesn't wait
+        assert await WriteGuard(stroom, 'MCP Workspace').find_child_folder(feeds, 'Events') is None
+    assert not sleep.await_count
+
+
+async def test_folders_asked_for_at_once_are_made_once():
+    import asyncio
+
+    class SlowSearch(FakeExplorer):
+        async def find_documents(self, name, types, limit, offset=0):
+            await asyncio.sleep(0)      # lets the other call in, as Stroom's round trip would
+            return await super().find_documents(name, types, limit)
+
+    stroom = SlowSearch('System/MCP Workspace')
+    guard = WriteGuard(stroom, 'MCP Workspace')
+    made = await asyncio.gather(guard.build_folder('acme-v1'), guard.build_folder('acme-v1'))
+    assert made[0]['uuid'] == made[1]['uuid']
+    assert len([r for r in stroom.requests if r[1] == '/explorer/v2/create']) == 1
 
 
 async def test_a_document_whose_filling_fails_is_deleted_not_left_empty():
@@ -193,7 +262,7 @@ async def test_two_docs_made_one_after_the_other_share_one_build_folder():
     stroom = FakeExplorer('System/MCP Workspace')
     indexed = dict(stroom.folders)
 
-    async def lagging_search(name, types, limit):    # only what was there before: new folders aren't indexed yet
+    async def lagging_search(name, types, limit, offset=0):    # only what was there before: new folders aren't indexed yet
         return {'values': [{'docRef': n, 'path': p.rsplit('/', 1)[0].replace('/', ' / ')}
                            for p, n in indexed.items() if n['name'] == name and n['type'] in types]}
     stroom.find_documents = lagging_search

@@ -26,6 +26,8 @@ KEPT_MAPPING = 'mcp-kept-mapping'
 logger = logging.getLogger(__name__)
 _BUILD = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
 _PATH_ATTEMPTS = 4
+# Seconds before looking again for a folder not found, before one is made (find_child_folder settle).
+_SETTLE = (1, 2)
 _TREE_FILTER = {'includedTypes': None, 'includedRootTypes': None, 'tags': None, 'nodeFlags': None,
                 'requiredPermissions': ['VIEW'], 'nameFilter': None, 'nameFilterChange': False, 'recentItems': None}
 
@@ -103,7 +105,20 @@ class WriteGuard:
             placed['_open'] = [*parent['_open'], node['uniqueKey']]
         return placed
 
-    async def find_child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any] | None:
+    async def find_child_folder(self, parent: dict[str, Any], name: str, settle: bool = False) -> dict[str, Any] | None:
+        """The parent's folder of that name, or None. With settle (before making one, or saying it will be made), a miss
+        is looked for again: Stroom answers the first explorer read after any change, anyone's, from its old tree model
+        while it rebuilds, so a folder that has been there for a while can be missing from it (the tree and the search
+        both). The read starts the rebuild; a read a moment later has it (seen on the local stack: the second read)."""
+        found = await self._find_child_folder(parent, name)
+        for pause in _SETTLE if settle else ():
+            if found:
+                break
+            await asyncio.sleep(pause)
+            found = await self._find_child_folder(parent, name)
+        return found
+
+    async def _find_child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any] | None:
         known = self._known_folders().get((parent.get('uuid'), name))
         if known:
             if await self._stroom.post('/explorer/v2/getFromDocRef', _ref(known)):
@@ -113,27 +128,49 @@ class WriteGuard:
         # Just deleted, the tree still lists it for a moment: only one that still resolves counts.
         if child and await self._stroom.post('/explorer/v2/getFromDocRef', _ref(child)):
             return self._placed(parent, name, child)
-        found = await self._stroom.find_documents(name, ['Folder'], 200)
-        for value in found.get('values') or []:
-            ref = value['docRef']
-            if ref.get('type') == 'Folder' and ref.get('name') == name:
-                parent_path = (value.get('path') or '').replace(' / ', '/')
-                if parent_path == parent.get('_path'):
-                    node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
-                    if not node:
-                        continue    # just deleted: Stroom's explorer search can still list it for a moment
-                    return self._placed(parent, name, node)
-        return None
+        # Every page: a name like Events or Indexing matches hundreds of folders in production (and the search matches
+        # names containing it), and the one under this parent missed off the first page would be made again.
+        offset, page = 0, 500
+        while True:
+            values = (await self._stroom.find_documents(name, ['Folder'], page, offset)).get('values') or []
+            for value in values:
+                ref = value['docRef']
+                if ref.get('type') == 'Folder' and ref.get('name') == name:
+                    parent_path = (value.get('path') or '').replace(' / ', '/')
+                    if parent_path == parent.get('_path'):
+                        node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
+                        if not node:
+                            continue    # just deleted: Stroom's explorer search can still list it for a moment
+                        return self._placed(parent, name, node)
+            if len(values) < page or offset >= 20 * page:
+                return None
+            offset += page
+
+    def _folder_lock(self, parent: dict[str, Any], name: str) -> asyncio.Lock:
+        # One at a time per folder, kept with the Stroom gateway like the known folders: two calls at once (an agent's
+        # parallel tool calls) each found no folder and each made one.
+        locks = getattr(self._stroom, '_folder_locks', None)
+        if locks is None:
+            locks = {}
+            setattr(self._stroom, '_folder_locks', locks)
+        return locks.setdefault((parent.get('uuid'), name), asyncio.Lock())
 
     async def create_folder(self, parent: dict[str, Any], name: str, tags: list[str]) -> dict[str, Any]:
-        node = await self._stroom.post('/explorer/v2/create', {
-            'docType': 'Folder', 'docName': name, 'destinationFolder': _strip(parent),
-            'permissionInheritance': 'DESTINATION'})
-        await self.tag([_ref(node)], tags)
-        return self._placed(parent, name, node)
+        """The parent's folder of that name: the one already there if there is one, else a new one tagged `tags`
+        (marked '_created'). Stroom lets a parent hold several folders of the same name, so making one without looking
+        first left twins (asked for by the user). One already there keeps its tags."""
+        async with self._folder_lock(parent, name):
+            found = await self.find_child_folder(parent, name, settle=True)
+            if found:
+                return found
+            node = await self._stroom.post('/explorer/v2/create', {
+                'docType': 'Folder', 'docName': name, 'destinationFolder': _strip(parent),
+                'permissionInheritance': 'DESTINATION'})
+            await self.tag([_ref(node)], tags)
+            return {**self._placed(parent, name, node), '_created': True}
 
     async def _child_folder(self, parent: dict[str, Any], name: str) -> dict[str, Any]:
-        return await self.find_child_folder(parent, name) or await self.create_folder(parent, name, [MANAGED, GENERATED])
+        return await self.create_folder(parent, name, [MANAGED, GENERATED])
 
     async def system_node(self) -> dict[str, Any]:
         roots = await self._stroom.post('/explorer/v2/fetchExplorerNodes', {
@@ -150,7 +187,7 @@ class WriteGuard:
         parts = folder_parts(path)
         node = await self.system_node()
         for n, name in enumerate(parts[1:], start=1):
-            child = await self.find_child_folder(node, name)
+            child = await self.find_child_folder(node, name, settle=True)
             if child is None:
                 return node, parts[n:]
             node = child

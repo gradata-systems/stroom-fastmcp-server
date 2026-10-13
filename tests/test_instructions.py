@@ -14,7 +14,7 @@ FEEDS = {'KEYCLOAK-V1.2': 'System / Feeds / Events / Keycloak'}
 class FakeStroom:
     settings = SETTINGS
 
-    async def find_documents(self, name, types, limit):
+    async def find_documents(self, name, types, limit, offset=0):
         if types == ['Documentation']:
             values = [{'docRef': {'type': 'Documentation', 'uuid': u, 'name': 'AGENTS'}, 'path': path}
                       for u, (path, _) in DOCS.items()]

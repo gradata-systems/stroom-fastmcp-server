@@ -45,7 +45,8 @@ up a promotion.
     name, so old and new are told apart at a glance. The version's new index, documentation and dashboard go in
     with it. Brand-new documents go where the agent proposes, following
     where sibling sources live, for example `System/Feeds/Events/<Source>`. Ask for any folder to change, and the
-    agent shows the tree again.
+    agent shows the tree again. A folder that already exists is always used, never made again beside itself (Stroom
+    would allow two of the same name in one folder); that goes for the workspace and build folders too.
 
     When a build promotes documents of more than one role, its role subfolders (Events or Records, Indexing, CEF,
     Reference) are kept under each destination, as the tree shows them, so `…/V1.1/Events/` and `…/V1.1/Indexing/`
