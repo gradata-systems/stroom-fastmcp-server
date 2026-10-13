@@ -54,6 +54,9 @@ up a promotion.
     whether you want them; say no, and each document goes straight into its folder. A folder you give for one
     particular document is used as you give it.
 
+    An evaluation report is a doc of its own, `<pipeline> - Evaluation`, and goes beside the pipeline it evaluates
+    (over an earlier report there, after a backup); the pipeline's documentation is left as it is.
+
     A build that works from data already in Stroom (an existing feed, or a new version or working copy of a
     production pipeline) keeps any feed it made in the workspace: those are test feeds, holding copies of
     production records. Give one a folder of its own if it is really a new production feed (a new feed version, say).

@@ -2,13 +2,21 @@
 
 ## Processor filters
 
-Every processor filter the server creates or enables needs the user's approval, and is limited:
+The server creates every processor filter **disabled**: enabling one, and so starting processing, is yours, on the
+pipeline's Processors tab in Stroom. The agent gives you the pipeline's link and what enabling it will do (which
+streams, where the output goes, and anything to do first, such as having the Elasticsearch index template
+committed), then waits for you to say it's enabled before it waits for the processing. A disabled filter changes
+nothing, so creating one asks for no approval. The agent can disable a filter, never enable one.
 
-| Filter | Selects | Task limit |
-| --- | --- | --- |
-| Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
-| Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
-| A promoted pipeline's feed | Everything on its feed, existing data included, except the streams the pipeline already processed in its build (`NOT Id IN ...`), **created disabled** | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
+The one exception is **reprocessing an events or indexing pipeline in a build**, after a fix: you approve it in a
+form, and the server creates the filter enabled so it runs straight away. Reprocessing any other pipeline in a build
+(a CEF output, which sends to Kafka, or reference data) is created disabled like the rest.
+
+| Filter | Selects | Created | Task limit |
+| --- | --- | --- | --- |
+| Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | Disabled | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
+| Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
+| A promoted pipeline's feed | Everything on its feed, existing data included, except the streams the pipeline already processed in its build (`NOT Id IN ...`) | Disabled | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 
 Other limits:
 
@@ -38,14 +46,15 @@ The server has no Elasticsearch connection or credentials. Everything goes throu
    in which case it is checked again.
 3. Your **cluster admin applies** the agreed template (a Dev Tools request). Without an example, the template makes a **data stream**,
    named as the index, with `@timestamp` as its time; with one, the example decides (index or data stream).
-4. The approval that starts indexing asks the user to confirm the template has been applied, since documents
-   arriving first would create the index without it.
+4. You **enable the indexing filter** only once the template has been applied, since documents arriving first would
+   create the index without it: the agent says so with the filter's link. Approving a reprocessing into Elasticsearch
+   confirms it the same way.
 
 While a pipeline is in the workspace, indexing runs with a batch size of 10, so a document Elasticsearch rejects
 comes back whole in the Error stream. The template's default is restored once indexing completes without errors,
 and promotion makes sure of it.
 
-Reprocessing into Elasticsearch doesn't remove documents already indexed, so the approval gives the
+Reprocessing into Elasticsearch doesn't remove documents already indexed, so the reprocessing approval gives the
 `_delete_by_query` request for the cluster admin to run first.
 
 ## Lucene

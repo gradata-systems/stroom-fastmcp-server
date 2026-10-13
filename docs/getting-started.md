@@ -34,16 +34,18 @@ for example `/mcp.stroom.onboard_data_source`.
 Ask the agent to onboard a source, naming the sample file, for example *"Onboard the VPN logs in
 samples/vpn.log to Stroom"*. A typical run:
 
-1. **Profile and plan.** The server reads the sample's format, fields and timestamps. It creates a build, a folder
-   under `MCP Workspace`, and gives the agent the plan.
-2. **Feed and upload.** The agent proposes a feed name and you confirm or correct it in a form. The sample is
-   uploaded to the feed. A large file goes from your disk to Stroom directly, through a short `curl` command you
-   approve, and never passes through the model.
+1. **Build, feed and upload.** The server creates a build, a folder under `MCP Workspace`. The agent proposes a
+   feed name and you confirm or correct it in a form. The sample is uploaded to the feed: a file goes from your disk
+   to Stroom directly, through a short `curl` command you approve, and never passes through the model.
+2. **Profile and plan.** The server reads the uploaded sample's format, fields and timestamps, and gives the agent
+   the plan. (A sample pasted into the chat is profiled first, before the feed.)
 3. **Translation.** The agent drafts a field mapping, and the server generates the XSLT (and a Data Splitter for
    text). Every sample record is stepped in Stroom until the output is valid event-logging XML. You confirm the
    template pipeline it builds on.
-4. **Processing.** You approve a processor filter that processes only the sample streams, one task at a time.
-5. **Indexing.** You confirm the backend, the field naming and the index name. For Elasticsearch, the index
+4. **Processing.** The agent creates a processor filter that processes only the sample streams, one task at a
+   time. It is created disabled: you enable it in Stroom, from the link the agent gives you. Reprocessing after a
+   fix you approve in a form, and it runs.
+5. **Indexing.** You choose how the index's fields are named, then confirm the backend and the index name. For Elasticsearch, the index
    template is built from an example you give it, and your cluster admin applies it. The server checks the index
    by searching it through Stroom, as people will.
 6. **Documentation.** The server writes Documentation docs for the pipelines, generated from the mapping and what

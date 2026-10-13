@@ -5,7 +5,9 @@ build are decided by the user:
 
 - A **confirmation** fixes a detail an action uses, such as a feed name, the template a pipeline builds on, or an
   index name. The agent proposes it, saying where it came from, and the user confirms or corrects it.
-- An **approval** guards an action: starting processing, reprocessing, or promoting a build.
+- An **approval** guards an action: reprocessing in a build, or promoting a build.
+- **Starting processing is yours.** Every processor filter is created disabled, and you enable it in Stroom: the agent
+  gives you the pipeline's link and what enabling it does. See [Processing and indexing](processing.md).
 
 ## How the user answers
 
@@ -22,7 +24,8 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | --- | --- | --- |
 | Feed name and encoding | Creating the feed | Your naming convention, the sample's profile |
 | Template pipeline for the translation | Creating the events pipeline | Template pipelines and how existing pipelines use them |
-| Index backend, field naming, indexing template, Elastic cluster, index name and version | One form at the start of indexing, since they depend on each other | Where similar sources index, conventions, existing indexes |
+| How the index's fields are named: an example index template, an existing index to follow, or a convention | The start of indexing, in a form of its own | Where similar sources index, conventions, existing indexes |
+| Index backend, index doc name, index name or volume group, Elastic cluster and time field | Creating the index doc, once the agent has proposed them in the chat | The field plan, your naming convention, the clusters Stroom has |
 | The index template (Elasticsearch) | Once it fits what the pipeline writes | Built from an example template the user gives |
 | A new version, or a change in place, with its names | Updating an events pipeline | Your versioning convention, e.g. V1.2 to V1.3 |
 | Columns of the verification dashboard | Verifying an index | The time field and the key fields |
@@ -30,15 +33,14 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | Kinds of event left untranslated | Surveying an existing feed | The survey |
 | Rules kept as `Unknown` (what happened is not known) | Saving a translation that keeps one, once per rule: asked again only for a rule that is new, or whose conditions or reason changed | The sample records the rule catches, and the action elements their values suggest |
 | Which feed you meant | A feed you named isn't in this Stroom | The three closest names, and a fourth choice to correct the name (or the cluster) |
-| Indexing Events from a pipeline the server didn't build | Creating the processor filter for the indexing pipeline | The pipeline the user names |
+| Indexing Events from a pipeline the server didn't build | Creating the processor filter for the indexing pipeline, or reprocessing | The pipeline the user names |
 | Destination folders, and whether to keep the build's role subfolders (Events, Indexing) there | Promotion, as a tree shown in the chat | Where sibling sources' content lives |
 
 ## What needs approval
 
 | Action | What the approval says |
 | --- | --- |
-| Creating or enabling a processor filter | Which streams or feed, the task limit, the time bound. For Elasticsearch: that the agreed index template has been applied to the cluster |
-| Reprocessing streams | Which streams, at most 10 a call. For Elasticsearch: the `_delete_by_query` request to run first, as documents already indexed stay |
+| Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the `_delete_by_query` request to run first, as documents already indexed stay |
 | Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 
 The [tool reference](../reference/tools.md) marks each tool that asks.
