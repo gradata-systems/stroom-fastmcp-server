@@ -125,6 +125,12 @@ audit:
       # root with CHOWN and FOWNER, which a namespace enforcing the restricted Pod Security Standard
       # refuses: there, have the volume's ownership set by its provisioner instead.
       fixPermissions: false
+      # An existing claim every replica shares, instead of a claim each: it must be ReadWriteMany (or all
+      # replicas on one node). Each pod writes its own file, named after it (audit.jsonl becomes
+      # audit-<fullname>-0.jsonl, -1, ...), so one log forwarder deployed apart from the server can
+      # collect every replica's file from the one volume. Still a StatefulSet, so a pod's name, and its
+      # file, stay the same across restarts. size, storageClassName and accessModes don't apply.
+      existingClaim: ""
       size: 1Gi
       # Empty: the cluster's default storage class.
       storageClassName: ""

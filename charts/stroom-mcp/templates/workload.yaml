@@ -4,8 +4,22 @@
 {{- if and $audit.persistence.enabled (not $audit.enabled) }}
 {{- fail "audit.file.persistence.enabled requires audit.file.enabled" }}
 {{- end }}
-{{- /* A persistent audit log needs a claim per replica, which only a StatefulSet provides. */}}
-{{- $statefulSet := $audit.persistence.enabled }}
+{{- /* A persistent audit log needs a claim per replica, which only a StatefulSet provides; or one existing claim
+     every replica shares (ReadWriteMany), each pod writing a file named after itself, its name kept stable across
+     restarts by the StatefulSet. */}}
+{{- $sharedClaim := $audit.persistence.existingClaim }}
+{{- if and $sharedClaim (not $audit.enabled) }}
+{{- fail "audit.file.persistence.existingClaim requires audit.file.enabled" }}
+{{- end }}
+{{- $persistent := or $audit.persistence.enabled (ne (toString $sharedClaim) "") }}
+{{- $statefulSet := $persistent }}
+{{- /* With a shared claim, each pod's own file: audit.jsonl becomes audit-<pod name>.jsonl. */}}
+{{- $auditFile := $audit.path }}
+{{- if $sharedClaim }}
+{{- $name := base $audit.path }}
+{{- $extension := ext $name }}
+{{- $auditFile = printf "%s/%s-$(POD_NAME)%s" (dir $audit.path) (trimSuffix $extension $name) $extension }}
+{{- end }}
 {{- if and $audit.enabled (not (hasPrefix "/" $audit.path)) }}
 {{- fail "audit.file.path must be an absolute path" }}
 {{- end }}
@@ -74,7 +88,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and $audit.enabled $audit.persistence.enabled $audit.persistence.fixPermissions }}
+      {{- if and $audit.enabled $persistent $audit.persistence.fixPermissions }}
       initContainers:
         # The claim's directory given to the server's user, on storage that ignores fsGroup.
         - name: audit-permissions
@@ -193,8 +207,14 @@ spec:
               value: /etc/stroom-mcp/conventions
             {{- end }}
             {{- if $audit.enabled }}
+            {{- if $sharedClaim }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
             - name: STROOM_MCP_AUDIT_LOG_FILE
-              value: {{ $audit.path | quote }}
+              value: {{ $auditFile | quote }}
             {{- end }}
             {{- if .Values.tls.enabled }}
             - name: STROOM_MCP_TLS_CERTFILE
@@ -284,7 +304,11 @@ spec:
           configMap:
             name: {{ include "stroom-mcp.fullname" . }}-conventions
         {{- end }}
-        {{- if and $audit.enabled (not $statefulSet) }}
+        {{- if and $audit.enabled $sharedClaim }}
+        - name: audit
+          persistentVolumeClaim:
+            claimName: {{ $sharedClaim }}
+        {{- else if and $audit.enabled (not $statefulSet) }}
         - name: audit
           emptyDir: {}
         {{- end }}
@@ -307,7 +331,7 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-  {{- if $statefulSet }}
+  {{- if and $statefulSet (not $sharedClaim) }}
   volumeClaimTemplates:
     - metadata:
         name: audit

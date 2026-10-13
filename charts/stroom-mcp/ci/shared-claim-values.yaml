@@ -1,0 +1,11 @@
+# Rendered in CI: every replica's audit log on one existing ReadWriteMany claim, a file per pod.
+publicBaseUrl: https://stroom-mcp.example.com
+stroom: {url: https://stroom.example.com}
+oidc: {issuerUrl: https://keycloak.example.com/realms/stroom, audience: stroom-mcp}
+tls: {enabled: false}
+replicaCount: 2
+requestState: {keys: [a-key-of-at-least-thirty-two-characters!!]}
+audit:
+  file:
+    enabled: true
+    persistence: {existingClaim: stroom-mcp-audit, fixPermissions: true}

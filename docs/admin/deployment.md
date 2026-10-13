@@ -93,6 +93,21 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   Turning persistence on or off for an existing release replaces the workload, restarting every pod. The claims
   outlive the release; delete them yourself when the audit files are no longer needed.
 
+  Or give every replica one existing claim, for a log forwarder deployed apart from the server to collect all their
+  files from one volume:
+
+  ```yaml
+  audit:
+    file:
+      enabled: true
+      persistence:
+        existingClaim: stroom-mcp-audit   # ReadWriteMany, unless every replica runs on one node
+  ```
+
+  Each pod then writes a file named after itself, `audit-<release>-stroom-mcp-0.jsonl`, `-1`, and so on (the path's
+  name with the pod's name added), so replicas never write to the same file. It is still a StatefulSet: a pod's name,
+  and so its file, stay the same across restarts. Point the forwarder at `audit-*.jsonl`.
+
   The server runs as uid 10001, and the pod's `fsGroup` gives it the claim. Storage that ignores `fsGroup` (NFS,
   some CSI drivers) leaves the claim owned by root, and the server stops at start, saying it can't write the audit
   log. There, set `audit.file.persistence.fixPermissions: true`: an init container, from the server's own image,
@@ -155,7 +170,7 @@ brackets.
 | `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
 | `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
-| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([Audit log](../operate/audit.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet |
+| `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([Audit log](../operate/audit.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet, or with `audit.file.persistence.existingClaim` one claim every replica shares, each pod's file named after it |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |
 

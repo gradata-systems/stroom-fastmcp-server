@@ -32,7 +32,9 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
   ```
 
   Keep one server process per file. Reopening relies on the operating system reporting that the file was
-  moved, which works on Linux and in containers but not on Windows.
+  moved, which works on Linux and in containers but not on Windows. Replicas sharing one volume
+  (`audit.file.persistence.existingClaim`) each write their own file, named after the pod, so a forwarder
+  deployed apart from the server collects `audit-*.jsonl` from it, and each file rotates on its own.
 
 ## Events
 
