@@ -17,6 +17,7 @@ flowchart LR
     U -- "a CEF pipeline to review or change" --> RC["review_cef_pipeline"]
     U -- "kinds the sample missed" --> FC["check_feed_coverage"]
     U -- "an event that came out wrong" --> FX["fix_pipeline_issue"]
+    U -- "a kind of event, found by a search,<br/>translated differently" --> CT["change_event_translation"]
     U -- "what does this pipeline do?" --> EV["evaluate_events_pipeline"]
     U -- "what does this index hold?" --> DX["document_index"]
 ```
@@ -30,6 +31,7 @@ flowchart LR
 | `update_events_pipeline` | An events pipeline, with new samples or a field fix | A new version, or a change in place on a working copy. The new output is compared with the current one record by record |
 | `update_indexing_pipeline` | An indexing pipeline, with fields to add or change | The next version beside the current one, starting on new Events. The current one keeps running |
 | `fix_pipeline_issue` | The Events stream id and event id of an event that came out wrong (a dashboard row has both), or a description the agent searches the index for | The event traced back to its record, a fix proven on it and the other events of its kind the index holds, applied with a backup, and what it reaches: the raw streams to reprocess and, for Elasticsearch, the delete to run first |
+| `change_event_translation` | An index, the events as you would search for them, and the change you want | The kind of event they are translated differently: the events found and confirmed with you, the change generalised to a rule (said to you with how many events it reaches before anything changes), proven on them, promoted, and the raw streams to reprocess and the Elasticsearch delete, for you |
 | `evaluate_events_pipeline` | Any events pipeline, including ones the server didn't build | A report (errors and schema compliance first, then its mapping and events) and a Documentation doc. Read only, unless a fix is approved |
 | `document_index` | An Elastic Index or Lucene Index doc | A Documentation doc of what the index holds, surveyed through Stroom |
 | `check_feed_coverage` | An events pipeline that has processed its feed | Kinds of event the sample missed, found across the feed, and covered |

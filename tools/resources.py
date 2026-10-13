@@ -538,6 +538,41 @@ every field, what it holds and the values it has. Change nothing except the docu
 
 {_RULES}{_docs(source_docs)}"""
 
+    @mcp.prompt(description="Change how a kind of event is translated, from events found by searching an index.")
+    def change_event_translation(index: str, events: str, change: str) -> str:
+        return f"""The user wants the events "{events}" in the index "{index}" translated differently: {change}
+
+The events are the user's examples of a kind of event: the change is a rule on what the raw records hold, so it
+applies to every event of that kind, not to these events alone.
+
+1. Find them: find_documents types=['ElasticIndex', 'Index'] for the index doc, then find_events with the conditions
+   the user's description gives (as they would set them on a dashboard). Show them the hits (newest first, each with
+   its StreamId and EventId), the total and the streams holding them, and confirm these are the events they mean;
+   narrow or widen the conditions with them until they are.
+2. Trace a few back, from different streams if the hits span several: locate_event stream_id=<StreamId>
+   event_id=<EventId> for each gives the raw record, the pipeline that produced it, and its translation. Read the
+   records' input (step_pipeline) beside the stored events.
+3. Generalise, and say it to the user before changing anything: describe_feed field=<each searched index field>
+   traces it to its event-logging path and the source field it comes from; describe_document on the translation
+   XSLT shows its kept mapping and the rule that writes these events. State the rule condition, on the raw fields,
+   that picks out exactly this kind (every hit must meet it; events of other kinds must not), and the change, as
+   one example's value before and after. Say how many events it reaches: find_events all_streams with the same
+   conditions (N events in M Events streams).
+4. Make the change as update_events_pipeline does (ask: a new version or in place; confirm the names;
+   copy_pipeline), with build_translation_xslt changes= only the rule or entries that change, uuid=<the copy's
+   XSLT>, change=<what and why>. A field the change reads that the rule's records may lack takes a default.
+5. Prove it: summarise_fix events=<the hits, from several streams> stream_ids=<a few recent raw streams>
+   expected_paths=<the fields the change is to>: the hits change as intended, nothing else does, and no new errors.
+   step_sample on the copy stays clean. Revise until summarise_fix is ready.
+6. The pipelines that read its Events (indexing, CEF): review_coverage pipeline_uuid=<the original pipeline>
+   events_stream_ids=<Events with the change> lists them and what each lacks; change them in the same build.
+7. write_documentation noting the change, then promote_build (approval). Then tell the user what is theirs to do,
+   from find_events all_streams: the raw streams to reprocess (exactly those), and for Elasticsearch the delete
+   request their cluster's admin runs just before, so the corrected events are not indexed twice. New data takes
+   the change once the promoted pipeline processes it.
+
+{_RULES}"""
+
     @mcp.prompt(description="Diagnose a reported problem in an events pipeline and propose a fix.")
     def fix_pipeline_issue(stream_id: int, issue: str, event_id: int | None = None) -> str:
         where = f"event {event_id} of stream {stream_id}" if event_id else f"stream {stream_id}"

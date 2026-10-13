@@ -41,6 +41,8 @@ flowchart LR
     U -- "a CEF pipeline to review or change" --> RC["review_cef_pipeline"]
     U -- "kinds the sample missed, in the whole feed" --> FC["check_feed_coverage"]
     U -- "an event that came out wrong" --> FX["fix_pipeline_issue"]
+    U -- "a kind of event, found by a search,<br/>translated differently" --> CT["change_event_translation"]
+    CT --> CO
     U -- "what does this pipeline do?" --> EV["evaluate_events_pipeline"]
     U -- "what does this index hold?" --> DX["document_index"]
     ON --> S1["Stage 1: translation<br/>mapping, XSLT, step, process"]
@@ -73,6 +75,7 @@ flowchart LR
 | `review_cef_pipeline` | A CEF pipeline, a change | Review a CEF pipeline, or change it |
 | `check_feed_coverage` | An events pipeline that processed its feed | Find kinds the sample missed and cover them |
 | `fix_pipeline_issue` | A Stream ID, optionally an Event ID | Fix a reported pipeline issue |
+| `change_event_translation` | An index, the events (as the user would search for them), the change | Change how a kind of event is translated, from what a search found |
 | `evaluate_events_pipeline` | An events pipeline | Evaluate and document an events pipeline |
 | `document_index` | An Elastic Index or Lucene Index doc | Document an existing index |
 
@@ -818,6 +821,7 @@ Resources carry the reference knowledge the model needs but should not have to d
 | `create_discovery_index` | `feed?`, `sample?`, `timestamp_field?` | Index raw structured data directly for exploration, without an event-logging translation |
 | `evaluate_events_pipeline` | `pipeline`, `sample_size?`, `source_docs?` | Report on what a pipeline does, its data and event types, schema conformance and suggested fixes, returned in the chat and saved as its Documentation doc |
 | `onboard_existing_feed` | `feed`, `source_docs?` | Build the events pipeline from the data a feed already holds by stepping only: survey its streams for kinds of event, step the translation on those records in place, look further back until nothing new turns up, then document, promote and hand over |
+| `change_event_translation` | `index`, `events`, `change` | Asked for by the user: a change to how a kind of event is translated, starting from events a search surfaced. Find them (`find_events`) and confirm them with the user; trace a few, from different streams, to their raw records (`locate_event`); generalise to a rule condition on the raw fields that every hit meets (`describe_feed` traces each searched field to its source; the kept mapping names the rule), said to the user with the change and its reach (N events in M streams) before anything changes; change it as `update_events_pipeline` does; prove it on the hits and recent streams (`summarise_fix events=`); the follow-on pipelines (`review_coverage`); promote; and the raw streams to reprocess and the Elasticsearch delete, for the user |
 | `fix_pipeline_issue` | `stream_id`, `issue`, `event_id?` | Locate a reported event (asking for its EventId, or finding it with `find_events`), confirm the problem, prove a fix on it and the other events of its kind (`summarise_fix events=`), then apply it or give the manual steps, as the user chooses, and say what it reaches (`find_events all_streams`): the raw streams to reprocess, and the Elasticsearch delete to run first |
 
 **Where the knowledge comes from.** The [event-logging](https://github.com/gchq/event-logging-schema) XSD is read from the Stroom instance's XML Schemas for the configured version, so generation and validation use exactly what the pipelines validate against. Guides are short, hand-written summaries of the [Stroom docs](https://gchq.github.io/stroom-docs/) in `knowledge/guides`, with links to the full page.
