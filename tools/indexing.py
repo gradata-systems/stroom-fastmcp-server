@@ -2163,5 +2163,112 @@ async def verify_index(
     return result
 
 
+_FIND_COLUMNS = 8
+
+
+class FindTerm(BaseModel):
+    """One condition, as a person would set it on a dashboard."""
+    field: str
+    condition: Condition = 'EQUALS'
+    value: str = Field('', description="BETWEEN: 'from,to'; IN: values separated by commas; EQUALS takes * wildcards.")
+
+
+async def find_events(
+        ctx: Context,
+        index_uuid: Annotated[str, Field(description="The index to search: its Elastic Index or Lucene Index doc "
+                                                     "(find_documents types=['ElasticIndex', 'Index']).")],
+        where: Annotated[list[FindTerm] | str, ONE_OR_MORE, Field(
+            description="Conditions the event meets, all of them, on the index's fields as the user describes it, "
+                        "e.g. [{'field': 'TypeId', 'value': 'RoleChange'}, {'field': 'UserId', 'value': 'admin*'}].")] = [],
+        time_from: Annotated[str | None, Field(description="From this time (ISO 8601, or Stroom's day()-7d).")] = None,
+        time_to: Annotated[str | None, Field(description="Up to this time (ISO 8601, or Stroom's now()).")] = None,
+        fields: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Index fields to show for each hit beside StreamId, EventId and the time (the searched ones "
+                        "are shown too).")] = [],
+        limit: Annotated[int, Field(ge=1, le=20, description="Hits to return, newest first.")] = 10,
+) -> dict[str, Any]:
+    """
+    Find events in an index through Stroom, as the user would on a dashboard (with their permissions; nothing is
+    saved): for an event the user describes but can't point at. Each hit has its Events stream's StreamId and its
+    EventId, for locate_event, which traces it to its raw record; with how many events match in all, and in which
+    streams. Read only. Searches only fields the index has.
+    """
+    stroom = gateway_from(ctx)
+    terms = [FindTerm.model_validate(t) if isinstance(t, dict) else t for t in where]
+    doc_type, index = None, None
+    for candidate in ('ElasticIndex', 'Index'):
+        try:
+            index = await stroom.get_doc(candidate, index_uuid)
+            doc_type = candidate
+            break
+        except ToolError:
+            continue
+    if not doc_type:
+        from utils.stroom import not_found
+        raise ToolError(not_found(stroom.settings, f"No Elastic Index or Lucene Index doc with UUID {index_uuid}"))
+    ref = {'type': doc_type, 'uuid': index_uuid, 'name': index.get('name')}
+    listed = {f['name']: f['type'] for f in await _index_fields(stroom, doc_type, ref)}
+    backend = 'elasticsearch' if doc_type == 'ElasticIndex' else 'lucene'
+    unknown = [n for n in [t.field for t in terms] + list(fields) if n not in listed]
+    if unknown:
+        import difflib
+        near = {n: difflib.get_close_matches(n, list(listed), 3, 0.5) for n in unknown}
+        raise ToolError(f"Not fields of index '{ref['name']}': " + '; '.join(
+            f"{n} (like {', '.join(m)})" if m else n for n, m in near.items())
+            + f". Its fields: {', '.join(sorted(listed)[:60])}")
+    _searchable(backend, [SearchCheck(field=t.field, condition=t.condition, value=t.value) for t in terms],
+                {n for n, t in listed.items() if t in ('ip', 'ipv4_address')})
+    time_field = index.get('timeField') or index.get('timeFieldName')
+    children = [{'type': 'term', 'field': t.field, 'condition': t.condition, 'value': t.value} for t in terms]
+    if time_from or time_to:
+        if not time_field:
+            raise ToolError(f"Index '{ref['name']}' has no time field to search a time range on")
+        children.append({'type': 'term', 'field': time_field, 'condition': 'BETWEEN',
+                         'value': f"{time_from or '1970-01-01T00:00:00.000Z'},{time_to or 'day()+1d'}"})
+    if not children:
+        raise ToolError("Give where (the conditions the event meets) or a time range: this finds an event, it doesn't "
+                        "list the index")
+    expression = {'type': 'operator', 'op': 'AND', 'children': children}
+    shown = list(dict.fromkeys([n for n in (*_IDS, time_field) if n and n in listed]
+                               + [t.field for t in terms] + list(fields)))[:_FIND_COLUMNS]
+
+    def probe(columns: list[dict[str, Any]], rows: int) -> dict[str, Any]:
+        return {'uuid': str(uuidlib.uuid4()), 'name': f"{ref['name']} search", 'dashboardConfig': {'components': [
+            {'type': 'query', 'id': 'query-FIND', 'name': 'Query', 'settings': {
+                'type': 'query', 'dataSource': ref, 'expression': expression}},
+            {'type': 'table', 'id': 'table-FIND', 'name': 'Table', 'settings': {
+                'type': 'table', 'queryId': 'query-FIND', 'fields': columns, 'extractValues': False,
+                'maxResults': [rows], 'pageSize': rows}}]}}
+
+    columns = [{**_column(n), **({'sort': {'order': 0, 'direction': 'DESCENDING'}} if n == time_field else {})}
+               for n in shown]
+    found = await _search(ctx, probe(columns, limit), expression, length=limit)
+    total, count_errors = await _count(ctx, probe(columns, limit), expression)
+    hits = [{k: (str(v)[:120] if v is not None else None) for k, v in row.items()} for row in found['rows'][:limit]]
+    by_stream: list[dict[str, Any]] = []
+    if 'StreamId' in listed:
+        grouped = await _search(ctx, probe([
+            {**_column('StreamId'), 'group': 0},
+            {'id': 'mcp-n', 'name': 'events', 'expression': 'count()', 'format': {'type': 'NUMBER'}, 'visible': True,
+             'sort': {'order': 0, 'direction': 'DESCENDING'}}], 50), expression, length=50)
+        by_stream = [{'stream_id': r.get('StreamId'), 'events': r.get('events')} for r in grouped['rows']]
+    errors = list(dict.fromkeys(str(e) for e in found['errors'] + count_errors))
+    result: dict[str, Any] = {
+        'index': {**ref, 'backend': backend}, 'searched': [f"{c['field']} {c['condition']} {c['value']}" for c in children],
+        'total': total if total is not None else len(hits), 'hits': hits, 'by_stream': by_stream,
+        **({'errors': errors} if errors else {})}
+    if not hits:
+        result['next'] = ("Nothing matches. Check the conditions with the user (the values as the dashboard shows them; "
+                          "EQUALS takes * wildcards), or ask them for the event's StreamId and EventId from the "
+                          "dashboard row where they saw it.")
+    elif 'StreamId' not in listed or 'EventId' not in listed:
+        result['next'] = "The index has no StreamId and EventId: ask the user for the Events stream and event id."
+    else:
+        result['next'] = ("Confirm with the user which hit is the event they mean (the hits are newest first), then "
+                          "locate_event stream_id=<its StreamId> event_id=<its EventId> traces it to its raw record. "
+                          "by_stream says which Events streams hold every match, with how many each.")
+    return result
+
+
 ALL_TOOLS = [get_field_conventions, draft_index_mapping, propose_index_template, check_index_template,
-             find_elastic_clusters, create_index_doc, create_indexing_pipeline, verify_index]
+             find_elastic_clusters, create_index_doc, create_indexing_pipeline, verify_index, find_events]

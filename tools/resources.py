@@ -545,8 +545,11 @@ every field, what it holds and the values it has. Change nothing except the docu
 
 1. Locate it: locate_event(stream_id={stream_id}{f', event_id={event_id}' if event_id else ''}) gives the raw
    stream, part and record, the pipeline, and its XSLTs and text converters (some may be inherited from a template).
-   Without an event id, use summarise_streams (kind=events) on the Events stream to find the event type the user means,
-   then step_pipeline on raw records until you find an example.
+   {'' if event_id else '''Without an event id, ask the user for it first: every indexed event carries the Events stream's StreamId and its
+   EventId, in the dashboard row where they saw it (show the StreamId and EventId columns, or open the row in the text
+   pane). If they only can describe it, find_events searches the index for it, as they would, and gives each hit's
+   StreamId and EventId; confirm with them which hit they mean. Only failing both, use summarise_streams (kind=events)
+   on the Events stream to find the event type they mean, then step_pipeline on raw records for an example.'''}
 2. Plan the validation, and say it to the user in two or three lines: what output the record should give
    (from the user's words, the event-logging schema and any source docs), which field paths are wrong now, and
    which other records to check (recent raw streams on the same feed, find_streams; the same event type).

@@ -259,6 +259,30 @@ async def fed_by_a_plan(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     return prod, doc
 
 
+async def find_one(ctx, doc: dict) -> None:
+    """Asked for by the user: one rare event among many indexed streams, which sampling would miss, found as the user
+    would on a dashboard and traced to its raw record."""
+    print('\n### 2a. an event the user describes, found in the index and traced to its raw record')
+    from tools.diagnosis import locate_event
+    found = await indexing.find_events(ctx, doc['uuid'], where=[{'field': 'user.name', 'value': 'alice'}])
+    hits = found['hits']
+    e2e.check(found['total'] >= 1 and hits and all(h.get('user.name') == 'alice' and h.get('StreamId') and h.get('EventId')
+                                                   for h in hits) and found['by_stream'],
+              f"found {found['total']} event(s) for user.name = alice, each with its StreamId and EventId, and the "
+              f"streams holding them: {found['by_stream']}")
+    hit = hits[0]
+    located = await locate_event(ctx, int(float(hit['StreamId'])), int(float(hit['EventId'])))
+    e2e.check('alice' in located.get('record_input', '') and 'alice' in located.get('stored_event', ''),
+              f"traced to its raw record: stream {located['raw_stream']}, record {located['location']}")
+    try:
+        await indexing.find_events(ctx, doc['uuid'], where=[{'field': 'user.nmae', 'value': 'alice'}])
+        refused = ''
+    except Exception as e:
+        refused = str(e)
+    e2e.check('Not fields of index' in refused and 'like user.name' in refused,
+              f"a field the index doesn't have refused, with the one meant: {refused[:120]}")
+
+
 async def new_field(ctx, stroom, es: httpx.AsyncClient, stamp: str, prod: dict, doc: dict) -> None:
     """Seen in production: documenting an Elastic Index doc after a field was added to the pipeline that feeds it, and
     once its data was indexed, Stroom didn't list the field; the doc came out without it, and the agent said the field
@@ -370,6 +394,7 @@ async def main():
                 await wide(ctx, stroom, es, stamp)
             if '--plan' in only:
                 prod, doc = await fed_by_a_plan(ctx, stroom, es, stamp)
+                await find_one(ctx, doc)
                 await new_field(ctx, stroom, es, stamp, prod, doc)
             if '--lucene' in only:
                 await lucene(ctx, stroom, stamp)

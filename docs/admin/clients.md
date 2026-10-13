@@ -17,7 +17,7 @@ VS Code is set up and tested end to end: see [Sign-in and VS Code](vscode.md).
 | Prompts (optional) | The workflows, as slash commands | Twelve prompts; a client without prompts can send the same text |
 | Resources (optional) | Guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
 | Patience with long calls | Processing takes time | `wait_for_processing` returns at its timeout with a hint to call again |
-| Room for 56 tools | Some clients cap tools per request | Tool groups a client can switch off, such as Elasticsearch on a Lucene-only instance |
+| Room for 57 tools | Some clients cap tools per request | Tool groups a client can switch off, such as Elasticsearch on a Lucene-only instance |
 
 ## Clients for searching, not building
 
