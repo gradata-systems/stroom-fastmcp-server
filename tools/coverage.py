@@ -317,6 +317,15 @@ async def _review_follow_on(ctx: Context, entry: dict[str, Any], events: list[et
     return out
 
 
+async def _newest_raw(stroom, any_events: list[dict[str, Any]]) -> list[int]:
+    """A few of the newest raw streams on the feed the pipeline's Events are in."""
+    feed = next((r['meta'].get('feedName') for r in any_events if r['meta'].get('feedName')), None)
+    if not feed:
+        return []
+    rows = (await stroom.find_meta([_term('Feed', feed), _term('Type', 'Raw Events')], 50)).get('values') or []
+    return [m['id'] for m in sorted((r['meta'] for r in rows), key=lambda m: -(m.get('createMs') or 0))[:3]]
+
+
 async def review_coverage(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The events pipeline (Raw Events to Events), once it has "
@@ -329,6 +338,13 @@ async def review_coverage(
             "Events streams the changed pipeline wrote (e.g. after reprocess_streams in a build), to check the "
             "follow-on pipelines against; left out, the Events it writes for some missed records are stepped."))] = [],
         follow_on: Annotated[bool, Field(description="Also review the pipelines that read its Events.")] = True,
+        changed_pipeline_uuid: Annotated[str | None, Field(description=(
+            "The copy with the change (a working copy or new version in a build), which can't process production "
+            "streams: the follow-on pipelines are checked against the Events it gives, stepped over raw_stream_ids."
+            ))] = None,
+        raw_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description=(
+            "With changed_pipeline_uuid: raw streams to step it over. Left out: the affected ones found, else the "
+            "feed's newest."))] = [],
 ) -> dict[str, Any]:
     """
     Whole-feed coverage of an events pipeline: kinds of event the sample missed, which only appear once the feed
@@ -443,6 +459,20 @@ async def review_coverage(
             from tools.validation import _stream_events
             xml, _ = await _stream_events(ctx, list(events_stream_ids))
             events = cef.events_of(xml)
+        elif changed_pipeline_uuid:
+            # Its Events, stepped: a copy in a build can't process production streams (seen: the prompts asked for
+            # "Events with the change", which only a step can give).
+            loaded = await _Pipeline.load(stroom, changed_pipeline_uuid)
+            changed = await kept_mapping(ctx, changed_pipeline_uuid)
+            streams = list(raw_stream_ids) or sorted({g['examples'][0]['raw_stream'] for g in groups
+                                                      if g.get('examples')})[:5] or await _newest_raw(stroom, any_events)
+            outputs = await _outputs(stroom, loaded, streams, (changed or kept or {}).get('element')
+                                     or loaded.default_outputs()[0], None, 200)
+            for output in outputs.values():
+                try:
+                    events += cef.events_of(output)
+                except etree.XMLSyntaxError:
+                    pass
         elif affected_ids and kept:
             loaded = await _Pipeline.load(stroom, pipeline_uuid)
             stepped = sorted({g['examples'][0]['raw_stream'] for g in groups if g.get('examples')})[:5]
@@ -463,7 +493,8 @@ async def review_coverage(
                 reviewed.append({**entry, 'error': str(e)[:200]})
         result['follow_on'] = reviewed
         result['follow_on_events'] = (f"{len(events)} Events " + ("given" if events_stream_ids else
-                                                                  "the pipeline writes now for some affected records")
+                                                                  "the changed copy gives, stepped" if changed_pipeline_uuid
+                                                                  else "the pipeline writes now for some affected records")
                                       if events else "none to check against: give events_stream_ids once the changed "
                                                      "pipeline has written some")
     return result

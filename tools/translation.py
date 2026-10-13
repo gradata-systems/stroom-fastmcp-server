@@ -228,7 +228,9 @@ async def update_text_converter(
     _check_converter(doc.get('converterType') or 'DATA_SPLITTER', code)
     await guard_from(ctx).check_managed({'type': 'TextConverter', 'uuid': uuid, 'name': doc.get('name')})
     doc['data'] = code
-    return _summary(await stroom.put_doc(doc, version))
+    from tools.plan import next_for
+    saved = _summary(await stroom.put_doc(doc, version))
+    return await next_for(ctx, saved, saved)
 
 
 Mapping = Annotated[TranslationMapping | None, Field(
@@ -522,7 +524,8 @@ async def update_xslt(
     doc['description'] = _previewed(doc)
     saved = await stroom.put_doc(doc, version)
     await _tag_kept(ctx, saved, mapping is not None or index_plan is not None or cef_plan is not None)
-    return {**_summary(saved), **extra}
+    from tools.plan import next_for
+    return await next_for(ctx, _summary(saved), {**_summary(saved), **extra})
 
 
 async def create_dictionary(

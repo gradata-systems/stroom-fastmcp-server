@@ -397,6 +397,8 @@ async def draft_cef_mapping(
         if not isinstance(saved, dict) or not saved.get('uuid'):
             return saved if not isinstance(saved, dict) else {**result, **saved}    # asked about fields edited by hand
         result['saved'] = {k: saved.get(k) for k in ('type', 'uuid', 'name', 'version')}
+        if saved.get('next'):
+            result['next'] = saved['next']
         result['hint'] = _next(plan, saved.get('uuid'), result)
     else:
         result['hint'] = ("Show the user the plan's tables (documentation) and the not-sent list; with their changes as "

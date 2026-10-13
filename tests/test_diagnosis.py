@@ -73,3 +73,36 @@ async def test_a_fix_is_held_back_only_by_errors_it_brings_not_those_already_the
     broken = await run([schema, fatal], [schema])         # the fix brings a new one
     assert not broken['ready'] and 'blocking errors the saved code does not' in broken['problems'][0]
     assert 'XPath error' in broken['problems'][0]
+
+
+async def test_a_fix_saved_on_a_copy_is_proven_against_the_pipelines_own_code():
+    # change_event_translation saves the change on a copy first: summarise_fix had nothing to diff a draft against.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from config import Settings
+    from tools import diagnosis
+    settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
+
+    def layers(uuid):
+        return [{'sourcePipeline': {'type': 'Pipeline', 'uuid': uuid, 'name': uuid}, 'pipelineData': {
+            'elements': {'add': [{'id': 'translationFilter', 'type': 'XSLTFilter'}]},
+            'properties': {'add': [{'element': 'translationFilter', 'name': 'xslt',
+                                    'value': {'entity': {'type': 'XSLT', 'uuid': f'x-{uuid}', 'name': 'X'}}}]}}}]
+    code = {'x-p': '<old/>', 'x-copy': '<new/>', 'x-same': '<old/>'}
+    stroom = SimpleNamespace(settings=settings, pipeline_layers=AsyncMock(side_effect=layers),
+                             get_doc=AsyncMock(side_effect=lambda t, u: {'data': code[u]}),
+                             get=AsyncMock(return_value={'name': 'P'}))
+    compare = AsyncMock(return_value={'records_compared': 2, 'records_changed': 1,
+                                      'fields_changed': [{'path': 'Event/EventDetail/X'}]})
+    with patch.object(diagnosis, 'gateway_from', return_value=stroom), patch.object(diagnosis, 'compare', compare), \
+            patch.object(diagnosis, 'step_sample', AsyncMock(return_value={'verdict': 'clean', 'groups': []})):
+        result = await diagnosis.summarise_fix(None, 'p', stream_ids=[1], expected_paths=['Event/EventDetail/X'],
+                                               fixed_pipeline_uuid='copy')
+        assert result['ready'] and result['element'] == 'translationFilter' and '+<new/>' in result['diff']
+        assert compare.await_args.args[3] == {'translationFilter': '<new/>'}     # the copy's code, on the pipeline
+        with pytest.raises(ToolError, match="same as the pipeline's"):
+            await diagnosis.summarise_fix(None, 'p', stream_ids=[1], expected_paths=['X'], fixed_pipeline_uuid='same')
+        with pytest.raises(ToolError, match='Give element and draft'):
+            await diagnosis.summarise_fix(None, 'p', stream_ids=[1], expected_paths=['X'])

@@ -20,7 +20,7 @@ NOT_TOOLS = {'data_splitter', 'record_start', 'record_end', 'xml_fragments', 'js
              'events_stream_ids',
              'source_confirmation_id', 'confirmation_id', 'approval_id', 'field_mapping', 'pipeline_link', 'extra_fields',
              'index_name', 'timestamp_field', 'source_docs', 'sample_size', 'input_fields', 'working_copy', 'set_properties',
-             'dev_tools', 'pipeline_properties', 'xslt_input', 'text_converter', 'parser_properties', 'variable_min_reads',
+             'dev_tools', 'set_properties_note', 'xslt_input', 'text_converter', 'parser_properties', 'variable_min_reads',
              'inline_map_max_keys', 'snake_case', 'manual_steps', 'expected_paths', 'raw_stream', 'path_population',
              'sample_check', 'fields_seen', 'converter_type', 'reference_data', 'index_patterns', 'event_types',
              'max_chars_per_stream', 'max_parts_per_stream', 'max_records', 'ignore_warnings', 'index_plan', 'drop_when',

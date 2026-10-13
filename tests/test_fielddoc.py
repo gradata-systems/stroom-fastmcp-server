@@ -109,6 +109,15 @@ async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_sectio
     with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)):
         with pytest.raises(ToolError, match='Give stream_ids'):
             await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
+    # Left out, they are the streams the pipeline last stepped clean on, from the build's record.
+    section = AsyncMock(side_effect=ToolError('generated'))
+    with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
+            patch.object(builds, '_stepped_streams', AsyncMock(return_value=[41, 42])), \
+            patch.object(builds, '_raw_parents', AsyncMock(side_effect=lambda s, ids, p: (ids, []))), \
+            patch.object(builds, 'field_mapping_section', section):
+        with pytest.raises(ToolError, match='generated'):
+            await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
+    assert section.await_args.args[3] == [41, 42]
     with patch.object(builds, 'kept_mapping', AsyncMock(return_value=None)), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         with pytest.raises(ToolError, match="needs a '## Field mapping' section"):

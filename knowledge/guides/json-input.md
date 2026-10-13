@@ -36,7 +36,8 @@ from the item (mark one read from the wrapper with `scope: record`). `profile_sa
 holding the most objects), also from a stream's head cut off mid-array.
 
 `profile_sample` reports which (`parser_properties`, `xslt_input`), and `build_translation_xslt` returns the
-setting to apply as `pipeline_properties`. Check `describe_document` for the value a template's children use.
+setting as `set_properties`, to pass to `create_pipeline` as it is. Check `describe_document` for the value a
+template's children use.
 
 ## Lines that are not JSON
 

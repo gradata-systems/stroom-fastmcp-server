@@ -710,9 +710,11 @@ async def reprocess_streams(
     if not await _reprocess_runs(stroom, pipeline_uuid):
         small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
         created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=False)
-        return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
-                'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
-                **_for_the_user(stroom, pipeline, created['id'], details)}
+        from tools.plan import next_for
+        return await next_for(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}, {
+            'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
+            'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
+            **_for_the_user(stroom, pipeline, created['id'], details)})
     gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
                                            f"Create processor filter and reprocess streams\nReprocess "
                                            f"{len(stream_ids)} stream(s) with '{pipeline['name']}'.",
@@ -721,9 +723,11 @@ async def reprocess_streams(
         return gate
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
     created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=True)
-    return {'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
-            'enabled': True, **({'batch_size': _BATCH_NOTE} if small else {}),
-            'hint': f"wait_for_processing with filter_id={created['id']} so only this run's outputs count."}
+    from tools.plan import next_for
+    return await next_for(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}, {
+        'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
+        'enabled': True, **({'batch_size': _BATCH_NOTE} if small else {}),
+        'hint': f"wait_for_processing with filter_id={created['id']} so only this run's outputs count."})
 
 
 async def _reprocess_runs(stroom: StroomGateway, pipeline_uuid: str) -> bool:

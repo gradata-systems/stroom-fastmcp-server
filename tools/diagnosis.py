@@ -201,8 +201,11 @@ def _changed_outside(paths: list[str], expected: list[str]) -> list[str]:
 async def summarise_fix(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The pipeline being fixed.")],
-        element: Annotated[str, Field(description="Element whose XSLT or text converter the fix changes.")],
-        draft: Annotated[str, Field(description="The complete fixed XSLT or text converter.")],
+        element: Annotated[str | None, Field(description=(
+            "Element whose XSLT or text converter the fix changes. With fixed_pipeline_uuid, left out: the one whose "
+            "code differs."))] = None,
+        draft: Annotated[str | None, Field(description=(
+            "The complete fixed XSLT or text converter; or give fixed_pipeline_uuid instead."))] = None,
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Raw streams to prove it on: the reported one plus recent production streams.")] = [],
         expected_paths: Annotated[list[str] | str, ONE_OR_MORE, Field(
@@ -212,15 +215,24 @@ async def summarise_fix(
             description="Indexed events to prove it on, each {stream_id, event_id} as find_events gives them: "
                         "exactly those records are stepped, whatever streams they are in (with stream_ids too, or "
                         "instead).")] = [],
+        fixed_pipeline_uuid: Annotated[str | None, Field(description=(
+            "A change already saved on a copy of the pipeline (copy_pipeline: a new version or working copy): its code "
+            "is the draft, proven against the pipeline's own saved code, in place of draft."))] = None,
 ) -> dict[str, Any]:
     """
-    Prove a drafted fix and package it for the user. Steps every record of the streams with the draft,
-    diffs outputs against the saved code (only expected_paths should change), and returns the code diff,
-    whether the fix is ready, and step-by-step instructions for applying it by hand. Saves nothing: ask the
-    user whether to apply it (update_events_pipeline's copy, update and promote) or do it themselves.
+    Prove a fix and package it for the user. Steps every record of the streams with the fix (a draft, or the code
+    saved on a copy: fixed_pipeline_uuid), diffs outputs against the pipeline's saved code (only expected_paths
+    should change), and returns the code diff, whether the fix is ready, and step-by-step instructions for applying
+    it by hand. Saves nothing: ask the user whether to apply it (a copy of the pipeline in a build, changed, then
+    promoted) or do it themselves.
     """
     stroom = gateway_from(ctx)
     events = [EventRef.model_validate(e) if isinstance(e, dict) else e for e in events]
+    if fixed_pipeline_uuid:
+        element, draft = await _copys_code(stroom, pipeline_uuid, fixed_pipeline_uuid, element)
+    elif not (element and draft):
+        raise ToolError("Give element and draft (the complete fixed code), or fixed_pipeline_uuid: a copy of the "
+                        "pipeline with the change saved on it")
     if not stream_ids and not events:
         raise ToolError("Give stream_ids (raw streams) or events (from find_events) to prove the fix on")
     if not expected_paths:
@@ -287,13 +299,31 @@ async def summarise_fix(
         **({'errors_resolved': [_brief(g) for g in resolved]} if resolved else {}),
         **({'errors_before_too': [_brief(g) for g in pre_existing],
             'errors_before_too_note': "The saved code has these as well: not caused by this fix, and not in its way. "
-                                      "Tell the user; they are a separate issue (evaluate_events_pipeline lists "
-                                      "them)."} if pre_existing else {}),
+                                      "Tell the user; they are a separate issue (an evaluation of the pipeline "
+                                      "lists them)."} if pre_existing else {}),
         'diff': diff[:stroom.settings.max_stream_chars], 'draft': draft, 'manual_steps': manual,
         'hint': ("Show the user the diff and the fields changed, then ask whether to apply the fix to the "
                  "pipeline or give them the manual steps." if not problems else
                  "Revise the draft and call summarise_fix again."),
     }
+
+
+async def _copys_code(stroom, pipeline_uuid: str, copy_uuid: str, element: str | None) -> tuple[str, str]:
+    """(element, code): the copy's code for the element, or for the one element whose code differs from the
+    pipeline's."""
+    async def codes(uuid: str) -> dict[str, str]:
+        docs = translation_docs(uuid, await stroom.pipeline_layers(uuid))
+        return {d['element']: (await stroom.get_doc(d['doc']['type'], d['doc']['uuid'])).get('data') or '' for d in docs}
+    mine, copy = await codes(pipeline_uuid), await codes(copy_uuid)
+    if element:
+        if element not in copy:
+            raise ToolError(f"The copy has no XSLT or text converter on '{element}'; it has: {sorted(copy)}")
+        return element, copy[element]
+    differing = [e for e in copy if e in mine and copy[e] != mine[e]]
+    if len(differing) != 1:
+        raise ToolError(f"Give element: the copy's code differs from the pipeline's on {differing or 'no element'}"
+                        if differing else "The copy's code is the same as the pipeline's: nothing to prove")
+    return differing[0], copy[differing[0]]
 
 
 async def _stepped(ctx: Context, pipeline_uuid: str, stream_ids: list[int], located: list[dict[str, Any]],

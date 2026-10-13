@@ -149,7 +149,14 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     view = [c for c in cef_review['changes'] if c.get('event_type') == 'View']
     e2e.check(bool(view) and any('View events' in m for m in cef_review['missing']),
               f"CEF changes for View events: {view} {cef_review['missing']}")
-    pending = pending_of((await stroom.get_doc('XSLT', xslt['uuid'])).get('description'))
+    # A copy in a build can't process production streams: the changed code, stepped, gives the Events instead.
+    stepped = await coverage.review_coverage(ctx, pipeline['uuid'], changed_pipeline_uuid=pipeline['uuid'],
+                                             raw_stream_ids=[later])
+    [cef_stepped] = [f for f in stepped['follow_on'] if f['uuid'] == forwarding['uuid']]
+    e2e.check(stepped['follow_on_events'].endswith('the changed copy gives, stepped')
+              and any(c.get('event_type') == 'View' for c in cef_stepped['changes']),
+              f"the follow-on checked against the stepped copy: {stepped['follow_on_events']}")
+    pending =pending_of((await stroom.get_doc('XSLT', xslt['uuid'])).get('description'))
     e2e.check([e['change'] for e in pending['entries']] == ['Created from its mapping',
                                                             'Rule for view events, found once the whole feed was processed']
               and 'e2e-model' in pending['entries'][0]['by'],

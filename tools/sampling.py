@@ -332,7 +332,8 @@ async def set_shape_handling(
     set_body_text(record, render(state))
     await gateway_from(ctx).put_doc(record)
     left = dropped(state)
-    return {'feed': feed, 'handling': handling, 'shapes': signatures,
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'feed': feed, 'handling': handling, 'shapes': signatures,
             'left_untranslated': [{'shape': s, 'reason': r} for s, r in left.items()],
             # The survey's examples of these kinds, to step with step_records.
             'locations': [{**e['location'], 'shape': s, **({'expect': 'none'} if handling == 'drop' else {})}
@@ -340,7 +341,7 @@ async def set_shape_handling(
             'hint': ("Add a drop rule for these kinds to the mapping (EventRule with drop=true and conditions that "
                      "match them), regenerate, and step_records over the survey's locations: those records should "
                      "produce no Event." if handling == 'drop' else
-                     "Add rules to translate these kinds, regenerate and step_records over their locations.")}
+                     "Add rules to translate these kinds, regenerate and step_records over their locations.")})
 
 
 def _hint(saturated: bool, new_shapes: list, known: list[str]) -> str:

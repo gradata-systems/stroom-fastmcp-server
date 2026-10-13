@@ -510,12 +510,14 @@ async def build_translation_xslt(
             result['source_notes_check'] = contradictions or 'the mapping agrees with the event catalogue'
             result['warnings'] += [f"source documentation: {c}" for c in contradictions]
     if mapping.input == 'json':
-        result['pipeline_properties'] = {
-            'jsonParser.addRootObject': mapping.json_layout == 'lines',
-            'note': ("JSON lines need the parser's root map (addRootObject true, the default), which the XSLT "
+        # As create_pipeline takes them (set_properties): seen, a dict passed on as is, to a parameter of another name.
+        result['set_properties'] = [{'element': 'jsonParser', 'name': 'addRootObject',
+                                     'value': mapping.json_layout == 'lines'}]
+        result['set_properties_note'] = (
+            "For create_pipeline's set_properties (the element id as the template names its JSON parser). " + ("JSON lines need the parser's root map (addRootObject true, the default), which the XSLT "
                      "matches as /map/map." if mapping.json_layout == 'lines' else
                      "A JSON array is matched with or without the parser's root map; set addRootObject false on "
-                     "create_pipeline to keep the output simple, as sibling pipelines do.") + " No text converter."}
+                     "create_pipeline to keep the output simple, as sibling pipelines do.") + " No text converter.")
     if result['ok'] and field_mapping and pipeline_uuid and stream_ids:
         stroom = gateway_from(ctx)
         pipeline = await _Pipeline.load(stroom, pipeline_uuid)
@@ -601,6 +603,8 @@ async def build_translation_xslt(
         if agreed_now:
             saved = {**saved, 'version': await _remember_unknown_agreed(ctx, saved['uuid'], agreed_now)}
         result['saved'] = {k: saved[k] for k in ('type', 'uuid', 'name', 'version')}
+        if saved.get('next'):
+            result['next'] = saved['next']      # the plan's next step, as the save gave it
         _remember_mapping(ctx, saved['uuid'], mapping)
         result.update({k: saved[k] for k in ('next', 'done') if k in saved})
         if not include_xslt:

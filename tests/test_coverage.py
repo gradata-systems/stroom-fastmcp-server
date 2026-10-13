@@ -111,3 +111,12 @@ async def test_an_elasticsearch_follow_on_gets_the_admins_delete_before_reindexi
     assert 'POST ecs-vault-v1/_delete_by_query {"query": {"terms": {"StreamId": [101, 102]}}}' in es['admin']
     assert 'created from 2026-10-01T00:00:00Z to 2026-10-02T00:00:00Z' in many['elasticsearch']['admin']
     assert none['elasticsearch']['admin'] == 'No Events streams of the affected raw streams were indexed yet.'
+
+
+async def test_a_changed_copy_is_stepped_over_the_feeds_newest_raw_streams_by_default():
+    # A working copy can't process production streams: the follow-on pipelines are checked against what it gives.
+    rows = [{'meta': {'id': i, 'createMs': i * 1000}} for i in (4, 9, 7, 2)]
+    stroom = SimpleNamespace(find_meta=AsyncMock(return_value={'values': rows}))
+    assert await coverage._newest_raw(stroom, [{'meta': {'feedName': 'ACME'}}]) == [9, 7, 4]
+    assert stroom.find_meta.await_args.args[0] == [term('Feed', 'ACME'), term('Type', 'Raw Events')]
+    assert await coverage._newest_raw(stroom, []) == []

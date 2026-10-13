@@ -163,6 +163,18 @@ PROCESSING = 'processing after promotion (filters created disabled; enabled, the
 TEST_FEED = '-MCP-TEST'
 
 
+async def _stepped_streams(ctx: Context, pipeline_uuid: str) -> list[int]:
+    """The streams the build's record says the pipeline last stepped clean on; [] outside a build or before."""
+    from security import record as build_record
+    ref = {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline_uuid}
+    try:
+        guard = guard_from(ctx)
+        build = await guard.build_of(ref)
+        return list((await build_record.entry(guard, build, pipeline_uuid)).get('stepped_streams') or []) if build else []
+    except Exception:   # a default: without it, the call says to give stream_ids
+        return []
+
+
 async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
     """What a build's pipelines still lack before promotion: a clean step of their current code (recorded in
     the build's record), a Documentation doc (for new pipelines), a Field mapping section that
@@ -543,6 +555,15 @@ async def write_documentation(
         # An events pipeline's own Events output, given in place of its raw sample (seen in VS Code): the raw streams
         # they were made from.
         stream_ids, noted = await _raw_parents(stroom, stream_ids, pipeline_uuid)
+    if kept and not stream_ids:
+        # The streams the pipeline's current code last stepped clean on, kept in the build's record (seen: prompts and
+        # agents left stream_ids out, and every documentation call was refused once first).
+        stream_ids = await _stepped_streams(ctx, pipeline_uuid)
+        if stream_ids:
+            noted.append(f"Generated from the streams the pipeline last stepped clean on: {stream_ids}")
+        if stream_ids and kept['kind'] == 'translation':
+            stream_ids, more = await _raw_parents(stroom, stream_ids, pipeline_uuid)
+            noted += more
     if kept:
         if not stream_ids:
             # Documentation goes down to the field, with the values the sample gave: it needs the sample.

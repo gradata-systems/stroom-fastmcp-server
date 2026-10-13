@@ -118,7 +118,7 @@ def fingerprint_digest(prints: dict[str, str]) -> str:
 
 
 async def _record(ctx: Context, pipeline: dict[str, Any], kind: str,
-                  draft_code: dict[str, str] | None = None) -> str | None:
+                  draft_code: dict[str, str] | None = None, extra: dict[str, Any] | None = None) -> str | None:
     """Record that the pipeline's code (or the draft stepped) passed: 'recorded'; None for a pipeline outside a build
     (never recorded); else why it couldn't be saved."""
     from security import record
@@ -136,6 +136,7 @@ async def _record(ctx: Context, pipeline: dict[str, Any], kind: str,
 
         def note(entry: dict[str, Any]) -> None:
             entry[kind] = sorted({*(d for d in entry.get(kind, []) if d == saved), digest})
+            entry.update(extra or {})
         await record.update(guard, build, ref, note)
         return 'recorded'
     except Exception as e:  # the record is a convenience; never fail the step over it, but say so
@@ -155,12 +156,13 @@ async def _recorded(ctx: Context, pipeline: dict[str, Any], kind: str) -> bool:
 
 
 async def remember_clean(ctx: Context, pipeline: dict[str, Any], draft_code: dict[str, str] | None,
-                         result: dict[str, Any]) -> None:
-    """Record the code a clean step_sample or step_records ran, for promotion's checks; the result says when the
-    record couldn't be saved."""
+                         result: dict[str, Any], streams: list[int] = ()) -> None:
+    """Record the code a clean step_sample or step_records ran, for promotion's checks, and the streams it ran on
+    (write_documentation's default sample); the result says when the record couldn't be saved."""
     if result.get('verdict') != 'clean' or not result.get('records_stepped'):
         return
-    outcome = await _record(ctx, pipeline, STEPPED, draft_code)
+    extra = {'stepped_streams': sorted({int(s) for s in streams})[:20]} if streams and not draft_code else None
+    outcome = await _record(ctx, pipeline, STEPPED, draft_code, extra)
     if outcome not in (None, 'recorded'):
         result['record'] = outcome
 
@@ -541,7 +543,8 @@ async def step_sample(
         result.update(verdict=summary['verdict'], groups=summary['groups'], groups_by_class=summary['groups_by_class'])
     if not records:
         _nothing_stepped(result, markers, f"streams {stream_ids}")
-    await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
+    await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code,
+                         result, stream_ids)
     if result['verdict'] == 'clean' and not draft_code:
         from tools.plan import build_of, with_next
         result = await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}), result)
@@ -634,7 +637,8 @@ async def step_records(
     if not result['records_stepped']:
         _nothing_stepped(result, markers, f"the records {missing[:5]}")
     if not uncovered:
-        await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code, result)
+        await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code,
+                             result, [RecordLocation.model_validate(x).stream for x in locations[:stroom.settings.max_sample_records]])
     return result
 
 

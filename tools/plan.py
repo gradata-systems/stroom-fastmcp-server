@@ -618,6 +618,13 @@ async def next_step(ctx: Context, build: str | None, made: dict[str, Any] | None
         return None
 
 
+async def next_for(ctx: Context, ref: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """with_next for the build the document is in, when it is in one: a save by uuid, or a copy, names no build
+    (seen: such results carried no next, and the agent lost its place in the plan)."""
+    build = await build_of(ctx, ref)
+    return await with_next(ctx, build, result) if build else result
+
+
 async def with_next(ctx: Context, build: str | None, result: dict[str, Any]) -> dict[str, Any]:
     """The tool result with `next`, the plan's next step, added (and a reminder that the work is not done)."""
     if not isinstance(result, dict) or 'status' in result:   # a confirmation or approval round, not an outcome

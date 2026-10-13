@@ -97,7 +97,7 @@ def test_profile_says_how_json_reaches_the_xslt():
 async def test_build_translation_xslt_tells_the_parser_setting(ctx):
     with with_schema(), patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})):
         result = await generation.build_translation_xslt(ctx, mapping(input='json', json_layout='lines'))
-    assert result['pipeline_properties']['jsonParser.addRootObject'] is True
+    assert result['set_properties'] == [{'element': 'jsonParser', 'name': 'addRootObject', 'value': True}]
 
 
 async def test_an_indexing_pipeline_needs_events_first():

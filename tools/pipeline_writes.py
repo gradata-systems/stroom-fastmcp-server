@@ -636,8 +636,10 @@ async def copy_pipeline(
     doc['description'] = source.get('description')
     doc['pipelineData'] = data
     doc = await stroom.put_doc(doc)
-    return {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'copy_of': source.get('name'),
-            'working_copy': working_copy, 'copied_documents': list(copies.values())}
+    from tools.plan import with_next
+    return await with_next(ctx, build, {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'],
+                                        'copy_of': source.get('name'), 'working_copy': working_copy,
+                                        'copied_documents': list(copies.values())})
 
 
 VALIDATION = {'SchemaFilter'}
