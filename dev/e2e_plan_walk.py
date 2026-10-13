@@ -166,6 +166,13 @@ class Walk:
         sent = response.json()
         check(response.status_code == 200 and sent.get('stream_id') and sent['bytes'] == len(SAMPLE.encode('utf-8')),
               f"the whole file reached Stroom from the terminal: {sent}")
+        # As onboarding does next: the sample surveyed with the build. Its survey doc once made the plan take the build
+        # for one on an existing feed, and indexing was skipped (found in a review of the prompts).
+        from tools import sampling
+        await sampling.survey_feed(self.ctx, stream_ids=[sent['stream_id']], build=self.build)
+        state = {s['step']: s['state'] for s in (await build_status(self.ctx, self.build))['steps']}
+        check(state['index'] == 'to do' and state['indexed'] == 'to do' and state['covered'] == 'not needed',
+              f"surveyed with the build, still a new source: indexing to do ({state['index']}, {state['indexed']})")
         return sent
 
     async def converter_step(self, call):
