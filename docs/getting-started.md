@@ -61,6 +61,7 @@ The server has a workflow for each of these; see [Workflows](operate/workflows.m
 
 - build a pipeline for a feed that already holds data;
 - fix an event that came out wrong, or add fields to an existing pipeline;
+- find events you saw in a dashboard, or can describe, and change how that kind of event is translated;
 - index an existing Events feed, or make the next version of an index;
 - index raw JSON, CSV or XML as it is, to explore it;
 - evaluate and document a pipeline or an index someone else built;

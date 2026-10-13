@@ -28,8 +28,10 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | Columns of the verification dashboard | Verifying an index | The time field and the key fields |
 | Errors accepted as benign, with the reason | Writing documentation | Errors the agent couldn't fix |
 | Kinds of event left untranslated | Surveying an existing feed | The survey |
+| Rules kept as `Unknown` (what happened is not known) | Saving a translation that keeps one, once per rule: asked again only for a rule that is new, or whose conditions or reason changed | The sample records the rule catches, and the action elements their values suggest |
+| Which feed you meant | A feed you named isn't in this Stroom | The three closest names, and a fourth choice to correct the name (or the cluster) |
 | Indexing Events from a pipeline the server didn't build | Creating the processor filter for the indexing pipeline | The pipeline the user names |
-| Destination folders | Promotion | Where sibling sources' content lives |
+| Destination folders, and whether to keep the build's role subfolders (Events, Indexing) there | Promotion, as a tree shown in the chat | Where sibling sources' content lives |
 
 ## What needs approval
 
@@ -37,7 +39,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | --- | --- |
 | Creating or enabling a processor filter | Which streams or feed, the task limit, the time bound. For Elasticsearch: that the agreed index template has been applied to the cluster |
 | Reprocessing streams | Which streams, at most 10 a call. For Elasticsearch: the `_delete_by_query` request to run first, as documents already indexed stay |
-| Promoting a build | Every document and where it goes, with anything the checks found still missing |
+| Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 
 The [tool reference](../reference/tools.md) marks each tool that asks.
 

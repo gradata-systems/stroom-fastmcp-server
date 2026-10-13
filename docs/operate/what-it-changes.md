@@ -64,6 +64,10 @@ Anything else is refused by the server's write guard, whatever the model asks fo
   through a Stroom indexing pipeline, and index templates are applied by your cluster admin.
 - **Process production data with a pipeline under development.** A translation pipeline in a build only processes
   streams from the build's own feeds. Records in a production feed are stepped where they are, which writes nothing.
+  A build that works from a feed already in Stroom creates no feed and uploads nothing unless you bring new samples;
+  any test feed it makes stays in the workspace at promotion.
+- **Search for you without asking.** Searches go through Stroom as you, on a dashboard that is never saved
+  (`find_events`, an index's survey), and only to find what you describe.
 - **Reprocess with production pipelines.** Promoted pipelines are refused by the write guard. Reprocessing
   production data is yours to do.
 - **Manage users, permissions, nodes or volumes.**
@@ -92,7 +96,8 @@ Each build folder has a `Build record` Documentation doc. It holds what the serv
 
 - which documents are working copies, and of what;
 - which code stepped clean, passed verification, or gave valid Events (by a hash of the code);
-- which feeds hold samples from files.
+- which feeds hold samples from files;
+- which feeds already in Stroom the build works from.
 
 It replaces the per-build tags earlier versions used. Leave it in place: the checks before promotion read it.
 

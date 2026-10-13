@@ -14,7 +14,7 @@ VS Code is set up and tested end to end: see [Sign-in and VS Code](vscode.md).
 | Streamable HTTP | The transport | `<public url>/mcp` |
 | OAuth sign-in as the user: authorization code with PKCE, or another flow that gives the user's own token | Every Stroom call acts as the user | Protected resource metadata (`/.well-known/oauth-protected-resource/mcp`) naming the provider. Tokens carry both audiences (the server's and `stroom`, or one both accept), `sub`, and the required scopes (`openid` by default) |
 | Forms, or a way to show a summary and send back an id | The user, not the model, answers confirmations and approvals | Forms on clients that support them; otherwise a summary and an id the client passes back once the user agrees |
-| Prompts (optional) | The workflows, as slash commands | Twelve prompts; a client without prompts can send the same text |
+| Prompts (optional) | The workflows, as slash commands | Thirteen prompts; a client without prompts can send the same text |
 | Resources (optional) | Guides as context | `stroom://guides`, `stroom://guide/{name}`, `stroom://conventions/{name}` |
 | Patience with long calls | Processing takes time | `wait_for_processing` returns at its timeout with a hint to call again |
 | Room for 57 tools | Some clients cap tools per request | Tool groups a client can switch off, such as Elasticsearch on a Lucene-only instance |
