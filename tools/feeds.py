@@ -175,6 +175,10 @@ async def create_feed(
         encoding: Annotated[str, Field(description="Character encoding of the data.")] = 'UTF-8',
         stream_type: Annotated[str, Field(description="Stream type received data is stored as.")] = 'Raw Events',
         description: Annotated[str, Field(description="What the feed carries and where it comes from.")] = '',
+        user_samples: Annotated[list[str] | str, ONE_OR_MORE, Field(
+            description="Only in a build on an existing feed's data: the sample files the user chose to use instead "
+                        "of that feed's data, as they named them. Files you found in the workspace aren't their "
+                        "choice: ask them.")] = [],
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -182,15 +186,29 @@ async def create_feed(
     confirmation form, before anything is made (call this rather than asking for the name in the chat first). Stroom checks the
     name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed. A
     feed of the same name elsewhere is refused before the user is asked, saying where it is; one already in this
-    build is returned as it is (existing: true).
+    build is returned as it is (existing: true). A build on an existing feed's data creates no feed, unless the user
+    chooses sample files of their own instead (user_samples): then it is a test feed for those.
     """
     existing = await _existing_feed(ctx, name, build)
     if existing:
         from tools.plan import with_next
         return await with_next(ctx, build, existing)
     await _refuse_case_twin(gateway_from(ctx), name)
-    details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type}
-    gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', f"Create feed '{name}'", details,
+    chosen = [f.strip() for f in ([user_samples] if isinstance(user_samples, str) else user_samples) if f.strip()]
+    from tools.plan import works_from
+    sources = await works_from(ctx, build)
+    if sources and not chosen:
+        # Asked for by the user: an agent asked to onboard an existing feed used the sample files in the VS Code
+        # workspace (seen on the local stack: refused processing the feed's stream, it made '<FEED>-MCP-TEST' for a
+        # copy of the sample).
+        raise ToolError(_works_from_message(build, sources) + " If the user wants sample files of their own used "
+                        "instead (ask them: files in the workspace aren't a choice they made), call again with "
+                        "user_samples= the files they named.")
+    details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type,
+               **({'works from': sources, "the user's sample files, instead of its data": chosen} if sources else {})}
+    summary = (f"Create test feed '{name}' for your sample files ({', '.join(chosen)}) instead of the data in "
+               f"{', '.join(sources)}" if sources else f"Create feed '{name}'")
+    gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', summary, details,
                                            confirmation_id, editable={'name': ('Feed name', name)})
     if gate:
         return gate
@@ -212,6 +230,11 @@ async def create_feed(
     doc = await stroom.get_doc('Feed', ref['uuid'])
     doc.update(encoding=encoding, streamType=stream_type, description=description)
     doc = await stroom.put_doc(doc)
+    if sources:
+        # The user's choice, kept: upload_sample takes samples for this feed only.
+        from security import record
+        await record.update(guard_from(ctx), build, {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name']},
+                            lambda entry: entry.update(user_samples=chosen))
     result = {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'], 'stream_type': doc.get('streamType'),
               'encoding': doc.get('encoding')}
     # A feed of this name made before and deleted leaves its streams under the name, out of sight in the UI.
@@ -285,13 +308,32 @@ async def upload_sample(
         'feed': feed, **sent, 'hint': "One stream per sample file: upload the next file, or go on with the plan (next)."})
 
 
+def _works_from_message(build: str, sources: list[str]) -> str:
+    feeds = ', '.join(sources)
+    return (f"Build '{build}' works from the existing feed(s) {feeds}: it is built on their data where it is, stepped "
+            f"(survey_feed, step_sample with their stream ids, step_records over the survey's locations) and processed "
+            f"(create_processor_filter with their stream ids: the server writes the Events to a test feed it makes in "
+            f"the build). It creates no feed and uploads nothing, and sample files in the user's workspace aren't "
+            f"used.")
+
+
 async def _build_feed(ctx: Context, feed: str) -> dict[str, Any]:
-    """The feed's doc ref, refused unless it is in a build: samples never go to a production feed."""
+    """The feed's doc ref, refused unless it is in a build: samples never go to a production feed. In a build on an
+    existing feed's data, only to a test feed for sample files the user chose (create_feed user_samples=)."""
     # A direct lookup: the explorer search index lags new documents by a moment.
     match = await gateway_from(ctx).get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
     if not match:
         raise ToolError(f"No feed named '{feed}'")
-    await guard_from(ctx).check_managed(match)
+    guard = guard_from(ctx)
+    await guard.check_managed(match)
+    build = await guard.build_of(match)
+    from tools.plan import works_from
+    sources = await works_from(ctx, build)
+    if sources:
+        from security import record
+        if not (await record.entry(guard, build, match['uuid'])).get('user_samples'):
+            raise ToolError(_works_from_message(build, sources) + f" Feed {feed} wasn't made for sample files the "
+                            f"user chose instead: upload nothing to it.")
     return match
 
 

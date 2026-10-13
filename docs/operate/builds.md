@@ -58,8 +58,9 @@ up a promotion.
     (over an earlier report there, after a backup); the pipeline's documentation is left as it is.
 
     A build that works from data already in Stroom (an existing feed, or a new version or working copy of a
-    production pipeline) keeps any feed it made in the workspace: those are test feeds, holding copies of
-    production records. Give one a folder of its own if it is really a new production feed (a new feed version, say).
+    production pipeline) keeps any feed it made in the workspace: those are test feeds, holding the Events its
+    pipelines made from production streams (`<FEED>-MCP-TEST`, made by the server), or sample files you chose
+    instead. Give one a folder of its own if it is really a new production feed (a new feed version, say).
 2. The user approves the layout they confirmed, in a short form.
 3. New documents are moved into place. Their UUIDs don't change, so references keep working. They lose
    `mcp-managed` and keep `mcp-generated`.
@@ -69,7 +70,9 @@ up a promotion.
    (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**. It has no minimum stream creation
    time: enabled, it processes everything on the feed, existing data included, except the streams the pipeline
    already processed in the build (Stroom would otherwise process those again, replacing their Events, and an index
-   would hold them twice). For a build on an existing feed the filter names that feed, never a test feed.
+   would hold them twice). For a build on an existing feed the filter names that feed, never a test feed, and
+   leaves none of the streams processed in the build out: their Events stayed in the test feed. Each pipeline's
+   StreamAppender writes into its input's feed again: the test feed was for the build only.
 
 ## After promotion
 

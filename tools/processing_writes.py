@@ -234,10 +234,11 @@ async def _refuse_superseded(stroom: StroomGateway, metas: list[dict[str, Any]])
 
 
 async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: list[int] | None,
-                            feed: str | None) -> None:
-    """Translation pipelines write their Events into the input's feed, so they only process the build's feeds.
+                            feed: str | None) -> dict[str, Any] | None:
+    """Translation pipelines write their Events into the input's feed, so they only process the build's feeds, or the
+    existing feeds the build works from: their Events then go to the build's test feed (output_feed), and the output
+    feed is returned.
 
-    Production records are stepped where they are (step_records) or copied into a test feed in the build.
     Indexing pipelines write to an index, not to a feed, so they are not limited this way.
     """
     stroom = gateway_from(ctx)
@@ -262,11 +263,88 @@ async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: 
                 in_build = in_build or bool(build and await build_of(twin) == build)
             if not in_build:
                 outside.append(name)
+    if outside and build:
+        from tools.plan import works_from
+        sources = await works_from(ctx, build)
+        if {o.lower() for o in outside} <= {s.lower() for s in sources}:
+            # Asked for by the user: an existing feed's streams are processed where they are, their Events written to
+            # a test feed in the build. Seen before (Haiku, asked to onboard an existing feed): refused here and told
+            # to copy the records into a test feed, it made one; with sample files in the workspace, those were what
+            # it would have uploaded.
+            return await output_feed(ctx, pipeline, sources, build)
     if outside:
         raise ToolError(f"Feed(s) {outside} are not in this build. A translation pipeline writes its Events into the "
-                        f"input's feed, so it only processes the build's own feeds: step production records in place "
-                        f"(step_records), or copy them into a test feed in the build (create_feed '<FEED>-MCP-TEST', "
-                        f"upload_sample).")
+                        f"input's feed, so it only processes the build's own feeds, or the existing feeds the build "
+                        f"works from: start_build build=<this build> feeds=[the feed] makes it work from that feed, "
+                        f"and its Events then go to a test feed in the build. Or step the records where they are "
+                        f"(step_records). Create no feed and upload nothing for them.")
+    return None
+
+
+async def output_feed(ctx: Context, pipeline: dict[str, Any], sources: list[str], build: str) -> dict[str, Any] | None:
+    """The build's test feed for a pipeline processing the existing feeds it works from (asked for by the user): the
+    pipeline's StreamAppender writes there (its feed property) instead of into the production feed. Made here, with the
+    source feed's settings, holding only output: nothing is uploaded to it. Promotion leaves it in the workspace and
+    takes the property off (restore_output_feed). None for a pipeline with no StreamAppender (nothing written to a
+    feed)."""
+    stroom = gateway_from(ctx)
+    guard = guard_from(ctx)
+    merged = merge_layers(await stroom.pipeline_layers(pipeline['uuid']))
+    appenders = [e['id'] for e in merged['elements'] if e['type'] == 'StreamAppender']
+    if not appenders:
+        return None
+    from tools.builds import TEST_FEED
+    name = f"{sources[0]}{TEST_FEED}"
+    found = next((d for d in await guard.folder_contents(build)
+                  if d['type'] == 'Feed' and d['name'].lower() == name.lower()), None)
+    made = False
+    if found is None:
+        source = await stroom.get(f'/feed/v1/getDocRefForName/{quote(sources[0], safe="")}')
+        settings = await stroom.get_doc('Feed', source['uuid']) if source else {}
+        ref = await guard.create('Feed', name, build)
+        doc = await stroom.get_doc('Feed', ref['uuid'])
+        doc.update(encoding=settings.get('encoding') or 'UTF-8', streamType=settings.get('streamType') or 'Raw Events',
+                   description=f"Build '{build}': the Events its pipelines make from {', '.join(sources)}'s streams. "
+                               f"Nothing is uploaded to it; it stays in the workspace at promotion.")
+        found = await stroom.put_doc(doc)
+        from security import record
+        await record.update(guard, build, {'type': 'Feed', 'uuid': found['uuid'], 'name': found['name']},
+                            lambda entry: entry.update(output_for=sources))
+        made = True
+    feed_ref = {'type': 'Feed', 'uuid': found['uuid'], 'name': found['name']}
+    doc = await stroom.get_doc('Pipeline', pipeline['uuid'])
+    data = doc.get('pipelineData') or {}
+    added = (data.get('properties') or {}).get('add') or []
+    have = {p['element'] for p in added if p.get('name') == 'feed' and p['element'] in appenders
+            and ((p.get('value') or {}).get('entity') or {}).get('uuid') == found['uuid']}
+    if set(appenders) - have:
+        from tools.pipeline_writes import _set_property
+        for element in appenders:
+            _set_property(data, element, 'feed', {'entity': feed_ref})
+        doc['pipelineData'] = data
+        await stroom.put_doc(doc)
+    return {'name': found['name'], 'uuid': found['uuid'], 'made': made, 'works_from': sources}
+
+
+async def restore_output_feed(ctx: Context, pipeline_uuid: str, build_feeds: set[str]) -> bool:
+    """Take a promoted pipeline's StreamAppender feed property off where it names one of the build's feeds: in
+    production its Events go into the input's feed, as Stroom does by default. True if it changed."""
+    stroom = gateway_from(ctx)
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    appenders = {e['id'] for e in merged['elements'] if e['type'] == 'StreamAppender'}
+    doc = await stroom.get_doc('Pipeline', pipeline_uuid)
+    data = doc.get('pipelineData') or {}
+    properties = data.get('properties') or {}
+    added = properties.get('add') or []
+    kept = [p for p in added if not (p.get('element') in appenders and p.get('name') == 'feed'
+                                     and ((p.get('value') or {}).get('entity') or {}).get('uuid') in build_feeds)]
+    if len(kept) == len(added):
+        return False
+    properties['add'] = kept
+    data['properties'] = properties
+    doc['pipelineData'] = data
+    await stroom.put_doc(doc)
+    return True
 
 
 async def elastic_destination(stroom: StroomGateway, pipeline_uuid: str) -> dict[str, Any] | None:
@@ -328,6 +406,14 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], so
                 targets.setdefault((meta.get('feedName'), meta.get('typeName')), _pipeline_terms(expression))
         indexing = await _is_indexing(stroom, pipeline['uuid'])
         if not indexing:
+            # Streams whose Events went to a test feed (an existing feed's, processed into the build's test feed:
+            # output_feed) are processed again in production: the test feed stays in the workspace.
+            kept_out = set()
+            for i in done:
+                outputs = await _outputs(stroom, i, pipeline['uuid'])
+                if outputs and all(_test_feed(m.get('feedName'), tests) for m in outputs):
+                    kept_out.add(i)
+            done -= kept_out
             tested = [key for key, extra in targets.items() if not extra and _test_feed(key[0], tests)]
             for key in tested:
                 del targets[key]
@@ -543,7 +629,9 @@ async def create_processor_filter(
     exactly that events pipeline. For an Elasticsearch indexing pipeline, the index template for its destination
     index must have been agreed with the user (propose_index_template, check_index_template); the user enables the
     filter only once it is committed to the cluster, so the index is created with it.
-    A translation pipeline only processes the build's own feeds; sample filters run one task at a time.
+    A translation pipeline processes the build's own feeds, or the existing feeds the build works from (start_build
+    feeds=): those streams are processed where they are, and their Events go to a test feed the server makes in the
+    build (output_feed in the reply; promotion leaves it in the workspace). Sample filters run one task at a time.
     Give the user the reply's pipeline_link and what enabling does; once they say it is enabled, wait_for_processing.
     """
     stroom = gateway_from(ctx)
@@ -554,7 +642,7 @@ async def create_processor_filter(
         raise ToolError(f"Pipeline '{pipeline.get('name')}' has no clean step of its current code recorded: step_sample "
                         f"(or step_records) over the sample streams until the verdict is clean, then process. A change "
                         f"to its XSLT or converter since the last clean step needs stepping again.")
-    await _build_feeds_only(ctx, pipeline, stream_ids, feed)
+    output = await _build_feeds_only(ctx, pipeline, stream_ids, feed)
     if stream_ids:
         await refuse_older_than_feed(ctx, stream_ids)
     if feed and not created_after:
@@ -615,11 +703,19 @@ async def create_processor_filter(
     result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': False,
               **({'events_from_pipeline': source['name']} if source else {}),
               **({'batch_size': _BATCH_NOTE} if small else {}),
+              **({'output_feed': output['name'], 'output_note': _output_note(output)} if output else {}),
               **_for_the_user(stroom, pipeline, created['id'], details)}
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
 
 
 _FIRST = ('index template', 'already indexed')
+
+
+def _output_note(output: dict[str, Any]) -> str:
+    return (f"The streams are processed where they are, in {', '.join(output['works_from'])}; their Events go to "
+            f"the build's test feed {output['name']}{' (made now)' if output['made'] else ''}, through the pipeline's "
+            f"StreamAppender (its feed property), not into the production feed. Nothing is uploaded to it. Promotion "
+            f"takes the property off and leaves the test feed in the workspace.")
 
 
 def _for_the_user(stroom: StroomGateway, pipeline: dict[str, Any], filter_id: int,

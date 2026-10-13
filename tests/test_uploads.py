@@ -160,7 +160,8 @@ async def test_a_feed_differing_from_another_only_in_case_is_refused():
     stroom = SimpleNamespace(find_documents=AsyncMock(return_value=found), get=AsyncMock(return_value=None))
     asked = AsyncMock(return_value={'status': 'needs_confirmation'})
     with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
-            patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)):
+            patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)), \
+            patch('tools.plan.works_from', AsyncMock(return_value=[])):
         with pytest.raises(ToolError, match=r"'Delinea-SecretServer-V1.0' \(System / MCP Workspace / onboard-delinea\) "
                                             r"already exists, differing from 'DELINEA-SECRETSERVER-V1.0' only in case"):
             await feeds.create_feed(None, 'b', 'DELINEA-SECRETSERVER-V1.0')
@@ -190,3 +191,46 @@ async def test_a_feed_of_the_same_name_is_refused_before_anything_or_carried_on_
         again = await feeds.create_feed(None, 'onboard-acme', 'ACME-VPN-V1.0')
         assert again['existing'] and again['uuid'] == 'f1' and 'nothing new was made' in again['note']
         assert not asked.await_count and not guard.create.await_count
+
+
+async def test_a_build_on_an_existing_feed_makes_a_feed_only_for_samples_the_user_chose():
+    # Asked for by the user: asked to onboard an existing feed, the agent used the sample files in the VS Code
+    # workspace. The build works from the feed (its Events go to a test feed the server makes): no feed is made for raw
+    # samples, unless the user names files of their own.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}), get=AsyncMock(return_value=None))
+    asked = AsyncMock(return_value={'status': 'needs_confirmation'})
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
+            patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)), \
+            patch('tools.plan.works_from', AsyncMock(return_value=['VPN-GATEWAY'])):
+        with pytest.raises(ToolError, match=r"works from the existing feed\(s\) VPN-GATEWAY.*user_samples="):
+            await feeds.create_feed(None, 'b', 'VPN-GATEWAY-SAMPLES')
+        assert not asked.await_count
+        await feeds.create_feed(None, 'b', 'VPN-GATEWAY-SAMPLES', user_samples=['samples/vpn_1.csv'])
+    summary, details = asked.await_args.args[3], asked.await_args.args[4]
+    # The confirmation shows the user the choice: their files instead of the feed's data.
+    assert summary == ("Create test feed 'VPN-GATEWAY-SAMPLES' for your sample files (samples/vpn_1.csv) instead of "
+                       "the data in VPN-GATEWAY")
+    assert details['works from'] == ['VPN-GATEWAY']
+
+
+async def test_samples_go_to_a_build_on_an_existing_feed_only_through_a_feed_made_for_the_users_files():
+    # The test feed the server makes for the Events (output_for) takes no samples either.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds
+    ref = {'type': 'Feed', 'uuid': 'f9', 'name': 'VPN-GATEWAY-MCP-TEST'}
+    stroom = SimpleNamespace(get=AsyncMock(return_value=ref))
+    guard = SimpleNamespace(check_managed=AsyncMock(), build_of=AsyncMock(return_value='b'))
+    entries = {'f9': {'output_for': ['VPN-GATEWAY']}}
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), patch.object(feeds, 'guard_from', lambda ctx: guard), \
+            patch('tools.plan.works_from', AsyncMock(return_value=['VPN-GATEWAY'])), \
+            patch('security.record.entry', AsyncMock(side_effect=lambda g, b, u: entries.get(u, {}))):
+        with pytest.raises(ToolError, match="wasn't made for sample files the user chose instead: upload nothing"):
+            await feeds._build_feed(None, 'VPN-GATEWAY-MCP-TEST')
+        entries['f9'] = {'user_samples': ['samples/vpn_1.csv']}
+        assert await feeds._build_feed(None, 'VPN-GATEWAY-MCP-TEST') == ref

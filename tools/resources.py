@@ -43,11 +43,13 @@ _RULES = """Rules for every run:
   events or indexing pipeline the user approves it in a form and it runs; any other pipeline's (CEF output, reference
   data) is created disabled, for the user to enable. Then wait_for_processing with its filter_id. Reprocessing
   production data, and switching readers from one index version to the next, are the user's.
-- A translation pipeline only processes the build's own feeds: step production records in place (step_sample with
-  their stream ids, step_records) or copy them into a test feed. A build on data already in Stroom (an existing
-  feed, a production pipeline's new version or working copy) starts with start_build feeds=[the feed it works from],
-  creates no feed and uploads nothing unless the user brings new samples; its test feeds stay in the workspace, and
-  promotion's filters name the feed it works from. Promotion creates each pipeline's processor filter, disabled, with
+- A build on data already in Stroom (an existing feed, a production pipeline's new version or working copy) starts
+  with start_build feeds=[the feed it works from], creates no feed and uploads nothing: sample files in the workspace
+  aren't used. Its records are stepped where they are (step_sample with their stream ids, step_records), and
+  processed where they are (create_processor_filter with their stream ids): the server writes their Events to a test
+  feed it makes in the build, never into the production feed. Only sample files the user chooses instead of the
+  feed's data go to a test feed of their own (create_feed user_samples=[the files they named]). Test feeds stay in
+  the workspace, and promotion's filters name the feed the build works from. Promotion creates each pipeline's processor filter, disabled, with
   no minimum creation time: give the user the pipeline link to review and enable it, and say that enabled it
   processes the feed's existing data too.
 - Elasticsearch indexing in the workspace runs in batches of 10 (create_processor_filter and reprocess_streams set
@@ -83,7 +85,13 @@ with others. A result your client saved to a file ("Large tool result ... writte
 it with your client's file-reading tool (read_file), which needs no approval, never with a terminal command
 (Get-Content, cat), which asks the user every time.
 
-Samples: ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
+Existing feed: when the user asks to onboard data a feed already holds, work from that feed (onboard_existing_feed):
+start_build feeds=[it], then survey_feed. No feed is created and nothing uploaded, whatever sample files the
+workspace holds: its streams are stepped and processed where they are (create_processor_filter with their stream
+ids), the server writing their Events to a test feed it makes in the build, and promotion gives the pipeline its
+filter on the feed.
+
+Samples (a new source): ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
 create_feed, upload_sample files=[the same paths], and start_onboarding again with the build and stream_ids, which
 profiles them; never read a file's text into the conversation to send it. Only pasted samples go as text
 (start_onboarding samples=), about 10 records each: you write that text out token by token. start_onboarding profiles
@@ -273,6 +281,9 @@ def register(mcp: FastMCP, conventions_dir: Path = ROOT / 'conventions') -> None
     def onboard_data_source(source_name: str, samples: str = '', vendor: str = '', source_docs: str = '') -> str:
         return f"""Onboard "{source_name}"{f' from {vendor}' if vendor else ''} into Stroom.
 
+A feed that already holds this data: follow onboard_existing_feed's steps instead (start_build feeds=[the feed],
+survey_feed), with no feed created and nothing uploaded, even with sample files in the workspace.
+
 Stage 1, events:
 1. Samples. Ask whether there are more sample files than {'the one below' if samples else 'they have given'} (other
    appliances, versions or days) and get them all. Files on the user's disk: start_onboarding files=[their paths]
@@ -336,8 +347,9 @@ Finish: {_PROMOTE} The documents go to the folders sibling sources use.
 1. Find it (find_documents) and describe_document the pipeline and its XSLT.
 2. Test records: ask the user which to use, and keep to their answer. Production records (recent streams on the
    feed, or a reported issue's examples: find_streams, read_stream, step_pipeline) are stepped where they are
-   (step_sample with their stream ids, step_records): no feed is created and nothing uploaded. Only new samples the
-   user brings go to a test feed in the build (create_feed, upload_sample), never the production feed; a test feed
+   (step_sample with their stream ids, step_records): no feed is created and nothing uploaded. Only new sample files
+   the user chooses go to a test feed in the build (create_feed user_samples=[the files they named], upload_sample),
+   never the production feed: files in the workspace aren't their choice until they say so. A test feed
    stays in the workspace at promotion, and its samples are processed and checked there (create_processor_filter,
    which the user enables; wait_for_processing; check_events).
 3. Draft the change on the test records with step_pipeline draft_code and compare_outputs (draft_code): only the
@@ -594,7 +606,7 @@ every field, what it holds and the values it has. Change nothing except the docu
 2. Draft the text converter if the format needs one (build_data_splitter with the surveyed streams) and the
    translation with build_translation_xslt (feeds=[{feed}], build and name), one rule per kind of event, then
    create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped
-   where they are. Create no feed, upload nothing and process nothing.
+   where they are. Create no feed and upload nothing, whatever sample files the workspace holds.
 3. survey_feed again with the same build: it carries on from the survey doc (streams read, kinds known). New kinds of
    event: add rules (build_translation_xslt uuid= changes=), and step_records over every location so far. Repeat
    until a survey's coverage says covered, or every stream has been read; until then, say plainly that the feed is
@@ -605,7 +617,10 @@ every field, what it holds and the values it has. Change nothing except the docu
 4. Broad check: step_sample over three of the surveyed streams (newest, oldest, middle) with records_per_stream=150,
    to catch variants the examples didn't show; fix and step again until clean. Then tell the user which kinds of
    event the pipeline covers and their share of the data.
-5. write_documentation for the pipeline. Then {_PROMOTE} Promotion gives it a filter on {feed}, disabled: enabled, it
+5. Process the surveyed streams where they are: create_processor_filter stream_ids=[them] (up to 10). Their Events
+   go to a test feed the server makes in the build (output_feed), not into {feed}. Give the user the pipeline link to
+   enable the filter; once they have, wait_for_processing, then check_events on the Events.
+6. write_documentation for the pipeline. Then {_PROMOTE} Promotion gives it a filter on {feed}, disabled: enabled, it
    processes the feed's existing data too; when is the user's. Once its Events exist, indexing them is a build of its
    own (start_build feeds=[{feed}], then the index).
 

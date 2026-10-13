@@ -63,10 +63,13 @@ Anything else is refused by the server's write guard, whatever the model asks fo
   use, and asks when none fits.
 - **Write to Elasticsearch directly.** It has no Elasticsearch connection. Documents reach Elasticsearch only
   through a Stroom indexing pipeline, and index templates are applied by your cluster admin.
-- **Process production data with a pipeline under development.** A translation pipeline in a build only processes
-  streams from the build's own feeds. Records in a production feed are stepped where they are, which writes nothing.
-  A build that works from a feed already in Stroom creates no feed and uploads nothing unless you bring new samples;
-  any test feed it makes stays in the workspace at promotion.
+- **Put a pipeline under development's Events into a production feed.** A translation pipeline in a build
+  processes streams from the build's own feeds, or from the feed already in Stroom that the build works from. Those
+  streams are processed where they are: the pipeline's StreamAppender writes their Events to a test feed the server
+  makes in the build (`<FEED>-MCP-TEST`), and promotion takes that setting off and leaves the test feed in the
+  workspace. Stroom still writes a stream's Error stream, if processing reports any, into the input stream's own feed: no pipeline property moves it, so Error streams from a build's pipeline can appear there, beside the raw streams.
+  Such a build creates no feed for raw samples and uploads nothing, whatever sample files your workspace holds,
+  unless you choose sample files of your own instead of the feed's data.
 - **Search for you without asking.** Searches go through Stroom as you, on a dashboard that is never saved
   (`find_events`, an index's survey), and only to find what you describe.
 - **Reprocess with production pipelines.** Promoted pipelines are refused by the write guard. Reprocessing

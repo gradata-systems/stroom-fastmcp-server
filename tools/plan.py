@@ -178,8 +178,10 @@ async def _survey_state(stroom, surveys: list[dict[str, Any]]) -> dict[str, Any]
         return None
     examples = [e for s in states for shape in (s.get('shapes') or {}).values() for e in shape.get('examples') or []]
     locations = [e['location'] for e in examples if e.get('location')]
+    streams = sorted({int(loc['stream']) for loc in locations if str(loc.get('stream', '')).isdigit()})
     return {'saturated': all(s.get('saturated') for s in states),
             'locations': locations if 0 < len(locations) <= 60 else None,
+            'streams': streams[-10:],
             'sample': '\n'.join(e['text'] for e in examples[:20]) or None}
 
 
@@ -209,6 +211,14 @@ async def source_feeds(ctx: Context, build: str, docs: list[dict[str, Any]]) -> 
     return [f for f in dict.fromkeys(found) if f.lower() not in own]
 
 
+async def works_from(ctx: Context, build: str | None) -> list[str]:
+    """The existing feeds the build works from (source_feeds), with its documents read here; [] for no build."""
+    if not build:
+        return []
+    from tools.builds import _build_docs
+    return await source_feeds(ctx, build, await _build_docs(ctx, build))
+
+
 async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The profiled format of the build's newest raw sample stream (its head), or None without one."""
     from tools.sampling import read_head
@@ -222,16 +232,20 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
         # The head ends part-way through a record: profiled with it, 50 XML fragments (35 KB) read as key=value, their
         # messages' "User: x" taken for pairs, and create_pipeline refused the XMLFragmentParser (Qwen, VS Code).
         text = text[:text.rstrip('\n').rfind('\n') + 1]
+    return {'stream_id': newest['id'], 'feed': newest['feed'], **text_format(text)}
+
+
+def text_format(text: str) -> dict[str, Any]:
+    """The format of sample text, profiled, and whether it needs a text converter."""
     profiled = profile(text)
     if profiled.get('malformed_lines') and profiled['format'] == 'json lines':
         # Lines that aren't JSON: the Data Splitter route (one record a line, the JSON parsed in the XSLT), as the
         # JSONParser would stop at the first of them.
-        return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': 'json lines (some not JSON)',
-                'suggested_parser': profiled.get('suggested_parser'), 'needs_text_converter': True}
-    return {'stream_id': newest['id'], 'feed': newest['feed'], 'format': profiled['format'],
-            'namespace': profiled.get('namespace'), 'root': profiled.get('root'),
-            'suggested_parser': profiled.get('suggested_parser'), 'needs_text_converter': profiled['format'] in TEXT_FORMATS
-            or profiled['format'] == 'xml fragments'}
+        return {'format': 'json lines (some not JSON)', 'suggested_parser': profiled.get('suggested_parser'),
+                'needs_text_converter': True}
+    return {'format': profiled['format'], 'namespace': profiled.get('namespace'), 'root': profiled.get('root'),
+            'suggested_parser': profiled.get('suggested_parser'),
+            'needs_text_converter': profiled['format'] in TEXT_FORMATS or profiled['format'] == 'xml fragments'}
 
 
 # Event-logging paths whose index fields make the verification dashboard's columns, in this order (seen in VS Code:
@@ -434,7 +448,8 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     survey = await _survey_state(stroom, surveys) if surveys and existing else None
     if survey and not fmt and survey.get('sample'):
         # The format of an existing feed, from the survey's examples: whether a text converter is needed.
-        fmt = profile(survey['sample'])
+        # Seen (e2e_existing_feed): profile()'s own result has no needs_text_converter, and the plan failed.
+        fmt = text_format(survey['sample'])
     # Which stages the build does: on existing data, those it has the pipelines (or survey, or index doc) for. A CEF
     # output build does neither, whatever it works from.
     cef_only = cef_build and not translation and not indexing and not surveyed
@@ -507,10 +522,14 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     stage_steps = {stage: {s['step'] for s in checklist() if s['stage'] == stage} for stage in ('1 events', '2 indexing')}
     if not survey:
         skipped.add('covered')
-    if existing and not own_feed:
-        # Nothing of its own to process: production records are stepped where they are (a test feed, if the build
-        # makes one, brings these steps back).
-        skipped |= {'feed', 'samples', 'processed', 'validated'}
+    if existing:
+        # No feed to create and nothing to upload: the feed's streams are stepped where they are. An existing feed's
+        # are processed where they are too, their Events written to a test feed the server makes in the build (asked
+        # for by the user). A copy of a production pipeline is proven by stepping, unless the build processes into a
+        # test feed of its own.
+        skipped |= {'feed', 'samples'}
+        if copies and not own_feed:
+            skipped |= {'processed', 'validated'}
     if not stage_1:
         skipped |= stage_steps['1 events']
     if not stage_2:
@@ -549,7 +568,8 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         elif processing == 'finished':
             processing = 'no_index'    # searched through an index doc: a discovery build makes it now
     named = ', '.join(sources) or 'the feed it works from'
-    raw_ids: Any = [m['id'] for m in raw] or (f"<recent raw streams of {named} (find_streams)>" if existing else [])
+    raw_ids: Any = [m['id'] for m in raw] or (survey or {}).get('streams') or (
+        f"<recent raw streams of {named} (find_streams)>" if existing else [])
     events_ids: Any = (raw_ids if discovery else events[:20]) or (
         f"<recent Events streams from {named} (find_streams stream_type=Events)>" if existing else [])
     edited = None

@@ -16,7 +16,10 @@ also has a file read and a logout, the second oldest a password change. Then, as
 6. the broad check steps the head of each stream (records_per_stream) clean;
 7. a single-line JSON stream of about 3 MB is surveyed from its head only (max_chars_per_stream): a bounded
    read, complete records only, and its locations step clean.
-Nothing is copied or processed: no test feed, no processor filter, no new streams.
+Stepping copies nothing. 8. Then the feed's streams are processed where they are (asked for by the user): the
+   Events go to a test feed the server makes in the build, through the pipeline's StreamAppender; no feed is
+   made for raw samples and nothing is uploaded. 9. Promotion takes the StreamAppender's feed off, leaves
+   the test feed in the workspace, and the feed's filter leaves none of the sample out.
 """
 import asyncio
 import json
@@ -33,7 +36,9 @@ import e2e_translation as e2e  # noqa: E402
 from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from security.guard import guard_from as ctx_guard  # noqa: E402
-from tools import feeds, generation, pipeline_writes, sampling, stepping, templates, translation  # noqa: E402
+from fastmcp.exceptions import ToolError  # noqa: E402
+from tools import builds, feeds, generation, pipeline_writes, processing_writes, sampling, stepping, templates, translation  # noqa: E402
+from tools.plan import status as build_status  # noqa: E402
 from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
@@ -235,15 +240,67 @@ async def main():
         e2e.check(located['verdict'] == 'clean' and located['records_stepped'] == len(head['locations']),
                  f"its locations step clean ({located['records_stepped']} records)")
 
-        print('\n### nothing copied or processed; generated docs are tagged')
+        print('\n### stepping copied nothing; generated docs are tagged')
         created = [m['meta'] for m in (await stroom.find_meta([e2e.processing_writes._term('Feed', source)], 50))['values']]
         e2e.check(len(created) == len(STREAMS) and all(m['typeName'] == 'Raw Events' for m in created),
                  f"the source feed still holds only its {len(STREAMS)} raw streams")
-        filters = [r for r in (await stroom.post('/processorFilter/v1/find', {'expression': {'type': 'operator', 'op': 'AND', 'children': []}})).get('values') or []
-                   if (r.get('processorFilter') or {}).get('pipelineUuid') == pipeline['uuid']]
-        e2e.check(not filters, 'no processor filter was created')
         tags = await ctx_guard(ctx).tags({'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': pipeline['name']})
         e2e.check('mcp-generated' in tags and 'mcp-managed' in tags, f"the pipeline is tagged {tags}")
+
+        print('\n### 8. processed where it is: the Events go to a test feed the server makes in the build')
+        # Asked for by the user: no feed made for raw samples and nothing uploaded; the build's pipeline processes the
+        # existing feed's streams, its StreamAppender writing to a test feed in the build.
+        test_feed = f'{source}-MCP-TEST'
+        try:
+            await feeds.create_feed(ctx, build, f'{source}-SAMPLES')
+            e2e.check(False, 'a feed for raw samples is refused in a build on an existing feed')
+        except ToolError as e:
+            e2e.check('works from the existing feed' in str(e) and 'user_samples=' in str(e),
+                      f"a feed for raw samples is refused: {str(e)[:160]}")
+        started = await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
+                                   stream_ids=ids)
+        e2e.check(started['output_feed'] == test_feed and 'not into the production feed' in started['output_note'],
+                  f"the filter's Events go to {started.get('output_feed')}")
+        own = (await stroom.get_doc('Pipeline', pipeline['uuid'])).get('pipelineData') or {}
+        set_feed = [p_ for p_ in (own.get('properties') or {}).get('add') or [] if p_['name'] == 'feed']
+        e2e.check(len(set_feed) == 1 and set_feed[0]['value']['entity']['name'] == test_feed,
+                  f"the pipeline's StreamAppender writes to {test_feed}")
+        try:
+            await feeds.upload_sample(ctx, test_feed, '{"ts": "2026-09-28T10:00:00Z"}')
+            e2e.check(False, 'nothing is uploaded to the test feed')
+        except ToolError as e:
+            e2e.check('upload nothing' in str(e), f"nothing is uploaded to the test feed: {str(e)[:120]}")
+        done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], ids)
+        outputs = {raw: await processing_writes._outputs(stroom, raw, pipeline['uuid']) for raw in ids}
+        events = [m for metas in outputs.values() for m in metas if m['typeName'] == 'Events']
+        e2e.check(done['finished'] and len(events) == len(ids) and all(m['feedName'] == test_feed for m in events),
+                  f"one Events stream per raw stream, all in {test_feed}: {[(m['id'], m['feedName']) for m in events]}")
+        in_source = [m['meta'] for m in (await stroom.find_meta([e2e.processing_writes._term('Feed', source)], 50))['values']]
+        errors = [m for metas in outputs.values() for m in metas if m['typeName'] == 'Error']
+        print(f"    the source feed holds {sorted({m['typeName'] for m in in_source})}; Error streams: "
+              f"{[(m['id'], m['feedName']) for m in errors]}")
+        e2e.check(not [m for m in in_source if m['typeName'] == 'Events'], f"no Events were written to {source}")
+        status = await build_status(ctx, build)
+        e2e.check(status['next']['step'] != 'feed' and 'upload_sample' not in json.dumps(status['next']),
+                  f"the plan goes on from the processed Events: next {status['next']['step']}")
+
+        print('\n### 9. promoted: the pipeline writes into its input feed again, and processes the sample again')
+        await builds.write_documentation(ctx, build, pipeline['uuid'], change='Created', stream_ids=ids[:1], markdown=(
+            '## Purpose and data\n\nApplication audit events.\n\n## Field mapping\n\n| Field | Path |\n| --- | --- |\n'
+            '| user | User/Id |\n'))
+        folder = f'System/E2E Production/existing-{stamp}'
+        promoted = await e2e.agreed(builds.promote_build, ctx=ctx, build=build,
+                                    destinations={'Pipeline': folder, 'XSLT': folder, 'Documentation': folder})
+        own = (await stroom.get_doc('Pipeline', pipeline['uuid'])).get('pipelineData') or {}
+        e2e.check(not [p_ for p_ in (own.get('properties') or {}).get('add') or [] if p_['name'] == 'feed'],
+                  'the StreamAppender feed property is taken off')
+        e2e.check(any('writes its Events into its input' in d for d in promoted['promoted']),
+                  'promotion says so')
+        e2e.check(any(test_feed in d and 'left' in d for d in promoted['promoted']),
+                  f"{test_feed} is left in the workspace")
+        made = promoted.get('processing_filters') or []
+        e2e.check(len(made) == 1 and made[0]['feed'] == source and not made[0].get('except_processed_in_build'),
+                  f"its filter on {source} leaves none of the sample out (their Events stayed in the test feed): {made}")
         await text_locations(ctx, stamp)
         print('\nALL PASSED')
     finally:

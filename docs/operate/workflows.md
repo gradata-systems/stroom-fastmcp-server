@@ -27,7 +27,7 @@ flowchart LR
 | Workflow | Starts from | Ends with |
 | --- | --- | --- |
 | `onboard_data_source` | A new source's name, and its sample files (or a pasted sample) | Feed, events pipeline, indexing pipeline and documentation, promoted |
-| `onboard_existing_feed` | A Raw Events feed that already holds data | An events pipeline for its kinds of event, stepped on the feed's own records where they are, promoted. Processing the feed is yours to start |
+| `onboard_existing_feed` | A Raw Events feed that already holds data | An events pipeline for its kinds of event, stepped and processed on the feed's own records where they are (the Events go to a test feed in the build), promoted. Processing the whole feed is yours to start |
 | `index_event_data` | An Events feed | An indexing pipeline and index, verified and promoted |
 | `create_discovery_index` | Raw JSON, CSV or XML, a sample or a feed | The records indexed as they are, to explore before a translation is written |
 | `update_events_pipeline` | An events pipeline, with new samples or a field fix | A new version, or a change in place on a working copy. The new output is compared with the current one record by record |

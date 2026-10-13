@@ -1253,11 +1253,18 @@ async def promote_build(
         folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
         done.append(f"created folder {path}" if folders[path].get('_created') else f"used the existing folder {path}")
     done += versioned
-    from tools.processing_writes import development_batch
+    from tools.processing_writes import development_batch, restore_output_feed
+    build_feeds = {d['uuid'] for d in docs if d['type'] == 'Feed'}
     for step in plan:
         if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(
                 ctx, step['doc']['uuid'], False):
             done.append(f"restored the default batch size on '{step['doc']['name']}'")
+        if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await restore_output_feed(
+                ctx, step['doc']['uuid'], build_feeds):
+            # Its Events went to the build's test feed (an existing feed's streams, processed in the build): in
+            # production they go into the input's feed.
+            done.append(f"'{step['doc']['name']}' writes its Events into its input's feed again (the build's test "
+                        f"feed was for the build only)")
     order = {'write back': 0, 'move': 1, 'discard': 2, 'keep': 3}
     for step in sorted(plan, key=lambda p: order[p['action']]):
         doc = step['doc']

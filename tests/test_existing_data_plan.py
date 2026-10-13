@@ -58,7 +58,8 @@ async def test_an_existing_feed_needs_no_feed_or_upload_before_any_pipeline():
 async def test_a_surveyed_feed_goes_on_to_the_translation_not_a_feed():
     result = await status([_doc('Documentation', 's', 'ACME - Survey')], sources=['ACME'])
     assert result['next']['step'] == 'translation'
-    assert states(result)['processed'] == 'not needed' and states(result)['index'] == 'not needed'
+    # Processed where it is, into a test feed the server makes (asked for by the user); indexing is a build of its own.
+    assert states(result)['processed'] == 'to do' and states(result)['index'] == 'not needed'
 
 
 async def test_a_new_version_of_an_events_pipeline_steps_production_records():
@@ -168,8 +169,12 @@ async def test_an_existing_feed_is_stepped_where_it_is_then_surveyed_until_cover
     stepped = await status(docs, survey={'saturated': False, 'locations': locations}, stepped=True, **args)
     assert stepped['next']['step'] == 'covered' and stepped['next']['call']['tool'] == 'survey_feed'
     assert stepped['next']['call']['arguments'] == {'feed': 'ACME', 'build': 'b'}
-    covered = await status(docs, survey={'saturated': True, 'locations': locations}, stepped=True, **args)
-    assert covered['next']['step'] == 'documented'
+    covered = await status(docs, survey={'saturated': True, 'locations': locations, 'streams': [5]}, stepped=True,
+                           **args)
+    # Then the surveyed streams are processed where they are (their Events go to the build's test feed).
+    assert covered['next']['step'] == 'processed'
+    assert covered['next']['call'] == {'tool': 'create_processor_filter',
+                                       'arguments': {'pipeline_uuid': 'ev', 'stream_ids': [5]}}
 
 
 async def test_indexing_an_existing_feeds_events_names_them_and_their_pipeline():
@@ -202,3 +207,13 @@ async def test_a_hand_edited_translation_is_read_back_before_it_is_documented():
                           checks=["Pipeline 'ACME-V1.1-Events': its XSLT differs from what its mapping generates: ..."])
     assert result['next']['step'] == 'documented'
     assert result['next']['call'] == {'tool': 'rebuild_mapping', 'arguments': {'uuid': 'x', 'pipeline_uuid': 'ev'}}
+
+
+async def test_an_existing_feeds_format_is_read_from_its_survey():
+    # Seen (e2e_existing_feed): with no raw stream of its own, the plan profiled the survey's examples and failed on a
+    # key the profile doesn't have.
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'), _doc('XSLT', 'x', 'X')]
+    survey = {'saturated': False, 'locations': None, 'streams': [5], 'sample': 'time,user,action\n10:00,alice,login\n'}
+    result = await status(docs, sources=['ACME'], survey=survey, stages={'ev': 'translation'},
+                          mappings={'x': ('translation', {})})
+    assert states(result)['converter'] == 'to do'      # delimited text needs a Data Splitter

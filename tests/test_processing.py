@@ -363,9 +363,13 @@ async def test_translation_pipelines_only_process_the_builds_feeds(ctx):
         return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}))
     respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': [
         {'docRef': {'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}, 'path': 'System / Feeds'}]}))
-    with patch('tools.processing_writes.guard_from', return_value=guard(feed_build=None)):
-        with pytest.raises(ToolError, match=r"Feed\(s\) \['PROD-FEED'\] are not in this build"):
+    with patch('tools.processing_writes.guard_from', return_value=guard(feed_build=None)), \
+            patch('tools.plan.works_from', AsyncMock(return_value=[])):
+        with pytest.raises(ToolError, match=r"Feed\(s\) \['PROD-FEED'\] are not in this build") as refused:
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
+        # The way to work on that feed's data is start_build feeds=; never a copy of its records (seen: told to copy
+        # them into a test feed, Haiku made one, and a workspace's sample files would have gone in).
+        assert 'start_build' in str(refused.value) and 'upload_sample' not in str(refused.value)
         with pytest.raises(ToolError, match='not in this build'):
             await processing_writes.create_processor_filter(ctx, 'p1', feed='PROD-FEED',
                                                             created_after='2026-09-29T00:00:00Z')
@@ -632,3 +636,95 @@ async def test_superseded_events_streams_are_refused_naming_the_events_now_in_th
     terms = stroom.find_meta.call_args.args[0]
     assert {'field': 'Parent Id', 'value': '3807'}.items() <= terms[0].items()
     await processing_writes._refuse_superseded(stroom, [{**gone, 'status': 'UNLOCKED'}])     # a live stream: fine
+
+
+@respx.mock
+async def test_an_existing_feeds_streams_are_processed_into_a_test_feed_in_the_build(ctx):
+    # Asked for by the user: a build on an existing feed's data processes its streams where they are, the Events
+    # written to a test feed the server makes in the build through the StreamAppender's feed property; nothing is
+    # uploaded and no feed is made for raw samples.
+    output = {'name': 'PROD-FEED-MCP-TEST', 'uuid': 'tf', 'made': True, 'works_from': ['PROD-FEED']}
+    create = mock_stroom(elastic=False, streams={6: ('Raw Events', None)})
+    respx.post(f'{API}/meta/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
+        {'meta': {'id': 6, 'typeName': 'Raw Events', 'feedName': 'PROD-FEED'}}]
+        if json.loads(request.content)['expression']['children'][0]['field'] == 'Id' else []}))
+    respx.get(f'{API}/feed/v1/getDocRefForName/PROD-FEED').mock(
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}))
+    respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'docRef': {'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}, 'path': 'System / Feeds'}]}))
+    redirect = AsyncMock(return_value=output)
+    with patch('tools.processing_writes.guard_from', return_value=guard(feed_build=None)), \
+            patch('tools.plan.works_from', AsyncMock(return_value=['PROD-FEED'])), \
+            patch.object(processing_writes, 'output_feed', redirect), \
+            patch.object(processing_writes, 'refuse_older_than_feed', AsyncMock()):
+        result = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
+    assert redirect.await_args.args[2] == ['PROD-FEED'] and create.called
+    assert result['output_feed'] == 'PROD-FEED-MCP-TEST' and result['enabled'] is False
+    assert 'not into the production feed' in result['output_note'] and 'Nothing is uploaded' in result['output_note']
+
+
+def _layers(own_properties):
+    """A pipeline inheriting a template whose StreamAppender is 'streamAppender', with its own properties."""
+    return [{'pipelineData': {'elements': {'add': [{'id': 'streamAppender', 'type': 'StreamAppender'}]}}},
+            {'pipelineData': {'properties': {'add': own_properties}}}]
+
+
+async def test_the_test_feed_is_made_once_and_set_on_the_stream_appender():
+    stroom = SimpleNamespace(
+        pipeline_layers=AsyncMock(return_value=_layers([])),
+        get=AsyncMock(return_value={'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}),
+        get_doc=AsyncMock(side_effect=lambda t, u: {
+            'pf': {'uuid': 'pf', 'encoding': 'UTF-16LE', 'streamType': 'Raw Events'},
+            'tf': {'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST'},
+            'p1': {'uuid': 'p1', 'name': 'P', 'pipelineData': {}}}[u]),
+        put_doc=AsyncMock(side_effect=lambda d: d))
+    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[]),
+                            create=AsyncMock(return_value={'type': 'Feed', 'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST'}))
+    recorded = AsyncMock()
+    with patch.object(processing_writes, 'gateway_from', lambda c: stroom), \
+            patch.object(processing_writes, 'guard_from', lambda c: guard), \
+            patch('security.record.update', recorded):
+        made = await processing_writes.output_feed(None, {'uuid': 'p1', 'name': 'P'}, ['PROD-FEED'], 'b')
+    assert made == {'name': 'PROD-FEED-MCP-TEST', 'uuid': 'tf', 'made': True, 'works_from': ['PROD-FEED']}
+    assert guard.create.await_args.args == ('Feed', 'PROD-FEED-MCP-TEST', 'b')
+    feed_doc, pipeline_doc = (c.args[0] for c in stroom.put_doc.await_args_list)
+    assert feed_doc['encoding'] == 'UTF-16LE'                     # the source feed's settings
+    assert pipeline_doc['pipelineData']['properties']['add'] == [
+        {'element': 'streamAppender', 'name': 'feed',
+         'value': {'entity': {'type': 'Feed', 'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST'}}}]
+    # Kept in the build's record as an output feed: upload_sample refuses it (no user_samples).
+    entry = {}
+    recorded.await_args.args[3](entry)
+    assert entry == {'output_for': ['PROD-FEED']}
+
+
+async def test_promotion_takes_the_test_feed_off_the_stream_appender():
+    own = [{'element': 'streamAppender', 'name': 'feed', 'value': {'entity': {'type': 'Feed', 'uuid': 'tf'}}},
+           {'element': 'translationFilter', 'name': 'xslt', 'value': {'entity': {'type': 'XSLT', 'uuid': 'x'}}}]
+    stroom = SimpleNamespace(pipeline_layers=AsyncMock(return_value=_layers(own)),
+                             get_doc=AsyncMock(return_value={'uuid': 'p1', 'pipelineData': {'properties': {'add': list(own)}}}),
+                             put_doc=AsyncMock(side_effect=lambda d: d))
+    with patch.object(processing_writes, 'gateway_from', lambda c: stroom):
+        assert await processing_writes.restore_output_feed(None, 'p1', {'tf'})
+        assert stroom.put_doc.await_args.args[0]['pipelineData']['properties']['add'] == own[1:]
+        # A feed property naming a feed outside the build (set by the user) is left alone.
+        stroom.put_doc.reset_mock()
+        assert not await processing_writes.restore_output_feed(None, 'p1', {'other'})
+        assert not stroom.put_doc.called
+
+
+@respx.mock
+async def test_streams_processed_into_a_test_feed_are_processed_again_once_promoted(ctx):
+    # Their Events stayed in the build's test feed, in the workspace: production needs its own.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9, 'pipelineUuid': 'tp', 'queryData': {'expression': {
+            'type': 'operator', 'op': 'OR', 'children': [{'type': 'term', 'field': 'Id', 'condition': 'EQUALS',
+                                                          'value': '8'}]}}}}]}))
+    respx.post(f'{API}/meta/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
+        {'meta': {'id': 8, 'feedName': 'ACME', 'typeName': 'Raw Events'}}]
+        if json.loads(request.content)['expression']['children'][0]['field'] == 'Id' else [
+        {'meta': {'id': 80, 'feedName': 'ACME-MCP-TEST', 'typeName': 'Events', 'pipelineUuid': 'tp'}}]}))
+    with patch.object(processing_writes, '_is_indexing', AsyncMock(return_value=False)):
+        plan = await processing_writes.promotion_processing(ctx, [{'uuid': 'tp', 'name': 'Acme-Events'}], ['ACME'],
+                                                            ['ACME-MCP-TEST'])
+    assert [(p['feed'], p['done']) for p in plan] == [('ACME', [])]
