@@ -552,17 +552,23 @@ every field, what it holds and the values it has. Change nothing except the docu
    on the Events stream to find the event type they mean, then step_pipeline on raw records for an example.'''}
 2. Plan the validation, and say it to the user in two or three lines: what output the record should give
    (from the user's words, the event-logging schema and any source docs), which field paths are wrong now, and
-   which other records to check (recent raw streams on the same feed, find_streams; the same event type).
+   which other records to check: other events of the same kind wherever they are (find_events with the conditions
+   that pick them out, e.g. the TypeId and the wrong value: its hits are what the fix is proven on), and recent raw
+   streams on the same feed (find_streams).
 3. Confirm the issue: step_pipeline on the located record (with part), check_events
    on the output. If you cannot reproduce it, say what you found and ask the user; do not guess a fix.
 4. Draft the fix in the pipeline's own XSLT or text converter and try it with step_pipeline draft_code. Then
-   summarise_fix with the reported raw stream plus a few recent ones and expected_paths set to the fields the fix
-   should change. Revise until ready is true.
+   summarise_fix with events= the hits of the same kind (find_events, from several streams if it has them) and
+   stream_ids= a few recent raw streams, and expected_paths set to the fields the fix should change: the hits must
+   change as intended, the recent streams only there. Revise until ready is true.
 5. Present the fix: the diff, the fields that change and how many records, and any template warning. Ask whether
    to apply it to the pipeline, or to give them the manual steps.
    - Apply: follow update_events_pipeline (ask new version or in place, confirm names, copy_pipeline, build_translation_xslt
      (uuid=...) from the changed mapping, or save_xslt (uuid=...) or save_text_converter with the draft, compare_outputs, write_documentation, promote_build).
    - Manual: give summarise_fix's manual_steps and diff.
-   Either way, reprocessing production data is the user's to do.
+   Either way, reprocessing production data is the user's to do. Tell them what the fix reaches, from find_events
+   all_streams with the same conditions: how many events, in which Events streams, the raw streams to reprocess
+   (exactly those, once the fix is promoted), and for Elasticsearch the delete request their cluster's admin runs just
+   before, so the corrected events are not indexed twice.
 
 {_RULES}"""

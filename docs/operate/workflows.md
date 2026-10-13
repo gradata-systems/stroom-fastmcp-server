@@ -29,7 +29,7 @@ flowchart LR
 | `create_discovery_index` | Raw JSON, CSV or XML, a sample or a feed | The records indexed as they are, to explore before a translation is written |
 | `update_events_pipeline` | An events pipeline, with new samples or a field fix | A new version, or a change in place on a working copy. The new output is compared with the current one record by record |
 | `update_indexing_pipeline` | An indexing pipeline, with fields to add or change | The next version beside the current one, starting on new Events. The current one keeps running |
-| `fix_pipeline_issue` | A stream id, and optionally an event id, of an event that came out wrong | The event traced back to its record, a fix proven by stepping, and applied with a backup |
+| `fix_pipeline_issue` | The Events stream id and event id of an event that came out wrong (a dashboard row has both), or a description the agent searches the index for | The event traced back to its record, a fix proven on it and the other events of its kind the index holds, applied with a backup, and what it reaches: the raw streams to reprocess and, for Elasticsearch, the delete to run first |
 | `evaluate_events_pipeline` | Any events pipeline, including ones the server didn't build | A report (errors and schema compliance first, then its mapping and events) and a Documentation doc. Read only, unless a fix is approved |
 | `document_index` | An Elastic Index or Lucene Index doc | A Documentation doc of what the index holds, surveyed through Stroom |
 | `check_feed_coverage` | An events pipeline that has processed its feed | Kinds of event the sample missed, found across the feed, and covered |
