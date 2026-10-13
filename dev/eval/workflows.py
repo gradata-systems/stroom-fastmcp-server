@@ -187,7 +187,7 @@ async def production_pipeline(ctx, stamp: str, label: str, streams: list[str], x
     raw = sorted(m['meta']['id'] for m in (await stroom.find_meta(
         [processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')], 10))['values'])
     await processing_writes._create_filter(stroom, pipeline, {'type': 'operator', 'op': 'AND', 'children': [
-        processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')]}, 10, 2, None)
+        processing_writes._term('Feed', feed_name), processing_writes._term('Type', 'Raw Events')]}, 10, 2, None, enabled=True)
     done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], raw)
     return {'feed': feed_name, 'pipeline': pipeline, 'xslt': xslt, 'raw': raw, 'processed': done,
             'folder': f'System/E2E Production/{label}-{stamp}'}

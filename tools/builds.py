@@ -358,6 +358,35 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
 
 
 _TITLE = re.compile(r'\A\s*#[ \t]+[^\n]*(?:\n|\Z)')
+# The guide's sections (stroom://guide/documentation) and an evaluation report's.
+_SECTION = re.compile(r'^#[ \t]+(Purpose and data|Processing|Field mapping|Output|Conformance|Errors|Open items|'
+                      r'Event types|Version control|Change log)\b', re.I)
+
+
+def section_levels(markdown: str) -> str:
+    """The documentation with its sections at `## `, where the agent wrote them at `# ` (seen: Haiku's index
+    documentation began `# Purpose and data`; the survey was put in a `## Purpose and data` of its own above it, and
+    as a pipeline's first line it would have been taken for the title). Every heading goes down a level, and a title
+    of the agent's goes: the tool sets the title."""
+    lines = (markdown or '').split('\n')
+    fenced, level1 = False, []
+    for n, line in enumerate(lines):
+        if line.lstrip().startswith(('```', '~~~')):
+            fenced = not fenced
+        elif not fenced and re.match(r'#[ \t]', line):
+            level1.append(n)
+    if not any(_SECTION.match(lines[n]) for n in level1):
+        return markdown
+    first = next((n for n, line in enumerate(lines) if line.strip()), None)
+    if first in level1 and not _SECTION.match(lines[first]):
+        lines[first] = ''
+    fenced = False
+    for n, line in enumerate(lines):
+        if line.lstrip().startswith(('```', '~~~')):
+            fenced = not fenced
+        elif not fenced and re.match(r'#{1,5}[ \t]', line):
+            lines[n] = '#' + line
+    return '\n'.join(lines).strip('\n')
 
 
 def titled(markdown: str, name: str) -> str:
@@ -538,7 +567,7 @@ async def write_documentation(
                         "with the user per rule in build_translation_xslt (allow_unknown), whose form shows what the "
                         "records hold; or map them to their action element. Save the XSLT from its mapping there.")
     from utils.versionlog import body_of
-    body = body_of(markdown)
+    body = body_of(section_levels(markdown))
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
     change = change.strip()     # a new doc's is 'Created'; an update needs its own line (checked below)
