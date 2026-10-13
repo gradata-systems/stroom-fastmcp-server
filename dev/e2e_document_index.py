@@ -335,10 +335,11 @@ async def new_field(ctx, stroom, es: httpx.AsyncClient, stamp: str, prod: dict, 
     # document carrying it is indexed, and the index is refreshed: searchable now.
     mapped = await es.put(f'/{index}/_mapping', json={'properties': {'event': {'properties': {'outcome': {'type': 'boolean'}}}}})
     e2e.check(mapped.status_code == 200, f'Elasticsearch maps event.outcome: {mapped.text[:120]}')
+    # An event already indexed, indexed again carrying it (Stroom only returns hits whose StreamId and EventId are an
+    # event of a stream in Stroom, so a made-up document would never be read back).
     newest = (await es.post(f'/{index}/_search', json={'size': 1, 'sort': [{'@timestamp': 'desc'}]})).json()['hits']['hits'][0]
-    source = {**newest['_source'], 'EventId': 1000, 'event': {'outcome': True}}
-    added = await es.post(f'/{index}/_doc?refresh=true', json=source)
-    e2e.check(added.status_code in (200, 201), f'a document carrying it indexed and refreshed: {added.status_code}')
+    added = await es.post(f"/{index}/_update/{newest['_id']}?refresh=true", json={'doc': {'event': {'outcome': True}}})
+    e2e.check(added.status_code == 200, f'a document carrying it indexed and refreshed: {added.status_code}')
     # How long Stroom takes to list it: the production case was a minute. Here it is checked against a bound, so a
     # Stroom that starts to cache its field list shows up.
     ref = {'type': 'ElasticIndex', 'uuid': doc['uuid'], 'name': doc['name']}

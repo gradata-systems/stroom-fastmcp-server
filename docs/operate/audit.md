@@ -44,6 +44,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 | `stroom_request` | every Stroom REST request, and every sample upload to the datafeed | `method`, `path`, `outcome` (`success` or `error`), `status`, `error`, `took_ms`; uploads add `feed` and `bytes` |
 | `confirmation` | a change the user confirms first, e.g. `create_feed`, `create_pipeline`, `copy_pipeline` | `action`, `details`, `outcome`, `via` or `id` |
 | `approval` | a change that needs the user's approval, e.g. `promote_build`, `create_processor_filter`, `reprocess_streams`, `set_processor_filter_enabled` | `action`, `details`, `outcome`, `via` or `id` |
+| `choice` | the user picks one of several options in a form: how an index's fields are named, which field is `@timestamp`, which feed they meant when the one they named isn't in this Stroom, whether a hand edit is kept | `action`, `question`, `outcome` (`requested`, `chosen` or `declined`), `via`, `choice` |
 | `access_denied` | a request refused by the server or by Stroom | `reason`, and the fields below |
 
 `confirmation` and `approval` outcomes:
@@ -53,6 +54,10 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 | `requested` | The server asked the user. `via: form` when the client shows a form; otherwise `id` is the consent id handed back to the client. |
 | `granted` | The user agreed: in a form (`via: form` or `elicitation`), or by the client calling again with the consent id (`via: id`). |
 | `declined` | The user refused in a form. The tool call ends with an error and nothing is changed. |
+
+A rule kept as `Unknown` in a translation is agreed once: when the translation is saved again with the same rule,
+the user isn't asked, and a `confirmation` with `outcome: granted` and `via: earlier` records that it is kept on
+their earlier answer, with the rule's conditions and reason in `details`.
 
 `details` is exactly what the user was shown, such as the build, feed name and encoding, or the pipelines
 and processor filters a promotion will change. A request and its answer arrive in separate tool calls, so
@@ -93,6 +98,8 @@ Every event also carries:
   `preferred_username`, or else `upn` (Entra ID), or else `email`; `client_id` is `azp`, the client the
   user signed in with. All three are null with `dev_no_auth`.
 - `call_id`: links a `tool_call` or `resource_read` to the events it caused (null for `invalid_token`)
+- `stroom`: the Stroom the server acts on, by its `STROOM_MCP_CLUSTER_NAME` (else its URL), so the logs of a server
+  for each cluster can be kept together and told apart
 
 ## Example
 
@@ -136,6 +143,8 @@ server's use:
   `outcome: granted`; `details` lists what changed.
 - What users declined: filter on `outcome: declined`.
 - Attempts to change production content directly: filter on `reason: not_managed`.
+- Work started against the wrong cluster: filter on `event: tool_call`, `outcome: error`, with an `error` that
+  says the feed or document isn't in this Stroom; `stroom` says which one it asked.
 - Sign-in problems: filter on `reason: invalid_token` and rank `check`. A rise in `audience`, `issuer` or
   `signing_key` usually means a configuration change at the identity provider; `signature` means altered tokens.
 - Slow or failing tools: filter on `event: tool_call` and sort by `duration_ms`, or filter on

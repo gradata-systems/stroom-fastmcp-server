@@ -545,6 +545,11 @@ async def build_translation_xslt(
         agreed_before = await _unknown_agreed(ctx, uuid, build, name) if kept else {}
         agreed_now = {r.name: _unknown_key(r) for r in kept if agreed_before.get(r.name) == _unknown_key(r)}
         kept = [r for r in kept if r.name not in agreed_now]
+        if agreed_now:
+            # Not asked again, but on the record: the XSLT keeps these as Unknown on the user's earlier answer.
+            from security.audit import audit
+            audit('confirmation', action='build_translation_xslt', outcome='granted', via='earlier',
+                  details={f"rule '{n}'": {'kept as Unknown': json.loads(k)} for n, k in agreed_now.items()})
         if kept:
             # Unknown says what happened is not known: the user agrees to that per rule, seeing what its records hold
             # (a form when the client has them, so the model cannot agree for them).

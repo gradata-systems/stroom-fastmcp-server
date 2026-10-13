@@ -24,7 +24,7 @@ from utils.version import SERVER_VERSION
 logger = logging.getLogger(__name__)
 
 settings = Settings()
-configure_audit_log(settings.audit_log_file)
+configure_audit_log(settings.audit_log_file, settings.cluster_name or settings.stroom_url)
 rules = ErrorRules.load(settings.error_rules_file)
 policy = AccessPolicy.load(settings.access_policy_file)
 consent = ConsentStore(settings.use_elicitation, keys=[k.get_secret_value() for k in settings.request_state_keys])

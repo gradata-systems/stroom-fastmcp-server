@@ -200,8 +200,13 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
     # asked; with its conditions or reason changed, it is.
     with schema, instructions, patch.object(translation, 'update_xslt', AsyncMock(return_value={
             'type': 'XSLT', 'uuid': 'x-1', 'name': 'N', 'version': 'v'})) as update:
-        again = await generation.build_translation_xslt(ctx, kept, uuid='x-1', sample=sample)
+        recorded = []
+        with patch('security.audit.audit', lambda event, **fields: recorded.append((event, fields))):
+            again = await generation.build_translation_xslt(ctx, kept, uuid='x-1', sample=sample)
         assert again['saved']['uuid'] == 'x-1' and update.await_count == 1
+        # Not asked, but on the record: kept on the user's earlier answer.
+        assert [(e, f['outcome'], f['via'], list(f['details'])) for e, f in recorded] == [
+            ('confirmation', 'granted', 'earlier', ["rule 'status'"])]
         changed = kept.model_copy(deep=True)
         changed.events[1].allow_unknown = 'heartbeats only'
         assert (await generation.build_translation_xslt(ctx, changed, uuid='x-1', sample=sample))['status'] ==             'needs_confirmation'

@@ -43,12 +43,21 @@ def spent_waiting_for_user(ms: int) -> None:
         spent['user_ms'] += ms
 
 
-def configure_audit_log(path: Path | None) -> None:
-    """Send audit events to `path` (JSON lines) or stdout, separately from application logs.
+# The Stroom this server acts on, in every event (its cluster name, else its URL): with a server per cluster logging
+# to one store, which one an event came from.
+_stroom: dict[str, str] = {}
+
+
+def configure_audit_log(path: Path | None, stroom: str | None = None) -> None:
+    """Send audit events to `path` (JSON lines) or stdout, separately from application logs; each names `stroom`, the
+    Stroom the server acts on.
 
     The file is reopened when it has been moved or deleted, so logrotate (without copytruncate) can rotate it
     and no event is lost or written to the old file.
     """
+    _stroom.clear()
+    if stroom:
+        _stroom['stroom'] = stroom
     try:
         handler = logging.handlers.WatchedFileHandler(path, encoding='utf-8') if path else logging.StreamHandler(sys.stdout)
     except OSError as e:
@@ -86,6 +95,7 @@ def audit(event: str, **fields: Any) -> None:
         'ts': datetime.now(timezone.utc).isoformat(),
         'event': event,
         'call_id': _call_id.get(),
+        **_stroom,
         **_identity(),
         **fields,
     }

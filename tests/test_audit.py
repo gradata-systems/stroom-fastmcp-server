@@ -97,3 +97,17 @@ def test_an_audit_log_the_server_cant_write_stops_it_saying_how_to_fix_it(tmp_pa
     # PermissionError at start.
     with pytest.raises(SystemExit, match=r"Can't write the audit log .*audit\.file\.persistence\.fixPermissions=true"):
         audit_module.configure_audit_log(tmp_path / 'missing-dir' / 'audit.jsonl')
+
+
+def test_every_event_names_the_stroom_it_acts_on(tmp_path):
+    # A server per cluster, their logs kept together: which Stroom an event came from.
+    log = tmp_path / 'audit.jsonl'
+    audit_module.configure_audit_log(log, 'PROD')
+    try:
+        audit_module.audit('tool_call', tool='find_events')
+    finally:
+        for handler in audit_module.audit_logger.handlers:
+            handler.close()
+        audit_module.audit_logger.handlers.clear()
+        audit_module._stroom.clear()
+    assert json.loads(log.read_text())['stroom'] == 'PROD'
