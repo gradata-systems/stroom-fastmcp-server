@@ -62,6 +62,11 @@ Reprocessing into Elasticsearch doesn't remove documents already indexed, so the
 Lucene indexes are made as Stroom Index docs, with the fields from the field plan. The user confirms the volume
 group with the other indexing details.
 
+Reprocessing into a Lucene index doesn't remove the documents the streams already put there either. When the index
+is the build's own and holds only the streams being reprocessed (no other pipeline of the build writes to it, and
+the indexing pipeline's filters selected no other streams), the approved reprocessing deletes the index's shards
+first, which the approval says. Otherwise the approval says the streams will be indexed twice.
+
 ## Verification
 
 An index is verified by searching it through Stroom, as people will. All documents for the sample streams, then

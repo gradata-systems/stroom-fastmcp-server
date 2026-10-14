@@ -40,7 +40,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 
 | Action | What the approval says |
 | --- | --- |
-| Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the `_delete_by_query` request to run first, as documents already indexed stay |
+| Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the `_delete_by_query` request to run first, as documents already indexed stay. For Lucene: that the build's index is emptied first (its shards deleted) when it holds only these streams, or else that they will be indexed twice |
 | Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 
 The [tool reference](../reference/tools.md) marks each tool that asks.

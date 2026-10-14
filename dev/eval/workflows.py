@@ -409,7 +409,8 @@ async def change_event_type_setup(ctx, stamp: str) -> dict[str, Any]:
             'facts': (f"The pipeline is `{name}`, in {prod['folder']}; its feed is {prod['feed']}. Change it in place: "
                       f"the same names, not a new version. PWCHANGE is a user changing their own password. Only "
                       f"PWCHANGE is to change; leave the other actions as they are, SCREENLOCK included. Promote once "
-                      f"it's proven; don't reprocess.")}
+                      f"it's proven; don't reprocess. You have no sample files of your own: test on the feed's "
+                      f"records (stepping them writes nothing, so it isn't reprocessing).")}
 
 
 async def change_event_type_reference(ctx, prepared: dict[str, Any]) -> None:
@@ -471,8 +472,12 @@ async def records_output_setup(ctx, stamp: str) -> dict[str, Any]:
                         f"Records streams from the raw CSV), then index those Records into Elasticsearch as they are, "
                         f"so we can search the inventory. Use the build `{build}`, the feed `{feed}` and the index "
                         f"`{index}`. Stop once the index is verified and documented; don't promote the build."),
-            'facts': (f"The sample is all there is. The index is `{index}`, on the local Elasticsearch cluster. "
+            'facts': (f"The sample is all there is. The index is `{index}`, on the local Elasticsearch cluster: its "
+                      f"Elastic Cluster doc in Stroom is `E2E_LIVE_ES` (the `E2E_LOCAL_ES` docs are test fixtures "
+                      f"with no URL). "
                       f"last_seen is the time field, ISO 8601 in UTC. No stream meta to add, nothing to leave out. "
+                      f"'As they are' means each column a field of its own, named as in the header (hostname, ip, "
+                      f"os, owner, last_seen), so we can search hostname = ws-0141; not lists of names and values. "
                       f"An example index template from a sibling index:\n{EXAMPLE_TEMPLATE}\nAgree to the proposals "
                       f"that fit this. Don't promote: this is a scratch environment.")}
 

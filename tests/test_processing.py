@@ -221,6 +221,43 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_appr
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
 
 
+LUCENE = {'type': 'Index', 'uuid': 'ix', 'name': 'ACME-INDEX'}
+
+
+@respx.mock
+@pytest.mark.parametrize('filtered, others, emptied', [
+    ([5], [], True),                                        # the build's index holds only stream 5: emptied first
+    ([5, 6], [], False),                                    # it holds stream 6 too
+    ([5], [{'type': 'Pipeline', 'uuid': 'p2'}], False),     # another pipeline of the build writes to it
+])
+async def test_reprocessing_into_a_build_lucene_index_empties_it_only_when_it_holds_just_these_streams(
+        ctx, filtered, others, emptied):
+    # Seen (eval, Haiku): an indexing XSLT fixed and its stream reprocessed left each event in the index twice.
+    create = mock_stroom(elastic=False, filtered=filtered)
+    find = respx.post(f'{API}/index/v2/shard/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'id': 434, 'status': 'OPEN', 'documentCount': 5, 'nodeName': 'node1a', 'indexUuid': 'ix'},
+        {'id': 400, 'status': 'DELETED', 'documentCount': 3, 'nodeName': 'node1a', 'indexUuid': 'ix'}]}))
+    delete = respx.post(f'{API}/index/v2/shard/delete').mock(return_value=httpx.Response(200, json=1))
+    guard = SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
+                            build_of=AsyncMock(return_value='b'), folder_contents=AsyncMock(return_value=others))
+    with patch('tools.processing_writes.guard_from', return_value=guard), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': 'indexing'})), \
+            patch.object(processing_writes, 'lucene_index', AsyncMock(return_value=LUCENE)):
+        gates, result = await reprocessed(ctx, stream_ids=[5])
+    details = gates[0]['details']
+    assert result['enabled'] is True and json.loads(create.calls.last.request.content)['enabled'] is True
+    if emptied:
+        assert 'deleted first' in details['earlier documents'] and 'already indexed' not in details
+        assert delete.call_count == 1 and delete.calls.last.request.url.params['nodeName'] == 'node1a'
+        body = json.loads(delete.calls.last.request.content)
+        assert body['indexUuidSet'] == {'matchAll': False, 'set': ['ix']}
+        assert body['indexShardIdSet'] == {'matchAll': False, 'set': [434]}
+        assert find.called
+    else:
+        assert 'indexed twice' in details['already indexed'] and 'earlier documents' not in details
+        assert not delete.called
+
+
 IN_BUILD = SimpleNamespace(tags=AsyncMock(return_value=['mcp-generated', 'mcp-managed']), build_of=AsyncMock(return_value='b'))
 
 @respx.mock

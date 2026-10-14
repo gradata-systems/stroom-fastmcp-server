@@ -661,6 +661,39 @@ async def test_without_forms_the_candidates_are_listed_and_the_users_answer_goes
         assert answered['plan']['discovery']['timestamp_field'] == 'received'
 
 
+RECORDS = ('<?xml version="1.1" encoding="UTF-8"?>\n<records xmlns="records:2" version="2.0">'
+           '<record><data name="hostname" value="ws-0141"/><data name="last_seen" value="2026-10-01T08:00:00Z"/></record>'
+           '<record><data name="hostname" value="ws-0142"/><data name="last_seen" value="2026-10-01T08:05:00Z"/></record>'
+           '</records>\n')
+
+
+async def test_a_records_stream_is_read_by_data_name_and_only_as_delimited_input():
+    # Seen (records_output eval, Haiku): a Records stream profiled as XML offered only 'data@value' as its time,
+    # 'last_seen' was refused, and the agent indexed each record as lists of names and values.
+    from utils.fieldplan import Discovery
+    asked = AsyncMock()
+    with patch('tools.sampling.read_head', AsyncMock(return_value=(RECORDS, False, 1))), \
+            patch('tools.indexing._choose', asked):
+        result = await indexing.draft_index_mapping(_discovery_ctx(), 'elasticsearch', 'stroom-discovery-assets-v1',
+                                                    discovery=Discovery(input='delimited', timestamp_field='last_seen'),
+                                                    events_stream_ids=[7])
+        assert not asked.called and result['plan']['discovery']['timestamp_field'] == 'last_seen'
+        with pytest.raises(ToolError, match="input': 'delimited'"):
+            await indexing.draft_index_mapping(_discovery_ctx(), 'elasticsearch', 'stroom-discovery-assets-v1',
+                                               discovery=Discovery(input='xml', record='record', timestamp_field='last_seen'),
+                                               events_stream_ids=[7])
+
+
+def test_a_discovery_plan_passed_back_without_its_fields_keeps_them():
+    # Seen (records_output eval, Haiku): the plan saved with "fields": [], and the template then mapped @timestamp as
+    # a keyword, so the time range found nothing.
+    plan = FieldPlan.model_validate({'backend': 'elasticsearch', 'index_name': 'assets', 'time_field': 'last_seen',
+                                     'fields': [], 'discovery': {'input': 'delimited', 'timestamp_field': 'last_seen'}})
+    assert [(f.name, f.type, f.source) for f in plan.fields] == [
+        ('StreamId', 'id', 'stroom:stream-id()'), ('EventId', 'id', 'stroom:record-no()'), ('@timestamp', 'date', 'last_seen')]
+    assert plan.time_field == '@timestamp' and not plan.required()
+
+
 async def test_one_time_field_as_proposed_is_not_asked_about():
     from utils.fieldplan import Discovery
     one = '{"ts": "2026-10-11T08:00:00Z", "user": "a"}\n{"ts": "2026-10-11T08:01:00Z", "user": "b"}\n'

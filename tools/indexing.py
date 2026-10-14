@@ -352,15 +352,32 @@ def _time_chosen(ctx: Context, index_name: str) -> str | None:
     return chosen['field'] if chosen and time.time() - chosen['at'] < _NAMING_TTL else None
 
 
+def _records_rows(text: str) -> str | None:
+    """records:2 records as JSON lines, one object of data name -> value per record; None for any other text."""
+    if 'records:2' not in text[:2000]:
+        return None
+    from lxml import etree
+    rows = []
+    for chunk in re.split(r'(?=<\?xml)', text):
+        if not chunk.strip():
+            continue
+        try:
+            root = etree.fromstring(chunk.strip().encode('utf-8'), etree.XMLParser(recover=True))
+        except etree.XMLSyntaxError:
+            continue
+        if root is None:
+            continue
+        for record in root.iter('{records:2}record'):
+            rows.append({d.get('name'): d.get('value') for d in record.iter('{records:2}data') if d.get('name')})
+    return '\n'.join(json.dumps(r) for r in rows if r) + '\n' if rows else None
+
+
 async def _discovery_time(ctx: Context, index_name: str, discovery: Discovery,
                           stream_ids: list[int]) -> Discovery | dict[str, Any]:
     """The discovery index's time field, confirmed by the user when the records hold more than one field of times
     (asked for by the user: it becomes @timestamp, and with it whether the index is a data stream), or when the one
     proposed holds no times. The answer is kept for the session, so the user isn't asked again."""
-    remembered = _time_chosen(ctx, index_name)
-    if remembered:
-        return discovery.model_copy(update={'timestamp_field': remembered})
-    if discovery.timestamp_chosen_by_user or not stream_ids:
+    if not stream_ids:
         return discovery
     from tools.sampling import read_head
     from utils.profile import profile
@@ -372,6 +389,20 @@ async def _discovery_time(ctx: Context, index_name: str, discovery: Discovery,
         except (ToolError, ValueError):
             continue
         text += head.rstrip('\n') + '\n'
+    rows = _records_rows(text)
+    if rows is not None:
+        # records:2 (a Records stream): each data element is a field by its name, as the delimited input reads them
+        # (seen: a Records stream profiled as XML offered only 'data@value', and the agent indexed name/value lists).
+        if discovery.input != 'delimited':
+            raise ToolError("These streams hold records:2 records (a Data Splitter's output, a Records stream): draft "
+                            "with discovery={'input': 'delimited', 'timestamp_field': <a data name>}, which indexes "
+                            "each data element as a field by its name, on an indexing template with an XMLParser.")
+        text = rows
+    remembered = _time_chosen(ctx, index_name)
+    if remembered:
+        return discovery.model_copy(update={'timestamp_field': remembered})
+    if discovery.timestamp_chosen_by_user:
+        return discovery
     try:
         fields = profile(text).get('fields') or [] if text.strip() else []
     except Exception:

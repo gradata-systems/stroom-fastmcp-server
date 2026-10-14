@@ -72,6 +72,25 @@ async def index_stage(ctx, csv: dict, stamp: str):
         print(f"    {'ok ' if c['pass'] else 'BAD'} {c['check']}: {c['returned']}"
               + (f" (traced to record {trace['event']})" if trace and trace['traced'] else f" (trace: {trace})" if trace else ''))
     check(result['passed'], 'verification searches pass, each hit traced to its event')
+    # Reprocessing: Stroom keeps what a stream put in a Lucene index, so the build's own index, holding only these
+    # streams, is emptied first; after it, the count is three again, not six.
+    asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], events,
+                                                      source_pipeline_uuid=csv['pipeline']['uuid'])
+    check(asked.get('status') == 'needs_approval' and 'deleted first' in (asked.get('details') or {}).get('earlier documents', ''),
+          f"the approval says the build's index is emptied first: {(asked.get('details') or {}).get('earlier documents')}")
+    again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], events, approval_id=asked['approval_id'],
+                                                      source_pipeline_uuid=csv['pipeline']['uuid'])
+    redone = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, expect_events=False,
+                                                         filter_id=again['filter_id'])
+    check(redone.get('gate') == 'pass', 'reprocessed into the index with no Error stream')
+    shards = (await stroom.post('/index/v2/shard/find', {'pageRequest': {'offset': 0, 'length': 100},
+                                                         'indexUuidSet': {'matchAll': False, 'set': [index['uuid']]}}))['values']
+    # A new shard's documentCount waits for its commit; the searches below see its documents before that.
+    check(any(s['status'] == 'DELETED' and s['documentCount'] == 3 for s in shards),
+          f"the shard holding the first three documents is deleted: "
+          f"{[(s['id'], s['status'], s['documentCount']) for s in shards]}")
+    again_found = await indexing.run_test_searches(ctx, dash['uuid'], events, 3, pipeline_uuid=pipeline['uuid'])
+    check(again_found['passed'], f"searches find each event once: {[(c['check'], c['returned']) for c in again_found['checks']]}")
     try:
         await builds.write_documentation(ctx, csv['build'], pipeline['uuid'],
                                          f"# {pipeline['name']}\n\n## Output\n\nLucene index {index_name}.\n", 'Created')

@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from lxml import etree
 
@@ -202,6 +202,16 @@ class FieldPlan(BaseModel):
     style: XsltStyle = Field(default_factory=XsltStyle, description=(
         "How the indexing XSLT is written, as an Events translation's is (naming, variables, layout): take it from "
         "an XSLT style section in the standing instructions (AGENTS docs); otherwise leave the defaults."))
+
+    @model_validator(mode='after')
+    def _discovery_fields(self) -> 'FieldPlan':
+        """A discovery plan's fields are always StreamId, EventId and @timestamp from its time field (seen: an agent
+        passing the plan back with no fields, and the index template then mapping @timestamp as a keyword)."""
+        if self.discovery is not None:
+            self.fields = [PlannedField(name=n, type=t, source=s or self.discovery.timestamp_field)
+                           for n, t, s in DISCOVERY_FIELDS]
+            self.time_field = '@timestamp'
+        return self
 
     def convention_problems(self) -> list[str]:
         """Where the plan departs from its convention: for ECS, names in its field sets it doesn't define, and

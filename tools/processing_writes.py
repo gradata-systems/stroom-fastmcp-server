@@ -357,6 +357,48 @@ async def elastic_destination(stroom: StroomGateway, pipeline_uuid: str) -> dict
     return {'index name': props.get('indexName'), 'cluster': (props.get('cluster') or {}).get('name')}
 
 
+async def lucene_index(stroom: StroomGateway, pipeline_uuid: str) -> dict[str, Any] | None:
+    """The Lucene index doc an indexing pipeline writes to; None for other pipelines."""
+    merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
+    elements = {e['id'] for e in merged['elements'] if e['type'] == 'IndexingFilter'}
+    ref = next((p['value'] for p in merged['properties'] if p['element'] in elements and p['name'] == 'index'), None)
+    return ref if isinstance(ref, dict) and ref.get('uuid') else None
+
+
+async def _index_holds_only(ctx: Context, pipeline_uuid: str, index: dict[str, Any], stream_ids: list[int]) -> bool:
+    """Whether a Lucene index holds only these streams' documents: it is a build's own, no other pipeline of the build
+    writes to it, and every filter of this pipeline selected only these streams."""
+    stroom, guard = gateway_from(ctx), guard_from(ctx)
+    build = await guard.build_of({'type': index.get('type'), 'uuid': index['uuid'], 'name': index.get('name')})
+    if not build:
+        return False
+    for f in await stroom.processor_filters(pipeline_uuid):
+        ids = _selected_ids((f.get('queryData') or {}).get('expression'))
+        if not ids or not ids <= set(stream_ids):
+            return False
+    for doc in await guard.folder_contents(build):
+        if doc['type'] == 'Pipeline' and doc['uuid'] != pipeline_uuid:
+            other = await lucene_index(stroom, doc['uuid'])
+            if other and other['uuid'] == index['uuid']:
+                return False
+    return True
+
+
+async def _delete_index_shards(stroom: StroomGateway, index_uuid: str) -> int:
+    """Delete a Lucene index's shards, and with them every document in it; returns how many documents they held."""
+    only = {'indexUuidSet': {'matchAll': False, 'set': [index_uuid]}}
+    found = await stroom.post('/index/v2/shard/find', {'pageRequest': {'offset': 0, 'length': 1000}, **only})
+    shards = [s for s in found.get('values') or [] if s.get('indexUuid') == index_uuid and s.get('status') != 'DELETED']
+    nodes: dict[str, list[int]] = {}
+    for s in shards:
+        nodes.setdefault(s.get('nodeName') or '', []).append(s['id'])
+    for node, ids in nodes.items():
+        await stroom.post(f"/index/v2/shard/delete?nodeName={quote(node, safe='')}",
+                          {'pageRequest': {'offset': 0, 'length': 1000}, **only,
+                           'indexShardIdSet': {'matchAll': False, 'set': ids}})
+    return sum(s.get('documentCount') or 0 for s in shards)
+
+
 def filter_feeds(expression: dict[str, Any] | None) -> list[str]:
     """The feeds a filter's expression names (Feed IS_DOC_REF, or Feed EQUALS as earlier filters had it)."""
     out = []
@@ -774,7 +816,8 @@ async def reprocess_streams(
     outputs for these streams deleted once the new ones are written; pass the returned filter_id to
     wait_for_processing so only the new outputs count. An events (or records) or indexing pipeline: the user
     approves it in a form, then its filter is created enabled and processing starts (for Elasticsearch indexing
-    the approval also confirms the index template is applied on the cluster). Any other pipeline (CEF output,
+    the approval also confirms the index template is applied on the cluster; a build's own Lucene index holding
+    only these streams is emptied first, its shards deleted). Any other pipeline (CEF output,
     reference data): the filter is created disabled, for the user to enable.
     Promoted pipelines are refused by the write guard: reprocessing production data is the user's.
     """
@@ -810,6 +853,19 @@ async def reprocess_streams(
                                       f"'{destination['index name']}': have the cluster admin delete them first, or "
                                       f"they are indexed twice: POST {destination['index name']}/_delete_by_query "
                                       f"{delete}")
+    # Stroom keeps a Lucene index's documents too (seen: an eval build's index held each event twice after its
+    # indexing XSLT was fixed and the stream reprocessed). A build's own index holding only these streams is emptied
+    # first, its shards deleted; any other index would hold them twice.
+    lucene = await lucene_index(stroom, pipeline_uuid)
+    clear = (bool(lucene) and await _reprocess_runs(stroom, pipeline_uuid)
+             and await _index_holds_only(ctx, pipeline_uuid, lucene, stream_ids))
+    if clear:
+        details['earlier documents'] = (f"deleted first: '{lucene.get('name')}' is this build's index and holds "
+                                        f"only these streams' documents (its shards are deleted)")
+    elif lucene:
+        details['already indexed'] = (f"Stroom keeps the documents these streams already put in '{lucene.get('name')}' "
+                                      f"(it holds other streams' documents too, so it isn't emptied): they are "
+                                      f"indexed twice")
     # Reprocessing an events or indexing pipeline while it is developed in a build runs once the user approves it
     # (asked for by the user); every other filter is made disabled, for the user to enable.
     if not await _reprocess_runs(stroom, pipeline_uuid):
@@ -826,6 +882,8 @@ async def reprocess_streams(
                                            details, approval_id)
     if gate:
         return gate
+    if clear:
+        await _delete_index_shards(stroom, lucene['uuid'])
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
     created = await _create_filter(stroom, pipeline, expression, 10, max_tasks, None, enabled=True)
     from tools.plan import next_for

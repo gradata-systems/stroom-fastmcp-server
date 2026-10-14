@@ -205,8 +205,17 @@ async def records(ctx, stroom: StroomGateway, template: dict, stamp: str) -> Non
     except ToolError as e:
         refused = str(e)
     e2e.check('is a Records stream' in refused, f"the Records stream is refused as Events to plan from: {refused[:110]}")
+    try:
+        await indexing.draft_index_mapping(ctx, 'elasticsearch', index, events_stream_ids=produced,
+                                           discovery=Discovery(input='xml', record='record', timestamp_field='time'))
+        refused = ''
+    except ToolError as e:
+        refused = str(e)
+    e2e.check("'input': 'delimited'" in refused, f"the Records drafted as XML are refused for delimited: {refused[:110]}")
+    # Its time field is read by data name, as the delimited input indexes it (seen: only 'data@value' offered).
     plan_ = FieldPlan.model_validate((await indexing.draft_index_mapping(
-        ctx, 'elasticsearch', index, discovery=Discovery(input='delimited', timestamp_field='time')))['plan'])
+        ctx, 'elasticsearch', index, events_stream_ids=produced,
+        discovery=Discovery(input='delimited', timestamp_field='time')))['plan'])
     xslt = await translation.save_xslt(ctx, build, f'{index}-XSLT', index_plan=plan_)
     es_template = next(c for c in (await templates.find_pipeline_templates(ctx, 'indexing'))['candidates']
                        if c['backend'] == 'elasticsearch' and c['parser'] == 'XMLParser')
