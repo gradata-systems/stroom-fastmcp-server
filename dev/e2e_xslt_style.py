@@ -295,10 +295,16 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     unknown['events'][0]['keep_unknown'] = True
     keep = dict(ctx=ctx, mapping=TranslationMapping.model_validate(unknown), stream_ids=[raw], build=build,
                 name=f'{feed}-unknown')
-    asked = await generation.build_translation_xslt(**keep)
-    e2e.check(asked.get('status') == 'needs_confirmation' and "the records' values show their action" in asked['summary'],
-              f"the user is asked, told what the values suggest: {asked.get('summary')}")
-    kept = await generation.build_translation_xslt(**keep, confirmation_id=asked['confirmation_id'])
+    # The detail shown in the chat first, the form kept short (asked for by the user: too much tiny text in a form).
+    shown = await generation.build_translation_xslt(**keep)
+    e2e.check(shown.get('status') == 'needs_review' and 'Their values suggest' in shown.get('show_user', '')
+              and "Records rule `traffic` matches" in shown.get('show_user', ''),
+              f"the user is shown the records, told what the values suggest:\n{shown.get('show_user')}")
+    asked = await generation.build_translation_xslt(**keep, reviewed=True)
+    e2e.check(asked.get('status') == 'needs_confirmation'
+              and asked['summary'] == 'Translate the records shown in the chat as Unknown events',
+              f"then a short form: {asked.get('summary')}")
+    kept = await generation.build_translation_xslt(**keep, reviewed=True, confirmation_id=asked['confirmation_id'])
     e2e.check(kept['ok'] and kept.get('saved'), 'kept as Unknown once the user agrees')
     pipeline = await pipeline_for(ctx, build, f'{feed}-unknown-Events', template['uuid'], tc['uuid'], kept['saved']['uuid'])
     sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])

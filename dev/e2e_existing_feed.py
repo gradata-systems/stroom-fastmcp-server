@@ -145,7 +145,11 @@ async def main():
 
         build = f'existing-{stamp}'
         print('\n### 1. survey two streams, spread over the feed, recorded in the build')
-        first = await sampling.survey_feed(ctx, source, max_streams=2, build=build)
+        # Fewer streams than the default is the user's to confirm (seen: an agent surveying a live feed 3 at a time).
+        asked = await sampling.survey_feed(ctx, source, max_streams=2, build=build)
+        e2e.check(asked.get('status') == 'needs_confirmation' and 'only 2 stream(s) a call' in asked.get('summary', ''),
+                  f"fewer streams than the default are confirmed first: {asked.get('summary')}")
+        first = await sampling.survey_feed(ctx, source, max_streams=2, build=build, confirmation_id=asked['confirmation_id'])
         e2e.check(first['survey_doc']['name'] == f'{source} - Survey', f"survey kept in {first['survey_doc']['name']}")
         signatures = [s['signature'] for s in first['shapes']]
         kinds = sorted(s['signature'].split('action=')[-1] for s in first['shapes'])

@@ -206,3 +206,50 @@ def test_cef_records_are_grouped_by_their_header():
         'cef:Acme|SecureGateway|1001|User authenticated', 'cef:Acme|SecureGateway|1002|Authentication failed',
         'cef:Acme|SecureGateway|2001|Web request allowed | proxy']
     assert cef_header('no header here') is None and cef_header('CEF:0|Acme|only|three') is None
+
+
+def _survey_ctx():
+    from types import SimpleNamespace
+    from config import Settings
+    from utils.consent import ConsentStore
+    settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=settings), 'consent': ConsentStore(False)})
+
+
+async def test_fewer_streams_than_the_default_are_the_users_to_confirm_once():
+    # Seen in VS Code: an agent surveyed a live feed 3 streams at a time until the user asked for a larger sample.
+    # A number the user gives is still theirs: fewer is confirmed in a form, then not asked again for that feed.
+    from unittest.mock import AsyncMock, patch
+    from fastmcp.exceptions import ToolError
+    from tools import sampling
+    ctx = _survey_ctx()
+    with patch('tools.feeds.resolve_feed', AsyncMock(return_value='ACME-VPN')), \
+            patch('tools.sampling.pick_spread', AsyncMock(return_value=([], {}))) as picked:
+        asked = await sampling.survey_feed(ctx, feed='ACME-VPN', max_streams=3)
+        assert asked['status'] == 'needs_confirmation' and not picked.await_count
+        assert "only 3 stream(s) a call (the default is 10)" in asked['summary']
+        with pytest.raises(ToolError, match='No Raw Events streams'):
+            await sampling.survey_feed(ctx, feed='ACME-VPN', max_streams=3, confirmation_id=asked['confirmation_id'])
+        with pytest.raises(ToolError, match='No Raw Events streams'):     # agreed: not asked again
+            await sampling.survey_feed(ctx, feed='ACME-VPN', max_streams=3)
+        assert (await sampling.survey_feed(ctx, feed='ACME-VPN', max_streams=2))['status'] == 'needs_confirmation'
+
+
+async def test_the_default_or_a_larger_sample_is_not_asked_about():
+    from unittest.mock import AsyncMock, patch
+    from fastmcp.exceptions import ToolError
+    from tools import sampling
+    for count in (10, 40):
+        with patch('tools.feeds.resolve_feed', AsyncMock(return_value='ACME-VPN')), \
+                patch('tools.sampling.pick_spread', AsyncMock(return_value=([], {}))):
+            with pytest.raises(ToolError, match='No Raw Events streams'):
+                await sampling.survey_feed(_survey_ctx(), feed='ACME-VPN', max_streams=count)
+
+
+async def test_a_samples_streams_given_by_id_are_not_asked_about():
+    from unittest.mock import AsyncMock, patch
+    from tools import sampling
+    with patch('tools.sampling._meta', AsyncMock(return_value={'id': 7, 'feedName': 'ACME-VPN', 'createMs': 0})), \
+            patch('tools.sampling.read_head', AsyncMock(return_value=('{"a": 1}\n{"a": 2}\n', False, 1))):
+        result = await sampling.survey_feed(_survey_ctx(), stream_ids=[7], max_streams=1)
+    assert result['streams_read'] == [7]

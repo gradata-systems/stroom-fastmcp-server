@@ -1,4 +1,5 @@
 """Sampling an existing feed to learn which kinds of event it holds."""
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
@@ -70,6 +71,37 @@ async def pick_spread(stroom: StroomGateway, terms: list[dict[str, Any]], count:
     return picked, span
 
 
+SURVEY_STREAMS = 10           # streams a survey call reads unless the user says otherwise
+_FEWER = 'survey_fewer_streams'
+_FEWER_TTL = 4 * 3600
+
+
+async def _fewer_streams(ctx: Context, feed: str, count: int, confirmation_id: str | None) -> dict[str, Any] | None:
+    """A survey call reading fewer than SURVEY_STREAMS streams is the user's to ask for, confirmed in a form (seen in
+    VS Code: an agent surveyed a live feed 3 streams at a time, and the user had to ask for a larger sample). The
+    answer holds for that feed and count this session, so later calls go on unasked. None when it may go ahead."""
+    from tools.plan import _user
+    key = (_user(ctx), feed.lower())
+    try:
+        store = ctx.lifespan_context.setdefault(_FEWER, {})
+    except Exception:
+        store = {}
+    agreed = store.get(key)
+    if agreed and agreed['count'] == count and time.time() - agreed['at'] < _FEWER_TTL:
+        return None
+    gate = await consent_from(ctx).require(
+        ctx, 'confirmation', 'survey_feed',
+        f"Survey feed '{feed}' only {count} stream(s) a call (the default is {SURVEY_STREAMS})",
+        {'feed': feed, 'streams a call': count, 'default': SURVEY_STREAMS,
+         'fewer streams': "rarer kinds of event are less likely to be found in a call; the survey still goes on "
+                          "until it is covered"},
+        confirmation_id)
+    if gate:
+        return gate
+    store[key] = {'count': count, 'at': time.time()}
+    return None
+
+
 FEED_CHARS = 250_000          # a part's head, for a feed's streams (any size)
 SAMPLE_CHARS = 2_000_000      # a sample stream's (stream_ids), read whole when it is a sample's size
 
@@ -118,9 +150,9 @@ async def survey_feed(
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Survey exactly these streams instead of picking from the feed: the sample streams an "
                         "onboarding uploaded (one per file), to see every kind of event they hold and where.")] = [],
-        max_streams: Annotated[int, Field(ge=1, le=100, description="Streams to read in this call, spread over the "
-                                                                   "feed's lifetime (up to 100, for a feed of many "
-                                                                   "small streams).")] = 10,
+        max_streams: Annotated[int, Field(ge=1, le=100, description=(
+            "Streams to read in this call, spread over the feed's lifetime: leave the default (10) unless the user "
+            "gives a number. More, up to 100, as they ask; fewer is confirmed by the user in a form."))] = SURVEY_STREAMS,
         skip_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Streams already read (streams_read from earlier calls): this call picks others.")] = [],
         known_signatures: Annotated[list[str] | str, ONE_OR_MORE, Field(
@@ -137,6 +169,8 @@ async def survey_feed(
             description="Keep the survey record in this build: a Documentation doc '<feed> - Survey' with the kinds "
                         "of event, examples and survey state. An existing record is continued: its streams are "
                         "skipped and its shapes are known.")] = None,
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (fewer "
+                                                                 "streams than the default).")] = None,
 ) -> dict[str, Any]:
     """
     Sample a feed's streams spread over its lifetime (newest, oldest, then the middle, then the quarters...)
@@ -166,6 +200,10 @@ async def survey_feed(
         feed = await resolve_feed(ctx, feed)
         if not isinstance(feed, str):
             return feed     # the user picks the feed they meant in a form
+    if not chosen and max_streams < SURVEY_STREAMS:
+        gate = await _fewer_streams(ctx, feed, max_streams, confirmation_id)
+        if gate:
+            return gate
     record = await _load_record(ctx, build, feed) if build else None
     state = read_state(body_text(record)) if record else None
     if state:

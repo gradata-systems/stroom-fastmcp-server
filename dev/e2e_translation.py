@@ -243,8 +243,9 @@ async def agreed(call, **kwargs):
                 print(f"    enabled filter {result['filter_id']}, as the user would in Stroom")
             return result
         if result['status'] == 'needs_review':
-            # Shown to the user in the chat (an index template, a promotion's layout), then confirmed in a form.
-            shown = result.get('layout') or result.get('dev_tools') or ''
+            # Shown to the user in the chat (an index template, a promotion's layout, records kept as Unknown), then
+            # confirmed in a form.
+            shown = result.get('layout') or result.get('dev_tools') or result.get('show_user') or ''
             print(f"    needs_review:\n" + '\n'.join(f'      {line}' for line in shown.splitlines()[:30]))
             kwargs['reviewed'] = True
             continue

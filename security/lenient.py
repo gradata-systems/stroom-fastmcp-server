@@ -7,12 +7,17 @@ the model which were ignored in the result.
 
 A choice given with stray punctuation or in another case (",XML_FRAGMENT", "xml_fragment") is read as the choice it
 plainly is, and the result says so: seen, an agent sending ",XML_FRAGMENT" again and again, refused each time.
+
+Text mangled by a Windows code page round trip ('â€”' for '—') is put back in every string argument, and the result
+says so (utils/mojibake): seen in VS Code, an agent stalled a terminal trying to fix a doc body itself.
 """
 from typing import Any, Sequence
 
 import mcp_types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
+
+from utils.mojibake import note as mojibake_note, repair
 
 
 _STRAY = ' \t\r\n,;:.\'"`()[]{}<>'
@@ -37,6 +42,19 @@ def plain_choice(value: Any, choices: list[str]) -> str | None:
         return None
     bare = value.strip(_STRAY)
     return next((c for c in choices if c == bare), None) or next((c for c in choices if c.lower() == bare.lower()), None)
+
+
+def repaired(value: Any) -> tuple[Any, int]:
+    """The value with every string in it repaired of mojibake, and in how many places."""
+    if isinstance(value, str):
+        return repair(value)
+    if isinstance(value, list):
+        out = [repaired(v) for v in value]
+        return [v for v, _ in out], sum(n for _, n in out)
+    if isinstance(value, dict):
+        out = {k: repaired(v) for k, v in value.items()}
+        return {k: v for k, (v, _) in out.items()}, sum(n for _, n in out.values())
+    return value, 0
 
 
 def without_additional_properties(schema: dict[str, Any]) -> dict[str, Any]:
@@ -75,9 +93,15 @@ class LenientArguments(Middleware):
                 ignored = sorted(k for k in arguments if k not in allowed)
                 for key in ignored:
                     arguments.pop(key, None)
+        mended = 0
+        if isinstance(arguments, dict):
+            for key, value in list(arguments.items()):
+                arguments[key], count = repaired(value)
+                mended += count
         result = await call_next(context)
         notes = ([f"Ignored unknown argument(s) {ignored}: this tool takes {sorted(allowed)}."] if ignored else []) \
-            + ([f"Read {', '.join(read_as)}: give the choice exactly as listed."] if read_as else [])
+            + ([f"Read {', '.join(read_as)}: give the choice exactly as listed."] if read_as else []) \
+            + ([mojibake_note(mended)] if mended else [])
         if notes:
             try:
                 result.content = [*result.content, mt.TextContent(type='text', text=' '.join(notes))]

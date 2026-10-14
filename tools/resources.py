@@ -83,7 +83,9 @@ tool list whose description names it, then the named tool. Only names your list 
 session, and a guessed one only fails. If none names it, ask the user to enable it. Never work around a hidden tool
 with others. A result your client saved to a file ("Large tool result ... written to file", VS Code: over 8 KB): read
 it with your client's file-reading tool (read_file), which needs no approval, never with a terminal command
-(Get-Content, cat), which asks the user every time.
+(Get-Content, cat), which asks the user every time. Never write, edit or re-encode text for this server in a terminal
+(seen: a doc body round-tripped through PowerShell came back mangled, and fixing it stalled the terminal): pass it to
+the tool as it is; the server repairs text mangled by a Windows code page itself.
 
 Existing feed: when the user asks to onboard data a feed already holds, work from that feed (onboard_existing_feed):
 start_build feeds=[it], then survey_feed. No feed is created and nothing uploaded, whatever sample files the
@@ -600,9 +602,9 @@ every field, what it holds and the values it has. Change nothing except the docu
 1. start_build feeds=[{feed}], then survey_feed feed={feed} build=<the build>: it samples streams spread over the
    feed's lifetime, reading only the head of each (big streams are fine), and groups records into kinds of event,
    with counts, examples and where each example is, and keeps them in the build's '{feed} - Survey' doc. Not every
-   kind appears in every stream. A larger sample when the user asks for one: max_streams (streams a call, 10 by
-   default, up to 100), max_records_per_stream (1,000, up to 10,000) and max_chars_per_stream (250,000, up to
-   5,000,000), on every survey_feed call.
+   kind appears in every stream. The sample size is the user's: max_streams (streams a call, 10 by default; up to
+   100 as they ask, fewer only when they give the number, which they confirm in a form), max_records_per_stream
+   (1,000, up to 10,000) and max_chars_per_stream (250,000, up to 5,000,000), on every survey_feed call.
 2. Draft the text converter if the format needs one (build_data_splitter with the surveyed streams) and the
    translation with build_translation_xslt (feeds=[{feed}], build and name), one rule per kind of event, then
    create_pipeline and step_records over the survey's locations until clean: the feed's own records are stepped

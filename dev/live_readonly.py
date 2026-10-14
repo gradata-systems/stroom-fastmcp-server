@@ -144,7 +144,13 @@ async def main(feed: str):
                     lambda r: (True, f"{len(r.get('errors') or [])} error(s), elements {sorted(r.get('elements') or {})[:4]}"))
         await check('step_sample 20 records', stepping.step_sample(ctx, pipe['uuid'], [raw], records_per_stream=20),
                     lambda r: (r.get('records_stepped', 0) > 0, f"{r.get('records_stepped')} stepped, verdict {r.get('verdict')}"))
-        survey = await check('survey_feed (no build)', sampling.survey_feed(ctx, feed, max_streams=4),
+        async def few_streams():
+            # Fewer streams than the default (10) is the user's to confirm: agreed here, nothing written to Stroom.
+            asked = await sampling.survey_feed(ctx, feed, max_streams=4)
+            if asked.get('status') != 'needs_confirmation':
+                return asked
+            return await sampling.survey_feed(ctx, feed, max_streams=4, confirmation_id=asked['confirmation_id'])
+        survey = await check('survey_feed (no build)', few_streams(),
                              lambda r: (bool(r.get('shapes')), f"{len(r['shapes'])} kinds in {len(r['streams_read'])} streams; {r['coverage'][:30]}"))
         if survey:
             await check('step_records survey locations', stepping.step_records(ctx, pipe['uuid'], survey['locations'][:30]),

@@ -48,3 +48,22 @@ async def test_a_choice_with_stray_punctuation_is_read_as_the_choice():
         assert "Read converter_type ',XML_FRAGMENT' as 'XML_FRAGMENT'" in result.content[-1].text
         with pytest.raises(Exception, match='DATA_SPLITTER'):       # not a choice at all: still refused
             await client.call_tool('create_text_converter', {'converter_type': 'XML'})
+
+
+async def test_text_mangled_by_a_windows_code_page_round_trip_is_put_back():
+    # Seen in VS Code: a doc body read back through PowerShell came with mojibake, and the agent stalled a terminal
+    # trying to fix it.
+    server = FastMCP('t', middleware=[LenientArguments()])
+
+    @server.tool
+    def write_documentation(markdown: str, accept_errors: list[dict] | None = None) -> dict:
+        return {'markdown': markdown, 'accept_errors': accept_errors}
+    mangled = 'The user' + bytes([0xE2, 0x80, 0x99]).decode('cp1252') + 's logon ' + bytes([0xE2, 0x80, 0x94]).decode('cp1252')
+    async with Client(server) as client:
+        result = await client.call_tool('write_documentation', {
+            'markdown': mangled, 'accept_errors': [{'reason': 'caf' + bytes([0xC3, 0xA9]).decode('cp1252')}]})
+        assert result.structured_content == {'markdown': 'The user’s logon —',
+                                             'accept_errors': [{'reason': 'café'}]}
+        assert 'Windows code page round trip, in 3 place(s)' in result.content[-1].text
+        clean = await client.call_tool('write_documentation', {'markdown': 'café — ok'})
+        assert clean.structured_content['markdown'] == 'café — ok' and len(clean.content) == 1

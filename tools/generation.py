@@ -1,4 +1,5 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
+import hashlib
 import re
 import json
 from typing import Annotated, Any, Literal
@@ -43,15 +44,25 @@ async def event_schema(ctx: Context, version: str) -> EventSchema:
     return schemas[version]
 
 
-_KIND = re.compile(r'(type|action|event|kind|category|operation|activity|status|result)', re.I)
-
-
-def _kinds(held: str) -> str:
-    """From what a rule's records hold ('device: FW; event_type: SYSTEM, ADMIN; action: START, ...'), the fields that
-    say what kind of record they are, for the confirmation's one line."""
-    parts = [p for p in held.split('; ') if not p.startswith('e.g. ')]
-    named = [p for p in parts if _KIND.search(p.split(':', 1)[0])]
-    return '; '.join(named or parts[:2])
+def _unknown_markdown(kept: list[Any], sampled: dict[str, dict[str, Any]], total: int) -> str:
+    """The records rules keep as Unknown, for the user in the chat: per rule, how many of the sample, what they hold,
+    what their values suggest instead and the reason given."""
+    lines = ["**Records to translate as Unknown events**", "",
+             "An Unknown event says what happened isn't known: it has no Authenticate, Create or other action.", ""]
+    for r in kept:
+        held = sampled[r.name]
+        lines += [f"**Records no other rule matches** (rule `{r.name}`)" if not r.when else
+                  f"**Records rule `{r.name}` matches**", "",
+                  f"- {held['records']} of the {total} sample records",
+                  "- What they hold:"]
+        lines += [f"  - {part}" for part in held['sample'].split('; ') if part]
+        if held.get('suggested'):
+            lines.append(f"- Their values suggest: {held['suggested']}"
+                         + (" (kept as Unknown though, as asked)" if held.get('against_suggestion') else ''))
+        if r.allow_unknown:
+            lines.append(f"- Reason given: {r.allow_unknown}")
+        lines.append('')
+    return '\n'.join(lines).rstrip() + '\n'
 
 
 # How a regex or xpath travels: written once, as XPath reads it; the call's JSON doubles each backslash; the server
@@ -340,6 +351,9 @@ async def build_translation_xslt(
         include_xslt: Annotated[bool, Field(description="When saving, also return the code (to read it).")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (rules kept "
                                                                  "as Unknown).")] = None,
+        reviewed: Annotated[bool, Field(description=(
+            "True once a needs_review reply's show_user (the records to translate as Unknown) is shown to the user in "
+            "the chat: the short form to agree to it then opens."))] = False,
         change: Annotated[str | None, Field(description=(
             "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
@@ -567,24 +581,21 @@ async def build_translation_xslt(
             # agree to: seen, the user asked to keep 'other' as Unknown for "none of the 1000" records.
             kept = [r for r in kept if r.name in sampled]
         if kept:
-            details = {}
-            for r in kept:
-                held = sampled.get(r.name)
-                details[f"rule '{r.name}'"] = {
-                    'reason given': r.allow_unknown,
-                    'sample records it keeps Unknown': (f"{held['records']} of {check['records']}" if held else
-                                                        f"none of the {check['records']}"),
-                    **({'what they hold': held['sample']} if held else {}),
-                    **({'their values suggest': held['suggested']} if held and held.get('suggested') else {})}
-            caught = '; '.join(f"{r.name}: {sampled[r.name]['records']} records ({_kinds(sampled[r.name]['sample'])})"
-                               for r in kept if r.name in sampled)
-            against = [k['rule'] for k in sampled.values() if k.get('against_suggestion')]
+            # Shown in the chat first, the form kept short (asked for by the user: "Keep rest as Unknown (what happened
+            # is not known) in the saved XSLT: rest: ..." was cryptic, and the detail too much tiny text in a form).
+            shown = _unknown_markdown(kept, sampled, check['records'])
+            if not reviewed:
+                return {'status': 'needs_review', 'show_user': shown,
+                        'hint': "Show the user show_user in the chat exactly as it is (markdown), then, in the same "
+                                "turn, without waiting for a reply, call build_translation_xslt again with the same "
+                                "arguments plus reviewed=true: a short form asks them to agree, or they say what "
+                                "to change (a rule's action instead of Unknown)."}
+            short = {f"rule '{r.name}'": f"{sampled[r.name]['records']} of {check['records']} sample records"
+                     for r in kept}
+            short['as shown in the chat'] = hashlib.sha256(shown.encode()).hexdigest()[:12]
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
-                                                   f"Keep {', '.join(r.name for r in kept)} as Unknown (what happened is "
-                                                   f"not known) in the saved XSLT" + (f": {caught}" if caught else '')
-                                                   + (f". For {', '.join(against)}, the records' values show their "
-                                                      f"action (see 'their values suggest')" if against else ''),
-                                                   details, confirmation_id)
+                                                   "Translate the records shown in the chat as Unknown events",
+                                                   short, confirmation_id)
             if gate:
                 return gate
             agreed_now.update({r.name: _unknown_key(r) for r in kept})

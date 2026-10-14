@@ -158,6 +158,22 @@ async def test_stroom_s_placeholder_past_the_end_is_not_read_as_data():
     assert await streams.raw_text(stroom, 7, 10_000) == (array, False)
 
 
+async def test_the_rule_for_the_rest_kept_unknown_is_put_as_the_records_no_other_rule_matches():
+    from utils.consent import ConsentStore
+    rest = mapping().events[-1].model_dump(exclude_none=True)
+    kept = mapping(events=[mapping().events[0].model_dump(exclude_none=True),
+                           {**rest, 'allow_unknown': 'status lines carry no activity'}])
+    ctx, (schema, instructions) = ctx_and_patches()
+    ctx.lifespan_context['consent'] = ConsentStore(use_elicitation=False)
+    sample = ('time,action,user,result,sid,host,port\n2026-09-28T10:00:00.000Z,login,alice,ok,s1,ws01,22\n'
+              '2026-09-28T10:01:00.000Z,status,,,,ws01,0\n')
+    with schema, instructions:
+        shown = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample)
+    assert shown['status'] == 'needs_review'
+    assert "**Records no other rule matches** (rule `other`)\n\n- 1 of the 2 sample records\n" in shown['show_user'], \
+        shown['show_user']
+
+
 async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
     from tools import translation
     from utils.consent import ConsentStore
@@ -178,14 +194,20 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
         # Seen in VS Code: asked with "no sample records checked", the user couldn't see what went to Unknown.
         with pytest.raises(ToolError, match='call again with stream_ids'):
             await generation.build_translation_xslt(ctx, kept, build='b', name='N')
-        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample)
+        # Seen in VS Code: "Keep rest as Unknown (what happened is not known) in the saved XSLT: rest:" was cryptic, and
+        # the detail too much tiny text in a form (asked for by the user): shown in the chat first, the form short.
+        shown = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample)
+        assert shown['status'] == 'needs_review' and not create.await_count and 'reviewed=true' in shown['hint']
+        md = shown['show_user']
+        assert md.startswith("**Records to translate as Unknown events**\n\nAn Unknown event says what happened isn't "
+                             "known: it has no Authenticate, Create or other action.\n\n**Records rule `status` matches**"
+                             "\n\n- 2 of the 4 sample records\n- What they hold:\n  - "), md
+        assert '  - action: status\n' in md and md.endswith('- Reason given: status lines carry no activity\n'), md
+        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=True)
         assert asked['status'] == 'needs_confirmation' and not create.await_count
-        assert asked['summary'].endswith('in the saved XSLT: status: 2 records (action: status)'), asked['summary']
-        assert asked['details']["rule 'status'"] == {
-            'reason given': 'status lines carry no activity', 'sample records it keeps Unknown': '2 of 4',
-            'what they hold': asked['details']["rule 'status'"]['what they hold']}
-        assert 'action: status' in asked['details']["rule 'status'"]['what they hold']
-        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample,
+        assert asked['summary'] == 'Translate the records shown in the chat as Unknown events'
+        assert asked['details']["rule 'status'"] == '2 of 4 sample records' and asked['details']['as shown in the chat']
+        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=True,
                                                       confirmation_id=asked['confirmation_id'])
         assert done['saved']['uuid'] == 'x-1'
         # Checking without saving asks nothing.
@@ -209,7 +231,7 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
             ('confirmation', 'granted', 'earlier', ["rule 'status'"])]
         changed = kept.model_copy(deep=True)
         changed.events[1].allow_unknown = 'heartbeats only'
-        assert (await generation.build_translation_xslt(ctx, changed, uuid='x-1', sample=sample))['status'] ==             'needs_confirmation'
+        assert (await generation.build_translation_xslt(ctx, changed, uuid='x-1', sample=sample))['status'] == 'needs_review'
 
 
 async def test_a_field_an_inferred_splitter_lacks_is_a_warning_not_a_refusal():
