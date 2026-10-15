@@ -2,8 +2,9 @@
 
 Each workflow is an MCP prompt, which VS Code offers as a slash command (`/mcp.stroom.<prompt>`). A user can also
 just ask in their own words, and the agent picks the workflow. They share the same steps and rules: work happens in
-a build, is checked, and is promoted only on approval. Processing starts only when you enable a processor filter in
-Stroom (the agent gives you its link); reprocessing in a build, after a fix, runs once you approve it. Each workflow
+a build, is checked, and is promoted only on approval. Processing a build's sample through its events or indexing
+pipeline, or reprocessing after a fix, runs once you approve it; any other processing starts only when you enable a
+processor filter in Stroom (the agent gives you its link). Each workflow
 carries every step it needs, so the agent never relies on another workflow's text.
 
 ```mermaid

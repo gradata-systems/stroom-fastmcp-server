@@ -253,3 +253,18 @@ async def test_a_samples_streams_given_by_id_are_not_asked_about():
             patch('tools.sampling.read_head', AsyncMock(return_value=('{"a": 1}\n{"a": 2}\n', False, 1))):
         result = await sampling.survey_feed(_survey_ctx(), stream_ids=[7], max_streams=1)
     assert result['streams_read'] == [7]
+
+
+
+async def test_a_few_of_an_existing_feeds_streams_by_id_are_the_users_to_confirm():
+    # Seen in testing on 0.18.13: an existing feed onboarded from 5 streams, given by id, so not asked about.
+    from unittest.mock import AsyncMock, patch
+    from tools import sampling
+    meta = AsyncMock(side_effect=lambda stroom, i: {'id': i, 'feedName': 'ACME-VPN', 'createMs': 0})
+    with patch('tools.sampling._meta', meta), patch('tools.sampling._in_a_build', AsyncMock(return_value=False)):
+        asked = await sampling.survey_feed(_survey_ctx(), stream_ids=[1, 2, 3, 4, 5])
+    assert asked['status'] == 'needs_confirmation' and "only 5 stream(s) a call" in asked['summary']
+    # A sample uploaded to a build's feed is read as it is.
+    with patch('tools.sampling._meta', meta), patch('tools.sampling._in_a_build', AsyncMock(return_value=True)), \
+            patch('tools.sampling.read_head', AsyncMock(return_value=('{"a": 1}\n', False, 1))):
+        assert (await sampling.survey_feed(_survey_ctx(), stream_ids=[1, 2, 3, 4, 5]))['streams_read'] == [1, 2, 3, 4, 5]

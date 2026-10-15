@@ -124,28 +124,74 @@ async def test_streams_the_pipeline_already_processed_go_through_reprocessing(ct
     assert not create.called
 
 
+GUARD = dict(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
+             build_of=AsyncMock(return_value='b'))
+# Not tagged managed: the development batch size is left alone.
+ES_GUARD = {**GUARD, 'tags': AsyncMock(return_value=['mcp-generated'])}
+
+
 @respx.mock
-async def test_a_filter_is_created_disabled_for_the_user_to_enable(ctx):
-    # Asked for by the user: enabling a filter is theirs, in Stroom. Disabled, it changes nothing: no form.
+async def test_the_samples_filter_is_created_enabled_once_the_user_approves(ctx):
+    # Asked for by the user: an events pipeline's sample filter, left disabled for them to enable in Stroom, wasn't.
     create = mock_stroom(elastic=False)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**GUARD)), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         gates, result = await gated_through(ctx, stream_ids=[6])
+    assert [g['status'] for g in gates] == ['needs_approval'] and gates[0]['details']['scope'] == 'streams [6]'
+    assert result['filter_id'] == 9 and create.call_count == 1 and result['enabled'] is True
+    assert json.loads(create.calls.last.request.content)['enabled'] is True and 'filter_id=9' in result['hint']
+
+
+@respx.mock
+@pytest.mark.parametrize('stage, scope', [('forwarding', {'stream_ids': [6]}),
+                                          ('translation', {'feed': 'ACME', 'created_after': '2026-10-10T00:00:00Z'})])
+async def test_a_feeds_filter_or_one_sending_elsewhere_is_left_disabled_for_the_user(ctx, stage, scope):
+    # A whole feed, or a pipeline sending to Kafka: disabled, no form; enabling it in Stroom is the user's approval.
+    create = mock_stroom(elastic=False, feed_streams=[{'id': 12, 'createMs': FEED_MADE + 10 ** 8}])
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**GUARD)), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': stage})):
+        gates, result = await gated_through(ctx, **scope)
     assert gates == [] and result['filter_id'] == 9 and create.call_count == 1
     assert json.loads(create.calls.last.request.content)['enabled'] is False and result['enabled'] is False
-    assert 'docUuid=p1' in result['pipeline_link'] and result['enabling_it']['scope'] == 'streams [6]'
+    assert 'docUuid=p1' in result['pipeline_link']
     assert "enable filter 9 on its Processors tab" in result['hint'] and 'not before' in result['hint']
 
 
 @respx.mock
-async def test_elasticsearch_indexing_is_enabled_by_the_user_once_the_template_is_committed(ctx):
-    # Disabled, with what must come first: the user enables it once the admin has committed the agreed template.
+async def test_elasticsearch_indexing_is_approved_once_the_template_is_committed(ctx):
+    # The approval also confirms the admin has committed the agreed template.
     create = mock_stroom(elastic=True)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**ES_GUARD)):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    assert gates == [] and json.loads(create.calls.last.request.content)['enabled'] is False and create.call_count == 1
-    assert result['before_enabling'] == ["the agreed index template 'ecs-acme-v2' for Elasticsearch index 'ecs-acme-v2' "
-                                         "is committed to cluster ES_DEV: enable it only once that is so"]
-    assert 'once what before_enabling says is done' in result['hint']
+    assert [g['status'] for g in gates] == ['needs_approval'] and 'template is committed' in gates[0]['summary']
+    assert gates[0]['details']['index template'] == ("the agreed index template 'ecs-acme-v2' for Elasticsearch index "
+                                                     "'ecs-acme-v2' is committed to cluster ES_DEV")
+    assert json.loads(create.calls.last.request.content)['enabled'] is True and result['enabled'] is True
+
+
+@respx.mock
+@pytest.mark.parametrize('agreed, drop', [
+    (AGREED, 'DELETE ecs-acme-v2.'),
+    ({**AGREED, 'dev_tools': 'PUT _index_template/ecs-acme-v2\n{"data_stream": {}}'}, 'DELETE _data_stream/ecs-acme-v2.')])
+async def test_an_index_the_pipeline_wrote_to_is_dropped_first(ctx, agreed, drop):
+    # Seen in testing: the translation amended and the sample processed again, its new Events indexed, the index held
+    # the superseded Events' documents beside them. The whole index is dropped and starts fresh (asked for by the
+    # user): the pipeline indexed Events stream 4 before.
+    create = mock_stroom(elastic=True, filtered=[4], streams={6: ('Events', 'ev')}, agreed=agreed)
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**ES_GUARD)):
+        gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
+    said = gates[0]['details']['already indexed']
+    assert f'the cluster admin drops it first, so it starts fresh: {drop}' in said and '_delete_by_query' not in said
+    assert 'once the index is dropped' in gates[0]['summary'] and result['enabled'] is True and create.call_count == 1
+
+
+@respx.mock
+async def test_an_index_nothing_was_indexed_into_yet_needs_no_drop(ctx):
+    mock_stroom(elastic=True, filtered=[], streams={6: ('Events', 'ev')})
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**ES_GUARD)):
+        gates, _ = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
+    assert 'already indexed' not in gates[0]['details']
 
 
 @respx.mock
@@ -215,7 +261,8 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_appr
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
     assert [g['status'] for g in gates] == ['needs_approval']
     assert "index 'ecs-acme-v2'" in gates[0]['details']['index template']
-    assert 'POST ecs-acme-v2/_delete_by_query' in gates[0]['details']['already indexed'] and 'StreamId' in gates[0]['details']['already indexed']
+    assert 'drops it first, so it starts fresh: DELETE ecs-acme-v2.' in gates[0]['details']['already indexed']
+    assert 'once the index is dropped' in gates[0]['summary']
     assert json.loads(create.calls.last.request.content)['enabled'] is True and result['filter_id'] == 9
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
@@ -225,21 +272,20 @@ LUCENE = {'type': 'Index', 'uuid': 'ix', 'name': 'ACME-INDEX'}
 
 
 @respx.mock
-@pytest.mark.parametrize('filtered, others, emptied', [
-    ([5], [], True),                                        # the build's index holds only stream 5: emptied first
-    ([5, 6], [], False),                                    # it holds stream 6 too
-    ([5], [{'type': 'Pipeline', 'uuid': 'p2'}], False),     # another pipeline of the build writes to it
+@pytest.mark.parametrize('build, others, emptied', [
+    ('b', [], True),                                        # the build's own index: emptied first, starting fresh
+    ('b', [{'type': 'Pipeline', 'uuid': 'p2'}], False),     # another pipeline of the build writes to it
+    (None, [], False),                                      # not the build's
 ])
-async def test_reprocessing_into_a_build_lucene_index_empties_it_only_when_it_holds_just_these_streams(
-        ctx, filtered, others, emptied):
+async def test_reprocessing_into_the_builds_own_lucene_index_empties_it_first(ctx, build, others, emptied):
     # Seen (eval, Haiku): an indexing XSLT fixed and its stream reprocessed left each event in the index twice.
-    create = mock_stroom(elastic=False, filtered=filtered)
+    create = mock_stroom(elastic=False, filtered=[5, 6])
     find = respx.post(f'{API}/index/v2/shard/find').mock(return_value=httpx.Response(200, json={'values': [
         {'id': 434, 'status': 'OPEN', 'documentCount': 5, 'nodeName': 'node1a', 'indexUuid': 'ix'},
         {'id': 400, 'status': 'DELETED', 'documentCount': 3, 'nodeName': 'node1a', 'indexUuid': 'ix'}]}))
     delete = respx.post(f'{API}/index/v2/shard/delete').mock(return_value=httpx.Response(200, json=1))
     guard = SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
-                            build_of=AsyncMock(return_value='b'), folder_contents=AsyncMock(return_value=others))
+                            build_of=AsyncMock(return_value=build), folder_contents=AsyncMock(return_value=others))
     with patch('tools.processing_writes.guard_from', return_value=guard), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'indexing'})), \
             patch.object(processing_writes, 'lucene_index', AsyncMock(return_value=LUCENE)):
@@ -254,7 +300,7 @@ async def test_reprocessing_into_a_build_lucene_index_empties_it_only_when_it_ho
         assert body['indexShardIdSet'] == {'matchAll': False, 'set': [434]}
         assert find.called
     else:
-        assert 'indexed twice' in details['already indexed'] and 'earlier documents' not in details
+        assert 'delete its shards' in details['already indexed'] and 'earlier documents' not in details
         assert not delete.called
 
 
@@ -584,8 +630,12 @@ async def test_indexing_events_from_another_pipeline_needs_the_users_confirmatio
     with patch('tools.processing_writes.guard_from', return_value=guard(built=False)):
         first = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev')
         assert first['status'] == 'needs_confirmation' and "which this server did not build" in first['summary']
+        approve = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev',
+                                                                  source_confirmation_id=first['confirmation_id'])
+        assert approve['status'] == 'needs_approval'
         done = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev',
-                                                               source_confirmation_id=first['confirmation_id'])
+                                                               source_confirmation_id=first['confirmation_id'],
+                                                               approval_id=approve['approval_id'])
     assert done['events_from_pipeline'] == 'Acme-Events'
     assert json.loads(create.calls.last.request.content)['queryData']['expression']['children'][1] == PIPELINE_TERM
 
@@ -626,13 +676,28 @@ async def test_promotion_plans_new_data_filters_from_sample_filters_and_surveys(
     assert body['enabled'] is False and body['minMetaCreateTimeMs'] is None and body['maxProcessingTasks'] == 2
     children = body['queryData']['expression']['children']
     assert [c.get('field') for c in children[:2]] == ['Type', 'Pipeline'] and children[1] == PIPELINE_TERM
-    # Not what it already processed in the build: Stroom would do those again for a new filter (seen on the local
-    # stack: the sample's Events marked deleted and replaced, and indexed twice).
-    assert children[2] == {'type': 'operator', 'op': 'NOT', 'children': [{'type': 'operator', 'op': 'OR', 'children': [
-        {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '8'}]}]}
-    assert made[0]['except_processed_in_build'] == [8]
+    # What it processed in the build too (asked for by the user: no NOT over those streams); the index starts fresh.
+    assert len(children) == 2 and 'except_processed_in_build' not in made[0]
     assert made[0]['pipeline_link'].endswith('docUuid=ip')
 
+
+
+@respx.mock
+async def test_a_promoted_indexing_pipelines_index_starts_fresh_before_its_filter_is_enabled(ctx):
+    # Asked for by the user: no NOT over the streams the build indexed; the index is dropped first instead.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 23}))
+    agreed = {**AGREED, 'dev_tools': 'PUT _index_template/ecs-acme-v2\n{"data_stream": {}}'}
+    respx.get(f'{API}/pipeline/v1/ip').mock(return_value=httpx.Response(200, json={
+        'uuid': 'ip', 'name': 'Acme - Indexing', 'description': with_agreed_template('Indexes Acme.', agreed)}))
+    with patch.object(processing_writes, 'elastic_destination',
+                      AsyncMock(return_value={'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'})):
+        made = await processing_writes.create_promotion_filters(ctx, [{
+            'pipeline': {'uuid': 'ip', 'name': 'Acme - Indexing'}, 'feed': None, 'stream_type': 'Events',
+            'extra_terms': [PIPELINE_TERM]}])
+    assert "drops 'ecs-acme-v2' first" in made[0]['before_enabling']
+    assert 'DELETE _data_stream/ecs-acme-v2.' in made[0]['before_enabling']
+    assert json.loads(create.calls.last.request.content)['enabled'] is False
 
 @respx.mock
 async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(ctx):
@@ -641,6 +706,7 @@ async def test_a_feed_is_named_by_reference_so_a_renamed_feed_is_still_selected(
         200, json={'type': 'Feed', 'uuid': 'feed-uuid', 'name': 'ACME'}))
     respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
     create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 22}))
+    respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=layers(False)))
     pipeline = {'uuid': 'tp', 'name': 'Acme-Events'}
     await processing_writes.create_promotion_filters(
         ctx, [{'pipeline': pipeline, 'feed': 'ACME', 'stream_type': 'Raw Events', 'extra_terms': []}])
@@ -764,4 +830,70 @@ async def test_streams_processed_into_a_test_feed_are_processed_again_once_promo
     with patch.object(processing_writes, '_is_indexing', AsyncMock(return_value=False)):
         plan = await processing_writes.promotion_processing(ctx, [{'uuid': 'tp', 'name': 'Acme-Events'}], ['ACME'],
                                                             ['ACME-MCP-TEST'])
-    assert [(p['feed'], p['done']) for p in plan] == [('ACME', [])]
+    assert [p['feed'] for p in plan] == ['ACME']
+
+
+@respx.mock
+@pytest.mark.parametrize('stage', ['translation', 'indexing'])
+async def test_a_promoted_pipeline_gets_no_sample_filter_enabled_or_otherwise(ctx, stage):
+    # Asked by the user: sample filters are created enabled only in a build. Promotion takes mcp-managed off (only
+    # mcp-generated stays), and the write guard then refuses the pipeline before any form or filter.
+    from security.guard import WriteGuard
+    create = mock_stroom(elastic=stage == 'indexing')
+    promoted = WriteGuard.__new__(WriteGuard)
+    promoted.tags = AsyncMock(return_value=['mcp-generated'])
+    with patch('tools.processing_writes.guard_from', return_value=promoted), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': stage})):
+        with pytest.raises(ToolError, match='was not created by this server'):
+            await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6],
+                                                            source_pipeline_uuid='ev' if stage == 'indexing' else None)
+        with pytest.raises(ToolError, match='was not created by this server'):
+            await processing_writes.reprocess_streams(ctx, 'p1', [6])
+    assert not create.called
+
+
+@respx.mock
+async def test_promotion_makes_no_second_filter_where_an_enabled_one_selects_what_arrives(ctx):
+    # Asked for by the user: an enabled filter already selecting the feed's new streams gets no twin; a build's sample
+    # filter, by stream id, selects nothing new, so a filter is made beside it.
+    filters = {'tp': [{'id': 5, 'pipelineUuid': 'tp', 'enabled': True, 'queryData': {'expression': {
+                   'type': 'operator', 'op': 'AND', 'children': [
+                       {'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': 'ACME'},
+                       {'type': 'term', 'field': 'Type', 'condition': 'EQUALS', 'value': 'Raw Events'}]}}}],
+               'ip': [{'id': 6, 'pipelineUuid': 'ip', 'enabled': True, 'queryData': {'expression': {
+                   'type': 'operator', 'op': 'AND', 'children': [{'type': 'operator', 'op': 'OR', 'children': [
+                       {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '8'}]}, PIPELINE_TERM]}}}]}
+    respx.post(f'{API}/processorFilter/v1/find').mock(side_effect=lambda request: httpx.Response(200, json={'values': [
+        {'processorFilter': f} for f in filters[json.loads(request.content)['expression']['children'][0]['docRef']['uuid']]]}))
+    create = respx.post(f'{API}/processorFilter/v1').mock(return_value=httpx.Response(200, json={'id': 30}))
+    respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=layers(False)))
+    respx.get(f'{API}/feed/v1/getDocRefForName/ACME').mock(
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'acme', 'name': 'ACME'}))
+    made = await processing_writes.create_promotion_filters(ctx, [
+        {'pipeline': {'uuid': 'tp', 'name': 'Acme-Events'}, 'feed': 'ACME', 'stream_type': 'Raw Events', 'extra_terms': []},
+        {'pipeline': {'uuid': 'ip', 'name': 'Acme - Indexing'}, 'feed': None, 'stream_type': 'Events',
+         'extra_terms': [PIPELINE_TERM]}])
+    assert made[0]['existing'] and made[0]['filter_id'] == 5 and 'no new filter' in made[0]['note']
+    assert made[1]['filter_id'] == 30 and not made[1].get('existing') and create.call_count == 1
+
+
+@respx.mock
+async def test_an_index_reading_a_pipeline_promoted_with_it_is_enabled_after_that_pipelines_filter(ctx):
+    # Seen in e2e: both enabled together, the index took the build's Events and then their re-translation too.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    ids = iter([31, 32])
+    respx.post(f'{API}/processorFilter/v1').mock(side_effect=lambda request: httpx.Response(200, json={'id': next(ids)}))
+    respx.get(f'{API}/feed/v1/getDocRefForName/ACME').mock(
+        return_value=httpx.Response(200, json={'type': 'Feed', 'uuid': 'acme', 'name': 'ACME'}))
+    respx.get(f'{API}/pipeline/v1/ip').mock(return_value=httpx.Response(200, json={
+        'uuid': 'ip', 'name': 'Acme - Indexing', 'description': with_agreed_template('Indexes Acme.', AGREED)}))
+    destination = AsyncMock(side_effect=lambda stroom, uuid: {'index name': 'ecs-acme-v2'} if uuid == 'ip' else None)
+    with patch.object(processing_writes, 'elastic_destination', destination), \
+            patch.object(processing_writes, 'lucene_index', AsyncMock(return_value=None)):
+        made = await processing_writes.create_promotion_filters(ctx, [
+            {'pipeline': {'uuid': 'ev', 'name': 'Acme-Events'}, 'feed': 'ACME', 'stream_type': 'Raw Events',
+             'extra_terms': []},
+            {'pipeline': {'uuid': 'ip', 'name': 'Acme - Indexing'}, 'feed': None, 'stream_type': 'Events',
+             'extra_terms': [PIPELINE_TERM]}])
+    assert "only once filter 31 (pipeline 'Acme-Events') has processed what the build processed again" in \
+        made[1]['before_enabling'] and 'before_enabling' not in made[0]

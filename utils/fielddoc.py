@@ -148,12 +148,258 @@ def _attribute_unmarked(rules: list[EventRule], effective: dict[str, dict], even
     return None
 
 
+# Field mapping layouts: by event type (the default), or the compact two tables. An AGENTS doc's Documentation section
+# or the user picks one (asked for by the user).
+BY_EVENT_TYPE, COMPACT = 'by_event_type', 'compact'
+LAYOUTS = (BY_EVENT_TYPE, COMPACT)
+
+
+# Groups of fields in the documentation (event types, action elements, CEF kinds) with roughly the same fields are
+# shown together, under one heading naming each (asked for by the user: Send and Receive, say). Roughly: at least this
+# share of their fields in common, a path's action element counted as any.
+SIMILAR = 0.75
+_ACTION_STEP = re.compile(r'^(EventDetail/)(?!(?:TypeId|Description|Classification|Purpose|Data)\b)([^/\[]+)(?=/)')
+
+
+def any_action_path(path: str) -> str:
+    """A path with its action element as '*' (EventDetail/Send/Source/User/Id: EventDetail/*/Source/User/Id)."""
+    return _ACTION_STEP.sub(r'\1*', path or '')
+
+
+def similar_groups(signatures: dict[str, set[str]], share: float = SIMILAR) -> list[list[str]]:
+    """The groups, in order, those with roughly the same fields together: each joins the first earlier cluster whose
+    fields it shares at least `share` of (of the two together); the rest stand alone."""
+    clusters: list[tuple[list[str], set[str]]] = []
+    for name, fields in signatures.items():
+        for members, together in clusters:
+            if fields and together and len(fields & together) >= share * len(fields | together):
+                members.append(name)
+                together |= fields
+                break
+        else:
+            clusters.append(([name], set(fields)))
+    return [members for members, _ in clusters]
+
+
+def combined_path(paths: list[str]) -> str:
+    """One path for a row shared by groups: as it is when they agree; with the action elements as (Send|Receive)
+    when only those differ; else each on its own line."""
+    distinct = list(dict.fromkeys(paths))
+    if len(distinct) == 1:
+        return distinct[0]
+    if len({any_action_path(p) for p in distinct}) == 1:
+        actions = [_ACTION_STEP.match(p).group(2) for p in distinct]
+        return _ACTION_STEP.sub(lambda m: f"{m.group(1)}({'|'.join(actions)})", distinct[0], count=1)
+    return '\n'.join(distinct)
+
+
+# Fields the server describes exactly itself: never asked of the agent.
+_SELF_DESCRIBED = {'@StreamId', '@EventId', 'StreamId', 'EventId'}
+_DESCRIPTIONS = re.compile(r'<!-- stroom-mcp field descriptions\n(.*?)\n-->', re.S)
+
+
+class Descriptions:
+    """What each field means for this source, written by the agent from the field's name, where it comes from and its
+    sample values (asked for by the user: the schema's generic words, or 'the x value recorded in a Data element of
+    Send', add nothing a reader can't see). With ask, the fields not yet described are collected, to ask for."""
+
+    def __init__(self, given: dict[str, str] | None = None, ask: bool = False,
+                 notes: list[dict[str, Any]] | None = None):
+        self.given = {k: v.strip() for k, v in (given or {}).items() if isinstance(v, str) and v.strip()}
+        self.ask, self.wanted = ask, {}
+        self.notes = notes or []      # the vendor documentation's field dictionary (record_source_notes)
+
+    def vendor(self, names: list[str], path: str) -> str:
+        """What the vendor's documentation says of the source fields a field is read from; else of the source field
+        it puts in this event-logging element (an index or CEF field knows only its path)."""
+        found = [n for n in self.notes if n.get('field') in names]
+        if not found and path:
+            name = re.search(r"\[@Name='([^']*)'\]", path)
+            bare = re.sub(r'\[[^\]]*\]|/@Value$', '', path)
+            found = [n for n in self.notes if n.get('event_logging_path')
+                     and re.sub(r'\[[^\]]*\]|/@Value$', '', n['event_logging_path']) == bare
+                     and (not name or name.group(1).lower() in (n['event_logging_path'] + ' ' + n['field']).lower())]
+        return ' '.join(n['meaning'].rstrip('.') + '.' + (' Codes: ' + '; '.join(f'{k}: {v}' for k, v in list(
+            n['values'].items())[:8]) + '.' if n.get('values') else '') for n in found if n.get('meaning'))
+
+    def of(self, field: str, source: str, values: list[str], says: str | dict[str, str], path: str = '',
+           names: list[str] = ()) -> str:
+        """The field's description: the agent's, else (the fallback) the first that says anything of it: the
+        vendor's documentation of the source fields it is read from (names) or of its element (path), then the
+        schemas. says: {schema: its words}, e.g. event-logging for where an index field comes from (what the
+        pipeline wrote), then ECS for its name; a string is the event-logging schema's. The agent is shown them all,
+        to build on (asked for by the user)."""
+        said = {k: v for k, v in {'vendor documentation': self.vendor([n for n in names if n], path),
+                                  **({'event-logging': says} if isinstance(says, str) else says)}.items() if v}
+        if field in self.given:
+            return self.given[field]
+        if self.ask and field not in _SELF_DESCRIBED and field not in self.wanted:
+            self.wanted[field] = {'field': field, 'from': source, 'values': [v[:60] for v in values[:3]],
+                                  **({'schemas_say': said} if said else {})}
+        return next(iter(said.values()), '')
+
+
+def read_descriptions(markdown: str | None) -> dict[str, str]:
+    """The field descriptions kept in a Documentation doc's text."""
+    import json
+    match = _DESCRIPTIONS.search(markdown or '')
+    try:
+        found = json.loads(match.group(1)) if match else {}
+    except ValueError:
+        return {}
+    return {k: v for k, v in found.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(found, dict) else {}
+
+
+def descriptions_block(descriptions: dict[str, str]) -> str:
+    import json
+    body = json.dumps(descriptions, indent=1, ensure_ascii=False).replace('--', '-\\u002d')
+    return f"<!-- stroom-mcp field descriptions\n{body}\n-->" if descriptions else ''
+
+
+def _unknown_kind(event: etree._Element) -> str:
+    detail = event.find(f'{{{EVT}}}EventDetail')
+    children = list(detail) if detail is not None else []
+    return next((etree.QName(c).localname for c in children
+                 if isinstance(c.tag, str) and etree.QName(c).localname not in ('TypeId', 'Description')), '?')
+
+
+def _described(schema: EventSchema, key: tuple[str, str | None]) -> str:
+    return schema_description(schema, _key_xpath(key))
+
+
+def _read_from(entry: FieldMapping | None) -> list[str]:
+    """The source fields a mapping entry reads."""
+    if entry is None:
+        return []
+    return [entry.field, *(entry.any_of or []), *([entry.lookup.field] if entry.lookup else [])]
+
+
+def _key_xpath(key: tuple[str, str | None]) -> str:
+    return key[0] + (f"[@Name='{key[1]}']/@Value" if key[1] else '')
+
+
+def _by_event_type(mapping: TranslationMapping, schema: EventSchema, rules: list[EventRule],
+                   effective: dict[str, dict[tuple[str, str | None], FieldMapping]],
+                   by_rule: dict[str, list[etree._Element]], unexplained: list[etree._Element], sampled: bool,
+                   total: int, order, described: Descriptions) -> list[str]:
+    """The fields common to every event type in one table, then a section per event type with a table of its own
+    fields. Common: an EventTime or EventSource element every rule writes from the same source; EventDetail is
+    always the event type's own."""
+    sections = ('EventTime', 'EventSource', 'EventDetail')
+    head = ['XPath', 'Description', 'From'] + (['Sample values'] if sampled else [])
+    common: list[tuple[str, str | None]] = []
+    if rules:
+        first = effective[rules[0].name]
+        common = [k for k, entry in first.items() if k[0].split('/')[0] != 'EventDetail' and all(
+            k in effective[r.name] and source_text(effective[r.name][k]) == source_text(entry) for r in rules)]
+        common.sort(key=lambda k: order(first[k]))
+    every = [e for events in by_rule.values() for e in events]
+
+    def values_of(events: list[etree._Element], key: tuple[str, str | None]) -> tuple[list[str], bool]:
+        found, several = [], False
+        for e in events:
+            got = event_values(e, sections).get(key, [])
+            several = several or len(got) > 1
+            found += got
+        return list(dict.fromkeys(found)), several
+
+    def row(key: tuple[str, str | None], entry: FieldMapping | None, events: list[etree._Element]) -> str:
+        source = source_text(entry) if entry else 'not in the mapping (added by hand, or by a later step)'
+        values, several = values_of(events, key)
+        cells = [f'`{_key_xpath(key)}`', described.of(_key_xpath(key), source, values, _described(schema, key),
+                                                      _key_xpath(key), _read_from(entry)), source]
+        if sampled:
+            cells.append((_shown(values) or '(not in the sample)') + ('\n(several per event)' if several else ''))
+        return _row(*cells)
+
+    def merged_row(members: list[tuple[str, tuple[str, str | None], FieldMapping | None]], grouped: int) -> str:
+        """A field of event types shown together: its paths and sources together, each source named by its type
+        where they differ or not every type writes it, and the values all of them got."""
+        first = members[0][1]
+        sources = [(name, source_text(entry) if entry else 'not in the mapping') for name, _, entry in members]
+        source = (sources[0][1] if len({t for _, t in sources}) == 1 and len(members) == grouped
+                  else '\n'.join(f'{t} ({name})' for name, t in sources))
+        values, several = [], False
+        for name, k, _ in members:
+            got, more = values_of(by_rule[name], k)
+            values += got
+            several = several or more
+        values = list(dict.fromkeys(values))
+        cells = [f'`{combined_path([_key_xpath(k) for _, k, _ in members])}`'.replace('\n', '`\n`'),
+                 described.of(_key_xpath(first), source, values, _described(schema, first), _key_xpath(first),
+                              [n for _, _, entry in members for n in _read_from(entry)]), source]
+        if sampled:
+            cells.append((_shown(values) or '(not in the sample)') + ('\n(several per event)' if several else ''))
+        return _row(*cells)
+
+    lines = ['### Common fields', '',
+             ("Every event type writes these, from the same source. Sample values are what the sample's events were "
+              f'written, {total} events in all.' if sampled else 'Every event type writes these, from the same source.'),
+             '', _row(*head), _row(*['---'] * len(head))]
+    lines += [row(k, effective[rules[0].name][k], every) for k in common]
+    mapped = {k for fields in effective.values() for k in fields}
+    if sampled:     # in the events, but no rule of the mapping writes it
+        extra = sorted({k for e in every for k in event_values(e, ('EventTime', 'EventSource')) if k not in mapped},
+                       key=lambda k: (k[0], k[1] or ''))
+        lines += [row(k, None, every) for k in extra]
+    lines += ['', '### Event types', '']
+    dropped = [r for r in mapping.events if r.drop]
+    if dropped:
+        lines += ['Left untranslated on purpose: ' + '; '.join(
+            f"`{r.name}` ({' and '.join(condition_text(c) for c in r.when) or 'every record'})" for r in dropped) + '.', '']
+    own: dict[str, list[tuple[str, str | None]]] = {}
+    for rule in rules:
+        fields = effective[rule.name]
+        own[rule.name] = sorted((k for k in fields if k not in common), key=lambda k: (
+            k[0] not in ('EventDetail/TypeId', 'EventDetail/Description'), order(fields[k])))
+    by_name = {r.name: r for r in rules}
+    # Judged on what they write besides TypeId and Description, which every event type has.
+    for names in similar_groups({n: {any_action_path(_key_xpath(k)) for k in keys
+                                     if k[0] not in ('EventDetail/TypeId', 'EventDetail/Description')}
+                                 for n, keys in own.items()}):
+        said = []
+        for name in names:
+            rule = by_name[name]
+            conditions = ' and '.join(condition_text(c) for c in rule.when)
+            line = (f'When {conditions}' if conditions else 'Any other record' if len(rules) > 1 else 'Every record') \
+                + (f' ({name})' if len(names) > 1 else '')
+            if sampled:
+                events = by_rule[name]
+                line += (f": {len(events)} of the sample's {total} events" if events else ': none in the sample')
+            said.append(line + '.')
+        lines += [f"#### {', '.join(names)}", '', ' '.join(said), '', _row(*head), _row(*['---'] * len(head))]
+        # One row per field, the groups' own paths and sources together.
+        rows: dict[str, list[tuple[str, tuple[str, str | None], FieldMapping | None]]] = {}
+        for name in names:
+            fields = effective[name]
+            for k in own[name]:
+                rows.setdefault(any_action_path(_key_xpath(k)), []).append((name, k, fields[k]))
+            if sampled and by_rule[name]:
+                for k in sorted({k for e in by_rule[name] for k in event_values(e, ('EventDetail',)) if k not in fields},
+                                key=lambda k: (k[0], k[1] or '')):
+                    rows.setdefault(any_action_path(_key_xpath(k)), []).append((name, k, None))
+        for members in rows.values():
+            if len(names) == 1:
+                name, k, entry = members[0]
+                lines.append(row(k, entry, by_rule[name]))
+            else:
+                lines.append(merged_row(members, len(names)))
+        lines.append('')
+    if unexplained:
+        kinds = Counter(_unknown_kind(e) for e in unexplained)
+        lines += [f"{len(unexplained)} of the sample's {total} events were not written by a rule of this mapping "
+                  f"(the XSLT was edited by hand, or a later step rewrote them): {dict(kinds)}.", '']
+    return lines
+
+
 def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
-                           observed: list[etree._Element] | None = None) -> str:
-    """The section: how the mapping reads records (items, drops, extractions), then the EventSource table (XPath,
-    the schema's description, From, and with a sample the values written) and the event types table (one row per
-    rule: its conditions, TypeId and Description from-and-values, how many of the sample's events it wrote, and
-    every EventDetail element as path <- from = sample value)."""
+                           observed: list[etree._Element] | None = None, layout: str = BY_EVENT_TYPE,
+                           described: Descriptions | None = None) -> str:
+    """The section: how the mapping reads records (items, drops, extractions), then, by event type (the default,
+    asked for by the user): a table of the fields common to every event type, and a section per event type with a
+    table of the fields particular to it (XPath, description, From, and with a sample the values written).
+    Compact: the EventSource table and an event types table, one row per rule with every EventDetail element in a
+    cell."""
     def order(entry: FieldMapping) -> tuple:
         try:
             return tuple(c.index for c in schema.resolve(entry.path.strip('/'))), entry.data_name or ''
@@ -208,6 +454,11 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
                          f"{' (of the record)' if ex.scope == 'record' else ''} with `{ex.regex}`")
         lines.append('')
 
+    described = described or Descriptions()
+    if layout != COMPACT:
+        return '\n'.join(lines + _by_event_type(mapping, schema, rules, effective, by_rule, unexplained, sampled,
+                                                 total, order, described)) + '\n'
+
     # --- EventSource and EventTime
     sources: dict[tuple, dict[str, list[str]]] = {}     # element -> from text -> rules that write it so
     entries: dict[tuple, FieldMapping] = {}
@@ -243,6 +494,8 @@ def field_mapping_markdown(mapping: TranslationMapping, schema: EventSchema,
             description = schema.describe(schema.resolve(k[0]))
         except ValueError:
             description = ''
+        description = described.of(_xpath(entries[k]), from_text, list(seen.get(k) or {}), description,
+                                   _xpath(entries[k]), _read_from(entries[k]))
         if not sampled:
             lines.append(_row(f'`{_xpath(entries[k])}`', description, from_text))
             continue
@@ -391,7 +644,10 @@ def schema_description(schema: EventSchema | None, source: str) -> str:
         if generic and generic.group(1) != parent:
             said = re.sub(r',?\s+e\.?g\.?\s.*$', '.', said.replace(generic.group(0), f'the {parent}', 1))
     if data:
-        return f"The `{data.group(1)}` value recorded in a Data element" + (f" of {path.split('/')[-1]}: {said}" if said else '.')
+        # The element the Data is under, not its description (seen in testing: every Data under Send was described
+        # as 'Used for send events that are at a higher level than a network/send event').
+        under = path.strip('/').split('/')[-1] if path.strip('/') else ''
+        return f"The `{data.group(1)}` value recorded in a Data element" + (f" of {under}." if under else '.')
     if attribute:
         return f"The `{attribute}` attribute of {path.split('/')[-1]}" + (f": {said}" if said else '.')
     return said
@@ -453,7 +709,8 @@ def existing_index_summary(survey: dict[str, Any]) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], schema: EventSchema | None) -> str:
+def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], schema: EventSchema | None,
+                            layout: str = BY_EVENT_TYPE, described: Descriptions | None = None) -> str:
     """The Field mapping section for an existing index, from its survey: every field Stroom has for it, with a
     description (the feeding pipeline's plan, else the event-logging schema for the field's source), its type, where it comes from when a feeding pipeline's plan records it, how often the surveyed
     documents held it, and their values."""
@@ -469,7 +726,7 @@ def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], sch
         intro += ' No documents came back through Stroom, so no field below was read (see Data surveyed).'
     lines = [intro, '']
     head = ['Index field', 'Description', 'Type', 'From (event-logging path)', 'In sample', 'Sample values']
-    lines += [_row(*head), _row(*['---'] * len(head))]
+    rows: list[tuple[str, list[str]]] = []
     fields = survey.get('fields') or []
     first = ('StreamId', 'EventId', survey.get('time_field'), '@timestamp')
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -480,8 +737,8 @@ def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], sch
     surveyed = set(survey.get('surveyed_fields') or [x['name'] for x in fields])
     unsurveyed = [x['name'] for x in fields if x['name'] not in surveyed]
     if documents and unsurveyed:
-        lines[-2:-2] = [f"The survey read {len(surveyed)} of the {len(fields)} fields; the other {len(unsurveyed)} "
-                        f"are listed as not surveyed.", '']
+        lines += [f"The survey read {len(surveyed)} of the {len(fields)} fields; the other {len(unsurveyed)} "
+                  f"are listed as not surveyed.", '']
     for f in list(dict.fromkeys(f['name'] for f in ordered)):
         field = next(x for x in fields if x['name'] == f)
         plan = planned.get(f)
@@ -498,24 +755,27 @@ def existing_index_markdown(survey: dict[str, Any], planned: dict[str, Any], sch
             description = field_description(what, None) or 'Not read: no documents came back through Stroom.'
             held, values = 'not read', '-'
         else:
-            what = ((getattr(plan, 'description', '') if plan else '')
-                    or (schema_description(schema, source) if source else _DOCUMENT_IDS.get(f, ''))
+            hint = ((schema_description(schema, source) if source else _DOCUMENT_IDS.get(f, ''))
                     or ("The index's time field: searches and dashboards filter on it."
                         if f == survey.get('time_field') else ''))
+            what = (getattr(plan, 'description', '') if plan else '') or (described or Descriptions()).of(
+                f, source, list(dict.fromkeys(v for vs in per_document for v in vs if v != '')),
+                {'event-logging': hint, 'ECS': ecs_says(f)}, source)
             description = field_description(what, per_document)
             count = sum(1 for vs in per_document if any(v != '' for v in vs))
             held = f'{100 * count / len(documents):.0f}% of documents' if documents else 'no documents'
             values = _values([v for vs in per_document for v in vs])
-        lines.append(_row(f'`{f}`', description, field['type'], f'`{source}`' if source else '(not recorded)', held, values))
+        rows.append((source, [f'`{f}`', description, field['type'], f'`{source}`' if source else '(not recorded)', held,
+                              values]))
     # Written by a feeding pipeline's plan, but not in the fields Stroom lists for the index: only documented when the
     # user chose to (write_documentation refuses otherwise), and said as such rather than left out.
     for name in not_listed(survey, planned):
         plan = planned[name]
         what = getattr(plan, 'description', '') or (schema_description(schema, plan.source) if plan.source else '')
-        lines.append(_row(f'`{name}`', field_description(what, None) or 'Written by the pipeline that feeds the index.',
-                          getattr(plan, 'type', ''), f'`{plan.source}`' if plan.source else '(not recorded)',
-                          'not in the index', '-'))
-    return '\n'.join(lines) + '\n'
+        rows.append((plan.source, [f'`{name}`', field_description(what, None) or 'Written by the pipeline that feeds the index.',
+                                   getattr(plan, 'type', ''), f'`{plan.source}`' if plan.source else '(not recorded)',
+                                   'not in the index', '-']))
+    return '\n'.join(lines + index_tables(rows, head, layout)) + '\n'
 
 
 def not_listed(survey: dict[str, Any], planned: dict[str, Any]) -> list[str]:
@@ -551,6 +811,46 @@ def shown_type(plan: Any, kind: str) -> str:
     return kind
 
 
+def ecs_says(name: str) -> str:
+    """What ECS says of a field of that name ('' when it is not ECS's)."""
+    from utils import ecs
+    return (ecs.field(name) or {}).get('short') or ''
+
+
+def action_of(source: str | None) -> str | None:
+    """The action element an event-logging path is under (EventDetail/Authenticate/User/Id: Authenticate); None for
+    what any kind of event has (EventTime, EventSource, TypeId, Description, the ids) or no path at all."""
+    from utils.cef import NOT_ACTION
+    parts = re.sub(r'\[[^\]]*\]', '', source or '').strip('/').split('/')
+    return parts[1] if len(parts) > 1 and parts[0] == 'EventDetail' and parts[1] not in NOT_ACTION | {'*'} else None
+
+
+def index_tables(rows: list[tuple[str, list[str]]], head: list[str], layout: str = BY_EVENT_TYPE,
+                 population: dict[str, float] | None = None) -> list[str]:
+    """An index's field rows (each with the event-logging path it comes from), by event type (the default, asked for
+    by the user): the fields any kind of event has in one table, then a section per action element with a table of
+    the fields from it. Compact, or with no field from an action element: one table."""
+    def table(cells: list[list[str]]) -> list[str]:
+        return [_row(*head), _row(*['---'] * len(head))] + [_row(*c) for c in cells]
+    by_action: dict[str, list[list[str]]] = {}
+    for source, cells in rows:
+        if action_of(source):
+            by_action.setdefault(action_of(source), []).append(cells)
+    if layout == COMPACT or not by_action:
+        return table([cells for _, cells in rows])
+    lines = ['### Common fields', '', 'Any kind of event can have these: from EventTime, EventSource, the event type, '
+             'and the ids.', '', *table([cells for source, cells in rows if not action_of(source)]), '',
+             '### Event types', '', "Each from the action element that kind of event has: only those events have them.", '']
+    sources = {a: {any_action_path(source) for source, _ in rows if action_of(source) == a} for a in by_action}
+    for actions in similar_groups(sources):
+        shares = [(a, max((v for path, v in (population or {}).items() if path.startswith(f'EventDetail/{a}/')),
+                          default=None)) for a in actions]
+        said = ', '.join(f'{v:g}%' + (f' ({a})' if len(actions) > 1 else '') for a, v in shares if v is not None)
+        lines += [f"#### {', '.join(actions)}", '', *([f"In {said} of the sample's events.", ''] if said else []),
+                  *table([c for a in actions for c in by_action[a]]), '']
+    return lines[:-1]
+
+
 def grouped_fields(plan: Any) -> list[Any]:
     """The plan's fields for the table: the document's ids and time field first, then grouped by their top-level
     object (host.*, user.*), each group where its first field comes in the plan."""
@@ -565,7 +865,8 @@ def grouped_fields(plan: Any) -> list[Any]:
 
 def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None = None,
                                  documents: list[dict[str, list[str]]] | None = None,
-                                 schema: EventSchema | None = None) -> str:
+                                 schema: EventSchema | None = None, layout: str = BY_EVENT_TYPE,
+                                 described: Descriptions | None = None) -> str:
     """The Field mapping section of an indexing pipeline's documentation: index field, a description (the plan's,
     else the event-logging schema's for its source), type, the event-logging path it
     comes from, and from the sample: how often that path is populated in the Events, and the values the index
@@ -577,12 +878,15 @@ def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None 
     if documents is not None:
         lines += [f'Sample values are what the {len(documents)} documents written from the sample got.', '']
     head = ['Index field', 'Description', 'Type', 'From (event-logging path)'] + (['In sample'] if sampled else [])         + (['Sample values'] if documents is not None else [])
-    lines += [_row(*head), _row(*['---'] * len(head))]
+    rows: list[tuple[str, list[str]]] = []
     for f in grouped_fields(plan):
         shared = plan.written_by(f.name) if hasattr(plan, 'written_by') else None
-        what = f.description or (f"Written by the shared template `{shared.template}`." if shared
-                                 else schema_description(schema, f.source))
         per_document = [d.get(f.name, []) for d in documents] if documents is not None else None
+        sampled_values = list(dict.fromkeys(v for vs in per_document or [] for v in vs if v != ''))
+        what = f.description or (described or Descriptions()).of(
+            f.name, f.source if not shared else f'shared template {shared.template}', sampled_values,
+            {'shared template': f"Written by the shared template `{shared.template}`.", 'ECS': ecs_says(f.name)}
+            if shared else {'event-logging': schema_description(schema, f.source), 'ECS': ecs_says(f.name)}, f.source)
         cells = [f'`{f.name}`', field_description(what, per_document), shown_type(plan, f.type), f"shared template `{shared.template}` of `{shared.href}`" if shared else f'`{f.source}`']
         if sampled:
             from utils.fieldplan import population_of
@@ -593,8 +897,8 @@ def index_field_mapping_markdown(plan: Any, population: dict[str, float] | None 
             values = list(dict.fromkeys(v for d in documents for v in d.get(f.name, []) if v != ''))
             cells.append(', '.join(f'`{v[:40]}`' for v in values[:3]) + (f' (+{len(values) - 3})' if len(values) > 3 else '')
                          if values else '(none in the sample)')
-        lines.append(_row(*cells))
-    return '\n'.join(lines) + '\n'
+        rows.append(('' if shared else f.source, cells))
+    return '\n'.join(lines + index_tables(rows, head, layout, population)) + '\n'
 
 
 def _values(values: list[str]) -> str:

@@ -102,6 +102,18 @@ async def _fewer_streams(ctx: Context, feed: str, count: int, confirmation_id: s
     return None
 
 
+async def _in_a_build(ctx: Context, feed: str) -> bool:
+    """Whether a feed is one a build made (its uploaded samples, a test feed); not for an existing feed, or when it
+    can't be told."""
+    from urllib.parse import quote
+    try:
+        ref = await gateway_from(ctx).get(f'/feed/v1/getDocRefForName/{quote(feed, safe="")}')
+        return bool(ref and ref.get('uuid') and await guard_from(ctx).build_of(
+            {'type': 'Feed', 'uuid': ref['uuid'], 'name': ref.get('name') or feed}))
+    except Exception:
+        return True
+
+
 FEED_CHARS = 250_000          # a part's head, for a feed's streams (any size)
 SAMPLE_CHARS = 2_000_000      # a sample stream's (stream_ids), read whole when it is a sample's size
 
@@ -149,7 +161,9 @@ async def survey_feed(
         stream_type: Annotated[str, Field(description="Stream type to sample.")] = 'Raw Events',
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Survey exactly these streams instead of picking from the feed: the sample streams an "
-                        "onboarding uploaded (one per file), to see every kind of event they hold and where.")] = [],
+                        "onboarding uploaded (one per file), to see every kind of event they hold and where. Not to "
+                        "pick an existing feed's streams: leave that to max_streams (fewer than 10 of them, by id, "
+                        "is confirmed by the user in a form).")] = [],
         max_streams: Annotated[int, Field(ge=1, le=100, description=(
             "Streams to read in this call, spread over the feed's lifetime: leave the default (10) unless the user "
             "gives a number. More, up to 100, as they ask; fewer is confirmed by the user in a form."))] = SURVEY_STREAMS,
@@ -202,6 +216,13 @@ async def survey_feed(
             return feed     # the user picks the feed they meant in a form
     if not chosen and max_streams < SURVEY_STREAMS:
         gate = await _fewer_streams(ctx, feed, max_streams, confirmation_id)
+        if gate:
+            return gate
+    if chosen and len(chosen) < SURVEY_STREAMS and not await _in_a_build(ctx, feed):
+        # A few of an existing feed's streams, by id: as few as a smaller max_streams, so the user's to confirm too
+        # (seen in testing on 0.18.13: an existing feed onboarded from 5 streams). A sample uploaded to a build's
+        # feed is read as it is.
+        gate = await _fewer_streams(ctx, feed, len(chosen), confirmation_id)
         if gate:
             return gate
     record = await _load_record(ctx, build, feed) if build else None

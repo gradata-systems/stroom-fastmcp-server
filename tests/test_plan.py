@@ -186,8 +186,10 @@ def test_every_indexing_call_takes_its_arguments():
             ('processed', p) for p in (None, 'running', 'disabled')]:
         call, then = plan.next_call(step, 'b', ['F'], [1], [2], 'p', 'q', processing, {'uuid': 'i', 'backend': 'lucene'})
         assert set(call['arguments']) <= set(inspect.signature(tools[call['tool']]).parameters), processing
-        # Filters are created disabled (asked for by the user): the next call never waits before the user enables it.
-        assert processing not in (None, 'disabled') or 'enable' in then, (step, processing)
+        # The sample's filter is created once the user approves it (asked for by the user); one left disabled is
+        # waited on only once the user enables it.
+        assert processing is not None or 'approves it in a form' in then, (step, processing)
+        assert processing != 'disabled' or 'enable' in then, (step, processing)
 
 
 async def test_next_says_what_to_do_when_its_tool_is_hidden(monkeypatch):
@@ -255,3 +257,11 @@ async def test_a_big_part_is_read_in_pages_up_to_the_limit():
     assert text == lines and cut is False
     text, cut, _ = await read_head(stroom, 1, 0, 10_000)
     assert len(text) <= 10_000 and cut is True and lines.startswith(text)
+
+
+def test_next_says_where_the_plan_stands_for_the_agents_task_list():
+    # Seen in testing: the agent's checklist stayed on 'Process samples into Events' while the work went on.
+    steps = [{'step': 'feed', 'state': 'done'}, {'step': 'covered', 'state': 'not needed'},
+             {'step': 'processed', 'state': 'done'}, {'step': 'validated', 'state': 'to do'},
+             {'step': 'documented', 'state': 'to do'}]
+    assert plan._progress(steps, 'validated') == 'step 3 of 4, validated; done: feed, processed'

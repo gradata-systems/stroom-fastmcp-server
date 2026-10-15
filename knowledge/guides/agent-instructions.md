@@ -50,7 +50,13 @@ the `functions` entry that binds their prefix), and a hand-written XSLT without 
 A `## Component templates` section says which Elasticsearch component templates new index templates compose
 (`- include: logs-ilm-90d, org-base`, `- exclude: legacy-base`). The server applies it: `propose_index_template`
 references the included ones (asking for their content) and leaves the excluded out, and `check_index_template`
-notes a template that breaks it. A user's own `include_components` wins over an exclusion.
+notes a template that breaks it. A user's own `include_components` wins over an exclusion. Excluding `ecs@mappings`
+is the only way an ECS index template goes without it.
+
+A `## Documentation` section says how `write_documentation` lays out a pipeline's Field mapping (`- field mapping:
+compact`, or `by event type`, the default; `one table` and `single table` mean compact). The most specific doc that
+says wins, and the result notes it. A layout the user asks for goes in `field_mapping_layout` (`by_event_type` or
+`compact`) and wins over the doc.
 
 An XSLT style section is applied through the translation mapping's `style` (naming, and when to use variables and
 xsl:maps; see the XSLT guide), and the same `style` of an index plan and of a CEF plan (`draft_cef_mapping style=`),

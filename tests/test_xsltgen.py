@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from saxonche import PySaxonProcessor
 
 from utils.eventschema import EventSchema
-from utils.fielddoc import field_mapping_markdown, readable, sampled_events
+from utils.fielddoc import COMPACT, field_mapping_markdown, readable, sampled_events
 from utils.xsltgen import (TranslationMapping, generate, literal, pattern_problem,
                            )
 
@@ -373,7 +373,7 @@ def test_field_mapping_tables_show_the_mapping_and_the_sample():
     m = mapping(events=rules)
     assert 'field_mapping' not in generate(m, SCHEMA, '4.1.0')
     # From the mapping alone: From says where each value comes from, in schema order.
-    text = field_mapping_markdown(m, SCHEMA)
+    text = field_mapping_markdown(m, SCHEMA, layout=COMPACT)
     source, events = text.split('### Event types')
     rows = [line for line in source.splitlines() if line.startswith('| `')]
     assert [r.split(' | ')[0] for r in rows] == [
@@ -402,7 +402,7 @@ def test_sampled_field_mapping_matches_events_to_rules_by_the_marker():
     marked = generate(m, SCHEMA, '4.1.0', mark_rules=True)['xslt']
     assert '<!--stroom-mcp rule: logon-->' in marked and 'stroom-mcp rule' not in generate(m, SCHEMA, '4.1.0')['xslt']
     events = sampled_events([etree.tostring(transform(marked, RECORDS), encoding='unicode')])
-    source, text = field_mapping_markdown(m, SCHEMA, events).split('### Event types')
+    source, text = field_mapping_markdown(m, SCHEMA, events, COMPACT).split('### Event types')
     # Both halves: the mapping and the values the sample's events got, with which kinds had an element.
     assert '| `EventSource/System/Name` | The name of the system. | "Acme VPN" | "Acme VPN" |' in source
     assert '| `host`, or "unknown" when empty | "unknown"<br>"ws01" |' in source
@@ -418,6 +418,29 @@ def test_sampled_field_mapping_matches_events_to_rules_by_the_marker():
     # An event the mapping did not write is reported, not silently dropped.
     foreign = etree.fromstring('<Event xmlns="event-logging:3"><EventDetail><TypeId>x</TypeId><View/></EventDetail></Event>')
     assert "1 of the sample's 3 events were not written by a rule of this mapping" in field_mapping_markdown(m, SCHEMA, events + [foreign])
+
+    # By event type (the default, asked for by the user): the common fields in one table, then a section per event type
+    # with a table of its own fields.
+    text = field_mapping_markdown(m, SCHEMA, events)
+    common, types = text.split('### Event types')
+    assert common.lstrip().startswith('### Common fields')
+    assert '| `EventSource/System/Name` | The name of the system. | "Acme VPN" | "Acme VPN" |' in common
+    assert '| `EventSource/User/Id` | An identifier for the user.' in common
+    # Written by one event type only (logoff's IP), or differently by each: the event type's own.
+    assert 'EventSource/Client/IPAddress' not in common and 'EventDetail' not in common
+    # logon and logoff write roughly the same fields: one section, both named (asked for by the user).
+    both, other = (types.split(f'#### {n}')[1].split('####')[0] for n in ('logon, logoff', 'other'))
+    assert ("When `action` = login (logon): 1 of the sample's 2 events. When `action` = logout (logoff): none in "
+            "the sample.") in both
+    rows = [r.split(' | ')[0] for r in both.splitlines() if r.startswith('| `')]
+    assert rows[:2] == ['| `EventDetail/TypeId`', '| `EventDetail/Description`']
+    assert '| "Logon" (logon)<br>"Logoff" (logoff) |' in both          # each one's source, where they differ
+    assert '| `ip` (logoff) | (not in the sample) |' in both            # written by one of them: named
+    assert '| `EventDetail/Authenticate/Outcome/Success` |' in both and '| "false" |' in both
+    assert ("| `EventDetail/Unknown/Data[@Name='action']/@Value` | The `action` value recorded in a Data element of "
+            "Unknown. | `action` |") in other
+    # Without a sample: no sample column.
+    assert 'Sample values' not in field_mapping_markdown(m, SCHEMA)
 
 
 def test_expressions_in_the_documentation_name_fields_not_selectors():

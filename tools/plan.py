@@ -269,8 +269,9 @@ async def _suggested_columns(ctx: Context, pipeline_uuid: str) -> list[str]:
     return chosen[:8]
 
 
-# Processor filters are created disabled: enabling one is the user's (asked for by the user).
-_ENABLE = "it is created disabled: give the user its pipeline_link and ask them to enable it on the pipeline's Processors tab"
+# A sample's processor filter is created enabled once the user approves it in a form (asked for by the user); one
+# made disabled (before, or a feed's) is the user's to enable.
+_APPROVE = "the user approves it in a form, and processing starts"
 _ASK = "ask them to, on the pipeline's Processors tab, if they haven't said"
 
 
@@ -310,7 +311,7 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                     "changes=), then step_records over every location so far; again until its coverage says covered. "
                     "Kinds not worth translating: ask the user (set_shape_handling, a drop rule)"),
         'processed': (('create_processor_filter', {'pipeline_uuid': tr, 'stream_ids': raw}),
-                      f"{_ENABLE}; once they say they have, wait_for_processing and check_events"),
+                      f"{_APPROVE}; then wait_for_processing with its filter_id, and check_events"),
         'processed:disabled': (('wait_for_processing', {'pipeline_uuid': tr, 'stream_ids': raw}),
                                f"only once the user says they enabled its filter ({_ASK}); then check_events"),
         'processed:running': (('wait_for_processing', {'pipeline_uuid': tr, 'stream_ids': raw}), 'then check_events'),
@@ -338,8 +339,8 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                                      'propose_index_template with the user\'s example'),
         'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events,
                                                  **({} if discovery else {'source_pipeline_uuid': source})}),
-                    f"{_ENABLE} (Elasticsearch: once the agreed template is committed); once they say they have, "
-                    f"wait_for_processing expect_events=false, and verify_index"),
+                    f"{_APPROVE} (Elasticsearch: once the agreed template is committed, and an index this pipeline "
+                    f"wrote to before dropped); then wait_for_processing expect_events=false, and verify_index"),
         'indexed:disabled': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
                              f"only once the user says they enabled its filter ({_ASK}); then verify_index"),
         'indexed:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),
@@ -611,11 +612,21 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         'before_promotion': checks,
         'steps': steps,
         **({'works_from': sources} if existing else {}),
-        'next': {'step': nxt['step'], 'do': nxt['what'], 'call': call, 'then': then} if nxt else
+        'next': {'step': nxt['step'], 'do': nxt['what'], 'call': call, 'then': then,
+                 'progress': _progress(steps, nxt['step'])} if nxt else
                 start if existing and not stage_1 and not stage_2 and not cef_build else
                 {'step': 'promoted', 'do': 'Everything is in place: promote_build with the user\'s approval',
                  'call': call, 'then': then},
     }
+
+
+def _progress(steps: list[dict[str, Any]], now: str) -> str:
+    """Where the plan stands, in a line, for a task list the agent keeps (seen in testing: its checklist stayed on
+    'Process samples into Events' while the work went on): the steps done, and the one now."""
+    counted = [s for s in steps if s['state'] != 'not needed']
+    done = [s['step'] for s in counted if s['state'] == 'done']
+    at = next((n for n, s in enumerate(counted, 1) if s['step'] == now), len(done) + 1)
+    return f"step {at} of {len(counted)}, {now}; done: {', '.join(done) or 'none yet'}"
 
 
 async def build_status(ctx: Context, build: Build) -> dict[str, Any]:

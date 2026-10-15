@@ -282,16 +282,14 @@ async def data_stream(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: 
         ('host', 'EQUALS', 'web01', 2, {'term': {'host': 'web01'}}),
         ('status', 'GREATER_THAN', '400', 1, {'range': {'status': {'gt': 400}}}),
     ], pipeline_uuid=pipeline['uuid'])
-    # Reprocessing: a data stream keeps what was indexed, so the approval gives the request to clear the stream's
-    # documents first; after it, the count is three again, not six.
+    # Reprocessing: a data stream keeps what was indexed, so the approval says to drop it first and start fresh (asked
+    # for by the user, in place of deleting by stream); after it, the count is three again, not six.
     asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw])
     note = (asked.get('details') or {}).get('already indexed') or ''
-    e2e.check(asked.get('status') == 'needs_approval' and f'POST {index}/_delete_by_query' in note,
-              'the approval gives the _delete_by_query request for the data stream')
-    request = note[note.index('POST '):]
-    path, body = request.split(' ', 2)[1], json.loads(request.split(' ', 2)[2])
-    deleted = (await es.post(f'/{path}?refresh=true', json=body)).json().get('deleted')
-    e2e.check(deleted == 3, f'the cluster admin deletes them from the data stream first: {deleted} documents')
+    e2e.check(asked.get('status') == 'needs_approval' and e2e.dropped_by(note) == f'_data_stream/{index}',
+              f'the approval says to drop the data stream first: {note[:160]}')
+    e2e.check((await es.delete(f'/_data_stream/{index}')).status_code == 200,
+              'the cluster admin drops the data stream; the template stays and makes it again')
     again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], approval_id=asked['approval_id'])
     redone = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
                                                          filter_id=again['filter_id'])

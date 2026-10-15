@@ -163,6 +163,42 @@ def component_rules(applying: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     return out
 
 
+
+# How a pipeline's documentation lays out its Field mapping (asked for by the user): by event type (the default: the
+# fields common to every event type in one table, then a table per event type), or compact:
+#   ## Documentation
+#   - field mapping: compact
+_DOCUMENTATION = re.compile(r'^#{1,6}\s*documentation\s*$', re.I | re.M)
+_LAYOUTS = {'by event type': 'by_event_type', 'by_event_type': 'by_event_type', 'per event type': 'by_event_type',
+            'compact': 'compact', 'one table': 'compact', 'single table': 'compact'}
+
+
+def field_mapping_layout(applying: list[dict[str, Any]]) -> dict[str, str] | None:
+    """{'layout', 'from'} from the applicable AGENTS docs' Documentation sections, the most specific doc's; None when
+    none says."""
+    found = None
+    for entry in applying:
+        text = entry.get('instructions') or ''
+        section = _DOCUMENTATION.search(text)
+        if not section:
+            continue
+        for line in re.split(r'^#{1,6}\s', text[section.end():], maxsplit=1, flags=re.M)[0].splitlines():
+            m = re.match(r'^\s*[-*]\s*field mapping( layout)?\s*:\s*(.+)$', line, re.I)
+            layout = _LAYOUTS.get(m.group(2).strip().strip('`*.').lower()) if m else None
+            if layout:
+                found = {'layout': layout, 'from': entry.get('folder', '')}
+    return found
+
+
+async def layout_ruled(ctx: Context, ref: dict[str, str]) -> dict[str, str] | None:
+    """The Documentation layout rule of the AGENTS docs that apply where this document (a pipeline, an index doc) is."""
+    try:
+        name = ref.get('name') or (await gateway_from(ctx).get_doc(ref['type'], ref['uuid'])).get('name') or ''
+        found = await applicable_instructions(ctx, docs=[{**ref, 'name': name}])
+    except Exception:
+        return None
+    return field_mapping_layout(found['instructions'])
+
 async def components_ruled(ctx: Context, pipeline_uuid: str) -> dict[str, list[dict[str, str]]]:
     """The Component templates rules of the AGENTS docs that apply where this pipeline is."""
     try:

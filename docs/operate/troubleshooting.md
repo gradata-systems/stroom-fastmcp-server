@@ -105,7 +105,9 @@ document's build is the folder it is in: see
 
 That is by design: the promoted pipeline's filter is created disabled. Review the pipeline and enable the filter. It
 has no minimum creation time, so it processes the feed's existing data as well: if an earlier version still processes
-the same feed, disable it first, or set a minimum creation time on the new filter in Stroom.
+the same feed, disable it first, or set a minimum creation time on the new filter in Stroom. For an indexing
+pipeline, do what its filter's `before_enabling` says first (drop the Elasticsearch index, or delete the Lucene
+index's shards), or the index holds the build's events twice.
 
 ## Stroom is busy with old processor filters
 

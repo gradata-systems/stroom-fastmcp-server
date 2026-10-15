@@ -158,8 +158,9 @@ async def nothing_feeds(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
                                       {'user.name': 'alice', 'source.ip': '10.3.0.1', 'http.status': '200'},
                                       'the existing index')
     rows = e2e.field_rows(written.get('field_mapping') or '')
-    e2e.check('75% of documents' in ' '.join(rows['http.status']) and 'IP addresses' in rows['source.ip'][0],
-              f"http.status in 3 of the 4 documents; source.ip described from its values: {rows['source.ip'][0]!r}")
+    # Described as the agent said, from its values (asked for by the user): here the e2e stand-in.
+    e2e.check('75% of documents' in ' '.join(rows['http.status']) and rows['source.ip'][0].startswith('E2E: source.ip'),
+              f"http.status in 3 of the 4 documents; source.ip described as the agent said: {rows['source.ip'][0]!r}")
     await promoted_to(ctx, stroom, build, written, folder)
 
     print('\n### 1, again: the doc beside the index doc changed through a working copy, not a second doc')
@@ -252,8 +253,9 @@ async def fed_by_a_plan(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     rows = e2e.field_rows(written.get('field_mapping') or '')
     await e2e.documented_to_the_field(stroom, written, ['@timestamp', 'user.name'], {'user.name': 'alice'},
                                       'the index a plan feeds')
-    e2e.check(rows['user.name'][2] == '`EventSource/User/Id`' and rows['user.name'][0] == 'An identifier for the user.',
-              f"where each field comes from in the events, described from the schema: {rows['user.name'][0]!r}")
+    # Described as the agent said, from its values (asked for by the user), not in the schema's generic words.
+    e2e.check(rows['user.name'][2] == '`EventSource/User/Id`' and rows['user.name'][0].startswith('E2E: user.name'),
+              f"where each field comes from in the events, described as the agent said: {rows['user.name'][0]!r}")
     chosen = f'System/E2E Docs/indexes-{stamp}'
     await promoted_to(ctx, stroom, build, written, chosen, {'Documentation': chosen})
     return prod, doc

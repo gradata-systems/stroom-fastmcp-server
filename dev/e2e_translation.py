@@ -18,6 +18,7 @@ Confirmations and approvals are granted here the way a user would, by passing th
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,29 @@ from tools.pipeline_writes import PropertyValue  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.stroom import StroomGateway  # noqa: E402
 from utils.triage import ErrorRules  # noqa: E402
+
+def described(fields: list[dict]) -> dict[str, str]:
+    """What an agent answers a needs_descriptions round with: here, a stand-in for each field, from its values."""
+    return {f['field']: f"E2E: {f['field']}, seen as {', '.join(f['values']) or 'nothing'}" for f in fields}
+
+
+_write_documentation = builds.write_documentation
+
+
+async def _describing(*args, **kwargs):
+    """write_documentation, its needs_descriptions round answered as the agent would (asked for by the user: the agent
+    describes what each field means), so every suite's direct call still writes the doc."""
+    result = await _write_documentation(*args, **kwargs)
+    while isinstance(result, dict) and result.get('status') == 'needs_descriptions':
+        print(f"    needs_descriptions: {[f['field'] for f in result['fields']][:8]}")
+        kwargs['field_descriptions'] = {**(kwargs.get('field_descriptions') or {}), **described(result['fields'])}
+        if result.get('confirmation_id'):
+            kwargs['confirmation_id'] = result['confirmation_id']
+        result = await _write_documentation(*args, **kwargs)
+    return result
+
+
+builds.write_documentation = _describing
 
 LIVE = os.environ.get('E2E_TARGET') == 'live'
 VERSION = '3.5.2' if LIVE else '4.1.0'  # the local content pack has 4.1.0; live pipelines use 3.5.2
@@ -171,6 +195,13 @@ def check(condition: bool, message: str):
         raise SystemExit(1)
 
 
+def dropped_by(note: str) -> str | None:
+    """The Elasticsearch path an approval's 'already indexed' note says to DELETE (the index starts fresh): e.g.
+    '_data_stream/acme-v1' or 'acme-v1'."""
+    found = re.search(r'DELETE (\S+?)(?:\.\s|\s\(|\.?$)', note or '')
+    return found.group(1) if found else None
+
+
 def field_rows(section: str) -> dict[str, list[str]]:
     """The Field mapping tables' rows, by field: the cells after the field's name."""
     rows = {}
@@ -242,6 +273,12 @@ async def agreed(call, **kwargs):
                     'PUT', f"/processorFilter/v1/{result['filter_id']}/enabled", True)
                 print(f"    enabled filter {result['filter_id']}, as the user would in Stroom")
             return result
+        if result['status'] == 'needs_descriptions':
+            # The agent describes each field from its values (here a stand-in), and calls again.
+            kwargs['field_descriptions'] = {**(kwargs.get('field_descriptions') or {}), **described(result['fields'])}
+            if result.get('confirmation_id'):
+                ids['confirmation_id'] = result['confirmation_id']
+            continue
         if result['status'] == 'needs_review':
             # Shown to the user in the chat (an index template, a promotion's layout, records kept as Unknown), then
             # confirmed in a form.

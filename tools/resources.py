@@ -35,13 +35,16 @@ _RULES = """Rules for every run:
   stepped as saved; code written by hand is tried with draft_code before it is saved.
 - Document what you build (write_documentation; stream_ids default to the streams its current code last stepped
   clean on) and use the user's source notes for field meanings.
-- Processor filters are created disabled: enabling one is always the user's, in Stroom. After create_processor_filter,
-  give the user its pipeline_link, what enabling does and anything before_enabling says (for Elasticsearch, the
-  agreed index template committed to the cluster first); ask them to enable it on the pipeline's Processors tab and
-  to tell you when they have. Then wait_for_processing with its filter_id: never before.
+- A sample's processor filter (create_processor_filter stream_ids=, an events or indexing pipeline) runs once the user
+  approves it in a form: Elasticsearch, only once the agreed index template is committed, and an index the pipeline
+  wrote to before dropped (the form says how). Then wait_for_processing with its filter_id. Any other filter (a whole
+  feed, a CEF output, reference data) is created disabled, as promotion's are: give the user its pipeline_link, what
+  enabling does and anything before_enabling says; ask them to enable it on the pipeline's Processors tab and to tell
+  you when they have. Then wait_for_processing with its filter_id: never before.
 - Reprocessing in a build, after a fix (reprocess_streams, at most 10 streams a call, one task at a time): for an
-  events or indexing pipeline the user approves it in a form and it runs; any other pipeline's (CEF output, reference
-  data) is created disabled, for the user to enable. Then wait_for_processing with its filter_id. Reprocessing
+  events or indexing pipeline the user approves it in a form and it runs (an index is dropped first, so it starts
+  fresh: give every Events stream it should hold); any other pipeline's (CEF output, reference data) is created
+  disabled, for the user to enable. Then wait_for_processing with its filter_id. Reprocessing
   production data, and switching readers from one index version to the next, are the user's.
 - A build on data already in Stroom (an existing feed, a production pipeline's new version or working copy) starts
   with start_build feeds=[the feed it works from], creates no feed and uploads nothing: sample files in the workspace
@@ -51,7 +54,10 @@ _RULES = """Rules for every run:
   feed's data go to a test feed of their own (create_feed user_samples=[the files they named]). Test feeds stay in
   the workspace, and promotion's filters name the feed the build works from. Promotion creates each pipeline's processor filter, disabled, with
   no minimum creation time: give the user the pipeline link to review and enable it, and say that enabled it
-  processes the feed's existing data too.
+  processes the feed's existing data too, the build's streams included. An indexing pipeline's says before_enabling:
+  its index is dropped (or emptied) first, so it starts fresh, and, with its events pipeline promoted too, it is
+  enabled only once that pipeline's filter has processed the build's streams again; ask the user to do it in that
+  order. A filter marked existing is one the pipeline already had, enabled: no second one is made.
 - Elasticsearch indexing in the workspace runs in batches of 10 (create_processor_filter and reprocess_streams set
   it), so a document Elasticsearch rejects is reported whole, with its reason; wait_for_processing restores the
   template's batch size once indexing completes without errors.
@@ -71,7 +77,7 @@ them and returns the plan), then stage 1, the events pipeline (feed, samples upl
 mapping, step every record, process, validate the Events, document), then stage 2, indexing, which reads the Events
 streams stage 1 produced, then promotion. One tool call is never the whole job: every write tool's result carries
 `next`, the plan's next step, and `done: false` until promotion; build_status shows every step's state. Keep going
-until `next` says promote. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses
+until `next` says promote. A task list you keep follows `next.progress`: the steps done, and the one now. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses
 until the build has an events pipeline or is given existing Events streams; create_processor_filter refuses a
 pipeline with no clean step recorded; create_pipeline refuses another source's XSLT and a template whose parser
 cannot read the sample. Templates are inherited (create_pipeline), never copied: copy_pipeline refuses one, and is for a
@@ -204,9 +210,9 @@ index's mappings and settings on the cluster (propose_index_template, check_inde
 {next(n)}. Elasticsearch, committing it: give the user the agreed template's dev_tools request for the cluster admin to
    commit to the cluster, and wait until they say it is committed: indexing before that creates the index without it.
 {next(n)}. Processing: create_processor_filter stream_ids={events} source_pipeline_uuid={source} (Events from a pipeline this
-   server didn't build: the user confirms it in a form). The filter is created disabled: give the user its
-   pipeline_link and before_enabling, ask them to enable it (Elasticsearch: once the template is committed) and to
-   tell you when they have; then wait_for_processing expect_events=false. If a call is refused, do what its message
+   server didn't build: the user confirms it in a form). The user approves it in a form (Elasticsearch: once the
+   template is committed, and the index dropped if this pipeline wrote to it before) and it runs; then
+   wait_for_processing expect_events=false. If a call is refused, do what its message
    says: never go on to another stage or to promotion instead.
 {next(n)}. Verification: suggest the dashboard's columns (the time field and key fields: user, host, address, event type,
    outcome; never StreamId or EventId) and confirm them with the user. verify_index with those fields and
@@ -327,9 +333,8 @@ Stage 1, events:
    and references for any lookup maps (update_pipeline sets one left unset). step_sample over every sample stream
    until the verdict is clean, fixing the mapping and saving again (uuid=) in between; step_pipeline on single
    records to debug.
-7. Processing: create_processor_filter on all the sample stream ids. It is created disabled: give the user its
-   pipeline_link, ask them to enable it on the Processors tab and to tell you when they have; then wait_for_processing
-   (the gate: one Events stream per raw stream, from code that stepped clean). After changing the XSLT, step again and
+7. Processing: create_processor_filter on all the sample stream ids. The user approves it in a form and it runs; then
+   wait_for_processing (the gate: one Events stream per raw stream, from code that stepped clean). After changing the XSLT, step again and
    reprocess_streams (the user approves; it runs). check_events stream_ids=<the Events streams> (the server reads
    them).
 8. write_documentation for the events pipeline (stream_ids = the sample streams): its Field mapping section is
@@ -383,13 +388,13 @@ Finish: {_PROMOTE} The documents go to the folders sibling sources use.
    reviewed=true, and the user confirms it (or corrects it: check_index_template). Give them its dev_tools for the
    cluster admin to commit, and wait until they say it is.
 5. create_processor_filter on v2 with stream_ids=<the recent Events streams> and source_pipeline_uuid=<the events
-   pipeline that wrote them> (the user confirms one this server didn't build). It is created disabled: give the
-   user its pipeline_link and ask them to enable it (Elasticsearch: once the template is committed), then
-   wait_for_processing expect_events=false. Elasticsearch: create_index_doc for v2 (verify_index searches through
+   pipeline that wrote them> (the user confirms one this server didn't build). The user approves it in a form
+   (Elasticsearch: once the template is committed) and it runs; then wait_for_processing expect_events=false. Elasticsearch: create_index_doc for v2 (verify_index searches through
    it). verify_index with pipeline_uuid = v2 and searches on the new fields.
 6. write_documentation for v2, saying what changed from v1. {_PROMOTE} v2 goes in a version subfolder beside v1, with its
    index doc, documentation and dashboard. Promotion gives v2 a filter, disabled, with no minimum creation time:
-   enabled, it indexes the feed's existing Events too (a backfill), except those indexed in the build. Say so. v1
+   enabled, it indexes the feed's existing Events too (a backfill), those indexed in the build included, so its
+   index is dropped first and starts fresh (before_enabling says how). Say so. v1
    stays running; enabling v2, switching readers to it, and retiring v1 are the user's.
 
 {_RULES}"""
@@ -515,9 +520,8 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    the example's settings and components. Without an example it is not offered to agree: ask for one first. It comes
    back as needs_review: show its dev_tools, call again with reviewed=true, and the user confirms it (or corrects it:
    check_index_template). Give them its dev_tools for the cluster admin to commit.
-5. create_processor_filter on the raw streams. It is created disabled: give the user its pipeline_link and ask them to
-   enable it once the template is committed, and to tell you when they have. Then wait_for_processing
-   expect_events=false; create_index_doc for the index; verify_index (pipeline_uuid = the discovery pipeline, so hits
+5. create_processor_filter on the raw streams. The user approves it in a form, once the template is committed, and it
+   runs. Then wait_for_processing expect_events=false; create_index_doc for the index; verify_index (pipeline_uuid = the discovery pipeline, so hits
    are traced to their records, and searches on a few of the fields the documents showed); write_documentation
    (stream_ids = the raw streams). Then {_PROMOTE}
 
@@ -620,8 +624,8 @@ every field, what it holds and the values it has. Change nothing except the docu
    to catch variants the examples didn't show; fix and step again until clean. Then tell the user which kinds of
    event the pipeline covers and their share of the data.
 5. Process the surveyed streams where they are: create_processor_filter stream_ids=[them] (up to 10). Their Events
-   go to a test feed the server makes in the build (output_feed), not into {feed}. Give the user the pipeline link to
-   enable the filter; once they have, wait_for_processing, then check_events on the Events.
+   go to a test feed the server makes in the build (output_feed), not into {feed}. The user approves it in a form and
+   it runs; then wait_for_processing, then check_events on the Events.
 6. write_documentation for the pipeline. Then {_PROMOTE} Promotion gives it a filter on {feed}, disabled: enabled, it
    processes the feed's existing data too; when is the user's. Once its Events exist, indexing them is a build of its
    own (start_build feeds=[{feed}], then the index).

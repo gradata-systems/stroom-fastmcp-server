@@ -582,6 +582,19 @@ def test_agents_docs_say_which_component_templates_to_include_or_exclude():
     assert sorted(r['name'] for r in rules['exclude']) == ['ilm-90d', 'legacy']
 
 
+
+def test_agents_docs_say_how_the_field_mapping_is_laid_out():
+    # Asked for by the user: by event type by default, configurable in an AGENTS doc; the more specific doc wins.
+    from tools.instructions import field_mapping_layout
+    assert field_mapping_layout([{'folder': 'System', 'instructions': '## Component templates\n- include: x\n'}]) is None
+    said = field_mapping_layout([
+        {'folder': 'System', 'instructions': '## Documentation\n- field mapping: compact\n'},
+        {'folder': 'System/Feeds/Acme', 'instructions': '# Notes\n\n## Documentation\n- Field mapping: by event type\n'}])
+    assert said == {'layout': 'by_event_type', 'from': 'System/Feeds/Acme'}
+    assert field_mapping_layout([{'folder': '', 'instructions': '## Documentation\n- field mapping: one table'}])[
+        'layout'] == 'compact'
+
+
 def test_nominated_components_are_referenced_and_excluded_ones_are_not():
     from utils.templatecheck import from_example, parse_component_templates
     plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',

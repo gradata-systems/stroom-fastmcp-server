@@ -168,6 +168,48 @@ def test_an_example_composing_ecs_mappings_leaves_ecs_fields_to_it():
     assert plain['template']['mappings']['properties']['source']['properties']['ip'] == {'type': 'ip'}
 
 
+
+def test_an_ecs_plan_composes_ecs_mappings_whatever_the_example_composes():
+    # A regression seen in testing: built from a sibling's index mapping (which never shows composed_of, and had
+    # dynamic false), an ECS plan's template mapped every field explicitly, dynamic false, without ecs@mappings.
+    from utils.templatecheck import from_example
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp', convention='ecs',
+                     fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
+                             PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress'),
+                             PlannedField(name='host.name', type='keyword', source='EventSource/Device/HostName'),
+                             PlannedField(name='acme.ticket', type='keyword', source='EventDetail/TypeId')])
+    planned = plan.elastic_template('ecs-acme-v2', leave_to_component=False)['body']
+    for dynamic in ('false', 'strict', False):
+        mapping = {'template': {'mappings': {'dynamic': dynamic, 'properties': {
+            'StreamId': {'type': 'long'}, 'host': {'properties': {'name': {'type': 'keyword', 'ignore_above': 256}}}}}}}
+        body, notes = from_example(planned, mapping, {}, ecs_base=True)
+        mappings = body['template']['mappings']
+        assert body['composed_of'] == ['ecs@mappings'] and mappings['dynamic'] is True
+        # source.ip left to the component; host.name kept as the example maps it; the user's own field mapped here.
+        assert 'source' not in mappings['properties'] and mappings['properties']['host']['properties']['name'] == {
+            'type': 'keyword', 'ignore_above': 256} and 'acme' in mappings['properties']
+        assert any('composed of ecs@mappings' in n for n in notes) and any('dynamic mapping on' in n for n in notes)
+    # First, ahead of the example's own components, which override it.
+    body, _ = from_example(planned, {'composed_of': ['org-base'], 'template': {'mappings': {}}},
+                           {'org-base': {'template': {'settings': {'number_of_shards': 1}}}}, ecs_base=True)
+    assert body['composed_of'] == ['ecs@mappings', 'org-base']
+    # Standing instructions excluding it win; a plan not following ECS is untouched.
+    excluded, _ = from_example(planned, {'template': {'mappings': {'dynamic': False}}}, {}, exclude=['ecs@mappings'],
+                               ecs_base=True)
+    assert 'composed_of' not in excluded and excluded['template']['mappings']['dynamic'] is False
+    plain, _ = from_example(planned, {'template': {'mappings': {'dynamic': False}}}, {})
+    assert 'composed_of' not in plain and plain['template']['mappings']['dynamic'] is False
+
+
+def test_an_ecs_component_template_elasticsearch_lacks_is_refused():
+    # Seen in testing: a proposed template composed ecs@settings, which Elasticsearch doesn't have.
+    from fastmcp.exceptions import ToolError
+    from tools.indexing import components_wanted
+    with pytest.raises(ToolError, match='ecs@mappings is its only ECS one'):
+        components_wanted({'composed_of': ['ecs@mappings', 'ecs@settings']}, {}, ['ecs@settings'])
+    # Given, it exists on the user's cluster.
+    assert components_wanted({'composed_of': ['ecs@settings']}, {'ecs@settings': {}}) is None
+
 def test_dynamic_off_stops_the_component_and_says_so():
     from utils.templatecheck import compare, json_xml_documents
     plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v1', time_field='@timestamp', convention='ecs',

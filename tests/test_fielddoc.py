@@ -66,7 +66,7 @@ def test_elasticsearch_rows_show_long_ids_and_group_fields_by_object():
     text = index_field_mapping_markdown(plan)
     rows = [line.split(' | ')[0].strip('| `') for line in text.splitlines() if line.startswith('| `')]
     assert rows == ['StreamId', '@timestamp', 'host.name', 'host.ip', 'user.id', 'user.name', 'message']
-    assert '| `StreamId` | The id of the Events stream the event came from. | long | `@StreamId` |' in text and '| `host.ip` |  | ip |' in text
+    assert '| `StreamId` | The id of the Events stream the event came from. | long | `@StreamId` |' in text and '| `host.ip` | Host ip addresses. | ip |' in text    # ECS's words, the schema's absent
 
 
 def test_each_index_field_is_described_from_the_schema_and_the_sample():
@@ -98,6 +98,8 @@ def test_each_index_field_is_described_from_the_schema_and_the_sample():
     assert described['user.id'] == 'An identifier for the user.'
     # The schema's opening ('This element contains information about the ...') goes.
     from utils.fielddoc import schema_description
+    # Seen in testing: a Data element took the description of the element it is under, repeated for every one.
+    assert schema_description(schema, "EventDetail/Send/Data[@Name='subject']/@Value") ==         'The `subject` value recorded in a Data element of Send.'
     assert schema_description(schema, 'EventTime/TimeCreated') == 'Time the event was created.'
     assert schema_description(schema, 'EventSource').startswith('Where the event came from')
 
@@ -106,7 +108,8 @@ async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_sectio
     ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'Acme', 'uuid': 'p'}),
                                                                        settings=SimpleNamespace(event_logging_version='4.1.0'))})
     kept = {'kind': 'translation', 'payload': {'mapping': {}}, 'element': 'translationFilter', 'xslt': {'data': ''}}
-    with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)):
+    with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
+            patch.object(builds, '_documentation_of', AsyncMock(return_value=('Acme', None, [], None, None))):
         with pytest.raises(ToolError, match='Give stream_ids'):
             await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
     # Left out, they are the streams the pipeline last stepped clean on, from the build's record.
@@ -114,11 +117,13 @@ async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_sectio
     with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
             patch.object(builds, '_stepped_streams', AsyncMock(return_value=[41, 42])), \
             patch.object(builds, '_raw_parents', AsyncMock(side_effect=lambda s, ids, p: (ids, []))), \
-            patch.object(builds, 'field_mapping_section', section):
+            patch.object(builds, 'field_mapping_section', section), \
+            patch.object(builds, '_documentation_of', AsyncMock(return_value=('Acme', None, [], None, None))):
         with pytest.raises(ToolError, match='generated'):
             await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
     assert section.await_args.args[3] == [41, 42]
     with patch.object(builds, 'kept_mapping', AsyncMock(return_value=None)), \
+            patch.object(builds, '_documentation_of', AsyncMock(return_value=('Acme', None, [], None, None))), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         with pytest.raises(ToolError, match="needs a '## Field mapping' section"):
             await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Created')
@@ -164,9 +169,10 @@ def test_the_index_section_shows_what_each_index_field_got_from_the_sample():
     assert index_documents([lucene]) == [{'UserId': ['bob', 'carol']}]
     section = index_field_mapping_markdown(plan, {'EventSource/User/Id': 100.0}, documents)
     assert 'Sample values are what the 1 documents written from the sample got.' in section
-    assert ('| `user.name` | Not described: no plan or schema covers it. | keyword | `EventSource/User/Id` | 100% of events | '
+    # Without the event-logging schema, ECS's words for the field's name (asked for by the user: a fallback).
+    assert ('| `user.name` | Short name or login of the user. | keyword | `EventSource/User/Id` | 100% of events | '
             '`alice` |') in section
-    assert ('| `source.ip` | Not described: no plan or schema covers it. | ip | `EventSource/Client/IPAddress` | not in the sample | '
+    assert ('| `source.ip` | IP address of the source. | ip | `EventSource/Client/IPAddress` | not in the sample | '
             '(none in the sample) |') in section
 
 
@@ -210,7 +216,7 @@ def test_an_existing_index_is_documented_from_its_survey():
     assert 'Where each field comes from is not recorded: no pipeline that writes to it keeps an index plan.' in text
     assert rows['http.status'] == ['Numbers.', 'long', '(not recorded)',
                                    '50% of documents', '`200` |']
-    assert rows['source.ip'][0] == 'IP addresses.'
+    assert rows['source.ip'][0] == 'IP address of the source.'     # ECS's words
     unstored = existing_index_markdown(_survey(stored=False), {}, None)
     assert '| `http.status` | Indexed but not stored: searchable, its values cannot be shown. | long | (not recorded) | not stored | - |' in unstored
 
@@ -241,7 +247,7 @@ def test_fields_past_what_the_survey_reads_are_listed_as_not_surveyed():
     text = existing_index_markdown(survey, {}, None)
     assert 'The survey read 3 of the 5 fields; the other 2 are listed as not surveyed.' in text
     assert '| `source.ip` | Not surveyed: past the fields the survey reads. | ip | (not recorded) | not surveyed | - |' in text
-    assert '| `user.name` | Not described: no plan or schema covers it. |' in text
+    assert '| `user.name` | Short name or login of the user. |' in text
 
 
 async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids():
@@ -395,3 +401,131 @@ async def test_verification_expects_only_the_fields_the_events_give_a_value(monk
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     lacking = await indexing._fields_written_not_indexed(ctx, 'p', {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'web'}, [9])
     assert lacking == {'Web - Indexing': ['host.name']}          # user.role: no event has a role, so not expected
+
+
+
+def test_groups_with_roughly_the_same_fields_are_shown_together():
+    # Asked for by the user: Send and Receive, say, under one heading; a path's action element counts as any.
+    from utils.fielddoc import combined_path, similar_groups
+    assert similar_groups({'Send': {'EventDetail/*/Source/User/Id', 'EventDetail/*/Destination/User/Id'},
+                           'View': {'EventDetail/*/Document/Title'},
+                           'Receive': {'EventDetail/*/Source/User/Id', 'EventDetail/*/Destination/User/Id'}}) == [
+        ['Send', 'Receive'], ['View']]
+    assert combined_path(['EventDetail/Send/Source/User/Id', 'EventDetail/Receive/Source/User/Id']) == \
+        'EventDetail/(Send|Receive)/Source/User/Id'
+    assert combined_path(['EventDetail/TypeId', 'EventDetail/TypeId']) == 'EventDetail/TypeId'
+
+
+def test_index_documentation_has_common_fields_then_a_section_per_action():
+    # Asked for by the user: as the Events documentation is, by event type; actions with the same fields together.
+    fields = [('StreamId', 'id', '@StreamId'), ('@timestamp', 'date', 'EventTime/TimeCreated'),
+              ('event.code', 'keyword', 'EventDetail/TypeId'),
+              ('email.from', 'keyword', 'EventDetail/Send/Source/User/Id'),
+              ('email.to', 'keyword', 'EventDetail/Send/Destination/User/Id'),
+              ('inbox.from', 'keyword', 'EventDetail/Receive/Source/User/Id'),
+              ('inbox.to', 'keyword', 'EventDetail/Receive/Destination/User/Id'),
+              ('file.name', 'keyword', 'EventDetail/View/Document/Title')]
+    plan = FieldPlan(backend='elasticsearch', index_name='acme-v1', time_field='@timestamp',
+                     fields=[PlannedField(name=n, type=t, source=s) for n, t, s in fields])
+    population = {'EventDetail/Send/Source/User/Id': 30.0, 'EventDetail/Receive/Source/User/Id': 20.0}
+    text = index_field_mapping_markdown(plan, population)
+    common, types = text.split('### Event types')
+    assert '### Common fields' in common and '`event.code`' in common and '`email.from`' not in common
+    assert "#### Send, Receive\n\nIn 30% (Send), 20% (Receive) of the sample's events." in types
+    assert types.index('`email.from`') < types.index('`inbox.to`') < types.index('#### View')
+    compact = index_field_mapping_markdown(plan, population, layout='compact')
+    assert '###' not in compact and compact.count('| Index field |') == 1
+
+
+def test_each_field_is_described_from_its_meaning_not_the_schemas_generic_words():
+    # Asked for by the user: 'The subject value recorded in a Data element of Send' says nothing a reader can't see.
+    # The agent writes what each field means, from its name, where it comes from and its sample values.
+    from utils.fielddoc import Descriptions, descriptions_block, read_descriptions
+    plan = FieldPlan(backend='elasticsearch', index_name='mail-v1', time_field='@timestamp', fields=[
+        PlannedField(name='StreamId', type='id', source='@StreamId'),
+        PlannedField(name='email.subject', type='keyword', source="EventDetail/Send/Data[@Name='subject']/@Value"),
+        PlannedField(name='host.name', type='keyword', source='EventSource/Device/HostName', description='Mail relay.')])
+    documents = [{'StreamId': ['7'], 'email.subject': ['Invoice 4411']}, {'StreamId': ['7'], 'email.subject': ['Re: lunch']}]
+    asking = Descriptions(ask=True)
+    index_field_mapping_markdown(plan, None, documents, None, described=asking)
+    # Not StreamId (the server's own), nor host.name (the plan says): the subject, with what it was seen holding.
+    assert list(asking.wanted) == ['email.subject']
+    assert asking.wanted['email.subject']['values'] == ['Invoice 4411', 'Re: lunch']
+    assert asking.wanted['email.subject']['from'] == "EventDetail/Send/Data[@Name='subject']/@Value"
+    given = Descriptions({'email.subject': 'Subject line of the email sent.'}, ask=True)
+    text = index_field_mapping_markdown(plan, None, documents, None, described=given)
+    assert not given.wanted and '| `email.subject` | Subject line of the email sent.' in text
+    # Kept with the documentation, '--' and all.
+    block = descriptions_block({'a': 'x -- y'})
+    assert '--' not in block.split('\n', 1)[1].rsplit('\n', 1)[0] and read_descriptions(f'# Doc\n\n{block}\n') == {'a': 'x -- y'}
+
+
+async def test_write_documentation_asks_for_descriptions_before_writing_anything():
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(
+        get_doc=AsyncMock(return_value={'name': 'Acme', 'uuid': 'p', 'data': '## Field mapping\n\n<!-- stroom-mcp field '
+                                                                             'descriptions\n{"kept": "Kept before."}\n-->'}),
+        settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    kept = {'kind': 'index', 'payload': {}, 'element': 'xsltFilter', 'xslt': {'data': ''}}
+
+    async def section(ctx, pipeline, kept, stream_ids, layout, described):
+        for field in ('kept', 'new'):
+            described.of(field, 'EventDetail/Send/Data', ['v'], 'schema words')
+        return 'section'
+    with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
+            patch.object(builds, '_documentation_of', AsyncMock(return_value=('Acme', None, [], {'uuid': 'd'}, None))), \
+            patch.object(builds, 'field_mapping_section', section):
+        asked = await builds.write_documentation(ctx, 'b', 'p', '## Purpose and data\n\nx\n', 'Changed', stream_ids=[5])
+    # Only the field not described before; what the agent said earlier is kept with the doc.
+    assert asked['status'] == 'needs_descriptions' and [f['field'] for f in asked['fields']] == ['new']
+    assert 'field_descriptions' in asked['hint'] and 'Nothing is written yet' in asked['hint']
+
+
+def test_a_reissued_id_lets_the_same_request_through_once():
+    from utils.consent import ConsentStore
+    store = ConsentStore(use_elicitation=False)
+    token = store.reissue('confirmation', 'write_documentation', {'index doc': 'x'})
+    import asyncio
+    assert asyncio.run(store.require(None, 'confirmation', 'write_documentation', 'S', {'index doc': 'x'}, token)) is None
+    with pytest.raises(ToolError, match='already used'):
+        asyncio.run(store.require(None, 'confirmation', 'write_documentation', 'S', {'index doc': 'x'}, token))
+
+
+def test_the_agent_is_shown_what_each_schema_says_to_build_on():
+    # Asked for by the user: ECS and event-logging descriptions supplement the agent's, and are the fallback.
+    from utils.fielddoc import Descriptions
+    plan = FieldPlan(backend='elasticsearch', index_name='acme-v1', time_field='@timestamp', fields=[
+        PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')])
+    from tests.test_xsltgen import SCHEMA
+    asking = Descriptions(ask=True)
+    text = index_field_mapping_markdown(plan, None, [{'source.ip': ['10.1.2.3']}], SCHEMA, described=asking)
+    said = asking.wanted['source.ip']['schemas_say']
+    assert said == {'event-logging': 'The network IP address of the client.', 'ECS': 'IP address of the source.'}
+    assert '| `source.ip` | The network IP address of the client. |' in text     # event-logging first: what was written
+
+
+def test_the_vendors_documentation_comes_first():
+    # Asked by the user: the vendor's documentation (record_source_notes) still informs every field's description: by
+    # the source field it is read from, else (an index or CEF field) by the element the notes put the field in.
+    from utils.fielddoc import Descriptions
+    from utils.xsltgen import generate
+    from tests.test_xsltgen import RECORDS, transform
+    from utils.fielddoc import field_mapping_markdown, sampled_events
+    notes = [{'field': 'user', 'meaning': 'Login of the account that signed in', 'event_logging_path': 'EventSource/User/Id'},
+             {'field': 'sid', 'meaning': 'VPN session', 'values': {'s1': 'first session'}}]
+    m = mapping()
+    events = sampled_events([__import__('lxml.etree', fromlist=['etree']).tostring(
+        transform(generate(m, SCHEMA, '4.1.0', mark_rules=True)['xslt'], RECORDS), encoding='unicode')])
+    asking = Descriptions(ask=True, notes=notes)
+    text = field_mapping_markdown(m, SCHEMA, events, described=asking)
+    said = asking.wanted['EventSource/User/Id']['schemas_say']
+    assert list(said) == ['vendor documentation', 'event-logging'] and said['vendor documentation'] == \
+        'Login of the account that signed in.'
+    assert '| `EventSource/User/Id` | Login of the account that signed in. |' in text      # the first fallback
+    assert asking.wanted["EventDetail/Authenticate/Data[@Name='session']/@Value"]['schemas_say'][
+        'vendor documentation'] == 'VPN session. Codes: s1: first session.'
+    # An index field knows only its path: matched by the element the notes put the source field in.
+    plan = FieldPlan(backend='elasticsearch', index_name='acme-v1', time_field='@timestamp', fields=[
+        PlannedField(name='user.name', type='keyword', source='EventSource/User/Id')])
+    asking = Descriptions(ask=True, notes=notes)
+    index_field_mapping_markdown(plan, None, None, SCHEMA, described=asking)
+    assert asking.wanted['user.name']['schemas_say']['vendor documentation'] == 'Login of the account that signed in.'

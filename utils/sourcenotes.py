@@ -8,7 +8,8 @@ and what it is in event-logging terms). The notes doc carries them as a block th
 - draft_translation_mapping builds its draft from them: fields where the dictionary puts them, one rule per
   catalogued event with its action element, TypeId, description, action and outcome;
 - build_translation_xslt checks a mapping against the catalogue, so a rule that contradicts it is reported;
-- write_documentation lists each source field with the documentation's meaning and codes.
+- write_documentation lists each source field with the documentation's meaning and codes, and shows the agent
+  what it says of each field it asks to describe (the fallback until it does).
 """
 import json
 import re

@@ -39,7 +39,25 @@ An `AGENTS` doc can also say which Elasticsearch component templates new index t
 
 Included components are referenced in every index template the server proposes there, whatever fields they map,
 and the fields they map are left to them. Excluded ones are left out, even when the user's example composes them,
-unless the user asks for one themselves. A template the user brings is checked against the section too.
+unless the user asks for one themselves. A template the user brings is checked against the section too. An ECS
+index template always composes `ecs@mappings`, even when the example doesn't, unless a section here excludes it.
+
+## Documentation
+
+An `AGENTS` doc can say how a pipeline's documentation lays out its Field mapping:
+
+```markdown
+## Documentation
+- field mapping: compact
+```
+
+`by event type` (the default) gives an Events pipeline a table of the common fields, then a section per event type
+with a table of its own fields; an indexing pipeline or an existing index, a table of the fields any event has,
+then one per action element the fields come from; a CEF pipeline, a table of the keys every event gets, then one
+per kind of event. Event types with roughly the same fields (Send and Receive, say) share one section.
+`compact` (or `one table`) gives an Events pipeline the EventSource table and one row per rule, an index one
+table, and a CEF pipeline one table with an Event type column. The most specific doc that says wins, and a layout the user asks for wins over
+it.
 
 ## Where they apply
 

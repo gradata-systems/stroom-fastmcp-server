@@ -18,6 +18,9 @@ as Stroom can't list or search a `match_only_text`, `flattened`, `geo_point` or 
 name one ECS's way. A template built from an earlier one (a new version of an index) leaves the ECS fields that
 template maps just as `ecs@mappings` does to the component too: only overrides are mapped explicitly. To drop
 explicit mappings, never remove `ecs@mappings` from `composed_of`: it is what maps those fields. A field of the user's own goes outside ECS's field sets.
+With an example too, an ECS plan's template is composed of `ecs@mappings` (first in `composed_of`), with dynamic
+mapping on, whatever the example composes or its `dynamic` says (an index's `_mapping` never shows `composed_of`);
+the notes say so. Only an AGENTS doc's exclusion of `ecs@mappings` leaves it out.
 
 The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
 index_plan=... uuid=`). The XSLT is written as an Events translation is, in the plan's `style` (from an XSLT style
@@ -41,7 +44,10 @@ index's mapping) and the component templates it is composed of. The fields a tem
 its components' together, and the server can't read Elasticsearch, so an example whose `composed_of` names
 components not given gets a `needs_components` reply: ask the user to run the request it gives (`GET
 _component_template/<names>`) and paste the whole response, then call again with `component_templates`. Elastic's
-`ecs@mappings` is known to the server. Only if the user can't get one, pass its name in `without_components`. The
+`ecs@mappings` is known to the server, and is Elasticsearch's only ECS component template: any other `ecs@` name
+(`ecs@settings`, say) is refused unless its content is given. If the request says `resource_not_found`, the cluster
+has no such component: leave it out. Only if the user can't get one that exists, pass its name in
+`without_components`. The
 proposed template references a component only if it maps a field the pipeline writes, and leaves those fields to
 it rather than mapping them again; a component with settings alone (a lifecycle policy), one mapping by dynamic
 templates only, and one not given are referenced, and the notes say they weren't weighed. Components the user
@@ -57,7 +63,8 @@ object-level `dynamic`) and its settings. The example's own fields this source d
 Before they confirm it, the user sees it whole: the template first comes back as `needs_review`, its Dev Tools
 request to show in the chat as a code block; called again with `reviewed=true`, the form is a short summary (name,
 pattern and priority, settings, fields and types). They confirm it, or correct it (`check_index_template`); once
-they say the cluster admin has committed it, `create_processor_filter` starts indexing. An alias in the example
+they say the cluster admin has committed it, `create_processor_filter` starts indexing once the user approves it
+(the approval confirms the template is committed). An alias in the example
 becomes a field when the pipeline writes that field (documents can't write to an alias), typed as its target.
 
 The choice is the user's: `get_field_conventions backend=elasticsearch` asks them in a form, with the choices as a
@@ -141,8 +148,15 @@ Some problems only appear when documents reach Elasticsearch (a value of the wro
 name it refuses, the field limit). In the workspace, `create_processor_filter` and `reprocess_streams` start
 indexing with a batch size of 10, so each rejected document comes back whole in the Error stream; triage splits the
 bulk response into one entry per document. `wait_for_processing` restores the template's default once indexing
-completes without errors. Reprocessing does not remove the documents a stream already indexed: the approval gives the
-`_delete_by_query` request for the cluster admin to run first, or the documents are indexed twice.
+completes without errors. Indexing again does not remove the documents already indexed (an amended translation's
+sample processed again leaves the superseded Events' documents in the index). So in a build, an indexing pipeline
+that has already indexed something starts its index fresh when it gets a new sample filter or reprocesses: the
+approval says the cluster admin drops the index first (`DELETE _data_stream/<index>` when the agreed template makes
+a data stream, else `DELETE <index>`); the template stays on the cluster and makes it again as documents arrive.
+Every document goes, so process all the Events streams the index should hold again (`reprocess_streams` for those
+it indexed before). A build's own Lucene index (no other pipeline of the build writes to it) has its shards deleted
+by the server once the user approves; any other, the user deletes its shards first. A promoted indexing pipeline's
+filter carries `before_enabling`, the same thing to do before the user enables it.
 
 ## Verifying
 

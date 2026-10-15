@@ -533,16 +533,26 @@ def composition(example_composed_of: list[str], include: list[str] = (), exclude
 
 
 def from_example(planned: dict[str, Any], example: dict[str, Any], components: dict[str, dict[str, Any]],
-                 discovery: bool = False, include: list[str] = (),
-                 exclude: list[str] = ()) -> tuple[dict[str, Any], list[str]]:
+                 discovery: bool = False, include: list[str] = (), exclude: list[str] = (),
+                 ecs_base: bool = False) -> tuple[dict[str, Any], list[str]]:
     """(body, notes): the final index template for the new index, built from the field plan's template and the
     user's example (an index template or an index's mapping, with the component templates it is composed of): the
     new index's own pattern; the example's composed_of, settings, priority, data_stream and top-level mapping
     parameters; a field a component template defines is left to it, a field the example maps keeps the example's
-    type, and the rest are typed from the plan. Aliases and _meta name the example's own indices: not copied."""
+    type, and the rest are typed from the plan. Aliases and _meta name the example's own indices: not copied.
+    ecs_base (an ECS plan): composed of ecs@mappings whatever the example composes, with dynamic mapping on so it
+    maps the ECS fields left to it (asked for by the user: an index's mapping never shows composed_of, and followed
+    as it was, the template mapped every field explicitly, dynamic false)."""
+    from utils import ecs
     notes = []
     own = ((example.get('template') or {}).get('mappings')) or {}
     composed_of = composition(list(example.get('composed_of') or []), include, exclude)
+    ecs_base = ecs_base and not discovery and ecs.COMPONENT not in exclude
+    if ecs_base and ecs.COMPONENT not in composed_of:
+        # First, so the example's own components and the template's mappings override it.
+        composed_of.insert(0, ecs.COMPONENT)
+        notes.append(f"composed of {ecs.COMPONENT}, Elastic's base for an ECS index template (built in from "
+                     f"Elasticsearch 8.13), though the example doesn't compose it: it maps the standard ECS fields")
     from_components: dict[str, dict[str, Any]] = {}
     for name in composed_of:
         if name in components:
@@ -562,10 +572,10 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
             objects.update(object_nodes(((components[name].get('template') or {}).get('mappings')) or {}))
     objects.update(object_nodes(own))
     typed = bool(objects) and sum('type' in o for o in objects.values()) * 2 > len(objects)
-    from utils import ecs
     # The example composes Elastic's ECS component, mapping as documents bring them: the ECS fields it maps as ECS
     # says are left to it, as an ECS plan's own template leaves them (asked for by the user).
-    by_component = ecs.COMPONENT in composed_of and str(own.get('dynamic', True)).lower() == 'true'
+    dynamic_on = str(own.get('dynamic', True)).lower() == 'true'
+    by_component = ecs.COMPONENT in composed_of and (dynamic_on or ecs_base)
     final, left, kept, new, styled, aliased, to_ecs = {}, [], [], [], [], [], []
     for path, spec in leaves.items():
         if path in from_components or (by_component and path not in in_example
@@ -608,6 +618,11 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     else:
         mappings = {k: copy.deepcopy(own[k]) for k in _MAPPING_PARAMS if k in own}
         mappings.setdefault('dynamic', True if by_component else planned_mappings.get('dynamic', False))
+        if by_component and not dynamic_on:
+            # ecs@mappings is dynamic templates: with dynamic false or strict it maps nothing.
+            mappings['dynamic'] = True
+            notes.append(f"dynamic mapping on, though the example's is {own.get('dynamic')}: {ecs.COMPONENT} maps a "
+                         f"field only as a document brings it")
     # subobjects: false keeps each dotted name a field of its own (time beside time.min): no objects to nest.
     mappings['properties'] = ({path: copy.deepcopy(spec) for path, spec in final.items()}
                               if mappings.get('subobjects') is False else _nest(final, objects, typed))
@@ -621,7 +636,8 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
         template = {'settings': merged, **template}
     body: dict[str, Any] = {'index_patterns': planned['index_patterns'],
                             'priority': example.get('priority', planned.get('priority', 200))}
-    used, unused, unsure = components_used(composed_of, components, leaves, to_ecs, discovery, include)
+    used, unused, unsure = components_used(composed_of, components, leaves, to_ecs, discovery,
+                                           [*include, *([ecs.COMPONENT] if ecs_base else [])])
     if used:
         body['composed_of'] = used
     if 'data_stream' in example:

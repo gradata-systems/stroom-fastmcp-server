@@ -339,6 +339,11 @@ class ConsentStore:
         return mcp_types.InputRequiredResult(input_requests={key: form},
                                             request_state=json.dumps(state, sort_keys=True))
 
+    def reissue(self, kind: Kind, action: str, details: dict[str, Any]) -> str:
+        """An id for the same request, once the user has agreed to it in this call (require returned None): the call
+        is repeated for a round that isn't theirs (the agent describing fields), and they aren't asked again."""
+        return self._seal(kind, self._binding(kind, action, _digest(action, details), _user()), int(time.time()) + TTL_SECONDS)
+
     def discard(self, token: str | None) -> None:
         """Spend a kept token once the action it covered is done."""
         if token:

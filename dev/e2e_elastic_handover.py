@@ -49,7 +49,7 @@ from config import Settings  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 from utils.mappingstore import read_agreed_template, read_mapping  # noqa: E402
-from tools import builds, explorer, indexing, processing_writes, stepping, templates, translation  # noqa: E402
+from tools import builds, explorer, indexing, processing, processing_writes, stepping, templates, translation  # noqa: E402
 from tools.plan import build_status  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import FieldPlan, PlannedField  # noqa: E402
@@ -189,9 +189,9 @@ async def component_choices(ctx, stroom: StroomGateway, build: str, pipeline: di
                                                       include_components=['org-users'])
         # Shown for review: the template is its Dev Tools request.
         body = json.loads(shown['dev_tools'].split('\n', 1)[1]) if shown.get('dev_tools') else {}
-        e2e.check(body.get('composed_of') == ['ecs-base', 'org-users', 'org-ilm'],
-                  f"composes ecs-base (used), org-users (nominated) and org-ilm (instructed); not ecs-unused (unused) "
-                  f"or legacy-base (excluded): {body.get('composed_of')}")
+        e2e.check(body.get('composed_of') == ['ecs@mappings', 'ecs-base', 'org-users', 'org-ilm'],
+                  f"composes ecs@mappings (an ECS plan), ecs-base (used), org-users (nominated) and org-ilm "
+                  f"(instructed); not ecs-unused (unused) or legacy-base (excluded): {body.get('composed_of')}")
         props = ((body.get('template') or {}).get('mappings') or {}).get('properties') or {}
         e2e.check('user' not in props and '@timestamp' not in props,
                   f"fields the components map left to them: {sorted(props)}")
@@ -334,17 +334,20 @@ async def main():
         built = json.loads(alone['dev_tools'].split('\n', 1)[1])
         props = built['template']['mappings']['properties']
         notes = alone.get('from_example') or []
-        e2e.check(alone.get('status') == 'needs_review' and 'composed_of' not in built and built['priority'] == 120
-                 and not alone.get('component_templates')
-                 and not any('composed_of' in n and 'ecs@mappings' not in n for n in notes),
-                 'built with no component templates, none asked for')
-        # The plan follows ECS: Elastic's recommended base is suggested, the user's example still followed as it is.
-        e2e.check(any("doesn't compose ecs@mappings" in n for n in notes),
-                  'the example not composing ecs@mappings is said, not changed')
-        e2e.check(props['StreamId'] == {'type': 'long'} and props['@timestamp'] == {'type': 'date'}
+        e2e.check(alone.get('status') == 'needs_review' and built['priority'] == 120
+                 and not alone.get('component_templates'),
+                 'built with no component templates of the example, none asked for')
+        # The plan follows ECS (asked for by the user, a regression seen in testing): composed of ecs@mappings whatever
+        # the example composes, with dynamic mapping on for it, though the example's is strict.
+        e2e.check(built.get('composed_of') == ['ecs@mappings'] and built['template']['mappings']['dynamic'] is True
+                  and any('composed of ecs@mappings' in n for n in notes),
+                  'composed of ecs@mappings with dynamic mapping on, though the example composes nothing and is strict')
+        # @timestamp the example maps just as ecs@mappings does: left to it too.
+        e2e.check(props['StreamId'] == {'type': 'long'} and '@timestamp' not in props
                  and props['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128}
-                 and props['host']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128},
-                 "every field in the template itself, in the example's types and keyword style")
+                 and 'name' not in (props.get('host') or {}).get('properties', {}),
+                 "the example's own fields as it maps them (unless as ecs@mappings does); an ECS field new to it left "
+                 f"to ecs@mappings: {sorted(props)}")
 
         print("\n### the template from the user's example, confirmed by the user")
         example = ('PUT _index_template/ecs-sibling-v1\n' + json.dumps({
@@ -363,11 +366,11 @@ async def main():
                                 events_stream_ids=events, example_template=example, component_templates=[base])
         body = final['template']
         print('    ' + '; '.join(final['from_example']))
-        e2e.check(body['index_patterns'] == [f'{index}*'] and body['composed_of'] == ['ecs-base']
+        e2e.check(body['index_patterns'] == [f'{index}*'] and body['composed_of'] == ['ecs@mappings', 'ecs-base']
                  and body['template']['settings']['index']['number_of_shards'] == 2 and 'aliases' not in body['template'],
                  "the new index's pattern, with the example's components and settings, without its aliases")
-        e2e.check(body['template']['mappings']['dynamic'] == 'strict' and '@timestamp' not in body['template']['mappings']['properties'],
-                 "the example's mapping parameters, and fields its components map left to them")
+        e2e.check(body['template']['mappings']['dynamic'] is True and '@timestamp' not in body['template']['mappings']['properties'],
+                 "dynamic on for ecs@mappings (the example's strict would stop it), and fields its components map left to them")
         e2e.check(final['self_check']['compatible'], f"the final template fits the documents: {final['self_check']['blocking']}")
         kept = read_agreed_template((await stroom.get_doc('Pipeline', pipeline['uuid'])).get('description'))
         e2e.check(final.get('agreed') and kept and kept['dev_tools'] == final['dev_tools'], 'agreed, and kept with the pipeline')
@@ -381,29 +384,16 @@ async def main():
         state = {s['step']: s['state'] for s in (await build_status(ctx, csv["build"]))['steps']}
         e2e.check(state['index_template'] == 'done' and state['indexed'] == 'to do', 'agreed; indexing still to do')
 
-        print('\n### the filter is made disabled: the user enables it once the admin has committed the template')
-        started = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
-                                                                  source_pipeline_uuid=csv['pipeline']['uuid'])
-        stored = await stroom.get(f"/processorFilter/v1/{started['filter_id']}")
-        e2e.check(stored.get('enabled') is False and started.get('enabled') is False and 'status' not in started,
-                  f"filter {started['filter_id']} created disabled, with no form")
-        e2e.check(started.get('before_enabling') == [f"the agreed index template '{index}' for Elasticsearch index "
-                                                     f"'{index}' is committed to cluster {cluster['name']}: enable it "
-                                                     f"only once that is so"],
-                  f"what must come first is said: {started.get('before_enabling')}")
-        e2e.check('docUuid=' + pipeline['uuid'] in started.get('pipeline_link', '')
-                  and f"enable filter {started['filter_id']}" in started.get('hint', ''), 'the user is given the link')
-        try:
-            await processing_writes.set_processor_filter_enabled(ctx, started['filter_id'], enabled=True)
-            refused = ''
-        except ToolError as e:
-            refused = str(e)
-        e2e.check(refused.startswith("Enabling a processor filter is the user's"), f"the agent can't enable it: {refused[:60]}")
-        waited = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], events, timeout_seconds=30,
-                                                             expect_events=False)
-        e2e.check(waited.get('gate') == 'waiting' and str(started['filter_id']) in waited.get('waiting_for', ''),
-                  f"waiting says it waits on the user: {waited.get('waiting_for')}")
-        # No Elasticsearch here: left disabled, so it doesn't fail in the background.
+        print("\n### the sample's filter runs once the user approves it, the template committed")
+        asked = await processing_writes.create_processor_filter(ctx, pipeline['uuid'], stream_ids=events,
+                                                                source_pipeline_uuid=csv['pipeline']['uuid'])
+        e2e.check(asked.get('status') == 'needs_approval' and 'template is committed' in asked.get('summary', '')
+                  and asked['details'].get('index template') == f"the agreed index template '{index}' for Elasticsearch "
+                                                                f"index '{index}' is committed to cluster {cluster['name']}",
+                  f"approved in a form, once the template is committed: {asked.get('summary')}")
+        e2e.check(not (await processing.processing_status(ctx, pipeline['uuid']))['filters'],
+                  'no filter until the user approves')
+        # No Elasticsearch here: not approved, so nothing runs in the background.
 
         print("\n### an ECS field added by hand in Stroom's editor is kept through the agent's next change")
         # Asked by the user: the indexing XSLT edited by hand to write event.created too, then the plan regenerated

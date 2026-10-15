@@ -50,25 +50,54 @@ are stepped, spread evenly over the streams given, so pass all the sample stream
 How records are read, when it applies: `for_each` (one record, several events), the kinds left untranslated
 (`drop_when`, with the reasons), and the fields `extract` parses out of text.
 
-**EventSource** (and `EventTime`): one row per element, with columns XPath, Description (the event-logging
-schema's own), From (the mapping: `` `badge_user` (lower)``, `` lookup `USER_DIRECTORY` by `user` -> `name` ``,
-`` first of `time`, `timestamp` ``, `` `roles`, one per value ``, a constant in quotes, a value map as
-`ok -> true, fail -> false`), and Sample values: the values the sample's events got, up to three, then how many
-more; "(logon events only)" when only some kinds of event have the element; "(several per event)" for repeats;
-"(not in the sample)" when no sampled event got it. An element the sample's events have that the mapping does not
-write (a hand edit, a later step) gets a row saying so.
+Then, laid out by event type (the default):
 
-**Event types**: one row per rule, with columns Rule (name and conditions), TypeId and Description (From, then the
-values seen), Events (how many of the sample's events the rule wrote, exactly: the documentation run marks each
-Event with its rule), and EventDetail: every other element below `EventDetail` as `` `path` <- from = "sample
-value" ``. Drop rules show as left untranslated. Events no rule of the mapping wrote are counted at the end.
+**Common fields**: a table of the `EventTime` and `EventSource` elements every rule writes from the same source,
+with columns XPath, Description (what the field means for this source, as you described it: see below), From (the mapping: `` `badge_user` (lower)``, `` lookup `USER_DIRECTORY` by
+`user` -> `name` ``, `` first of `time`, `timestamp` ``, `` `roles`, one per value ``, a constant in quotes, a value
+map as `ok -> true, fail -> false`), and Sample values: the values the sample's events got, up to three, then how
+many more; "(several per event)" for repeats; "(not in the sample)" when no sampled event got it. An element the
+sample's events have that the mapping does not write (a hand edit, a later step) gets a row saying so.
+
+**Event types**: a `#### <rule>` section per rule, with its conditions and how many of the sample's events it wrote
+(exactly: the documentation run marks each Event with its rule), and a table with the same columns of its own
+fields: `TypeId` and `Description` first, then its `EventDetail` elements and any `EventSource` element it writes
+differently. Rules with roughly the same fields (logon and logoff, Send and Receive: three quarters of their fields
+in common, an action element counted as any) share one section, headed with each name: one row per field, its
+paths together as `EventDetail/(Send|Receive)/...`, and each rule's source named where they differ or only some
+write it. Drop rules show as left untranslated. Events no rule of the mapping wrote are counted at the end.
+
+Compact, the earlier layout: an **EventSource** table (one row per element, "(logon events only)" when only some
+kinds of event have it), then an **Event types** table with one row per rule: Rule, TypeId and Description, Events,
+and every other `EventDetail` element as `` `path` <- from = "sample value" ``. A CEF pipeline's section by event
+type is a table of the keys every event gets, then one per kind of event (kinds with roughly the same keys
+together, as rules are); compact, one table with an Event type column. An `AGENTS` doc's `## Documentation` section (`- field mapping: compact`) picks the layout; pass
+`field_mapping_layout` (`by_event_type` or `compact`) only when the user asks for one, and it wins over the doc.
+
+### Field descriptions
+
+Each field's description says what it means for this source, for someone searching or reading the data: not the
+schema's generic words, nor where it comes from (the table shows that). `write_documentation` asks for them: a
+`needs_descriptions` reply lists the fields not yet described, each with where it comes from, its sample values and
+`schemas_say`: what the vendor's documentation says of it (the source notes `record_source_notes` kept, matched by
+the source field it is read from, or by the element the notes put that field in) and what the schemas say
+(event-logging for where it comes from, ECS for an index field's name, ArcSight's dictionary for a CEF key). Infer each from its name, its path and its values, and the user's source notes
+where they say, building on the schemas where they fit: a `subject` Data value under `Send` holding "Invoice 4411" is
+"Subject line of the email sent"; a CEF custom slot (`cs1`, deviceCustomString1) is what this source puts in it, and
+is described for each kind of event (`View: cs1`). Where the values don't make it clear, say what they look like and
+that the meaning is unconfirmed. Until a field is described, the doc shows the first of those that says anything of it, the vendor's first. Call again with the
+same arguments plus `field_descriptions={field: description}` (and any ids the reply gives). They are kept with the
+documentation: an update asks only for fields new since, and a description given again replaces the kept one.
 
 ### What the section holds (indexing pipelines)
 
 The index name, backend and time field; events left out (`drop_when`); and one row per index field (nested
-fields by their dotted path, e.g. `user.name`): name, type, the event-logging path it comes from, how often that
-path is populated in the sampled Events, and Sample values: the values the documents the pipeline wrote from the
-sample got, up to three. A discovery pipeline lists the fields it maps explicitly, then every field the sample's
+fields by their dotted path, e.g. `user.name`): name, description, type, the event-logging path it comes from, how
+often that path is populated in the sampled Events, and Sample values: the values the documents the pipeline wrote
+from the sample got, up to three. By event type (the default) as for an events pipeline: a Common fields table (from
+`EventTime`, `EventSource`, `TypeId`, `Description` and the ids), then a `####` section per action element the
+fields come from (`EventDetail/Authenticate/...`), with its share of the sample's events, actions with roughly the
+same fields together; compact, one table. An existing index's documentation is laid out the same way. A discovery pipeline lists the fields it maps explicitly, then every field the sample's
 documents held, with how often and sample values. The agreed Elasticsearch index template is named too.
 
 ### An existing index

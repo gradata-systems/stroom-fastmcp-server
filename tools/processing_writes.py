@@ -365,23 +365,53 @@ async def lucene_index(stroom: StroomGateway, pipeline_uuid: str) -> dict[str, A
     return ref if isinstance(ref, dict) and ref.get('uuid') else None
 
 
-async def _index_holds_only(ctx: Context, pipeline_uuid: str, index: dict[str, Any], stream_ids: list[int]) -> bool:
-    """Whether a Lucene index holds only these streams' documents: it is a build's own, no other pipeline of the build
-    writes to it, and every filter of this pipeline selected only these streams."""
+async def _own_index(ctx: Context, pipeline_uuid: str, index: dict[str, Any]) -> bool:
+    """Whether a Lucene index is the build's own and no other pipeline of the build writes to it."""
     stroom, guard = gateway_from(ctx), guard_from(ctx)
     build = await guard.build_of({'type': index.get('type'), 'uuid': index['uuid'], 'name': index.get('name')})
     if not build:
         return False
-    for f in await stroom.processor_filters(pipeline_uuid):
-        ids = _selected_ids((f.get('queryData') or {}).get('expression'))
-        if not ids or not ids <= set(stream_ids):
-            return False
     for doc in await guard.folder_contents(build):
         if doc['type'] == 'Pipeline' and doc['uuid'] != pipeline_uuid:
             other = await lucene_index(stroom, doc['uuid'])
             if other and other['uuid'] == index['uuid']:
                 return False
     return True
+
+
+def drop_request(pipeline: dict[str, Any], index_name: str) -> str:
+    """The Dev Tools request dropping an Elasticsearch index: its data stream, as the agreed template makes it, or the
+    index."""
+    agreed = read_agreed_template(pipeline.get('description')) or {}
+    try:
+        body = json.loads((agreed.get('dev_tools') or '').split('\n', 1)[1])
+    except (IndexError, ValueError):
+        return f"DELETE _data_stream/{index_name} (a data stream), or DELETE {index_name} (an index)"
+    return f"DELETE _data_stream/{index_name}" if 'data_stream' in body else f"DELETE {index_name}"
+
+
+async def _fresh_index(ctx: Context, pipeline: dict[str, Any], destination: dict[str, Any] | None,
+                       lucene: dict[str, Any] | None) -> tuple[dict[str, str], bool]:
+    """(details, empty): what an index this pipeline already wrote to needs before it indexes again, and whether the
+    server empties it once the user approves. Seen in testing: the Events translation amended and its sample processed
+    again, indexing the new Events left the superseded Events' documents beside them. The whole index is dropped and
+    starts fresh (asked for by the user: simpler than deleting by stream, and no tracking of superseded streams, which
+    may have aged off anyway)."""
+    every = ("every document goes with it, so this processes all the Events streams the index should hold "
+             "(reprocess_streams takes those this pipeline indexed before)")
+    if destination:
+        return {'already indexed': (f"'{destination['index name']}' holds what this pipeline indexed before: the "
+                                    f"cluster admin drops it first, so it starts fresh: "
+                                    f"{drop_request(pipeline, destination['index name'])}. The agreed template stays "
+                                    f"on the cluster and makes the index again as documents arrive; {every}")}, False
+    if lucene and await _own_index(ctx, pipeline['uuid'], lucene):
+        return {'earlier documents': (f"deleted first: '{lucene.get('name')}' is this build's index, emptied so it starts "
+                                      f"fresh (its shards are deleted); {every}")}, True
+    if lucene:
+        return {'already indexed': (f"'{lucene.get('name')}' holds what this pipeline indexed before, and isn't this "
+                                    f"build's own (or another pipeline writes to it), so it isn't emptied: delete its "
+                                    f"shards (the index's Shards tab) first, or it holds those events twice")}, False
+    return {}, False
 
 
 async def _delete_index_shards(stroom: StroomGateway, index_uuid: str) -> int:
@@ -437,25 +467,15 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], so
     for pipeline in pipelines:
         own = await stroom.processor_filters(pipeline['uuid'])
         targets: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        done: set[int] = set()
         for f in own:
             expression = (f.get('queryData') or {}).get('expression')
             ids = sorted(_selected_ids(expression))
-            done |= set(ids)
             metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in ids], len(ids), op='OR')
                                          ).get('values') or []] if ids else []
             for meta in metas:
                 targets.setdefault((meta.get('feedName'), meta.get('typeName')), _pipeline_terms(expression))
         indexing = await _is_indexing(stroom, pipeline['uuid'])
         if not indexing:
-            # Streams whose Events went to a test feed (an existing feed's, processed into the build's test feed:
-            # output_feed) are processed again in production: the test feed stays in the workspace.
-            kept_out = set()
-            for i in done:
-                outputs = await _outputs(stroom, i, pipeline['uuid'])
-                if outputs and all(_test_feed(m.get('feedName'), tests) for m in outputs):
-                    kept_out.add(i)
-            done -= kept_out
             tested = [key for key, extra in targets.items() if not extra and _test_feed(key[0], tests)]
             for key in tested:
                 del targets[key]
@@ -471,11 +491,9 @@ async def promotion_processing(ctx: Context, pipelines: list[dict[str, Any]], so
                 # feed among them), as the pipeline's Events are those meant.
                 if (stream_type, sources_of) not in by_source:
                     by_source.add((stream_type, sources_of))
-                    plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra,
-                                 'done': sorted(done)})
+                    plan.append({'pipeline': pipeline, 'feed': None, 'stream_type': stream_type, 'extra_terms': extra})
             elif feed and not _test_feed(feed, tests):
-                plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra,
-                             'done': sorted(done)})
+                plan.append({'pipeline': pipeline, 'feed': feed, 'stream_type': stream_type, 'extra_terms': extra})
     return plan
 
 
@@ -485,25 +503,82 @@ def _test_feed(feed: str | None, tests: set[str]) -> bool:
 
 async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Feed-wide filters for promoted pipelines, created disabled for the user. No minimum stream creation time (asked
-    for by the user): enabled, a filter processes the feed's data, existing data included, except the streams the
-    pipeline already processed in its build. Stroom doesn't skip those for a new filter: seen on the local stack, the
-    sample's raw stream processed again, its Events marked deleted and replaced (and an index would hold them twice)."""
+    for by the user): enabled, a filter processes the feed's data, existing data included, and what the pipeline
+    processed in its build too: Stroom does those again for a new filter. An index starts fresh: dropped (or emptied)
+    before its filter is enabled, it holds each event once (asked for by the user, in place of leaving out the streams
+    processed in the build, which an index would otherwise hold twice). A pipeline with an enabled filter already
+    selecting what arrives is given none (asked for by the user): a second would process everything twice."""
     stroom = gateway_from(ctx)
-    made = []
+    made: list[dict[str, Any]] = []
     for entry in plan:
-        done = entry.get('done') or []
+        link = doc_link(stroom.settings, 'Pipeline', entry['pipeline']['uuid'])
+        covering = await _covering_filter(stroom, entry)
+        if covering:
+            made.append({'filter_id': covering['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
+                         'stream_type': entry['stream_type'], 'enabled': True, 'existing': True,
+                         'note': f"no new filter: enabled filter {covering['id']} already selects what arrives",
+                         'pipeline_link': link})
+            continue
         expression = {'type': 'operator', 'op': 'AND', 'children': (
             [await _feed_term(stroom, entry['feed'])] if entry['feed'] else []) + [
-            _term('Type', entry['stream_type']), *entry['extra_terms']] + ([
-                {'type': 'operator', 'op': 'NOT', 'children': [
-                    {'type': 'operator', 'op': 'OR', 'children': [_term('Id', i) for i in done]}]}] if done else [])}
+            _term('Type', entry['stream_type']), *entry['extra_terms']]}
         created = await _create_filter(stroom, entry['pipeline'], expression, 10, stroom.settings.max_feed_filter_tasks,
                                        None, enabled=False)
+        before = await _before_promoted_indexing(stroom, entry['pipeline'])
         made.append({'filter_id': created['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
                      'stream_type': entry['stream_type'], 'enabled': False,
-                     **({'except_processed_in_build': done} if done else {}),
-                     'pipeline_link': doc_link(stroom.settings, 'Pipeline', entry['pipeline']['uuid'])})
+                     **({'before_enabling': before} if before else {}), 'pipeline_link': link})
+    # An index reading the Events of a pipeline promoted with it: the events pipeline's new filter goes first. Seen in
+    # e2e: both enabled together, the indexing filter took the build's Events while they were still current, then
+    # their re-translation too, and the index held the sample twice.
+    new = {entry['pipeline']['uuid']: f for entry, f in zip(plan, made) if not f.get('existing')}
+    for entry, f in zip(plan, made):
+        sources = [(t.get('docRef') or {}).get('uuid') for t in entry['extra_terms'] if t.get('field') == 'Pipeline']
+        first = next((new[u] for u in sources if u in new), None)
+        if f.get('before_enabling') and first:
+            f['before_enabling'] += (f"; and only once filter {first['filter_id']} (pipeline '{first['pipeline']}') "
+                                     f"has processed what the build processed again: enabled before that, it indexes "
+                                     f"those Events too, then their replacements")
     return made
+
+
+async def _covering_filter(stroom: StroomGateway, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """An enabled filter of the pipeline (its processor on) that selects the streams arriving from now on for this
+    entry: its feed and type, Events from its source pipeline. A filter by stream id (a build's sample) doesn't."""
+    sources = [(t.get('docRef') or {}).get('uuid') for t in entry['extra_terms'] if t.get('field') == 'Pipeline']
+    arriving = {'id': -1, 'feedName': entry['feed'] or '', 'typeName': entry['stream_type'],
+                'pipelineUuid': sources[0] if sources else None, 'createMs': int(time.time() * 1000)}
+    for f in await stroom.processor_filters(entry['pipeline']['uuid']):
+        if (f.get('processor') or {}).get('enabled') is False:
+            continue
+        expression = (f.get('queryData') or {}).get('expression')
+        if not entry['feed'] and not _names_pipeline(expression):
+            continue    # any feed's Events: only a filter naming the source pipeline is the same selection
+        if _will_process(f, arriving):
+            return f
+    return None
+
+
+def _names_pipeline(expression: dict[str, Any] | None) -> bool:
+    return any(c.get('field') == 'Pipeline' or (c.get('type') == 'operator' and _names_pipeline(c))
+               for c in (expression or {}).get('children') or [])
+
+
+async def _before_promoted_indexing(stroom: StroomGateway, pipeline: dict[str, Any]) -> str | None:
+    """What a promoted indexing pipeline's index needs before its filter is enabled: dropped, or emptied, so it starts
+    fresh; None for any other pipeline."""
+    destination = await elastic_destination(stroom, pipeline['uuid'])
+    if destination:
+        doc = await stroom.get_doc('Pipeline', pipeline['uuid'])
+        return (f"the cluster admin drops '{destination['index name']}' first, so it starts fresh with what this "
+                f"pipeline indexes, the Events indexed in the build among them: "
+                f"{drop_request(doc, destination['index name'])}. The agreed template stays on the cluster and makes "
+                f"the index again as documents arrive")
+    lucene = await lucene_index(stroom, pipeline['uuid'])
+    if lucene:
+        return (f"delete the shards of index '{lucene.get('name')}' first (its Shards tab), so it starts fresh with what "
+                f"this pipeline indexes, the Events indexed in the build among them")
+    return None
 
 
 # While a pipeline is developed in the workspace, Elasticsearch indexing runs in small batches: a rejected document
@@ -661,12 +736,17 @@ async def create_processor_filter(
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
+        approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
-    Create a processor filter, disabled, for Stroom to process streams through the pipeline once the user enables
-    it: enabling a filter is always the user's, in Stroom (the pipeline's Processors tab). Scope it to the sample
-    stream ids; a whole-feed scope needs a created_after bound and is limited to the configured task count. Streams
-    the pipeline already processed are refused: use reprocess_streams for those.
+    Create a processor filter for Stroom to process streams through the pipeline. Scope it to the sample stream
+    ids: for an events (or records) or indexing pipeline the user approves it in a form, then it is created enabled
+    and processing starts. A whole-feed scope, or any other pipeline (CEF output, reference data), is created
+    disabled, for the user to enable in Stroom (the pipeline's Processors tab); a feed scope needs a created_after
+    bound and is limited to the configured task count. Streams the pipeline already processed are refused: use
+    reprocess_streams for those. An indexing pipeline whose earlier Events have since been superseded (the
+    translation processed their raw streams again) still has their documents in its index: the approval says what
+    the cluster admin deletes first (a build's own Lucene index holding only those is emptied, its shards deleted).
     An indexing pipeline reading Events needs source_pipeline_uuid, and its filter only selects Events from
     exactly that events pipeline. For an Elasticsearch indexing pipeline, the index template for its destination
     index must have been agreed with the user (propose_index_template, check_index_template); the user enables the
@@ -674,7 +754,8 @@ async def create_processor_filter(
     A translation pipeline processes the build's own feeds, or the existing feeds the build works from (start_build
     feeds=): those streams are processed where they are, and their Events go to a test feed the server makes in the
     build (output_feed in the reply; promotion leaves it in the workspace). Sample filters run one task at a time.
-    Give the user the reply's pipeline_link and what enabling does; once they say it is enabled, wait_for_processing.
+    A disabled filter: give the user the reply's pipeline_link and what enabling does; once they say it is enabled,
+    wait_for_processing. An enabled one: wait_for_processing with its filter_id.
     """
     stroom = gateway_from(ctx)
     pipeline = await _managed_pipeline(ctx, pipeline_uuid)
@@ -736,16 +817,42 @@ async def create_processor_filter(
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
         details['index template'] = await _committed(stroom, pipeline, destination)
+    # A sample indexed into an index this pipeline already wrote to: the index starts fresh, dropped first (asked for
+    # by the user). Not a feed's filter beside an earlier one (a backfill, then new data): those add to the index.
+    lucene = await lucene_index(stroom, pipeline_uuid)
+    clear = False
+    if stream_ids and (destination or lucene) and await stroom.processor_filters(pipeline_uuid):
+        fresh, clear = await _fresh_index(ctx, pipeline, destination, lucene)
+        details.update(fresh)
+    from tools.plan import build_of, with_next
+    common = {'pipeline': pipeline['name'], 'scope': scope, **({'events_from_pipeline': source['name']} if source else {}),
+              **({'output_feed': output['name'], 'output_note': _output_note(output)} if output else {})}
+    if stream_ids and await _reprocess_runs(stroom, pipeline_uuid):
+        # The sample, through an events or indexing pipeline: processed once the user approves it (asked for by the
+        # user: sample filters made disabled were left for them to enable in Stroom).
+        summary = (f"Create processor filter and process the sample\nProcess {len(stream_ids)} sample stream(s) with "
+                   f"'{pipeline['name']}'.")
+        if 'already indexed' in details:
+            summary += " Approve only once the index is dropped, as said below."
+        if 'index template' in details:
+            summary += " Approve only once the agreed index template is committed to the cluster."
+        gate = await consent_from(ctx).require(ctx, 'approval', 'create_processor_filter', summary, details, approval_id)
+        if gate:
+            return gate
+        if clear:
+            await _delete_index_shards(stroom, lucene['uuid'])
+        small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
+        created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=True)
+        consent_from(ctx).discard(source_confirmation_id)
+        result = {'filter_id': created['id'], **common, **({'batch_size': _BATCH_NOTE} if small else {}), 'enabled': True,
+                  'hint': f"Processing has started: wait_for_processing with filter_id={created['id']}."}
+        return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
+    # A feed's streams, or a pipeline that sends elsewhere (CEF to Kafka) or loads reference data: disabled (asked for
+    # by the user), so there is no approval form: enabling it in Stroom is the user's approval.
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
-    # Disabled, always (asked for by the user): enabling a filter, and so starting processing, is the user's. Made
-    # disabled, it changes nothing, so there is no approval form: enabling it in Stroom is the user's approval.
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=False)
     consent_from(ctx).discard(source_confirmation_id)
-    from tools.plan import build_of, with_next
-    result = {'filter_id': created['id'], 'pipeline': pipeline['name'], 'scope': scope, 'enabled': False,
-              **({'events_from_pipeline': source['name']} if source else {}),
-              **({'batch_size': _BATCH_NOTE} if small else {}),
-              **({'output_feed': output['name'], 'output_note': _output_note(output)} if output else {}),
+    result = {'filter_id': created['id'], **common, **({'batch_size': _BATCH_NOTE} if small else {}), 'enabled': False,
               **_for_the_user(stroom, pipeline, created['id'], details)}
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
 
@@ -845,27 +952,13 @@ async def reprocess_streams(
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
         details['index template'] = await _committed(stroom, pipeline, destination)
-        # Stroom's purgeOnReprocess does not apply to a second filter on the same streams, and this server has no
-        # Elasticsearch access: the earlier documents stay unless the cluster admin deletes them first (after
-        # reprocessing, the same request would delete the new ones too).
-        delete = json.dumps({'query': {'terms': {'StreamId': [int(i) for i in stream_ids]}}})
-        details['already indexed'] = (f"Stroom does not remove the documents these streams already put in "
-                                      f"'{destination['index name']}': have the cluster admin delete them first, or "
-                                      f"they are indexed twice: POST {destination['index name']}/_delete_by_query "
-                                      f"{delete}")
-    # Stroom keeps a Lucene index's documents too (seen: an eval build's index held each event twice after its
-    # indexing XSLT was fixed and the stream reprocessed). A build's own index holding only these streams is emptied
-    # first, its shards deleted; any other index would hold them twice.
+    # Stroom's purgeOnReprocess does not apply to a second filter on the same streams, nor does it remove a Lucene
+    # index's documents (seen: an eval build's index held each event twice after its indexing XSLT was fixed and the
+    # stream reprocessed), and this server has no Elasticsearch access: the index is dropped first and starts fresh.
     lucene = await lucene_index(stroom, pipeline_uuid)
-    clear = (bool(lucene) and await _reprocess_runs(stroom, pipeline_uuid)
-             and await _index_holds_only(ctx, pipeline_uuid, lucene, stream_ids))
-    if clear:
-        details['earlier documents'] = (f"deleted first: '{lucene.get('name')}' is this build's index and holds "
-                                        f"only these streams' documents (its shards are deleted)")
-    elif lucene:
-        details['already indexed'] = (f"Stroom keeps the documents these streams already put in '{lucene.get('name')}' "
-                                      f"(it holds other streams' documents too, so it isn't emptied): they are "
-                                      f"indexed twice")
+    fresh, clear = await _fresh_index(ctx, pipeline, destination, lucene)
+    clear = clear and await _reprocess_runs(stroom, pipeline_uuid)
+    details.update(fresh)
     # Reprocessing an events or indexing pipeline while it is developed in a build runs once the user approves it
     # (asked for by the user); every other filter is made disabled, for the user to enable.
     if not await _reprocess_runs(stroom, pipeline_uuid):
@@ -876,10 +969,10 @@ async def reprocess_streams(
             'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
             'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
             **_for_the_user(stroom, pipeline, created['id'], details)})
-    gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams',
-                                           f"Create processor filter and reprocess streams\nReprocess "
-                                           f"{len(stream_ids)} stream(s) with '{pipeline['name']}'.",
-                                           details, approval_id)
+    summary = f"Create processor filter and reprocess streams\nReprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'."
+    if 'already indexed' in details:
+        summary += " Approve only once the index is dropped, as said below."
+    gate = await consent_from(ctx).require(ctx, 'approval', 'reprocess_streams', summary, details, approval_id)
     if gate:
         return gate
     if clear:

@@ -237,12 +237,10 @@ async def elastic(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: str)
     e2e.check(rechecked.get('agreed'), 'the same template still fits; the user confirms it again')
     asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw])
     note = asked['details']['already indexed']
-    e2e.check(asked.get('status') == 'needs_approval' and f'POST {index}/_delete_by_query' in note,
-              "the approval says Stroom will not remove the stream's earlier documents, and gives the request to")
-    request = note[note.index('POST '):]
-    path, body = request.split(' ', 2)[1], json.loads(request.split(' ', 2)[2])
-    deleted = (await es.post(f'/{path}?refresh=true', json=body)).json().get('deleted')
-    e2e.check(deleted == 2, f'the cluster admin deletes them first: {deleted} documents')
+    dropped = e2e.dropped_by(note)
+    e2e.check(asked.get('status') == 'needs_approval' and dropped in (index, f'_data_stream/{index}'),
+              f"the approval says the index holds what was indexed before, and to drop it first: {note[:160]}")
+    e2e.check((await es.delete(f'/{dropped}')).status_code == 200, f'the cluster admin drops it: DELETE {dropped}')
     again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], approval_id=asked['approval_id'])
     done = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
                                                        filter_id=again['filter_id'])

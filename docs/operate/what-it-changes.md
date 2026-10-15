@@ -50,8 +50,9 @@ Content moves out of the workspace only when the user approves [promotion](build
   the build. On promotion, the production document is backed up to `MCP Workspace/backups`, the copy's content is
   written into it, and the copy is removed. The document keeps its UUID, so processor filters, pipeline references
   and dashboards keep working.
-- **Processing.** It creates processor filters disabled, for you to enable in Stroom; reprocessing in a build runs
-  once you approve it (see [Processing and indexing](processing.md)). It never enables a filter itself.
+- **Processing.** Processing a build's sample through an events or indexing pipeline, and reprocessing in a build,
+  run once you approve them; every other processor filter is created disabled, for you to enable in Stroom (see
+  [Processing and indexing](processing.md)). It never enables an existing filter.
 
 Anything else is refused by the server's write guard, whatever the model asks for.
 

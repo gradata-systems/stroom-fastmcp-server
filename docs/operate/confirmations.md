@@ -5,9 +5,10 @@ build are decided by the user:
 
 - A **confirmation** fixes a detail an action uses, such as a feed name, the template a pipeline builds on, or an
   index name. The agent proposes it, saying where it came from, and the user confirms or corrects it.
-- An **approval** guards an action: reprocessing in a build, or promoting a build.
-- **Starting processing is yours.** Every processor filter is created disabled, and you enable it in Stroom: the agent
-  gives you the pipeline's link and what enabling it does. See [Processing and indexing](processing.md).
+- An **approval** guards an action: processing a build's sample, reprocessing in a build, or promoting a build.
+- **Starting other processing is yours.** Any other processor filter (a whole feed, a CEF output, reference data, a
+  promoted pipeline) is created disabled, and you enable it in Stroom: the agent gives you the pipeline's link and
+  what enabling it does. See [Processing and indexing](processing.md).
 
 ## How the user answers
 
@@ -31,7 +32,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | Columns of the verification dashboard | Verifying an index | The time field and the key fields |
 | Errors accepted as benign, with the reason | Writing documentation | Errors the agent couldn't fix |
 | Kinds of event left untranslated | Surveying an existing feed | The survey |
-| Surveying fewer streams a call than the default 10 | Surveying an existing feed with a smaller sample, once per feed and number | The number you or the agent gave |
+| Surveying fewer streams a call than the default 10 | Surveying an existing feed with a smaller sample, once per feed and number: a smaller `max_streams`, or a few of its streams given by id | The number you or the agent gave |
 | Records translated as `Unknown` events (what happened isn't known: no Authenticate, Create or other action) | Saving a translation that keeps any, once per rule: asked again only for a rule that is new, or whose conditions or reason changed. The detail is shown in the chat first; the form only asks you to agree to it | How many sample records the rule catches (for the rule for the rest, those no other rule matches), what they hold, the reason, and the action elements their values suggest |
 | Which feed you meant | A feed you named isn't in this Stroom | The three closest names, and a fourth choice to correct the name (or the cluster) |
 | Indexing Events from a pipeline the server didn't build | Creating the processor filter for the indexing pipeline, or reprocessing | The pipeline the user names |
@@ -41,7 +42,8 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 
 | Action | What the approval says |
 | --- | --- |
-| Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the `_delete_by_query` request to run first, as documents already indexed stay. For Lucene: that the build's index is emptied first (its shards deleted) when it holds only these streams, or else that they will be indexed twice |
+| Processing the sample streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams. For Elasticsearch: that the agreed index template has been committed to the cluster. For an index the pipeline already wrote to, what makes it start fresh, as for reprocessing |
+| Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the request for the cluster admin to drop the index first (`DELETE _data_stream/<index>` or `DELETE <index>`), as documents already indexed stay; the template makes it again, and all the Events streams it should hold are processed again. For Lucene: that the build's own index is emptied first (its shards deleted), or else to delete its shards first |
 | Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 
 The [tool reference](../reference/tools.md) marks each tool that asks.

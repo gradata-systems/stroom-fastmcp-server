@@ -24,7 +24,7 @@ from tools.streams import _meta, summarise_events
 from tools.templates import _shape
 from utils.consent import consent_from, edited
 from utils.fielddoc import index_field_mapping_markdown
-from utils.fieldplan import ECS_COMPONENT, Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
+from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
@@ -1670,6 +1670,13 @@ def components_wanted(example: dict[str, Any], components: dict[str, Any],
     from utils import ecs
     without = [without] if isinstance(without, str) else list(without or [])
     composed_of = list(example.get('composed_of') or [])
+    # Seen in testing: a proposed template composed ecs@settings, which Elasticsearch doesn't have (ecs@mappings is its
+    # only ECS component template), let go as one the user couldn't give. Only its content, given, shows it exists.
+    unknown = [n for n in composed_of if n.lower().startswith('ecs@') and n != ecs.COMPONENT and n not in components]
+    if unknown:
+        raise ToolError(f"{unknown}: not a component template Elasticsearch has: {ecs.COMPONENT} is its only ECS one, "
+                        f"built in. Don't compose it (leave it out of include_components). Only if the user's cluster "
+                        f"has one by that name: its content in component_templates (GET _component_template/{unknown[0]}).")
     missing = [n for n in composed_of if n not in components and n != ecs.COMPONENT and n not in without]
     if not missing:
         return None
@@ -1678,9 +1685,10 @@ def components_wanted(example: dict[str, Any], components: dict[str, Any],
             'hint': ("The example is composed of component templates whose fields can't be seen here without them: the "
                      "fields it maps are those of the index template and all of its components together. Ask the user "
                      "to run the request in Kibana Dev Tools and paste the whole response, then call again with "
-                     "component_templates= every component given so far and this one. If the user can't get one, "
-                     "call again with without_components= its name: the template is then built without its fields, "
-                     "which it may repeat or contradict.")}
+                     "component_templates= every component given so far and this one. If the request says "
+                     "resource_not_found, the cluster has no such component: it can't be composed, so leave it out. "
+                     "If the user can't get one that exists, call again with without_components= its name: the "
+                     "template is then built without its fields, which it may repeat or contradict.")}
 
 
 def _component_notes(missing: list[str]) -> list[str]:
@@ -1762,6 +1770,13 @@ def _asking(gate: Any, result: dict[str, Any]) -> Any:
                                    "version (and the component templates): it is confirmed there."}
 
 
+
+def _ecs_base(plan: FieldPlan) -> bool:
+    """Whether the template is composed of ecs@mappings whatever the example composes: an ECS plan with fields it
+    maps as ECS says (one named in the example's own style, User.Id, has none for it to map)."""
+    from utils import ecs
+    return plan.convention == 'ecs' and any(ecs.left_to_component(f.name, f.type) for f in plan.fields)
+
 async def propose_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
@@ -1831,14 +1846,10 @@ async def propose_index_template(
         # Every planned field: the example says what it is composed of, and so which fields are left to that.
         full = plan.model_copy(update={'index_name': index}).elastic_template(name, priority, leave_to_component=False)
         body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None,
-                                   include=include, exclude=exclude)
+                                   include=include, exclude=exclude, ecs_base=_ecs_base(plan))
         notes = ruled + notes
         if kept_note:
             notes.insert(0, kept_note)
-        if plan.convention == 'ecs' and ECS_COMPONENT not in (body.get('composed_of') or []):
-            # The user's example is followed as it is; said, so they can add Elastic's recommended base.
-            notes.append(f"the example doesn't compose {ECS_COMPONENT}, Elastic's recommended base for an ECS index "
-                         f"template (built in from Elasticsearch 8.13): add it to composed_of if the user wants it")
     stroom = gateway_from(ctx)
     if not example_template and not without_example:
         # No template to commit yet: one handed out now would be applied to the cluster without the user's

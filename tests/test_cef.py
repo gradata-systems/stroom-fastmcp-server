@@ -166,6 +166,12 @@ def test_the_documentation_names_each_key_its_arcsight_field_and_its_label():
     assert "labelled 'session_id' (cn1Label = deviceCustomNumber1Label)" in text and '| 6857 |' in text
     assert "| the event's kind (View) | act | deviceAction |" in text
     assert 'on topic `arcsight-cef`, one Event a record' in text
+    # By event type (the default, asked for by the user): the keys every event gets, then a table per kind of event.
+    assert '### Every event' in text and '### View events' in text and '| Event type |' not in text
+    # Compact (an AGENTS doc's Documentation section, or the user): one table with an Event type column.
+    compact = plan.markdown(cef.examples_from(plan, lines, cef.events_of(EVENTS)), 'compact')
+    assert '### Every event' not in compact and '### View events' not in compact
+    assert "| View | the event's kind (View) | act | deviceAction |" in compact and '| every event | ' in compact
 
 
 def test_a_plan_with_keys_outside_the_dictionary_or_unlabelled_slots_has_problems():
@@ -304,3 +310,43 @@ def test_the_cef_xslt_follows_the_events_xslt_style():
     assert '<xsl:variable name="severity" select="EventDetail/Alert/Severity"/>' in mapped.xslt()
     assert "if (string(($severity)[1]) = 'low')" in mapped.xslt()
     assert cef.lines_in(run(mapped.xslt())) == lines
+
+
+def test_kinds_with_the_same_keys_are_documented_together():
+    # Asked for by the user: Send and Receive under one heading, one row per key, each kind's example where they differ.
+    plan = cef.CefPlan.model_validate({
+        'vendor': {'value': 'Acme'}, 'product': {'value': 'Mail'}, 'version': {'value': '1'},
+        'signature': {'source': 'EventDetail/TypeId'}, 'name': {'source': 'EventDetail/Description'},
+        'severity': {'value': '3'}, 'common': [{'path': 'EventTime/TimeCreated', 'key': 'rt', 'transform': 'epoch_ms'}],
+        'events': {'Send': [{'path': 'EventDetail/Send/Source/User/Id', 'key': 'suser'},
+                            {'path': 'EventDetail/Send/Destination/User/Id', 'key': 'duser'}],
+                   'Receive': [{'path': 'EventDetail/Receive/Source/User/Id', 'key': 'suser'},
+                               {'path': 'EventDetail/Receive/Destination/User/Id', 'key': 'duser'}],
+                   'View': [{'path': 'EventDetail/View/Document/Title', 'key': 'fname'}]}, 'output': 'text'})
+    text = plan.markdown({('Send', 'suser'): 'alice', ('Receive', 'suser'): 'bob', ('Send', 'duser'): 'carol',
+                          ('Receive', 'duser'): 'carol'})
+    assert '### Send, Receive events' in text and '### View events' in text and '### Send events' not in text
+    assert '| `EventDetail/(Send\|Receive)/Source/User/Id` | suser |' in text and '| alice (Send); bob (Receive) |' in text
+    assert text.split('duser')[1].rstrip().split('\n')[0].endswith('| carol |')
+    assert "| `EventTime/TimeCreated` | rt |" in text      # the Every event table has no Event type column
+
+
+def test_cef_fields_are_described_by_what_they_hold_here():
+    # Asked for by the user: a custom slot (deviceCustomString1) means what this source puts in it; ArcSight's
+    # dictionary words are the fallback, and shown to the agent to build on.
+    from utils.fielddoc import Descriptions
+    plan = cef.CefPlan.model_validate({
+        'vendor': {'value': 'Acme'}, 'product': {'value': 'Vault'}, 'version': {'value': '1'},
+        'signature': {'source': 'EventDetail/TypeId'}, 'name': {'source': 'EventDetail/Description'},
+        'severity': {'value': '3'}, 'common': [{'path': 'EventTime/TimeCreated', 'key': 'rt', 'transform': 'epoch_ms'}],
+        'events': {'View': [{'path': "EventDetail/View/Data[@Name='folder']/@Value", 'key': 'cs1', 'label': 'folder'}]},
+        'output': 'text'})
+    asking = Descriptions(ask=True)
+    text = plan.markdown({('View', 'cs1'): 'Finance/Payroll'}, described=asking)
+    assert sorted(asking.wanted) == ['View: cs1', 'rt']                   # by kind: a slot means what each kind puts in it
+    asked = asking.wanted['View: cs1']
+    assert asked['values'] == ['Finance/Payroll'] and "labelled 'folder'" in asked['from']
+    assert 'ArcSight' in asked['schemas_say'] and asked['schemas_say']['ArcSight'] in text     # the fallback
+    given = Descriptions({'View: cs1': 'The vault folder holding the secret viewed.'}, ask=True)
+    text = plan.markdown({('View', 'cs1'): 'Finance/Payroll'}, described=given)
+    assert "| The vault folder holding the secret viewed.; labelled 'folder' (cs1Label = deviceCustomString1Label)" in text

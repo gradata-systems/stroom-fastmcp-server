@@ -2,21 +2,23 @@
 
 ## Processor filters
 
-The server creates every processor filter **disabled**: enabling one, and so starting processing, is yours, on the
-pipeline's Processors tab in Stroom. The agent gives you the pipeline's link and what enabling it will do (which
-streams, where the output goes, and anything to do first, such as having the Elasticsearch index template
-committed), then waits for you to say it's enabled before it waits for the processing. A disabled filter changes
-nothing, so creating one asks for no approval. The agent can disable a filter, never enable one.
+**Processing the sample streams through an events (or records) or indexing pipeline in a build**, or
+**reprocessing** one after a fix: you approve it in a form, and the server creates the filter enabled so it runs
+straight away. For Elasticsearch, the approval also confirms the agreed index template is committed to the cluster.
 
-The one exception is **reprocessing an events or indexing pipeline in a build**, after a fix: you approve it in a
-form, and the server creates the filter enabled so it runs straight away. Reprocessing any other pipeline in a build
-(a CEF output, which sends to Kafka, or reference data) is created disabled like the rest.
+Every other processor filter is created **disabled**: a whole-feed scope, any other pipeline in a build (a CEF
+output, which sends to Kafka, or reference data), and a promoted pipeline's filter. Enabling one, and so starting
+processing, is yours, on the pipeline's Processors tab in Stroom. The agent gives you the pipeline's link and what
+enabling it will do (which streams, where the output goes, and anything to do first, such as having the
+Elasticsearch index template committed), then waits for you to say it's enabled before it waits for the processing.
+A disabled filter changes nothing, so creating one asks for no approval. The agent can disable a filter, never enable
+one.
 
 | Filter | Selects | Created | Task limit |
 | --- | --- | --- | --- |
-| Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | Disabled | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
+| Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
 | Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
-| A promoted pipeline's feed | Everything on its feed, existing data included, except the streams the pipeline already processed in its build (`NOT Id IN ...`) | Disabled | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
+| A promoted pipeline's feed | Everything on its feed, existing data and the streams the pipeline processed in its build included | Disabled | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 
 Other limits:
 
@@ -46,26 +48,31 @@ The server has no Elasticsearch connection or credentials. Everything goes throu
    in which case it is checked again.
 3. Your **cluster admin applies** the agreed template (a Dev Tools request). Without an example, the template makes a **data stream**,
    named as the index, with `@timestamp` as its time; with one, the example decides (index or data stream).
-4. You **enable the indexing filter** only once the template has been applied, since documents arriving first would
-   create the index without it: the agent says so with the filter's link. Approving a reprocessing into Elasticsearch
-   confirms it the same way.
+4. **Indexing starts** only once the template has been applied, since documents arriving first would create the
+   index without it. Approving the sample's indexing, or a reprocessing, confirms it; for a filter you enable
+   yourself, such as a promoted one, the agent says so with the filter's link.
 
 While a pipeline is in the workspace, indexing runs with a batch size of 10, so a document Elasticsearch rejects
 comes back whole in the Error stream. The template's default is restored once indexing completes without errors,
 and promotion makes sure of it.
 
-Reprocessing into Elasticsearch doesn't remove documents already indexed, so the reprocessing approval gives the
-`_delete_by_query` request for the cluster admin to run first.
+Indexing again doesn't remove documents already indexed: when the Events translation is amended and its sample
+processed again, the superseded Events' documents stay beside the new ones. So when an indexing pipeline that has
+already indexed something gets a new sample filter, or reprocesses, the index starts fresh: the approval says the
+cluster admin drops it first, `DELETE _data_stream/<index>` when the agreed template makes a data stream, else
+`DELETE <index>`. The agreed template stays on the cluster and makes the index again as documents arrive. Every
+document goes, so all the Events streams the index should hold are processed again. A promoted indexing pipeline's
+filter says the same in `before_enabling`, to do before you enable it.
 
 ## Lucene
 
 Lucene indexes are made as Stroom Index docs, with the fields from the field plan. The user confirms the volume
 group with the other indexing details.
 
-Reprocessing into a Lucene index doesn't remove the documents the streams already put there either. When the index
-is the build's own and holds only the streams being reprocessed (no other pipeline of the build writes to it, and
-the indexing pipeline's filters selected no other streams), the approved reprocessing deletes the index's shards
-first, which the approval says. Otherwise the approval says the streams will be indexed twice.
+Indexing again into a Lucene index doesn't remove the documents already there either, and it starts fresh the same
+way. When the index is the build's own (no other pipeline of the build writes to it), the server deletes its shards
+once you approve, which the approval says. Otherwise the approval tells you to delete its shards (the index's Shards
+tab) first. A promoted indexing pipeline's filter says so in `before_enabling`.
 
 ## Verification
 

@@ -17,8 +17,9 @@ from tools.processing_writes import agreement_problem, create_promotion_filters,
 from tools.pipelines import translation_docs
 from tools.stepping import _outputs, _Pipeline, stepped_clean, verified
 from tools.streams import summarise_events
-from utils.fielddoc import (discovery_field_markdown, field_mapping_markdown, index_documents, object_arrays,
-                            index_field_mapping_markdown, sampled_events, written_fields_markdown)
+from utils.fielddoc import (BY_EVENT_TYPE, LAYOUTS, Descriptions, descriptions_block, read_descriptions,
+                            discovery_field_markdown, field_mapping_markdown, index_documents,
+                            object_arrays, index_field_mapping_markdown, sampled_events, written_fields_markdown)
 from utils.fieldplan import FieldPlan
 from utils.mappingstore import (DOC_MARK, digest, doc_digest, normalise_xslt, read_agreed_template, read_mapping,
                                 replace_section)
@@ -276,7 +277,8 @@ async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
 
 
 async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: dict[str, Any],
-                                stream_ids: list[int]) -> str:
+                                stream_ids: list[int], layout: str = BY_EVENT_TYPE,
+                                described: Descriptions | None = None) -> str:
     """The Field mapping section generated from the kept mapping (stepped over the sample streams, with each
     Event marked by its rule) or index plan (with the Events' path population)."""
     stroom = gateway_from(ctx)
@@ -302,7 +304,7 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             per_stream[stream] = per_stream.get(stream, 0) + 1
         counted = ', '.join(f"{n} of stream {s}" for s, n in per_stream.items())
         section = (f"Counts are of {len(outputs)} sample records ({counted}).\n\n"
-                   + field_mapping_markdown(mapping, schema, events))
+                   + field_mapping_markdown(mapping, schema, events, layout, described))
         drift = await _drift(ctx, kept)
         if drift:
             section += f"\nNote: {drift[0].upper() + drift[1:]}.\n"
@@ -316,7 +318,7 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             raise ToolError(f"Field mapping not written: stepping pipeline '{pipeline.get('name')}' over streams "
                             f"{stream_ids} gave no CEF lines. Its stream_ids are the Events streams it sends "
                             f"(wait_for_processing on the events pipeline lists them).")
-        section = plan.markdown(examples_from(plan, lines, [e for e in events if e is not None]))
+        section = plan.markdown(examples_from(plan, lines, [e for e in events if e is not None]), layout, described)
         drift = await _plan_drift(ctx, kept)
         if drift:
             section += f"\nNote: {drift[0].upper() + drift[1:].split(' What differs')[0]}\n"
@@ -350,7 +352,7 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             schema = await event_schema(ctx, stroom.settings.event_logging_version)
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
-        section = index_field_mapping_markdown(plan, population, documents, schema) + _agreed_line(pipeline)
+        section = index_field_mapping_markdown(plan, population, documents, schema, layout, described) + _agreed_line(pipeline)
         drift = await _plan_drift(ctx, kept)
         if drift:
             section = section.rstrip() + f"\n\nNote: {drift[0].upper() + drift[1:].split(' What differs')[0]}\n"
@@ -544,6 +546,16 @@ async def write_documentation(
             description="With pipeline_uuid: the markdown is an evaluation report, kept as its own doc, "
                         "'<pipeline> - Evaluation', beside the pipeline once promoted; the pipeline's documentation is "
                         "left as it is. Its sections are the report's, nothing generated.")] = False,
+        field_descriptions: Annotated[dict[str, str] | str, Field(
+            description="What each field means for this source, {field: description}, when a needs_descriptions reply "
+                        "asks: inferred from its name, where it comes from and its sample values (and the user's "
+                        "source notes). Kept with the documentation, so later updates ask only for new fields; give "
+                        "one again to change it.")] = {},
+        field_mapping_layout: Annotated[str | None, Field(
+            description="Only when the user asks for a layout: 'by_event_type' (a table of the fields every event "
+                        "type has, then a section with a table per event type) or 'compact' (the common fields, then "
+                        "one table with a row per event type). Left out: an AGENTS doc's Documentation section "
+                        "decides, else by_event_type.")] = None,
 ) -> dict[str, Any]:
     """
     Create or update the Documentation doc for a pipeline in the build (same name as the pipeline), or, with
@@ -552,7 +564,11 @@ async def write_documentation(
     the user chooses another folder. The Field
     mapping section is not taken from the markdown: it is generated from the mapping (or index plan) kept with the
     pipeline's XSLT, stepped over stream_ids, and put in place of whatever the markdown has there, so it always
-    agrees with the XSLT. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
+    agrees with the XSLT. It lists the fields every event type has in one table, then a table per event type (types
+    with roughly the same fields together); field_mapping_layout='compact', or an AGENTS doc's Documentation section,
+    lays it out otherwise. Each field is described by what it means for this source: a needs_descriptions reply
+    lists the fields not yet described, with where each comes from and its sample values, for the agent to describe
+    (field_descriptions); kept with the doc, so an update asks only for new fields. An events pipeline whose XSLT keeps no mapping must bring its own Field mapping
     section. The Errors section is generated too: every kind of error processing the streams produced (from their
     Error streams), with counts and an example, and the errors the user accepted as benign, with their reasons; those
     are kept with the doc, so triage does not raise them again. An update replaces the body and keeps the version
@@ -571,12 +587,21 @@ async def write_documentation(
     if not body.strip():
         raise ToolError("The documentation is empty: give the full text in markdown, with the sections in stroom://guide")
     change = change.strip()     # a new doc's is 'Created'; an update needs its own line (checked below)
+    if field_mapping_layout and field_mapping_layout not in LAYOUTS:
+        raise ToolError(f"field_mapping_layout is one of {list(LAYOUTS)}, not '{field_mapping_layout}'")
+    if isinstance(field_descriptions, str):
+        try:
+            field_descriptions = json.loads(field_descriptions) if field_descriptions.strip() else {}
+        except ValueError:
+            raise ToolError("field_descriptions is an object, {field: description}")
+    if not isinstance(field_descriptions, dict):
+        raise ToolError("field_descriptions is an object, {field: description}")
     if index_uuid:
         if stream_ids or accept_errors:
             raise ToolError("stream_ids and accept_errors are for a pipeline's documentation; an existing index is "
                             "surveyed through Stroom instead. Leave them out with index_uuid.")
-        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id,
-                                     document_missing_fields)
+        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id, field_mapping_layout,
+                                     document_missing_fields, field_descriptions)
     if not pipeline_uuid:
         raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
     if evaluation:
@@ -586,6 +611,12 @@ async def write_documentation(
     kept = await kept_mapping(ctx, pipeline_uuid)
     generated_section = None
     noted = []
+    name, copy_of, in_build, existing, beside = await _documentation_of(ctx, build, pipeline)
+    # What each field means, as the agent described it from the sample (asked for by the user), kept with the doc.
+    previous = existing or beside
+    kept_descriptions = (read_descriptions(body_text(await stroom.get_doc('Documentation', previous['uuid'])))
+                         if previous else {})
+    described = Descriptions({**kept_descriptions, **field_descriptions}, ask=True, notes=await _vendor_notes(ctx, build))
     if kept and kept['kind'] == 'translation' and stream_ids:
         # An events pipeline's own Events output, given in place of its raw sample (seen in VS Code): the raw streams
         # they were made from.
@@ -607,7 +638,14 @@ async def write_documentation(
             raise ToolError(f"Give stream_ids (the pipeline's {what}): the Field mapping section is generated from the "
                             f"{'mapping' if kept['kind'] == 'translation' else 'CEF plan' if kept['kind'] == 'cef' else 'index plan'} kept with the XSLT by "
                             f"stepping them, each field with the values the sample gave")
-        generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids)
+        layout, said = await _layout(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}, field_mapping_layout)
+        noted += said
+        generated_section = await field_mapping_section(ctx, pipeline, kept, stream_ids, layout or BY_EVENT_TYPE,
+                                                        described)
+        if described.wanted:
+            return needs_descriptions(described)
+        if described.given:
+            generated_section = generated_section.rstrip() + '\n\n' + descriptions_block(described.given)
         if kept['kind'] == 'translation':
             # What the user's documentation says each source field holds, where the build keeps notes from it.
             from utils.sourcenotes import fields_markdown, merged, notes_in_build
@@ -662,27 +700,12 @@ async def write_documentation(
         set_body_text(doc, _with_change(ctx, titled(text, doc['name']), old, change, kept))
         return await stroom.put_doc(doc)
 
-    name, beside = pipeline['name'], None
-    guard = guard_from(ctx)
-    copy_of = await guard.copy_of({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': name})
-    if copy_of:
-        # An in-place change (a working copy): the documentation is the production pipeline's, under its name, and
-        # its existing doc beside it is changed through a working copy that promotion writes back after a backup.
-        original = await stroom.get_doc('Pipeline', copy_of)
-        name = original['name']
-        beside = await _documentation_beside(stroom, original)
-    in_build = await _build_docs(ctx, build)
-    if not copy_of and not any(d['uuid'] == pipeline_uuid for d in in_build):
-        # A pipeline outside the build, promoted already: its documentation beside it is changed the same way, through
-        # a working copy in the build that promotion writes back (seen in VS Code: documented after promotion, a
-        # second doc of its name was made in a new workspace folder and the promoted one left as it was).
-        beside = await _documentation_beside(stroom, pipeline)
-    existing = next((d for d in in_build if d['type'] == 'Documentation' and d['name'] == name), None)
     if not change:
         if existing or beside:
             raise ToolError("This updates the pipeline's documentation: give change, one line for its version "
                             "control on what changed and why, e.g. 'Mapped CODE_TO_TOKEN'")
         change = 'Created'
+    guard = guard_from(ctx)
     if existing:
         doc = await write(existing)
     elif beside:
@@ -732,8 +755,74 @@ async def _raw_parents(stroom, stream_ids: list[int], pipeline_uuid: str) -> tup
     return list(dict.fromkeys(out)), notes
 
 
+async def _documentation_of(ctx: Context, build: str, pipeline: dict[str, Any]) -> tuple:
+    """(name, copy_of, in_build, existing, beside): where a pipeline's documentation is: its name, the production
+    pipeline a working copy is of, the build's docs, the doc of that name in the build, and one beside the pipeline
+    outside it, changed through a working copy."""
+    stroom, guard = gateway_from(ctx), guard_from(ctx)
+    name, beside = pipeline['name'], None
+    copy_of = await guard.copy_of({'type': 'Pipeline', 'uuid': pipeline['uuid'], 'name': name})
+    if copy_of:
+        # An in-place change (a working copy): the documentation is the production pipeline's, under its name, and
+        # its existing doc beside it is changed through a working copy that promotion writes back after a backup.
+        original = await stroom.get_doc('Pipeline', copy_of)
+        name = original['name']
+        beside = await _documentation_beside(stroom, original)
+    in_build = await _build_docs(ctx, build)
+    if not copy_of and not any(d['uuid'] == pipeline['uuid'] for d in in_build):
+        # A pipeline outside the build, promoted already: its documentation beside it is changed the same way, through
+        # a working copy in the build that promotion writes back (seen in VS Code: documented after promotion, a
+        # second doc of its name was made in a new workspace folder and the promoted one left as it was).
+        beside = await _documentation_beside(stroom, pipeline)
+    existing = next((d for d in in_build if d['type'] == 'Documentation' and d['name'] == name), None)
+    return name, copy_of, in_build, existing, beside
+
+
+async def _vendor_notes(ctx: Context, build: str) -> list[dict[str, Any]]:
+    """The field dictionary of the vendor documentation kept in the build (record_source_notes); [] when none."""
+    from utils.sourcenotes import merged, notes_in_build
+    try:
+        return merged(await notes_in_build(ctx, build))['fields']
+    except Exception:   # descriptions are then the agent's and the schemas'
+        return []
+
+
+def needs_descriptions(described: Descriptions, **ids: str) -> dict[str, Any]:
+    """The round asking the agent what each field means (asked for by the user: the schema's generic words, or 'the
+    x value recorded in a Data element of Send', add nothing a reader can't see for themselves)."""
+    return {'status': 'needs_descriptions', 'fields': list(described.wanted.values()), **ids,
+            'hint': "Nothing is written yet. For each field, say in one short sentence what it means for this source, "
+                    "for someone searching or reading the data: infer it from the field's name, where it comes from "
+                    "(from) and its sample values, and the user's source notes where they say. E.g. a Data value "
+                    "'subject' under Send with values like 'Invoice 4411' is 'Subject line of the email sent'; a "
+                    "CEF custom slot (cs1, deviceCustomString1) is what this source puts in it. schemas_say is what "
+                    "the vendor's documentation (record_source_notes) and the schemas say of it (event-logging for where it "
+                    "comes from, ECS for an index field, ArcSight's dictionary for a CEF key): build on them where "
+                    "they fit this source, the vendor's first, and use them "
+                    "where its values add nothing; never only repeat their generic words, nor where it comes from, "
+                    "which the table shows. Where the values don't make the meaning clear, say what they look like "
+                    "and that its meaning is unconfirmed, rather than guess. Then call write_documentation again with the "
+                    "same arguments plus field_descriptions={field: description}" + (", and the ids given here" if ids
+                                                                                      else '') + "."}
+
+
+async def _layout(ctx: Context, ref: dict[str, str], asked: str | None) -> tuple[str, list[str]]:
+    """(layout, notes): the Field mapping layout the user asked for, else the applicable AGENTS doc's, else by event
+    type (asked for by the user)."""
+    if asked:
+        return asked, []
+    from tools.instructions import layout_ruled
+    ruled = await layout_ruled(ctx, ref)
+    if not ruled:
+        return BY_EVENT_TYPE, []
+    return ruled['layout'], [f"Field mapping laid out {ruled['layout'].replace('_', ' ')}, as the AGENTS doc in "
+                             f"{ruled['from'] or '(root)'} says"]
+
+
 async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, change: str,
-                          confirmation_id: str | None, document_missing_fields: bool = False) -> dict[str, Any]:
+                          confirmation_id: str | None, field_mapping_layout: str | None = None,
+                          document_missing_fields: bool = False,
+                          field_descriptions: dict[str, str] | None = None) -> dict[str, Any]:
     """The documentation of an existing index, its Field mapping section generated from a survey through Stroom. A doc
     already beside the index doc is changed through a working copy, written back (after a backup) on promotion."""
     from tools.indexing import _path_of, survey_index
@@ -756,16 +845,15 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     existing = next((d for d in await _build_docs(ctx, build)
                      if d['type'] == 'Documentation' and d['name'] == ref['name']), None)
     # Asked before the survey, so the index is read once, after the user confirms.
+    asked = {'index doc': f"{folder}/{ref['name']} ({doc_type})",
+             'drafted in': f"build '{build}', as Documentation '{ref['name']}'",
+             'promoted (once you agree)': (f"written back into the existing Documentation '{ref['name']}' beside it, "
+                                           f"after a backup" if beside else
+                                           f"beside the index doc, in {folder}, unless you choose another folder")}
     gate = await consent_from(ctx).require(
         ctx, 'confirmation', 'write_documentation',
         f"Document the existing {'Elastic Index' if doc_type == 'ElasticIndex' else 'Lucene Index'} doc "
-        f"'{ref['name']}' ({folder})",
-        {'index doc': f"{folder}/{ref['name']} ({doc_type})",
-         'drafted in': f"build '{build}', as Documentation '{ref['name']}'",
-         'promoted (once you agree)': (f"written back into the existing Documentation '{ref['name']}' beside it, after "
-                                       f"a backup" if beside else
-                                       f"beside the index doc, in {folder}, unless you choose another folder")},
-        confirmation_id)
+        f"'{ref['name']}' ({folder})", asked, confirmation_id)
     if gate:
         return gate
     survey = await survey_index(ctx, doc_type, index_uuid)
@@ -798,7 +886,19 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
                           "document has it) and the user wants the doc now: document_missing_fields=true, which "
                           "lists them as not in the index.")
     missing = list(dict.fromkeys(f for fields in missing_by.values() for f in fields))
-    section = existing_index_markdown(survey, planned, schema)     # fields not in the index: only as the user chose
+    layout, _ = await _layout(ctx, ref, field_mapping_layout)
+    previous = existing or beside
+    kept_descriptions = (read_descriptions(body_text(await stroom.get_doc('Documentation', previous['uuid'])))
+                         if previous else {})
+    described = Descriptions({**kept_descriptions, **(field_descriptions or {})}, ask=True,
+                             notes=await _vendor_notes(ctx, build))
+    section = existing_index_markdown(survey, planned, schema, layout, described)     # not in the index: as the user chose
+    if described.wanted:
+        # The user agreed in this call: the call repeated with the descriptions isn't theirs to agree again.
+        return needs_descriptions(described, confirmation_id=consent_from(ctx).reissue(
+            'confirmation', 'write_documentation', asked))
+    if described.given:
+        section = section.rstrip() + '\n\n' + descriptions_block(described.given)
     summary = existing_index_summary(survey)
     text = _below_section(replace_section(body, 'Field mapping', section), 'Purpose and data', summary)
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -1333,11 +1433,16 @@ async def promote_build(
         result['promoted_with_warnings'] = warnings
     if filters:
         result['processing_filters'] = filters
-        result['next'] = ("Tell the user each promoted pipeline has a processing filter, created disabled: review the "
+        result['next'] = ("Tell the user each promoted pipeline has a processing filter, created disabled (one marked "
+                          "existing is an enabled filter it already had, selecting what arrives: no second one was "
+                          "made): review the "
                           "pipeline (pipeline_link) and enable it on its Processors tab when ready. Enabled, it processes "
-                          "everything on its feed the pipeline hasn't processed yet, existing data included: if an "
+                          "everything on its feed, existing data included, and what the build processed again: if an "
                           "earlier version still processes the same feed, it processes that history again, so decide "
-                          "with them first (disable the earlier one, or limit the filter in Stroom).")
+                          "with them first (disable the earlier one, or limit the filter in Stroom)."
+                          + (" A filter with before_enabling indexes into an index that must start fresh: ask the user "
+                             "to have it done first, as it says (an index left as it is holds the build's events twice)."
+                             if any(f.get('before_enabling') for f in filters) else ''))
     return result
 
 

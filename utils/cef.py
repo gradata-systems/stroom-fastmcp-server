@@ -272,8 +272,9 @@ class CefPlan(BaseModel):
     def xslt(self) -> str:
         return render_xslt(self)
 
-    def markdown(self, examples: dict[tuple[str, str], str] | None = None) -> str:
-        return plan_markdown(self, examples or {})
+    def markdown(self, examples: dict[tuple[str, str], str] | None = None, layout: str = 'by_event_type',
+                 described: Any = None) -> str:
+        return plan_markdown(self, examples or {}, layout, described)
 
 
 SEVERITIES = {str(n) for n in range(11)} | {'Low', 'Medium', 'High', 'Very-High', 'Unknown'}
@@ -885,7 +886,16 @@ def _header_from(value: CefValue) -> str:
     return said
 
 
-def plan_markdown(plan: CefPlan, examples: dict[tuple[str, str], str]) -> str:
+def description_key(kind: str, key: str) -> str:
+    """How a CEF field's description is kept: by key for every event's, by kind and key otherwise (a custom slot
+    holds what each kind of event puts in it)."""
+    return key if kind == 'common' else f'{kind}: {key}'
+
+
+def plan_markdown(plan: CefPlan, examples: dict[tuple[str, str], str], layout: str = 'by_event_type',
+                  described: Any = None) -> str:
+    """The Field mapping section: the header, then by event type (the default) a table of the keys every event
+    gets and one per kind of event; compact, one table with an Event type column."""
     out = ["Each Event becomes one CEF (ArcSight Common Event Format) line: `CEF:0|Device Vendor|Device Product|Device "
            "Version|Device Event Class ID|Name|Severity|` then key=value pairs. "
            + (f"Each line is the value of one Kafka record on topic `{plan.topic}`, one Event a record"
@@ -902,22 +912,61 @@ def plan_markdown(plan: CefPlan, examples: dict[tuple[str, str], str]) -> str:
                    f"{_cell(examples.get(('header', name), ''))} |")
     out += ['']
 
-    def table(fields: list[CefField], kind: str) -> list[str]:
-        rows = ["| Event path | CEF key | ArcSight field | What it holds | Example |", "| --- | --- | --- | --- | --- |"]
+    def table(fields: list[CefField], kind: str, typed: bool = False) -> list[str]:
+        rows = [] if typed else ["| Event path | CEF key | ArcSight field | What it holds | Example |",
+                                 "| --- | --- | --- | --- | --- |"]
         for f in fields:
             full, _, length, meaning = KEYS.get(f.key, (f.key, '', None, 'key outside the CEF dictionary'))
+            # What the field means here: the agent's, from its path, label and example (asked for by the user: a
+            # custom slot like deviceCustomString1 means what this source puts in it); ArcSight's words as fallback.
+            if described is not None:
+                example = examples.get((kind, f.key), '')
+                meaning = described.of(description_key(kind, f.key),
+                                       f"{f.path} -> {f.key}" + (f" (labelled '{f.label}')" if f.label else ''),
+                                       [example] if example else [], {'ArcSight': meaning}, f.path)
             what = meaning + (f"; labelled '{f.label}' ({f.key}Label = {KEYS.get(f.key + 'Label', (f.key + 'Label',))[0]})"
                               if f.label and f.key in SLOT_KEYS else '')
             what += {'epoch_ms': '; milliseconds since 1970',
                      'outcome': '; from Outcome/Success (no Outcome: success)'}.get(f.transform, '')
             if length:
                 what += f'; at most {length} characters'
-            rows.append(f"| {_cell(_path_said(f.path))} | {f.key} | {full} | {_cell(what)} | {_cell(examples.get((kind, f.key), ''))} |")
+            rows.append((('| every event ' if kind == 'common' else f'| {_cell(kind)} ') if typed else '')
+                        + f"| {_cell(_path_said(f.path))} | {f.key} | {full} | {_cell(what)} | {_cell(examples.get((kind, f.key), ''))} |")
         return rows
-    if plan.common:
+    if layout == 'compact':
+        out += ["### Fields", "", "| Event type | Event path | CEF key | ArcSight field | What it holds | Example |",
+                "| --- | --- | --- | --- | --- | --- |"]
+        for kind, fields in [('common', plan.common)] + list(plan.events.items()):
+            out += table(fields, kind, typed=True)
+        out += ['']
+    if plan.common and layout != 'compact':
         out += ["### Every event", "", *table(plan.common, 'common'), '']
-    for kind, fields in plan.events.items():
-        out += [f"### {kind} events", "", *table(fields, kind), '']
+    # Kinds with roughly the same keys together, under one heading naming each (asked for by the user: Send and
+    # Receive, say): one row per key, its paths together, the examples each kind got.
+    from utils.fielddoc import any_action_path, combined_path, similar_groups
+    kinds = similar_groups({k: {f"{any_action_path(f.path)} {f.key}" for f in fields}
+                            for k, fields in plan.events.items()}) if layout != 'compact' else []
+    for group in kinds:
+        if len(group) == 1:
+            out += [f"### {group[0]} events", "", *table(plan.events[group[0]], group[0]), '']
+            continue
+        rows: dict[str, list[tuple[str, CefField]]] = {}
+        for kind in group:
+            for f in plan.events[kind]:
+                rows.setdefault(f"{any_action_path(f.path)} {f.key}", []).append((kind, f))
+        merged = []
+        for members in rows.values():
+            kind, f = members[0]
+            line = table([f], kind)[2]
+            paths = [m.path for _, m in members]
+            if len(set(paths)) > 1:
+                line = line.replace(f"| {_cell(_path_said(f.path))} |", f"| `{_cell(combined_path(paths))}` |", 1)
+            got = {k: example for k, m in members if (example := examples.get((k, m.key), ''))}
+            if len(set(got.values())) > 1 or len(members) < len(group):
+                said = '; '.join(f"{v} ({k})" for k, v in got.items())
+                line = line.rsplit('|', 2)[0] + f"| {_cell(said)} |"
+            merged.append(line)
+        out += [f"### {', '.join(group)} events", "", *table([], '')[:2], *merged, '']
     if plan.not_sent:
         out += ["### Not sent", "", "Event values the sample holds that no CEF key carries.", "",
                 "| Event path | Event type | Why |", "| --- | --- | --- |"]

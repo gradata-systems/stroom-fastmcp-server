@@ -45,7 +45,7 @@ The server doesn't rotate or expire the audit log itself; that is left to what r
 | `resource_read` | every resource read, such as a guide or convention profile, when it finishes | `uri`, `outcome`, `error`, `duration_ms` |
 | `stroom_request` | every Stroom REST request, and every sample upload to the datafeed | `method`, `path`, `outcome` (`success` or `error`), `status`, `error`, `took_ms`; uploads add `feed` and `bytes` |
 | `confirmation` | a change the user confirms first, e.g. `create_feed`, `create_pipeline`, `copy_pipeline` | `action`, `details`, `outcome`, `via` or `id` |
-| `approval` | a change that needs the user's approval, e.g. `promote_build`, `reprocess_streams` (processor filters are otherwise created disabled, and enabled by the user in Stroom, where Stroom audits it) | `action`, `details`, `outcome`, `via` or `id` |
+| `approval` | a change that needs the user's approval, e.g. `promote_build`, `reprocess_streams`, `create_processor_filter` for a build's sample (processor filters are otherwise created disabled, and enabled by the user in Stroom, where Stroom audits it) | `action`, `details`, `outcome`, `via` or `id` |
 | `choice` | the user picks one of several options in a form: how an index's fields are named, which field is `@timestamp`, which feed they meant when the one they named isn't in this Stroom, whether a hand edit is kept | `action`, `question`, `outcome` (`requested`, `chosen` or `declined`), `via`, `choice` |
 | `access_denied` | a request refused by the server or by Stroom | `reason`, and the fields below |
 

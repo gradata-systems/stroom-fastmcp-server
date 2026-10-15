@@ -526,7 +526,7 @@ async def _stream_events(ctx: Context, stream_ids: list[int]) -> tuple[str, dict
     return etree.tostring(merged, encoding='unicode'), read
 
 
-async def _record_validated(ctx: Context, stream_ids: list[int]) -> list[str]:
+async def _record_validated(ctx: Context, stream_ids: list[int]) -> list[dict[str, str]]:
     """The pipelines that wrote these Events streams, recorded as validated (the plan's 'validated' step)."""
     from tools.stepping import remember_validated
     stroom = gateway_from(ctx)
@@ -538,8 +538,9 @@ async def _record_validated(ctx: Context, stream_ids: list[int]) -> list[str]:
             doc = await stroom.get(f'/pipeline/v1/{uuid}')
         except ToolError:
             continue
-        if await remember_validated(ctx, {'type': 'Pipeline', 'uuid': uuid, 'name': doc.get('name')}):
-            recorded.append(doc.get('name'))
+        ref = {'type': 'Pipeline', 'uuid': uuid, 'name': doc.get('name')}
+        if await remember_validated(ctx, ref):
+            recorded.append(ref)
     return recorded
 
 
@@ -569,7 +570,12 @@ async def check_events(
         events_xml, read = await _stream_events(ctx, stream_ids)
         result = {**await check_events(ctx, events_xml, schema_version), 'read': read}
         if result['ok']:
-            result['recorded_for'] = await _record_validated(ctx, stream_ids)
+            recorded = await _record_validated(ctx, stream_ids)
+            result['recorded_for'] = [r['name'] for r in recorded]
+            if recorded:
+                # The plan moves on from here too (seen in testing: the agent's checklist stayed on processing).
+                from tools.plan import next_for
+                return await next_for(ctx, recorded[0], result)
         return result
     events_xml, escaped = _unescaped(events_xml)
     if escaped:

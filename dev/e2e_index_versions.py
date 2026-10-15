@@ -94,18 +94,30 @@ async def production(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: s
     except Exception as e:
         refused = str(e)
     e2e.check('not created by this server' in refused, "the server will not switch on a promoted pipeline's filter")
-    for f in made.values():
-        await stroom.request('PUT', f"/processorFilter/v1/{f['filter_id']}/enabled", True)
-    # No minimum creation time, so the feed's existing data is theirs too, but not what the build already processed:
-    # Stroom would process the sample again for a new filter, mark its Events deleted and index them twice.
-    e2e.check(all(f.get('except_processed_in_build') for f in made.values()),
-              f"each promoted filter leaves out what its pipeline processed in the build: "
-              f"{[f.get('except_processed_in_build') for f in made.values()]}")
-    await asyncio.sleep(30)
-    rows = (await stroom.find_meta([{'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(i)}
-                                    for i in events], len(events), op='OR')).get('values') or []
-    e2e.check(rows and all(r['meta'].get('status') != 'DELETED' for r in rows),
-              f"30 s after they are enabled, the sample's Events {events} are still the current ones, not processed again")
+    # Asked for by the user: no NOT over what the build processed. The indexing filter says to drop the index first, so
+    # it starts fresh, and to wait for the events pipeline's filter: the sample is translated again, and indexed while
+    # its earlier Events were still current, the index held it twice (seen in this suite: 8 documents, not 5).
+    events_filter = made[csv['pipeline']['name']]['filter_id']
+    before = made[v1['name']].get('before_enabling') or ''
+    drop = e2e.dropped_by(before)
+    e2e.check(drop and f"drops '{index}' first" in before and f'only once filter {events_filter}' in before
+              and not made[csv['pipeline']['name']].get('before_enabling'),
+              f"the indexing filter says to drop its index first, and to wait for filter {events_filter}: {before[:200]}")
+    e2e.check((await es.delete(f'/{drop}')).status_code == 200, f'dropped: DELETE {drop}')
+    # As the user would in Stroom, in that order: the events pipeline's filter, then once it has processed the sample
+    # again, the indexing filter.
+    await stroom.request('PUT', f"/processorFilter/v1/{events_filter}/enabled", True)
+    again = await processing_writes.wait_for_processing(ctx, csv['pipeline']['uuid'], [csv['raw']], filter_id=events_filter)
+    events = again['streams'][0]['events']
+    await stroom.request('PUT', f"/processorFilter/v1/{made[v1['name']]['filter_id']}/enabled", True)
+    await processing_writes.wait_for_processing(ctx, v1['uuid'], events, expect_events=False,
+                                                filter_id=made[v1['name']]['filter_id'])
+    await asyncio.sleep(10)     # anything else it might take, before counting
+    await es.post(f'/{index}/_refresh')
+    by_stream = (await es.post(f'/{index}/_search', json={'size': 0, 'aggs': {'s': {'terms': {'field': 'StreamId'}}}})
+                 ).json()['aggregations']['s']['buckets']
+    e2e.check([(b['key'], b['doc_count']) for b in by_stream] == [(events[0], 3)],
+              f"the fresh index holds the re-translated sample once, its earlier Events not at all: {by_stream}")
     return {'csv': csv, 'events': events, 'v1': v1, 'v1_index': index, 'v1_doc': index_doc, 'cluster': cluster,
             'filters': made, 'folder': folder, 'stamp': stamp}
 

@@ -68,11 +68,15 @@ up a promotion.
    to `MCP Workspace/backups` first.
 5. Each promoted pipeline gets a processor filter on its feed, with the feed task limit
    (`STROOM_MCP_MAX_FEED_FILTER_TASKS`, 2 by default), **created disabled**. It has no minimum stream creation
-   time: enabled, it processes everything on the feed, existing data included, except the streams the pipeline
-   already processed in the build (Stroom would otherwise process those again, replacing their Events, and an index
-   would hold them twice). For a build on an existing feed the filter names that feed, never a test feed, and
-   leaves none of the streams processed in the build out: their Events stayed in the test feed. Each pipeline's
-   StreamAppender writes into its input's feed again: the test feed was for the build only.
+   time: enabled, it processes everything on the feed, existing data and the streams the pipeline processed in the
+   build included (Stroom processes those again, replacing their Events). An indexing pipeline's filter carries
+   `before_enabling`: have the cluster admin drop the Elasticsearch index first (`DELETE _data_stream/<index>` or
+   `DELETE <index>`, as the agreed template makes it), or delete a Lucene index's shards, so it starts fresh rather
+   than holding the build's events twice. When the events pipeline whose Events it indexes is promoted with it,
+   `before_enabling` also says to enable it only once that pipeline's filter has processed the build's streams again:
+   enabled at the same time, it indexes their earlier Events too, then their replacements. A pipeline that already
+   has an enabled filter selecting what arrives on the feed gets no second one (the reply marks it `existing`). For a
+   build on an existing feed the filter names that feed, never a test feed. Each pipeline's StreamAppender writes into its input's feed again: the test feed was for the build only.
 
 ## After promotion
 
