@@ -24,6 +24,7 @@ from tools.processing import processing_status
 from tools.streams import feed_created_ms, own_streams, refuse_older_than_feed
 from tools.stepping import stepped_clean
 from utils.consent import consent_from
+from utils import useractions
 from utils.mappingstore import digest, normalise_xslt, read_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.stroom import StroomGateway, doc_link, gateway_from
@@ -524,10 +525,15 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]]) -> 
             _term('Type', entry['stream_type']), *entry['extra_terms']]}
         created = await _create_filter(stroom, entry['pipeline'], expression, 10, stroom.settings.max_feed_filter_tasks,
                                        None, enabled=False)
-        before = await _before_promoted_indexing(stroom, entry['pipeline'])
+        before, first = await _before_promoted_indexing(stroom, entry['pipeline'])
+        selects = (f"processes feed {entry['feed']} ({entry['stream_type']}), existing data included" if entry['feed']
+                   else f"processes {entry['stream_type']} from its source pipeline, existing data included")
         made.append({'filter_id': created['id'], 'pipeline': entry['pipeline']['name'], 'feed': entry['feed'],
                      'stream_type': entry['stream_type'], 'enabled': False,
-                     **({'before_enabling': before} if before else {}), 'pipeline_link': link})
+                     **({'before_enabling': before} if before else {}), 'pipeline_link': link,
+                     'user_actions': [a for a in (first, useractions.enable_filter(
+                         stroom.settings, created['id'], entry['pipeline'], selects,
+                         [first['id']] if first else [])) if a]})
     # An index reading the Events of a pipeline promoted with it: the events pipeline's new filter goes first. Seen in
     # e2e: both enabled together, the indexing filter took the build's Events while they were still current, then
     # their re-translation too, and the index held the sample twice.
@@ -539,6 +545,9 @@ async def create_promotion_filters(ctx: Context, plan: list[dict[str, Any]]) -> 
             f['before_enabling'] += (f"; and only once filter {first['filter_id']} (pipeline '{first['pipeline']}') "
                                      f"has processed what the build processed again: enabled before that, it indexes "
                                      f"those Events too, then their replacements")
+            f['user_actions'][-1].setdefault('after', []).extend(
+                [f"enable-{first['filter_id']}",
+                 f"filter {first['filter_id']} has processed what the build processed again"])
     return made
 
 
@@ -564,21 +573,26 @@ def _names_pipeline(expression: dict[str, Any] | None) -> bool:
                for c in (expression or {}).get('children') or [])
 
 
-async def _before_promoted_indexing(stroom: StroomGateway, pipeline: dict[str, Any]) -> str | None:
-    """What a promoted indexing pipeline's index needs before its filter is enabled: dropped, or emptied, so it starts
-    fresh; None for any other pipeline."""
+async def _before_promoted_indexing(stroom: StroomGateway,
+                                    pipeline: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """(what, action): what a promoted indexing pipeline's index needs before its filter is enabled, dropped or
+    emptied so it starts fresh, and the button for it; (None, None) for any other pipeline."""
     destination = await elastic_destination(stroom, pipeline['uuid'])
     if destination:
         doc = await stroom.get_doc('Pipeline', pipeline['uuid'])
-        return (f"the cluster admin drops '{destination['index name']}' first, so it starts fresh with what this "
-                f"pipeline indexes, the Events indexed in the build among them: "
-                f"{drop_request(doc, destination['index name'])}. The agreed template stays on the cluster and makes "
-                f"the index again as documents arrive")
+        request = drop_request(doc, destination['index name'])
+        return ((f"the cluster admin drops '{destination['index name']}' first, so it starts fresh with what this "
+                 f"pipeline indexes, the Events indexed in the build among them: {request}. The agreed template stays "
+                 f"on the cluster and makes the index again as documents arrive"),
+                useractions.es_request(f"drop-{destination['index name']}", request,
+                                       f"Drop '{destination['index name']}' so it starts fresh"))
     lucene = await lucene_index(stroom, pipeline['uuid'])
     if lucene:
-        return (f"delete the shards of index '{lucene.get('name')}' first (its Shards tab), so it starts fresh with what "
-                f"this pipeline indexes, the Events indexed in the build among them")
-    return None
+        return ((f"delete the shards of index '{lucene.get('name')}' first (its Shards tab), so it starts fresh with "
+                 f"what this pipeline indexes, the Events indexed in the build among them"),
+                useractions.open_document(stroom.settings, {**lucene, 'type': lucene.get('type') or 'Index'},
+                                          'delete its shards on the Shards tab, so it starts fresh'))
+    return None, None
 
 
 # While a pipeline is developed in the workspace, Elasticsearch indexing runs in small batches: a rejected document
@@ -853,7 +867,8 @@ async def create_processor_filter(
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=False)
     consent_from(ctx).discard(source_confirmation_id)
     result = {'filter_id': created['id'], **common, **({'batch_size': _BATCH_NOTE} if small else {}), 'enabled': False,
-              **_for_the_user(stroom, pipeline, created['id'], details)}
+              **_for_the_user(stroom, pipeline, created['id'], details,
+                              _before_actions(stroom, pipeline, destination, lucene, details))}
     return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
 
 
@@ -868,18 +883,44 @@ def _output_note(output: dict[str, Any]) -> str:
 
 
 def _for_the_user(stroom: StroomGateway, pipeline: dict[str, Any], filter_id: int,
-                  details: dict[str, Any]) -> dict[str, Any]:
-    """What the user needs to enable a disabled filter: where, what it will do, and what must be done first."""
+                  details: dict[str, Any], before: list[dict[str, Any]] = ()) -> dict[str, Any]:
+    """What the user needs to enable a disabled filter: where, what it will do, and what must be done first; with
+    user_actions, the same as buttons (before: the actions that come first)."""
     first = [f"{details[k]}: enable it only once that is so" if k == 'index template' else details[k]
              for k in _FIRST if k in details]
+    before = [b for b in before if b]
+    enable = useractions.enable_filter(stroom.settings, filter_id, pipeline, details.get('scope') or '',
+                                       [b['id'] for b in before])
     return {
         'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline['uuid']),
         'enabling_it': {k: v for k, v in details.items() if k not in _FIRST},
         **({'before_enabling': first} if first else {}),
+        **useractions.actions(*before, enable),
         'hint': (f"Filter {filter_id} is disabled: enabling it is the user's. Give them the pipeline_link and ask them "
                  f"to enable filter {filter_id} on its Processors tab"
                  + (", once what before_enabling says is done" if first else '')
                  + f", and to tell you when they have. Then wait_for_processing (filter_id={filter_id}); not before.")}
+
+
+def _before_actions(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any] | None,
+                    lucene: dict[str, Any] | None, details: dict[str, Any]) -> list[dict[str, Any] | None]:
+    """Buttons for what comes before enabling a filter: the agreed index template committed, an index this pipeline
+    wrote to before dropped (Elasticsearch: copied for the cluster admin), a Lucene index's shards deleted (its doc
+    opened)."""
+    out: list[dict[str, Any] | None] = []
+    if destination:
+        agreed = read_agreed_template(pipeline.get('description')) or {}
+        if agreed.get('dev_tools'):
+            out.append(useractions.es_request('commit-template', agreed['dev_tools'],
+                                              f"Commit the agreed index template '{agreed.get('name')}' to cluster "
+                                              f"{destination.get('cluster')}, if it isn't already"))
+        if 'already indexed' in details:
+            out.append(useractions.es_request('drop-index', drop_request(pipeline, destination['index name']),
+                                              f"Drop '{destination['index name']}' so it starts fresh"))
+    elif lucene and 'already indexed' in details:
+        out.append(useractions.open_document(stroom.settings, {**lucene, 'type': lucene.get('type') or 'Index'},
+                                             'delete its shards on the Shards tab, so it starts fresh'))
+    return out
 
 
 async def set_processor_filter_enabled(
@@ -968,7 +1009,8 @@ async def reprocess_streams(
         return await next_for(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}, {
             'filter_id': created['id'], 'pipeline': pipeline['name'], 'streams': stream_ids, 'max_tasks': max_tasks,
             'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
-            **_for_the_user(stroom, pipeline, created['id'], details)})
+            **_for_the_user(stroom, pipeline, created['id'], details,
+                            _before_actions(stroom, pipeline, destination, lucene, details))})
     summary = f"Create processor filter and reprocess streams\nReprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'."
     if 'already indexed' in details:
         summary += " Approve only once the index is dropped, as said below."
@@ -1028,11 +1070,11 @@ def _will_process(f: dict[str, Any], meta: dict[str, Any]) -> bool:
             and not (created and earliest and created < earliest) and not (created and latest and created > latest))
 
 
-async def _disabled_only(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> str:
-    """What the user must enable before the pipeline processes these streams ('' when something enabled will): its
-    disabled filters that would, or the disabled processor they hang on, which runs none of them."""
+async def _waiting_on(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> tuple[list[int], list[int]]:
+    """(disabled, stopped): the filters that would process these streams but are disabled, and those whose processor
+    is disabled; both empty when something enabled will process them."""
     if not stream_ids:
-        return ''
+        return [], []
     metas = [r['meta'] for r in (await stroom.find_meta([_term('Id', i) for i in stream_ids], len(stream_ids),
                                                         op='OR')).get('values') or []]
     filters = await stroom.processor_filters(pipeline_uuid)
@@ -1042,14 +1084,10 @@ async def _disabled_only(stroom: StroomGateway, pipeline_uuid: str, stream_ids: 
         if selecting and not any(f.get('enabled') and (f.get('processor') or {}).get('enabled') is not False
                                  for f in selecting):
             waiting |= {f['id'] for f in selecting}
-    if not waiting:
-        return ''
     stopped = sorted(i for i in waiting if (next(f for f in filters if f['id'] == i).get('processor') or {})
                      .get('enabled') is False)
     disabled = sorted(i for i in waiting if not next(f for f in filters if f['id'] == i).get('enabled'))
-    return ' and '.join(([f"filter(s) {disabled}"] if disabled else [])
-                        + ([f"the processor of filter(s) {stopped} (the pipeline's processor row, above its "
-                            f"filters)"] if stopped else []))
+    return disabled, stopped
 
 
 async def _unselected(stroom: StroomGateway, pipeline_uuid: str, stream_ids: list[int]) -> list[str]:
@@ -1126,14 +1164,25 @@ async def wait_for_processing(
             output_type = await output_stream_type(stroom, pipeline_uuid)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
         if checked is None:
-            disabled = await _disabled_only(stroom, pipeline_uuid, [raw for raw, metas in outputs.items() if not metas])
+            waiting_ids, stopped_ids = await _waiting_on(stroom, pipeline_uuid,
+                                                         [raw for raw, metas in outputs.items() if not metas])
+            disabled = ' and '.join(([f"filter(s) {waiting_ids}"] if waiting_ids else [])
+                                    + ([f"the processor of filter(s) {stopped_ids} (the pipeline's processor row, "
+                                        f"above its filters)"] if stopped_ids else []))
             if disabled:
+                pipeline_ref = {'type': 'Pipeline', 'uuid': pipeline_uuid,
+                                'name': (await stroom.get_doc('Pipeline', pipeline_uuid)).get('name')}
+                waiting_actions = useractions.actions(
+                    *[useractions.enable_filter(stroom.settings, i, pipeline_ref) for i in waiting_ids],
+                    useractions.open_document(stroom.settings, pipeline_ref, "enable its processor (the row above its "
+                                                                             "filters) on the Processors tab")
+                    if stopped_ids else None)
                 # Created disabled (asked for by the user): nothing runs until the user enables it, so waiting would
                 # only run out the timeout.
                 return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid}), {
                     'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'waiting',
                     'waiting_for': f"the user to enable {disabled}",
-                    'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid),
+                    'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid), **waiting_actions,
                     'hint': f"Processing hasn't started: {disabled} disabled, and enabling is the user's. Ask them to "
                             f"enable it on the pipeline's Processors tab (pipeline_link) and to tell you when they "
                             f"have; then wait_for_processing again."})

@@ -1899,7 +1899,7 @@ async def propose_index_template(
                         confirmation_id, reviewed)
     if gate:
         return _asking(gate, result)
-    result.update({'agreed': True, 'hint': (
+    result.update({'agreed': True, **_commit_action(result, name, destination), 'hint': (
         "The user agreed this index template; it is kept with the pipeline. Give them dev_tools for the cluster admin "
         "to commit to the cluster, and end your turn. Once they say it is committed, create_processor_filter: its "
         "approval asks them to confirm that, and starts indexing.")})
@@ -1971,11 +1971,19 @@ async def check_index_template(
                         own, components, result['notes'], confirmation_id, reviewed)
     if gate:
         return _asking(gate, result)
-    result.update({'agreed': True, 'hint': (
+    result.update({'agreed': True, **_commit_action(result, name or destination['index name'], destination), 'hint': (
         "The user agreed this index template; it is kept with the pipeline. Once they say the cluster admin has "
         "committed it to the cluster, create_processor_filter: its approval asks them to confirm that, and starts "
         "indexing.")})
     return result
+
+
+def _commit_action(result: dict[str, Any], name: str, destination: dict[str, Any]) -> dict[str, Any]:
+    """The agreed template's request, as a button for the cluster admin to copy (asked for by the user)."""
+    from utils import useractions
+    return useractions.actions(useractions.es_request(
+        'commit-template', result.get('dev_tools') or '',
+        f"Commit the agreed index template '{name}' to cluster {destination.get('cluster')}"))
 
 
 def _cidr(value: str) -> str:

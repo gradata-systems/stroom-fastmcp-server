@@ -99,9 +99,10 @@ async def upload(request: Request) -> Response:
 
 
 from tools.plan import annotate_tools
+from tools.toolmeta import registration
 annotate_tools(TOOL_MODULES)
 for tool in (t for module in TOOL_MODULES for t in module.ALL_TOOLS):
-    mcp.tool(tool)
+    mcp.tool(tool, **registration(tool.__name__))
 resources.register(mcp, settings.conventions_dir)
 
 

@@ -10,11 +10,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from security.guard import guard_from
 from tools.streams import SampleStreams, read_sample_streams
+from utils import useractions
 from utils.consent import consent_from, edited
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SAMPLE_GUIDE, SampleTexts, as_named_samples, check_sample, long_samples_note
-from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
+from utils.stroom import StroomGateway, body_text, doc_link, gateway_from, set_body_text
 from utils.uploads import send_to_feed
 
 Build = Annotated[str, Field(description="Build name; its workspace folder is created if needed.")]
@@ -26,7 +27,6 @@ def sent_by_user(settings, feed: dict[str, Any]) -> str:
     Seen (Qwen3 Coder Next, VS Code): a curl to Stroom's datafeed given here for the user, with 'Bearer <their token or
     API key>', was run three times from the agent's terminal (PowerShell's curl alias, then Invoke-WebRequest, then
     a 401) before it called upload_sample. No such command is given now: the agent has no token for the datafeed."""
-    from utils.stroom import doc_link
     return (f"Next: upload_sample feed={feed['name']} files=[their paths], and run the command it gives for each file in "
             f"the user's terminal: it sends the file from their disk whole, and prints its stream_id. Never send files "
             f"to Stroom's datafeed yourself (you have no token for it), and don't pass their text through you. Only if "
@@ -236,7 +236,11 @@ async def create_feed(
         await record.update(guard_from(ctx), build, {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name']},
                             lambda entry: entry.update(user_samples=chosen))
     result = {'type': 'Feed', 'uuid': doc['uuid'], 'name': doc['name'], 'stream_type': doc.get('streamType'),
-              'encoding': doc.get('encoding')}
+              'encoding': doc.get('encoding'), 'link': doc_link(stroom.settings, 'Feed', doc['uuid']),
+              # Sample files can go in through Stroom's own upload on the feed's Data tab (asked for by the user, for
+              # a client in Stroom, which uploads nothing through the chat).
+              **useractions.actions(useractions.open_document(stroom.settings, doc, "upload sample files on its Data "
+                                                                                    "tab, each as its own stream"))}
     # A feed of this name made before and deleted leaves its streams under the name, out of sight in the UI.
     rows = (await stroom.find_meta([{'type': 'term', 'field': 'Feed', 'condition': 'EQUALS', 'value': doc['name']}],
                                    50)).get('values') or []

@@ -71,6 +71,12 @@ async def test_elicitation_is_used_when_the_client_supports_it():
     with pytest.raises(ToolError, match='did not agree'):
         await store.require(SimpleNamespace(elicit=decline), 'confirmation', 'create_feed', 'Create feed X', {}, None)
 
+    # Closed or run out without an answer (Stroom answers cancel when its form expires): not a refusal.
+    async def cancel(message, response_type):
+        return Answer('cancel', None)
+    with pytest.raises(ToolError, match=r"No answer yet to: Create feed X\..*call create_feed again"):
+        await store.require(SimpleNamespace(elicit=cancel), 'confirmation', 'create_feed', 'Create feed X', {}, None)
+
 
 async def test_client_without_elicitation_falls_back_to_an_id():
     async def unsupported(message, response_type):
@@ -153,6 +159,10 @@ async def test_a_proposed_name_can_be_corrected_in_the_modern_form():
     # Declining the form stops it.
     ctx = ModernCtx(responses={key: {'action': 'decline'}}, state=asked.request_state)
     with pytest.raises(ToolError, match='did not agree'):
+        await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable)
+    # A form that ran out (cancel) is no answer yet, not a refusal.
+    ctx = ModernCtx(responses={key: {'action': 'cancel'}}, state=asked.request_state)
+    with pytest.raises(ToolError, match="No answer yet to: Create feed.*they didn't decline"):
         await store.require(ctx, 'confirmation', 'create_feed', 'Create feed', details, None, editable=editable)
 
 

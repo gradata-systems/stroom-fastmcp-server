@@ -195,10 +195,12 @@ class ConsentStore:
                 agreed = getattr(answer, 'action', None) == 'accept' and bool(confirmed)
                 edits = _settled(editable, {k: getattr(data, k, None) for k in editable})
                 changed = _changed(editable, edits)
-                audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='elicitation',
+                unanswered = getattr(answer, 'action', None) == 'cancel'
+                audit(kind, action=action, details=details, via='elicitation',
+                      outcome='granted' if agreed else 'unanswered' if unanswered else 'declined',
                       **({'edited': changed} if agreed and changed else {}))
                 if not agreed:
-                    raise ToolError(f"The user did not agree to: {summary}")
+                    raise ToolError(_not_agreed(summary, action, unanswered))
                 ctx_edits(ctx).update(edits)
                 ctx_changes(ctx).update({k: (editable[k][1], v) for k, v in changed.items()})
                 # The user's answer as an id, for the same call repeated with what they settled on: if their access
@@ -308,10 +310,11 @@ class ConsentStore:
             agreed = action_taken == 'accept' and (bool(editable) or bool(content.get('value')))
             edits = _settled(editable, {k: content.get(k) for k in editable})
             changed = _changed(editable, edits)
-            audit(kind, action=action, details=details, outcome='granted' if agreed else 'declined', via='form',
+            audit(kind, action=action, details=details, via='form',
+                  outcome='granted' if agreed else 'unanswered' if action_taken == 'cancel' else 'declined',
                   **({'edited': changed} if agreed and changed else {}))
             if not agreed:
-                raise ToolError(f"The user did not agree to: {summary}")
+                raise ToolError(_not_agreed(summary, action, action_taken == 'cancel'))
             state['granted'].append(bound)
             if edits:
                 state.setdefault('edits', {})[bound] = edits
@@ -350,6 +353,17 @@ class ConsentStore:
             token = token.strip().lower()
             payload = self._unseal(token)
             self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
+
+
+def _not_agreed(summary: str, action: str, unanswered: bool) -> str:
+    """What the agent is told when a form wasn't accepted. A form closed or run out without an answer (cancel) is not
+    the user declining (asked for by the user: Stroom answers cancel when its form expires, and an agent took 'did not
+    agree' for a refusal)."""
+    if unanswered:
+        return (f"No answer yet to: {summary}. The form was closed or ran out before the user answered; they didn't "
+                f"decline, and nothing was done. When the user is back, call {action} again with the same arguments: "
+                f"they are asked again.")
+    return f"The user did not agree to: {summary}"
 
 
 # The answer a form gave in this call, kept as an id (see require); read when the access token runs out later on.

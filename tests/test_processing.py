@@ -155,6 +155,9 @@ async def test_a_feeds_filter_or_one_sending_elsewhere_is_left_disabled_for_the_
     assert json.loads(create.calls.last.request.content)['enabled'] is False and result['enabled'] is False
     assert 'docUuid=p1' in result['pipeline_link']
     assert "enable filter 9 on its Processors tab" in result['hint'] and 'not before' in result['hint']
+    # As a button (asked for by the user), with nothing to do first here.
+    [enable] = result['user_actions']
+    assert enable['action'] == 'enable_processor_filter' and enable['filter_id'] == 9 and 'after' not in enable
 
 
 @respx.mock
@@ -577,11 +580,16 @@ async def test_waiting_ends_at_once_when_no_filter_will_process_the_stream(ctx, 
 async def test_waiting_on_a_disabled_filter_asks_for_the_user_to_enable_it(ctx):
     # Filters are created disabled: nothing runs until the user enables one, so there is nothing to wait out.
     waiting_on({'enabled': False, 'terms': [('Id', '6')]})
+    respx.get(f'{API}/pipeline/v1/p1').mock(return_value=httpx.Response(200, json={'uuid': 'p1', 'name': 'Acme-Events'}))
     started = time.monotonic()
     result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=60)
     assert time.monotonic() - started < 5
     assert result['gate'] == 'waiting' and result['waiting_for'] == 'the user to enable filter(s) [775]'
     assert 'docUuid=p1' in result['pipeline_link'] and 'Processors tab' in result['hint']
+    # As a button too (asked for by the user: Stroom shows user_actions on the tool call's card).
+    [action] = result['user_actions']
+    assert action['action'] == 'enable_processor_filter' and action['filter_id'] == 775
+    assert action['doc'] == {'type': 'Pipeline', 'uuid': 'p1', 'name': 'Acme-Events'} and 'docUuid=p1' in action['link']
 
 
 @respx.mock
@@ -589,9 +597,12 @@ async def test_waiting_on_a_disabled_processor_asks_for_the_user_to_enable_it(ct
     # A disabled processor runs none of its filters, enabled or not (seen on the local stack: the filter enabled, the
     # processor Stroom made with it still disabled, and nothing processed).
     waiting_on({'enabled': True, 'processor': False, 'terms': [('Id', '6')]})
+    respx.get(f'{API}/pipeline/v1/p1').mock(return_value=httpx.Response(200, json={'uuid': 'p1', 'name': 'Acme-Events'}))
     result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=60)
     assert result['gate'] == 'waiting' and result['waiting_for'].startswith(
         'the user to enable the processor of filter(s) [775]')
+    # No button enables a processor: the pipeline is opened for the user to.
+    assert [a['action'] for a in result['user_actions']] == ['open_document']
 
 
 @respx.mock
@@ -697,6 +708,12 @@ async def test_a_promoted_indexing_pipelines_index_starts_fresh_before_its_filte
             'extra_terms': [PIPELINE_TERM]}])
     assert "drops 'ecs-acme-v2' first" in made[0]['before_enabling']
     assert 'DELETE _data_stream/ecs-acme-v2.' in made[0]['before_enabling']
+    # As buttons (asked for by the user): the drop, for the cluster admin to copy, then the enable, after it.
+    drop, enable = made[0]['user_actions']
+    assert drop == {'id': 'drop-ecs-acme-v2', 'action': 'elasticsearch_request', 'by': 'cluster admin',
+                    'request': 'DELETE _data_stream/ecs-acme-v2', 'summary': "Drop 'ecs-acme-v2' so it starts fresh"}
+    assert enable['action'] == 'enable_processor_filter' and enable['filter_id'] == 23
+    assert enable['after'] == ['drop-ecs-acme-v2']
     assert json.loads(create.calls.last.request.content)['enabled'] is False
 
 @respx.mock
@@ -897,3 +914,6 @@ async def test_an_index_reading_a_pipeline_promoted_with_it_is_enabled_after_tha
              'extra_terms': [PIPELINE_TERM]}])
     assert "only once filter 31 (pipeline 'Acme-Events') has processed what the build processed again" in \
         made[1]['before_enabling'] and 'before_enabling' not in made[0]
+    assert [a['id'] for a in made[0]['user_actions']] == ['enable-31']
+    assert made[1]['user_actions'][-1]['after'] == [
+        'drop-ecs-acme-v2', 'enable-31', "filter 31 has processed what the build processed again"]

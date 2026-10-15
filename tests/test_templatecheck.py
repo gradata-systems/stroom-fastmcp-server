@@ -387,6 +387,10 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
                                                        component_templates=COMPONENTS, reviewed=True,
                                                        confirmation_id=asked['confirmation_id'])
         assert agreed['agreed'] and 'commit to the cluster' in agreed['hint']
+        # As a button for the cluster admin to copy (asked for by the user): the request exactly as agreed.
+        [commit] = agreed['user_actions']
+        assert commit['action'] == 'elasticsearch_request' and commit['request'] == agreed['dev_tools'].strip()
+        assert commit['by'] == 'cluster admin' and "'ecs-acme-v2'" in commit['summary']
         kept = read_agreed_template(saved['description'])
         assert kept['name'] == 'ecs-acme-v2' and kept['index'] == 'ecs-acme-v2' and kept['xslt'] == 'abc'
         assert kept['dev_tools'] == agreed['dev_tools'] and saved['description'].startswith('Indexes Acme.')

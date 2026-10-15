@@ -24,6 +24,7 @@ from utils.fieldplan import FieldPlan
 from utils.mappingstore import (DOC_MARK, digest, doc_digest, normalise_xslt, read_agreed_template, read_mapping,
                                 replace_section)
 from utils.xsltgen import TranslationMapping, generate
+from utils import useractions
 from utils.accepted import entry as accepted_entry, merge as merge_accepted, read_accepted
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
@@ -731,6 +732,9 @@ async def write_documentation(
                         f"build='{build}' (approved by the user) writes it back over the promoted doc, after a backup."}
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
+                                        'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
+                                        **useractions.actions(useractions.open_document(
+                                            stroom.settings, {**doc, 'type': 'Documentation'}, 'review it')),
                                         **({'field_mapping': generated_section} if generated_section else {}),
                                         **({'note': '; '.join(noted)} if noted else {})})
 
@@ -1292,6 +1296,16 @@ async def promote_build(
                 creating.append(path)
     moving = [p['doc'] for p in plan if p['action'] == 'move' and p['doc']['type'] == 'Pipeline']
     kept_feeds = [p['doc']['name'] for p in plan if p['action'] == 'keep' and p['doc']['type'] == 'Feed']
+    # New versions' predecessors, read before promotion clears the build's record: their filters may be disabled once
+    # the new version takes over (the user's to decide).
+    predecessors = {}
+    for d in moving:
+        try:
+            before = (await build_record.entry(guard, build, d['uuid'])).get('version_of')
+        except Exception:
+            before = None
+        if before:
+            predecessors[d['uuid']] = before
     processing = await promotion_processing(ctx, [{'uuid': d['uuid'], 'name': d['name']} for d in moving], sources,
                                             kept_feeds)
     details = {'build': build, 'plan': [f"create folder {path}" for path in creating]
@@ -1431,6 +1445,17 @@ async def promote_build(
                                       + (" and each document updated in place" if updated else '') + "."}
     if warnings:
         result['promoted_with_warnings'] = warnings
+    buttons = [a for f in filters for a in f.pop('user_actions', [])]
+    for successor, predecessor in predecessors.items():
+        try:
+            earlier = await stroom.get_doc('Pipeline', predecessor)
+            buttons += [useractions.disable_filter(
+                stroom.settings, f['id'], earlier, "the earlier version; once the new one takes over, if you choose",
+                optional=True) for f in await stroom.processor_filters(predecessor) if f.get('enabled')]
+        except Exception:   # a suggestion: never a reason for promotion to fail
+            pass
+    if buttons:
+        result['user_actions'] = buttons
     if filters:
         result['processing_filters'] = filters
         result['next'] = ("Tell the user each promoted pipeline has a processing filter, created disabled (one marked "
