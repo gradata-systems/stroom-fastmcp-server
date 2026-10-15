@@ -14,7 +14,7 @@ The rules are enforced by the server, so they hold whatever the client or model:
 - **Checked before it runs.** Every sample record is stepped, and promotion shows what a build still lacks.
 - **Audited.** Every tool call, Stroom request, confirmation, approval and refusal is logged with the user behind it.
 
-Status: 0.18.15, released as a container image and a Helm chart.
+Status: 0.18.16, released as a container image and a Helm chart.
 
 ## Documentation
 
