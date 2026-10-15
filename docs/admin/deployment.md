@@ -10,7 +10,7 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 - **An OpenID Connect provider**: the one Stroom already trusts, with a public client for VS Code whose access
   tokens are JWTs carrying this server's audience and Stroom's (or one audience both accept), plus `sub`.
   Details: [Sign-in and VS Code, section 1](vscode.md#1-identity-provider). Or, for Stroom's Ask Stroom AI alone,
-  Stroom's own identity provider: [Stroom's internal identity provider](#stroom-s-internal-identity-provider).
+  Stroom's own identity provider: [Stroom's internal identity provider](#strooms-internal-identity-provider).
 - **Access tokens that last 15 minutes**, not Keycloak's default of 5, on the client VS Code uses. With 5-minute
   tokens VS Code kept refreshing its sign-ins in a loop, and every Stroom call waited behind it, for minutes
   ([Troubleshooting](../operate/troubleshooting.md#every-stroom-call-takes-minutes-and-vs-codes-auth-log-loops)).
@@ -163,7 +163,7 @@ brackets.
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
-| `IDENTITY_PROVIDER` | `oidc` | `oidc`: an external provider, for every client. `stroom_internal`: Stroom's own, for Ask Stroom AI ([above](#stroom-s-internal-identity-provider)) [`oidc.identityProvider`] |
+| `IDENTITY_PROVIDER` | `oidc` | `oidc`: an external provider, for every client. `stroom_internal`: Stroom's own, for Ask Stroom AI ([above](#strooms-internal-identity-provider)) [`oidc.identityProvider`] |
 | `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one); with `stroom_internal`, read from Stroom [`oidc.issuerUrl`] |
 | `OIDC_AUDIENCE` | required | This server's audience; with `stroom_internal`, Stroom's internal OAuth client id [`oidc.audience`] |
 | `OIDC_JWKS_URI` | discovered | The provider's signing keys; by default `jwks_uri` from `<issuer>/.well-known/openid-configuration`, fetched on the first request [`oidc.jwksUri`] |

@@ -64,7 +64,7 @@ answers what a feed holds and what a field means, where it comes from and how to
 the server generated and the indexes' own field types. It only reads, as the signed-in user. OpenWebUI is an
 example. Stroom's own assistant (Ask Stroom AI) uses the full server, with the tool annotations, groups,
 user actions and links above. On a Stroom with its own identity provider it forwards its user's token from that
-provider ([Stroom's internal identity provider](deployment.md#stroom-s-internal-identity-provider)); no other client
+provider ([Stroom's internal identity provider](deployment.md#strooms-internal-identity-provider)); no other client
 can sign in to such a Stroom's server.
 
 ## Agent frameworks

@@ -89,8 +89,10 @@ def check_docs(last_tag: str, unchanged_reason: str | None) -> list[str]:
 def run_tests() -> None:
     for name, command in (('unit tests', [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '--color=no']),
                           ('evaluation references, offline', [sys.executable, 'dev/eval/offline.py']),
-                          # The docs site, strictly: a broken link or a page left out of the navigation stops it.
-                          ('docs site', ['uv', 'run', '--group', 'docs', 'mkdocs', 'build', '--strict', '--quiet',
+                          # The docs site, strictly: a broken link or a page left out of the navigation stops it. Not
+                          # --quiet: it hides warnings, so strict mode never sees them (0.18.16 went out with a broken
+                          # anchor that CI then refused).
+                          ('docs site', ['uv', 'run', '--group', 'docs', 'mkdocs', 'build', '--strict',
                                          '--site-dir', str(Path(tempfile.gettempdir()) / 'stroom-mcp-site')])):
         print(f"  {name} ...", flush=True)
         done = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace',
