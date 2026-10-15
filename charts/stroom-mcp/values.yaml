@@ -39,6 +39,12 @@ stroom:
 
 # The OpenID Connect provider Stroom trusts (Keycloak, Entra ID, Okta, Auth0, ...).
 oidc:
+  # oidc: an external provider Stroom trusts too (Stroom set to EXTERNAL_IDP), for every client.
+  # stroom_internal: Stroom's own provider (INTERNAL_IDP), for Stroom's Ask Stroom AI forwarding its user's
+  # token; no other client can sign in. audience is then Stroom's internal OAuth client id (Stroom logs it at
+  # startup as "Stroom's Oauth2 clientId"), issuerUrl may stay empty (read from Stroom), and stroom.audience
+  # isn't used (Stroom's own tokens carry its client id).
+  identityProvider: oidc
   # Issuer URL, exactly as in the tokens' iss claim, e.g. https://keycloak.example.com/realms/stroom
   # or https://login.microsoftonline.com/<tenant>/v2.0.
   issuerUrl: ""

@@ -9,7 +9,8 @@ user with their own token. It holds no credentials for Stroom. VS Code (or any M
 
 - **An OpenID Connect provider**: the one Stroom already trusts, with a public client for VS Code whose access
   tokens are JWTs carrying this server's audience and Stroom's (or one audience both accept), plus `sub`.
-  Details: [Sign-in and VS Code, section 1](vscode.md#1-identity-provider).
+  Details: [Sign-in and VS Code, section 1](vscode.md#1-identity-provider). Or, for Stroom's Ask Stroom AI alone,
+  Stroom's own identity provider: [Stroom's internal identity provider](#stroom-s-internal-identity-provider).
 - **Access tokens that last 15 minutes**, not Keycloak's default of 5, on the client VS Code uses. With 5-minute
   tokens VS Code kept refreshing its sign-ins in a loop, and every Stroom call waited behind it, for minutes
   ([Troubleshooting](../operate/troubleshooting.md#every-stroom-call-takes-minutes-and-vs-codes-auth-log-loops)).
@@ -127,6 +128,26 @@ docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
   ghcr.io/gradata-systems/stroom-fastmcp-server:0.18.15
 ```
 
+## Stroom's internal identity provider
+
+A Stroom using its own identity provider (`identityProviderType: INTERNAL_IDP`) signs in its users itself. Its
+Ask Stroom AI can use this server, forwarding its signed-in user's access token: set
+`STROOM_MCP_IDENTITY_PROVIDER=stroom_internal` [`oidc.identityProvider`] and `STROOM_MCP_OIDC_AUDIENCE` to Stroom's
+internal OAuth client id [`oidc.audience`]. Stroom logs that id at startup ("Stroom's Oauth2 clientId"); it is also
+the `client_id` in its `oauth_client` table, and the `aud` of its users' access tokens. Then:
+
+- The issuer comes from Stroom's discovery document, `<STROOM_URL>/api/oauth2/v1/.well-known/openid-configuration`,
+  and the signing keys from `<STROOM_URL>/api/oauth2/v1/certs` (the `/oauth2/v1/certs` the document names is
+  reached only through Stroom's front proxy), both when the first token arrives. Set `OIDC_ISSUER_URL` only to
+  pin it.
+- Tokens are checked as any provider's: signature, expiry, issuer, the audience, `openid` scope, `sub`. They are
+  forwarded to Stroom as they came, and `STROOM_AUDIENCE` follows `OIDC_AUDIENCE`.
+- No sign-in is offered to other clients (no OAuth metadata): Stroom's provider accepts only Stroom's own
+  redirect, so VS Code and other clients can't sign in through it.
+- Sample uploads through `upload_sample` (pasted text) reach Stroom's receipt, which can't authenticate a token
+  from its internal provider: they work only if receipt is unauthenticated. Ask Stroom AI's users upload sample
+  files on the feed's Data tab in Stroom instead (`create_feed`'s `open_document` action).
+
 ## Settings
 
 Environment variables with the prefix `STROOM_MCP_` (or a `.env` file); the chart value that sets each is in
@@ -135,20 +156,21 @@ brackets.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `STROOM_URL` | required | Stroom base URL [`stroom.url`]. With several Stroom nodes, a URL that keeps a client on one node: a stepping session lives on the node that started it, and a slow step's follow-up must reach it. Through an ingress with cookie affinity (`affinity: cookie`) the follow-up carries the cookie its first response set; the in-cluster Service needs `sessionAffinity: ClientIP` |
-| `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom [`stroom.audience`] |
+| `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom; with `stroom_internal`, `OIDC_AUDIENCE` [`stroom.audience`] |
 | `STROOM_UI_URL` | `STROOM_URL` | Base of Stroom links shown to users [`stroom.uiUrl`] |
 | `CLUSTER_NAME` | none | The name people know this Stroom by (`PROD`, `DEV`): the server tells clients which Stroom it acts on, and names it when a feed or document isn't found there, so a user connected to several clusters knows which one answered [`stroom.clusterName`] |
 | `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
-| `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one) [`oidc.issuerUrl`] |
-| `OIDC_AUDIENCE` | required | This server's audience [`oidc.audience`] |
+| `IDENTITY_PROVIDER` | `oidc` | `oidc`: an external provider, for every client. `stroom_internal`: Stroom's own, for Ask Stroom AI ([above](#stroom-s-internal-identity-provider)) [`oidc.identityProvider`] |
+| `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one); with `stroom_internal`, read from Stroom [`oidc.issuerUrl`] |
+| `OIDC_AUDIENCE` | required | This server's audience; with `stroom_internal`, Stroom's internal OAuth client id [`oidc.audience`] |
 | `OIDC_JWKS_URI` | discovered | The provider's signing keys; by default `jwks_uri` from `<issuer>/.well-known/openid-configuration`, fetched on the first request [`oidc.jwksUri`] |
 | `OIDC_TOKEN_ALGORITHM` | `RS256` | Token signing algorithm [`oidc.tokenAlgorithm`] |
 | `OIDC_REQUIRED_SCOPES` | `openid` | Scopes every token must carry (`scope` or `scp`), comma- or space-separated; may be empty [`oidc.requiredScopes`] |
 | `OIDC_CA_CERTS` | | CA for the provider's certificate, added to the system CAs [`oidc.ca`] |
-| `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata [`publicBaseUrl`] |
+| `PUBLIC_BASE_URL` | required | https URL clients use, in OAuth metadata; optional with `stroom_internal` outside the chart [`publicBaseUrl`] |
 | `REQUEST_STATE_KEYS` | per process | Shared keys sealing form state and the confirmation and approval ids given to clients without forms, comma-separated; set them when running more than one replica [`requestState`] |
 | `UPLOAD_TICKET_MINUTES` | `15` | How long a sample-upload ticket lasts (never past the sign-in it carries): `upload_sample` with `files` gives the agent one, and a `curl` command per file that sends the file from the user's terminal to `/upload` [`extraEnv`] |
 | `UPLOAD_TICKETS` | `short` | `short`: an upload ticket is a 12-character code this replica keeps until it expires (one replica, or routing that keeps a client on one; a restart forgets pending codes). `sealed`: the ticket carries everything, sealed with `REQUEST_STATE_KEYS`, so any replica opens it, but it runs to 2,500 characters for the agent to copy [`extraEnv`] |

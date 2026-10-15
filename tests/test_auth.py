@@ -125,3 +125,55 @@ def test_audit_username_falls_back_to_upn_then_email(claims, username):
     access = AccessToken(token='t', client_id='vscode', scopes=[], subject='u1', claims={'sub': 'u1', **claims})
     with patch('security.audit.get_access_token', return_value=access):
         assert audit_module._identity()['username'] == username
+
+
+# Stroom's own identity provider (INTERNAL_IDP), for Ask Stroom AI forwarding its signed-in user's token (asked for by
+# the user). Its tokens, as seen on the local stack: aud and azp the internal client id, sub the username.
+INTERNAL_CLIENT = 'rxEZWKzG.client-id.apps.stroom-idp'
+STROOM_ISSUER = 'https://stroom.example/oauth2/v1'
+
+
+def stroom(requests: list[str]) -> httpx2.AsyncClient:
+    """Stroom's internal provider: its discovery document names keys behind Stroom's front proxy; the API serves them."""
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        if str(request.url) == 'https://stroom.example/api/oauth2/v1/.well-known/openid-configuration':
+            return httpx2.Response(200, json={'issuer': STROOM_ISSUER, 'jwks_uri': f'{STROOM_ISSUER}/certs'})
+        if str(request.url) == 'https://stroom.example/api/oauth2/v1/certs':
+            return httpx2.Response(200, json=JWKS)
+        return httpx2.Response(404)
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+
+
+def internal_settings(**overrides) -> Settings:
+    return Settings(_env_file=None, stroom_url='https://stroom.example', identity_provider='stroom_internal',
+                    oidc_audience=INTERNAL_CLIENT, **overrides)
+
+
+async def test_tokens_from_strooms_internal_provider_are_checked_against_stroom_itself():
+    from security.auth import stroom_internal_auth
+    requests = []
+    auth = stroom_internal_auth(internal_settings(), stroom(requests))
+    good = KEYS.create_token(issuer=STROOM_ISSUER, audience=INTERNAL_CLIENT, subject='admin', kid='k1',
+                             scopes=['openid', 'email'])
+    access = await auth.verify_token(good)
+    assert access is not None and access.claims['sub'] == 'admin'
+    # The issuer from Stroom's discovery document, the keys from its API, both once.
+    assert requests == ['https://stroom.example/api/oauth2/v1/.well-known/openid-configuration',
+                        'https://stroom.example/api/oauth2/v1/certs']
+    await auth.verify_token(good)
+    assert len(requests) == 2
+    # Another client's token, another issuer's, or a forged one: refused.
+    assert await auth.verify_token(KEYS.create_token(issuer=STROOM_ISSUER, audience='other-client', subject='admin',
+                                                     kid='k1', scopes=['openid'])) is None
+    assert await auth.verify_token(KEYS.create_token(issuer='https://elsewhere.example', audience=INTERNAL_CLIENT,
+                                                     subject='admin', kid='k1', scopes=['openid'])) is None
+    assert await auth.verify_token(RSAKeyPair.generate().create_token(
+        issuer=STROOM_ISSUER, audience=INTERNAL_CLIENT, subject='admin', kid='k1', scopes=['openid'])) is None
+
+
+def test_stroom_takes_its_internal_tokens_with_the_internal_client_as_audience():
+    # The token is forwarded to Stroom as it came: the audience Stroom checks is the internal client id too.
+    assert internal_settings().stroom_audience == INTERNAL_CLIENT
+    assert internal_settings(stroom_audience='stroom').stroom_audience == 'stroom'     # set explicitly: kept
+    assert settings().stroom_audience == 'stroom'                                    # an external provider: as before

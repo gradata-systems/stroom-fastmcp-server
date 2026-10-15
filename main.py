@@ -57,6 +57,15 @@ if settings.dev_no_auth:
         raise SystemExit("dev_no_auth needs STROOM_MCP_STROOM_API_KEY to call Stroom")
     logger.warning("Authentication is disabled (dev_no_auth); for local development only")
     auth = None
+elif settings.identity_provider == 'stroom_internal':
+    # Stroom's own identity provider, for Ask Stroom AI forwarding its user's token (asked for by the user).
+    if not settings.oidc_audience:
+        raise SystemExit("Set STROOM_MCP_OIDC_AUDIENCE to Stroom's internal OAuth client id (Stroom logs it at startup "
+                         "as \"Stroom's Oauth2 clientId\")")
+    if settings.stroom_api_key:
+        raise SystemExit("STROOM_MCP_STROOM_API_KEY is for dev_no_auth only; Stroom calls use the caller's token")
+    from security.auth import stroom_internal_auth
+    auth = stroom_internal_auth(settings, oidc_http_client(settings.stroom_ca_certs))
 else:
     if not (settings.oidc_issuer_url and settings.oidc_audience and settings.public_base_url):
         raise SystemExit("Set STROOM_MCP_OIDC_ISSUER_URL, _OIDC_AUDIENCE and _PUBLIC_BASE_URL")

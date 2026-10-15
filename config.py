@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -67,9 +67,19 @@ class Settings(BaseSettings):
     # Audit trail as JSON lines; stdout when unset (suits Kubernetes log shipping).
     audit_log_file: Path | None = None
 
+    # Who signs the access tokens callers bring. 'oidc': an external OpenID Connect provider that Stroom trusts too
+    # (Stroom set to EXTERNAL_IDP), for every client. 'stroom_internal': Stroom's own identity provider (INTERNAL_IDP),
+    # for Stroom's Ask Stroom AI, which forwards its signed-in user's access token. Stroom's internal provider signs
+    # in no other client (it accepts only Stroom's own redirect), so no sign-in is offered to them: oidc_audience is
+    # then Stroom's internal OAuth client id (logged by Stroom at startup as "Stroom's Oauth2 clientId", or its
+    # oauth_client table), the issuer and signing keys come from Stroom itself (stroom_url), and stroom_audience
+    # follows oidc_audience.
+    identity_provider: Literal['oidc', 'stroom_internal'] = 'oidc'
+
     # OpenID Connect provider (the OAuth2 authorization server Stroom trusts): Keycloak, Entra ID, Okta,
     # Auth0, Cognito and so on.
-    # Issuer URL, exactly as in the tokens' iss claim, e.g. https://keycloak.example.com/realms/stroom.
+    # Issuer URL, exactly as in the tokens' iss claim, e.g. https://keycloak.example.com/realms/stroom. With
+    # stroom_internal, optional: read from Stroom's discovery document when the first token arrives.
     oidc_issuer_url: str = ''
     oidc_audience: str = ''
     # Where the provider publishes its signing keys. Unset: jwks_uri from the issuer's
@@ -115,6 +125,13 @@ class Settings(BaseSettings):
         """This Stroom as people know it: its name and URL, e.g. Stroom 'PROD' (https://stroom.example.com)."""
         url = (self.stroom_ui_url or self.stroom_url).rstrip('/')
         return f"Stroom '{self.cluster_name}' ({url})" if self.cluster_name else f"the Stroom at {url}"
+
+    @model_validator(mode='after')
+    def _internal_audience(self) -> 'Settings':
+        # Stroom's internal provider issues tokens for its own client only: Stroom accepts them with that audience.
+        if self.identity_provider == 'stroom_internal' and 'stroom_audience' not in self.model_fields_set:
+            self.stroom_audience = self.oidc_audience
+        return self
 
     @field_validator('request_state_keys', mode='before')
     @classmethod

@@ -283,8 +283,13 @@ class StroomGateway:
             audit('stroom_request', outcome='success' if response.is_success else 'error',
                   status=response.status_code, **who)
         if response.is_error:
+            internal = (" Stroom's internal identity provider can't authenticate data receipt with a token: upload the "
+                        "sample files on the feed's Data tab in Stroom instead (create_feed's open_document action), "
+                        "or have Stroom's admin let receipt go unauthenticated."
+                        if response.status_code in (401, 403) and self.settings.identity_provider == 'stroom_internal'
+                        else '')
             raise ToolError(f"Stroom refused the upload ({response.status_code}): "
-                            f"{response.headers.get('Stroom-Error') or response.text[:300]}")
+                            f"{response.headers.get('Stroom-Error') or response.text[:300]}{internal}")
         return response
 
     async def find_meta(self, terms: list[dict[str, Any]], limit: int, op: str = 'AND',

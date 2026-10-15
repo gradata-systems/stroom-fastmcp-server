@@ -118,6 +118,44 @@ class OIDCTokenVerifier(JWTVerifier):
         return 'signature'
 
 
+class StroomInternalVerifier(OIDCTokenVerifier):
+    """Access tokens from Stroom's own identity provider (INTERNAL_IDP), as Stroom's Ask Stroom AI forwards its
+    signed-in user's (asked for by the user). Checked as any provider's: signature, expiry, issuer, audience (Stroom's
+    internal client id, configured), scopes and sub. The issuer comes from Stroom's discovery document and the signing
+    keys from Stroom's API (/api/oauth2/v1/certs): the /oauth2/v1/certs the document names is reached only through
+    Stroom's front proxy. Both are fetched when the first token arrives, so startup doesn't depend on Stroom."""
+
+    def __init__(self, *, stroom_url: str, issuer: str | None = None, **kwargs: Any):
+        base = f"{stroom_url.rstrip('/')}/api/oauth2/v1"
+        super().__init__(issuer=issuer or None, jwks_uri=f"{base}/certs", **kwargs)
+        self._configuration = f"{base}/.well-known/openid-configuration"
+        self._needs_issuer = not issuer
+
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        if self._needs_issuer:
+            assert self._http_client is not None
+            response = await self._http_client.get(self._configuration)
+            response.raise_for_status()
+            issuer = response.json().get('issuer')
+            if not issuer:
+                raise ValueError(f"no issuer in {self._configuration}; set STROOM_MCP_OIDC_ISSUER_URL")
+            self.issuer, self._needs_issuer = issuer, False
+        return await super()._fetch_jwks()
+
+
+def stroom_internal_auth(settings: Settings, http_client: httpx2.AsyncClient) -> StroomInternalVerifier:
+    """Verifies the tokens Ask Stroom AI forwards. A verifier alone, not a sign-in: no OAuth metadata points other
+    clients at Stroom's internal provider, which signs in nothing but Stroom."""
+    return StroomInternalVerifier(
+        stroom_url=settings.stroom_url,
+        issuer=settings.oidc_issuer_url or None,
+        audience=settings.oidc_audience,
+        algorithm=settings.oidc_token_algorithm,
+        required_scopes=settings.oidc_required_scopes,
+        http_client=http_client,
+    )
+
+
 def oidc_http_client(ca_file: Path | None) -> httpx2.AsyncClient:
     """HTTPS client for the provider that trusts the system CAs plus `ca_file`, if given."""
     return httpx2.AsyncClient(verify=trust(ca_file), timeout=httpx2.Timeout(10.0))

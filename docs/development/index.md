@@ -59,6 +59,7 @@ The end-to-end suites drive the real tools against that stack. Run them one at a
 | `dev/e2e_cef.py` | CEF for ArcSight through Kafka: the question about keys outside the CEF dictionary, a draft and an override, the XSLT saved with its plan, a pipeline of its own with no template, stepped, reviewed and documented; a hand-written CEF pipeline reviewed, an AGENTS doc deciding keys, topic, mappings and template, text output, a change promoted with its version history |
 | `dev/e2e_xslt_style.py` | How generated XSLT is written: each layout giving the same Events in Stroom, shared functions found in a sibling and called, the processing gate on replaced code, Unknown agreed with the user |
 | `dev/e2e_oauth.py` | Sign-in as an MCP client does it, with the dev Keycloak in `dev/keycloak`, and Stroom trusting it |
+| `dev/e2e_internal_idp.py` | Stroom's own identity provider: the local Stroom's access token for admin, as Ask Stroom AI forwards it, taken by the server started with `IDENTITY_PROVIDER=stroom_internal`, which calls Stroom with it; no token and the ID token refused, no sign-in offered |
 
 Every Elasticsearch index the suites build is searched two ways (`dev/searching.py`): through Stroom's dashboards,
 as people will search, with each hit traced back to its record, and directly in Elasticsearch, as an independent

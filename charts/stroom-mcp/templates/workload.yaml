@@ -139,16 +139,27 @@ spec:
             - name: STROOM_MCP_CLUSTER_NAME
               value: {{ . | quote }}
             {{- end }}
+            {{- if ne $oidc.identityProvider "stroom_internal" }}
             - name: STROOM_MCP_STROOM_AUDIENCE
               value: {{ required "stroom.audience is required" $stroom.audience | quote }}
+            {{- end }}
             - name: STROOM_MCP_STROOM_REQUEST_TIMEOUT
               value: {{ $stroom.requestTimeout | quote }}
             {{- if or $stroom.ca.secretName $stroom.ca.configMapName }}
             - name: STROOM_MCP_STROOM_CA_CERTS
               value: /etc/stroom-mcp/stroom-ca/{{ $stroom.ca.key }}
             {{- end }}
+            - name: STROOM_MCP_IDENTITY_PROVIDER
+              value: {{ $oidc.identityProvider | default "oidc" | quote }}
+            {{- if eq $oidc.identityProvider "stroom_internal" }}
+            {{- with $oidc.issuerUrl }}
+            - name: STROOM_MCP_OIDC_ISSUER_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- else }}
             - name: STROOM_MCP_OIDC_ISSUER_URL
               value: {{ required "oidc.issuerUrl is required" $oidc.issuerUrl | quote }}
+            {{- end }}
             - name: STROOM_MCP_OIDC_AUDIENCE
               value: {{ required "oidc.audience is required" $oidc.audience | quote }}
             {{- if $oidc.jwksUri }}
