@@ -156,9 +156,10 @@ def stroom_internal_auth(settings: Settings, http_client: httpx2.AsyncClient) ->
     )
 
 
-def oidc_http_client(ca_file: Path | None) -> httpx2.AsyncClient:
-    """HTTPS client for the provider that trusts the system CAs plus `ca_file`, if given."""
-    return httpx2.AsyncClient(verify=trust(ca_file), timeout=httpx2.Timeout(10.0))
+def oidc_http_client(ca_file: Path | None, verify: bool = True) -> httpx2.AsyncClient:
+    """HTTPS client for the provider that trusts the system CAs plus `ca_file`, if given; with verify False, no
+    check at all (Stroom's own provider on a development Stroom, stroom_tls_verify off)."""
+    return httpx2.AsyncClient(verify=trust(ca_file) if verify else False, timeout=httpx2.Timeout(10.0))
 
 
 def oidc_auth(settings: Settings, http_client: httpx2.AsyncClient) -> RemoteAuthProvider:

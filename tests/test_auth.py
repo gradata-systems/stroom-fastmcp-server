@@ -177,3 +177,11 @@ def test_stroom_takes_its_internal_tokens_with_the_internal_client_as_audience()
     assert internal_settings().stroom_audience == INTERNAL_CLIENT
     assert internal_settings(stroom_audience='stroom').stroom_audience == 'stroom'     # set explicitly: kept
     assert settings().stroom_audience == 'stroom'                                    # an external provider: as before
+
+
+def test_stroom_tls_verification_can_be_turned_off_for_a_development_stroom():
+    # Asked for by the user, for a self-signed certificate: off means no check at all; on, the system CAs (+ a CA file).
+    import ssl
+    from utils.tls import stroom_trust
+    assert stroom_trust(settings(stroom_tls_verify=False)) is False
+    assert isinstance(stroom_trust(settings()), ssl.SSLContext)

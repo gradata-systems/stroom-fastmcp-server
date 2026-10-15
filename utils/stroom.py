@@ -12,7 +12,7 @@ from fastmcp.server.dependencies import get_access_token
 
 from config import Settings
 from security.audit import audit, spent_in_stroom
-from utils.tls import trust
+from utils.tls import stroom_trust
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,15 @@ def not_found(settings: Settings, what: str) -> str:
     return (f"{what} in {settings.stroom_label}. If the user named it, this server may be connected to a different "
             f"Stroom cluster from the one they mean: stop, tell them which Stroom this is, and ask them to check the "
             f"cluster and the name or UUID. Don't look for another document to use instead, and don't create one.")
+
+
+def _untrusted(error: Exception) -> str:
+    """What to tell the user when Stroom's certificate failed the check (a self-signed one, say); '' otherwise."""
+    if 'CERTIFICATE_VERIFY_FAILED' not in str(error):
+        return ''
+    return (": its HTTPS certificate isn't trusted. The server's operator trusts it with STROOM_MCP_STROOM_CA_CERTS "
+            "(for a self-signed certificate, the certificate itself), or for a development Stroom turns the check "
+            "off with STROOM_MCP_STROOM_TLS_VERIFY=false")
 
 
 def doc_link(settings: Settings, doc_type: str, uuid: str) -> str:
@@ -124,7 +133,7 @@ class StroomGateway:
         self._client = httpx.AsyncClient(
             base_url=settings.stroom_url.rstrip('/') + '/api',
             headers={'Accept': 'application/json'},
-            verify=trust(settings.stroom_ca_certs),
+            verify=stroom_trust(settings),
             timeout=settings.stroom_request_timeout,
             transport=transport,
             # One client serves every user: a cookie Stroom (or an ingress) sets for one request must not ride along on
@@ -172,7 +181,7 @@ class StroomGateway:
         except httpx.HTTPError as e:
             logger.exception("Stroom %s %s failed", method, path)
             audit('stroom_request', outcome='error', error=str(e), **who)
-            raise ToolError("Stroom is unavailable") from e
+            raise ToolError("Stroom is unavailable" + _untrusted(e)) from e
 
         took_ms = round((time.perf_counter() - started) * 1000)
         spent_in_stroom(took_ms, method, path)
@@ -275,7 +284,7 @@ class StroomGateway:
                                                headers={'Feed': feed, **headers, **self._authorization()})
         except httpx.HTTPError as e:
             audit('stroom_request', outcome='error', error=str(e), method='POST', path=self.settings.datafeed_path)
-            raise ToolError("Stroom's datafeed is unavailable") from e
+            raise ToolError("Stroom's datafeed is unavailable" + _untrusted(e)) from e
         who = {'method': 'POST', 'path': self.settings.datafeed_path, 'feed': feed, 'bytes': len(data)}
         if response.status_code in (401, 403):
             audit('access_denied', reason=f'stroom_{response.status_code}', status=response.status_code, **who)

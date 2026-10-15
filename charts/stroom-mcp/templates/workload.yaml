@@ -145,6 +145,10 @@ spec:
             {{- end }}
             - name: STROOM_MCP_STROOM_REQUEST_TIMEOUT
               value: {{ $stroom.requestTimeout | quote }}
+            {{- if eq (toString $stroom.tlsVerify) "false" }}
+            - name: STROOM_MCP_STROOM_TLS_VERIFY
+              value: "false"
+            {{- end }}
             {{- if or $stroom.ca.secretName $stroom.ca.configMapName }}
             - name: STROOM_MCP_STROOM_CA_CERTS
               value: /etc/stroom-mcp/stroom-ca/{{ $stroom.ca.key }}

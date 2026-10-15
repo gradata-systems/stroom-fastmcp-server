@@ -36,6 +36,10 @@ stroom:
     secretName: ""
     configMapName: ""
     key: ca.crt
+  # false: Stroom's certificate isn't verified at all (a development Stroom with a self-signed
+  # certificate). Anyone between the server and Stroom can then read the users' tokens it forwards.
+  # Prefer stroom.ca, with the certificate itself for a self-signed one.
+  tlsVerify: true
 
 # The OpenID Connect provider Stroom trusts (Keycloak, Entra ID, Okta, Auth0, ...).
 oidc:

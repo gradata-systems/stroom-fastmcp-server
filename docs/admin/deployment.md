@@ -138,8 +138,8 @@ the `client_id` in its `oauth_client` table, and the `aud` of its users' access 
 
 - The issuer comes from Stroom's discovery document, `<STROOM_URL>/api/oauth2/v1/.well-known/openid-configuration`,
   and the signing keys from `<STROOM_URL>/api/oauth2/v1/certs` (the `/oauth2/v1/certs` the document names is
-  reached only through Stroom's front proxy), both when the first token arrives. Set `OIDC_ISSUER_URL` only to
-  pin it.
+  reached only through Stroom's front proxy), both when the first token arrives, trusting Stroom's certificate as
+  every Stroom call does (`STROOM_CA_CERTS`, or `STROOM_TLS_VERIFY`). Set `OIDC_ISSUER_URL` only to pin it.
 - Tokens are checked as any provider's: signature, expiry, issuer, the audience, `openid` scope, `sub`. They are
   forwarded to Stroom as they came, and `STROOM_AUDIENCE` follows `OIDC_AUDIENCE`.
 - No sign-in is offered to other clients (no OAuth metadata): Stroom's provider accepts only Stroom's own
@@ -159,7 +159,8 @@ brackets.
 | `STROOM_AUDIENCE` | `stroom` | Audience the forwarded token must carry for Stroom; with `stroom_internal`, `OIDC_AUDIENCE` [`stroom.audience`] |
 | `STROOM_UI_URL` | `STROOM_URL` | Base of Stroom links shown to users [`stroom.uiUrl`] |
 | `CLUSTER_NAME` | none | The name people know this Stroom by (`PROD`, `DEV`): the server tells clients which Stroom it acts on, and names it when a feed or document isn't found there, so a user connected to several clusters knows which one answered [`stroom.clusterName`] |
-| `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs [`stroom.ca`] |
+| `STROOM_CA_CERTS` | | CA for Stroom's certificate, added to the system CAs; for a self-signed certificate, the certificate itself [`stroom.ca`] |
+| `STROOM_TLS_VERIFY` | `true` | `false`: Stroom's certificate isn't checked at all, for a development Stroom with a self-signed certificate. Anyone between the server and Stroom can then read the users' tokens it forwards, and with `IDENTITY_PROVIDER=stroom_internal` give the server signing keys of their own; the server warns at startup. Prefer `STROOM_CA_CERTS`; the two together are refused [`stroom.tlsVerify`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |

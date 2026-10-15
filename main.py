@@ -50,6 +50,18 @@ if not (tls or settings.tls_terminated_upstream or loopback):
     raise SystemExit("TLS is required: set STROOM_MCP_TLS_CERTFILE and _TLS_KEYFILE, or "
                      "STROOM_MCP_TLS_TERMINATED_UPSTREAM=true when a proxy in front terminates TLS")
 
+if not settings.stroom_tls_verify:
+    # Asked for by the user, for a development Stroom with a self-signed certificate; loud, as dev_no_auth is.
+    if settings.stroom_ca_certs:
+        raise SystemExit("STROOM_MCP_STROOM_TLS_VERIFY=false and STROOM_MCP_STROOM_CA_CERTS contradict each other: "
+                         "with the CA file, leave verification on")
+    logger.warning("Stroom's certificate is not verified (STROOM_MCP_STROOM_TLS_VERIFY=false): anyone between this "
+                   "server and %s can read the users' tokens it forwards. For development only; trust the certificate "
+                   "with STROOM_MCP_STROOM_CA_CERTS instead", settings.stroom_url)
+    if settings.identity_provider == 'stroom_internal':
+        logger.warning("With STROOM_MCP_IDENTITY_PROVIDER=stroom_internal, the signing keys come from Stroom over that "
+                       "unverified connection too: whoever sits in between could sign tokens of their own")
+
 if settings.dev_no_auth:
     if settings.host not in LOCALHOST:
         raise SystemExit("dev_no_auth is only allowed when the server listens on localhost")
@@ -65,7 +77,7 @@ elif settings.identity_provider == 'stroom_internal':
     if settings.stroom_api_key:
         raise SystemExit("STROOM_MCP_STROOM_API_KEY is for dev_no_auth only; Stroom calls use the caller's token")
     from security.auth import stroom_internal_auth
-    auth = stroom_internal_auth(settings, oidc_http_client(settings.stroom_ca_certs))
+    auth = stroom_internal_auth(settings, oidc_http_client(settings.stroom_ca_certs, settings.stroom_tls_verify))
 else:
     if not (settings.oidc_issuer_url and settings.oidc_audience and settings.public_base_url):
         raise SystemExit("Set STROOM_MCP_OIDC_ISSUER_URL, _OIDC_AUDIENCE and _PUBLIC_BASE_URL")

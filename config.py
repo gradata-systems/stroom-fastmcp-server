@@ -22,8 +22,13 @@ class Settings(BaseSettings):
     # connected knows which one this is, and in every refusal of a feed or document that isn't here.
     cluster_name: str = ''
     stroom_api_key: SecretStr | None = None
-    # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs.
+    # CA that signed Stroom's HTTPS certificate, trusted in addition to the system CAs. For a self-signed
+    # certificate, the certificate itself.
     stroom_ca_certs: Path | None = None
+    # false: Stroom's certificate isn't verified at all (a development Stroom with a self-signed certificate, asked
+    # for by the user). Anyone between the server and Stroom can then read the users' tokens it forwards, and with
+    # identity_provider stroom_internal hand it signing keys of their own. Prefer stroom_ca_certs.
+    stroom_tls_verify: bool = True
     stroom_request_timeout: float = 60.0
     # How long Stroom works on a step before answering 'not yet' (a follow-up then needs the same Stroom node): under
     # stroom_request_timeout, so a slow step finishes in its first request.
