@@ -12,7 +12,7 @@ from security.guard import guard_from
 from tools.streams import _meta, _term
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
-from utils.stroom import StroomGateway, body_text, gateway_from, set_body_text
+from utils.stroom import StroomGateway, body_text, gateway_from, refused_reason, set_body_text
 from utils.survey import Shapes, share, split_records
 from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
 
@@ -252,7 +252,13 @@ async def survey_feed(
         parts = 1
         part = 0
         while part < min(parts, max_parts_per_stream) and read_here < max_records_per_stream:
-            text, truncated, parts = await read_head(stroom, meta['id'], part, max_chars_per_stream)
+            try:
+                text, truncated, parts = await read_head(stroom, meta['id'], part, max_chars_per_stream)
+            except ToolError as e:
+                # A feed's oldest streams are read too, and the likeliest to be on a volume Stroom can no longer
+                # read: said for that stream, the rest of the survey still made.
+                per_stream.append({'stream': meta['id'], 'part': part, 'error': f"Stroom couldn't read it: {refused_reason(e)}"})
+                break
             cut = cut or truncated
             try:
                 chunk = split_records(text, max_records_per_stream - read_here, truncated)

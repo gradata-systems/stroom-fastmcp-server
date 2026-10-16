@@ -11,7 +11,7 @@ from pydantic import Field
 
 from security.policy import DEFAULT_MARKERS, AccessPolicy, StageMarkers
 from tools.pipelines import chain_order, merge_layers
-from utils.stroom import StroomGateway, gateway_from
+from utils.stroom import StroomGateway, gateway_from, refused_reason
 
 Stage = Literal['translation', 'indexing', 'discovery', 'reference', 'records', 'forwarding']
 # The property that makes each element type do something; unset means a child must supply it.
@@ -242,7 +242,7 @@ async def list_template_children(
             names = {t.get('value') or (t.get('docRef') or {}).get('name') for t in terms if t.get('field') == 'Feed'}
             feeds_by_pipeline.setdefault(pf.get('pipelineUuid'), set()).update(n for n in names if n)
     result = []
-    for kid in sorted(kids, key=lambda k: k['name']):
+    for kid in sorted(kids, key=lambda k: k.get('name') or ''):
         try:
             layers = await stroom.pipeline_layers(kid['uuid'])
         except ToolError as e:
@@ -250,10 +250,10 @@ async def list_template_children(
             result.append({'uuid': kid['uuid'], 'name': kid['name'], 'path': kid['path'], 'unreadable': str(e)[:300]})
             continue
         own = (layers[-1].get('pipelineData') or {}) if layers else {}
-        props = [f"{p['element']}.{p['name']}" for p in (own.get('properties') or {}).get('add') or []]
-        added = [f"{e['id']} ({e['type']})" for e in (own.get('elements') or {}).get('add') or []]
-        removed = [e['id'] for e in (own.get('elements') or {}).get('remove') or []]
-        relinked = [f"{l['from']} -> {l['to']}" for l in (own.get('links') or {}).get('add') or []]
+        props = [f"{p.get('element')}.{p.get('name')}" for p in (own.get('properties') or {}).get('add') or []]
+        added = [f"{e.get('id')} ({e.get('type')})" for e in (own.get('elements') or {}).get('add') or []]
+        removed = [e.get('id') for e in (own.get('elements') or {}).get('remove') or []]
+        relinked = [f"{l.get('from')} -> {l.get('to')}" for l in (own.get('links') or {}).get('add') or []]
         refs = [f"{(r.get('feed') or {}).get('name')} via {(r.get('pipeline') or {}).get('name')}"
                 for r in (own.get('pipelineReferences') or {}).get('add') or []]
         result.append({'uuid': kid['uuid'], 'name': kid['name'], 'path': kid['path'], 'sets': props,
@@ -287,8 +287,16 @@ async def describe_template_contract(
     for slot in shape['shared']:
         if slot['type'] != 'XSLTFilter' or not isinstance(slot.get('value'), dict):
             continue
-        doc = await stroom.get(f"/xslt/v1/{slot['value']['uuid']}")
-        root = etree.fromstring((doc.get('data') or '').encode('utf-8'))
+        # A shared XSLT that is gone, empty or doesn't parse (an empty decoration XSLT is common): said for that
+        # element, the rest of the contract still given.
+        try:
+            doc = await stroom.get(f"/xslt/v1/{slot['value']['uuid']}")
+            root = etree.fromstring(((doc or {}).get('data') or '').encode('utf-8'))
+        except (ToolError, KeyError, etree.XMLSyntaxError) as e:
+            readers.append({'element': slot['element'], 'xslt': slot['value'].get('name'),
+                            'unreadable': refused_reason(e) if isinstance(e, ToolError) else
+                            'empty or not well-formed XML' if isinstance(e, etree.XMLSyntaxError) else 'no document'})
+            continue
         expressions = sorted({node.get(a) for node in root.iter() if isinstance(node.tag, str)
                               for a in _XPATH_ATTRS if node.get(a)})
         names = sorted({n for e in expressions for n in _NAME.findall(e)})

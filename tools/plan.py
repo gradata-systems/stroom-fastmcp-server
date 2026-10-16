@@ -16,7 +16,7 @@ from tools.streams import SampleStreams, own_streams, read_sample_streams
 from utils.params import ONE_OR_MORE
 from utils.profile import profile, profile_many
 from utils.samples import SAMPLE_GUIDE, SampleTexts, as_named_samples, long_samples_note
-from utils.stroom import gateway_from
+from utils.stroom import gateway_from, refused_reason
 
 Build = Annotated[str, Field(description="Build name, e.g. 'acme-door-v1.0'.")]
 # Which parser element reads which profiled format.
@@ -409,7 +409,10 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     fmt = await sample_format(ctx, build, docs) if raw else None
     xslts = []
     for d in by_type.get('XSLT', []):
-        doc = await stroom.get_doc('XSLT', d['uuid'])
+        try:
+            doc = await stroom.get_doc('XSLT', d['uuid'])
+        except ToolError:   # gone since the build was listed: nothing kept with it
+            doc = {}
         kept = read_mapping(doc.get('description'))
         xslts.append({'name': d['name'], 'uuid': d['uuid'], 'mapping': kept[0] if kept else None,
                       # A discovery plan: raw records indexed as they are, whatever parser reads them (XML too).
@@ -418,8 +421,15 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     from tools.pipeline_writes import open_slots
     from tools.pipelines import merge_layers
     for d in by_type.get('Pipeline', []):
-        shape = await _shape(stroom, d['uuid'])
-        missing = [f"{s['element']}.{s['property']}" for s in await open_slots(stroom, merge_layers(await stroom.pipeline_layers(d['uuid'])))]
+        try:
+            shape = await _shape(stroom, d['uuid'])
+            missing = [f"{s['element']}.{s['property']}" for s in await open_slots(stroom, merge_layers(await stroom.pipeline_layers(d['uuid'])))]
+        except ToolError as e:
+            # A pipeline Stroom can't load (a working copy of a production one with a property its element type lost,
+            # or one whose template can't be loaded): listed as unreadable with why, the build's status still given.
+            pipelines.append({**d, 'stage': 'unreadable', 'parser': None, 'stepped': False,
+                              'missing': [f"Stroom can't load it: {refused_reason(e)}"]})
+            continue
         pipelines.append({**d, 'stage': shape['stage'], 'parser': shape.get('parser'), 'stepped': await stepped_clean(ctx, d),
                           'missing': missing})
     translation = [p for p in pipelines if p['stage'] == 'translation']

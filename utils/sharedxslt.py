@@ -252,7 +252,7 @@ def usage(xslt: str, shared: dict[str, str]) -> list[dict[str, Any]]:
         text = shared.get(href)
         templates = templates_of(text) if text else {}
         calls = calls_of(xslt, templates)
-        details = describe(text)['templates'] if text else {}
+        details = describe(text).get('templates', {}) if text else {}     # {'unreadable': True} for one that won't parse
         out += [{'href': href, **c, **{k: v for k, v in details.get(c['template'], {}).items() if k != 'writes'}}
                 for c in calls]
         functions = function_calls(xslt, functions_of(_parse(text))) if text else []

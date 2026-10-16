@@ -28,7 +28,7 @@ from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_act
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
-from utils.stroom import doc_link, gateway_from, set_body_text
+from utils.stroom import doc_link, gateway_from, refused_reason, set_body_text
 from utils.sharedxslt import json_values
 from utils.templatecheck import (compare, compose, composition, from_example, json_xml_documents, names_from_example,
                                  parse_component_templates, read_mapping_fields,
@@ -322,11 +322,16 @@ async def get_field_conventions(
     for doc_name in profile.get('reference_index_docs') or []:
         found = await stroom.find_documents(doc_name, ['Index', 'ElasticIndex'], 20)
         for value in found.get('values') or []:
-            ref = value['docRef']
+            ref = value.get('docRef') or {}
             if ref.get('name') == doc_name and ref.get('type') in ('Index', 'ElasticIndex'):
-                fields = await stroom.post('/dataSource/v1/findFields', {
-                    'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
-                reference[f"{ref['type']} {doc_name}"] = {f['fldName']: f['fldType'] for f in fields.get('values') or []}
+                try:
+                    fields = await stroom.post('/dataSource/v1/findFields', {
+                        'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
+                except ToolError as e:   # a reference index Stroom can't list: said, the profile still given
+                    reference[f"{ref['type']} {doc_name}"] = {'(unreadable)': refused_reason(e)}
+                    continue
+                reference[f"{ref['type']} {doc_name}"] = {f.get('fldName'): f.get('fldType')
+                                                          for f in fields.get('values') or [] if f.get('fldName')}
     out = {'name': name, 'profile': profile, 'reference_fields': reference}
     if name == 'ecs':
         # The full schema, as Elastic publishes it: plans following ECS are checked against it.
@@ -678,7 +683,11 @@ async def draft_index_mapping(
         # found by name as Stroom resolves the import.
         found = [v['docRef'] for v in (await stroom.find_documents(use.href, ['XSLT'], 20)).get('values') or []
                  if v['docRef'].get('name') == use.href]
-        values = json_values((await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') or '', use.template)             if found else {}
+        try:
+            values = json_values((await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') or '', use.template) \
+                if found else {}
+        except ToolError:   # listed, but gone or unreadable: as if not found
+            found, values = [], {}
         values = {k: v for k, v in values.items() if k == use.at or k.startswith(use.at + '.')} or {use.at: 'string'}
         for name, element in values.items():
             if not any(f.name == name for f in fields):
@@ -811,22 +820,38 @@ async def find_elastic_clusters(
     indexes = [v for v in (await stroom.find_documents('*', ['ElasticIndex'], 500)).get('values') or []
                if v['docRef'].get('type') == 'ElasticIndex']
     by_cluster: dict[str, list[dict[str, Any]]] = {}
+    unread = []
     for value in indexes:
-        doc = await stroom.get_doc('ElasticIndex', value['docRef']['uuid'])
+        # Every Elastic Index doc on the instance: one Stroom can't give (deleted since the search listed it, not this
+        # user's to read) is said, the others still listed.
+        try:
+            doc = await stroom.get_doc('ElasticIndex', value['docRef']['uuid'])
+        except ToolError as e:
+            unread.append(f"Elastic Index '{value['docRef'].get('name')}': {refused_reason(e)}")
+            continue
         cluster = (doc.get('clusterRef') or {}).get('uuid')
         by_cluster.setdefault(cluster, []).append({'name': doc.get('name'), 'uuid': doc.get('uuid'),
                                                    'index_name': doc.get('indexName'), 'time_field': doc.get('timeField'),
                                                    'path': (value.get('path') or '').replace(' / ', '/')})
     out = []
     for ref in clusters:
-        doc = _redact(await stroom.get_doc('ElasticCluster', ref['uuid']))
+        try:
+            raw = await stroom.get_doc('ElasticCluster', ref['uuid'])
+        except ToolError as e:
+            unread.append(f"Elastic Cluster '{ref.get('name')}': {refused_reason(e)}")
+            continue
+        doc = _redact(raw)
         entry = {'name': doc.get('name'), 'uuid': doc.get('uuid'),
                  'urls': (doc.get('connection') or {}).get('connectionUrls'),
                  'index_docs': by_cluster.get(ref['uuid'], [])}
         if test:
-            entry['test'] = await stroom.post('/elasticCluster/v1/testCluster', await stroom.get_doc('ElasticCluster', ref['uuid']))
+            # Each cluster's own result: one that can't be reached is that cluster's answer, not the whole call's.
+            try:
+                entry['test'] = await stroom.post('/elasticCluster/v1/testCluster', raw)
+            except ToolError as e:
+                entry['test'] = {'ok': False, 'message': refused_reason(e)}
         out.append(entry)
-    return {'clusters': out}
+    return {'clusters': out, **({'unreadable': unread} if unread else {})}
 
 
 async def _the_cluster_in_use(stroom) -> str | None:
@@ -1303,7 +1328,10 @@ async def feeding_pipelines(ctx: Context, doc_type: str, uuid: str, index: dict[
         properties = {(q['element'], q['name']): q['value'] for q in merged['properties']}
         if not writes_to(properties, doc_type, uuid, index_name):
             continue
-        kept = await kept_mapping(ctx, doc['uuid'])
+        try:
+            kept = await kept_mapping(ctx, doc['uuid'])
+        except ToolError:   # its plan unreadable: still a pipeline that feeds the index, without one
+            kept = None
         fed.append({'uuid': doc['uuid'], 'name': doc.get('name'), 'path': (value.get('path') or '').replace(' / ', '/'),
                     'plan': kept['payload'] if kept and kept['kind'] == 'index' else None})
     return fed
@@ -2201,7 +2229,10 @@ async def verify_index(
         for d in contents:
             if d['type'] != 'Pipeline':
                 continue
-            merged = merge_layers(await stroom.pipeline_layers(d['uuid']))
+            try:
+                merged = merge_layers(await stroom.pipeline_layers(d['uuid']))
+            except ToolError:   # one Stroom can't load: not recorded as verified, the others still are
+                continue
             properties = {(q['element'], q['name']): q['value'] for q in merged['properties']}
             if writes_to(properties, INDEX_TYPE[backend], index_uuid, index.get('indexName')) \
                     and await remember_verified(ctx, {'type': 'Pipeline', 'uuid': d['uuid'], 'name': d['name']}):

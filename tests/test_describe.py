@@ -120,3 +120,54 @@ def test_an_xslts_kept_mapping_is_summarised_unless_asked_for_whole():
     whole = {'description': description}
     _kept_summary(whole, 'x-1', True)
     assert whole['kept_mapping']['mapping'] == payload['mapping']
+
+
+async def test_a_pipeline_stroom_cant_load_is_listed_and_the_rest_still_described():
+    # Seen in production: one pipeline on the feed set a property its element type no longer has; Stroom refused to
+    # load it ('Attempt to set property "compressionLevel" on element "rollingFileAppender"'), and describe_feed failed.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from fastmcp.exceptions import ToolError
+    from tools import describe
+    broken = ToolError('Stroom rejected the request (500): Attempt to set property "compressionLevel" on element '
+                       '"rollingFileAppender" but property is unknown. (stroom.pipeline.factory.PipelineFactoryException: x)')
+    stroom = SimpleNamespace(settings=SimpleNamespace(stroom_ui_url='https://stroom.example', stroom_url='https://stroom.example'),
+                             get_doc=AsyncMock(side_effect=lambda kind, uuid: {'uuid': uuid, 'name': {'f': 'ACME', 'bad': 'Old-Events',
+                                                                                                    'good': 'ACME-Events'}[uuid]}),
+                             find_documents=AsyncMock(return_value={'values': []}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+
+    mapping = {'input': 'data_splitter', 'unmatched': 'skip',
+               'events': [{'name': 'logon', 'when': [{'field': 'action', 'equals': 'LOGIN'}],
+                           'fields': [{'path': 'EventDetail/TypeId', 'value': 'Logon'},
+                                      {'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'}]}]}
+
+    async def kept(ctx, uuid):
+        if uuid == 'bad':
+            raise broken
+        # As kept with the XSLT: the mapping under 'mapping', beside its schema version.
+        return {'kind': 'translation', 'payload': {'mapping': mapping, 'schema_version': '4.1.0'}}
+
+    async def follows(ctx, p, feeds):
+        if p['uuid'] == 'bad':
+            raise broken
+        return []
+    with patch('tools.feeds.resolve_feed', AsyncMock(return_value='ACME')), \
+            patch('tools.feeds.feeds_named', AsyncMock(return_value=[{'uuid': 'f', 'name': 'ACME'}])), \
+            patch.object(describe, '_pipelines_reading', AsyncMock(return_value=[
+                {'uuid': 'bad', 'name': 'Old-Events', 'reads_events': False},
+                {'uuid': 'good', 'name': 'ACME-Events', 'reads_events': False}])), \
+            patch('tools.coverage.follow_on_pipelines', follows), \
+            patch('tools.builds.kept_mapping', kept), \
+            patch('tools.builds._shape_stage', AsyncMock(return_value='translation')), \
+            patch('tools.builds._folder_of', AsyncMock(return_value='System/Feeds')), \
+            patch.object(describe, '_generated_doc', AsyncMock(return_value=None)), \
+            patch('security.guard.guard_from', return_value=SimpleNamespace(workspace='MCP Workspace')):
+        out = await describe.describe_feed(ctx, 'acme')
+    bad, good = out['pipelines']
+    assert bad['kind'] == 'unknown' and bad['problem'] == (
+        "Stroom couldn't load this pipeline, so it isn't described: Attempt to set property \"compressionLevel\" on "
+        "element \"rollingFileAppender\" but property is unknown.") and 'docUuid=bad' in bad['link']
+    assert good == {'pipeline': 'ACME-Events', 'uuid': 'good', 'kind': 'events'}
+    # The event kinds from the kept mapping, read from under 'mapping' (passed whole, none were ever listed).
+    assert out['event_kinds'][0].startswith('logon: Authenticate (')

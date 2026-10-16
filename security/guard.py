@@ -251,7 +251,10 @@ class WriteGuard:
             if ref.get('type') == 'Folder' or ref.get('uuid') in docs or not (
                     where == folder['_path'] or where in {f"{folder['_path']}/{r}" for r in ROLES}):
                 continue
-            node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
+            try:
+                node = await self._stroom.post('/explorer/v2/getFromDocRef', ref)
+            except ToolError:   # the search lags a delete (promotion deletes working copies): gone, not in the build
+                continue
             if node:
                 docs[ref['uuid']] = {'type': ref['type'], 'uuid': ref['uuid'], 'name': ref.get('name'),
                                      'tags': node.get('tags') or [], 'path': where,

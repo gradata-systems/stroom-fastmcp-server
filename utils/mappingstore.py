@@ -31,9 +31,11 @@ def read_block(description: str | None, name: str) -> Any:
         for match in pattern.finditer(description or ''):
             if match.group(1) == name:
                 try:
-                    return json.loads(match.group(2))
+                    found = json.loads(match.group(2))
                 except ValueError:
                     return None
+                # Callers read keys from it: anything but an object (a hand-edited description) is no block.
+                return found if isinstance(found, dict) else None
     return None
 
 

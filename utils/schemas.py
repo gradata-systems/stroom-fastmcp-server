@@ -26,14 +26,20 @@ class SchemaCache:
     async def _load_index(self) -> dict[str, str]:
         if self._index is None:
             found = await self._stroom.find_documents('*', ['XMLSchema'], 500)
-            self._index = {}
+            # Built apart and kept only once whole: the cache serves every user, and a half-built index kept after one
+            # failed read said "Stroom has no XML schema" to all of them until a restart.
+            index: dict[str, str] = {}
             for value in found.get('values') or []:
-                ref = value['docRef']
-                if ref.get('type') != 'XMLSchema':
+                ref = value.get('docRef') or {}
+                if ref.get('type') != 'XMLSchema' or not ref.get('uuid'):
                     continue
-                doc = await self._stroom.get(f"/xmlSchema/v1/{ref['uuid']}")
-                if doc.get('systemId'):
-                    self._index[doc['systemId']] = ref['uuid']
+                try:
+                    doc = await self._stroom.get(f"/xmlSchema/v1/{ref['uuid']}")
+                except ToolError:   # deleted since the search listed it, or not this user's to read: not one of them
+                    continue
+                if (doc or {}).get('systemId'):
+                    index[doc['systemId']] = ref['uuid']
+            self._index = index
         return self._index
 
     async def system_ids(self) -> list[str]:

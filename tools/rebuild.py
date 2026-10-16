@@ -165,7 +165,10 @@ async def rebuild_mapping(
             found = [v['docRef'] for v in (await stroom.find_documents(href, ['XSLT'], 20)).get('values') or []
                      if v['docRef'].get('type') == 'XSLT' and v['docRef'].get('name') == href]
             if len(found) == 1:
-                imported[href] = (await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') or ''
+                try:
+                    imported[href] = (await stroom.get_doc('XSLT', found[0]['uuid'])).get('data') or ''
+                except ToolError:   # listed, but gone or unreadable: as if not found
+                    pass
     rebuilt = rebuild(code, base, base_code, imported)
     # Nothing new or removed: the XSLT reads as the mapping, written by an earlier generator, not changed by hand.
     upgraded = bool(base) and not rebuilt.new and not rebuilt.removed and not rebuilt.raw

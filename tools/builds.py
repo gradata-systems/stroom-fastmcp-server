@@ -28,7 +28,7 @@ from utils import useractions
 from utils.accepted import entry as accepted_entry, merge as merge_accepted, read_accepted
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
-from utils.stroom import body_text, gateway_from, set_body_text, doc_link
+from utils.stroom import body_text, doc_link, gateway_from, refused_reason, set_body_text
 
 class AcceptedError(BaseModel):
     """An error the user says is benign, as triage showed it."""
@@ -103,7 +103,10 @@ async def kept_mapping(ctx: Context, pipeline_uuid: str) -> dict[str, Any] | Non
     for entry in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid)):
         if entry['inherited_from_template'] or entry['doc']['type'] != 'XSLT':
             continue
-        xslt = await stroom.get_doc('XSLT', entry['doc']['uuid'])
+        try:
+            xslt = await stroom.get_doc('XSLT', entry['doc']['uuid'])
+        except ToolError:   # deleted, or not this user's to read: no mapping kept with it, for every caller
+            continue
         found = read_mapping(xslt.get('description'))
         if found:
             return {'kind': found[0], 'payload': found[1], 'element': entry['element'], 'xslt': xslt}
@@ -133,6 +136,14 @@ async def lost_mappings(ctx: Context, pipeline_uuid: str) -> list[str]:
 async def _shape_stage(stroom, pipeline_uuid: str) -> str:
     from tools.templates import _shape
     return (await _shape(stroom, pipeline_uuid))['stage']
+
+
+async def _stage_or_none(stroom, pipeline_uuid: str) -> str | None:
+    """_shape_stage, or None for a pipeline Stroom can't load (a choice then made without it, not a failure)."""
+    try:
+        return await _shape_stage(stroom, pipeline_uuid)
+    except ToolError:
+        return None
 
 
 async def written_fields_section(stroom, pipeline_uuid: str, stream_ids: list[int]) -> str:
@@ -191,31 +202,36 @@ async def build_checks(ctx: Context, docs: list[dict[str, Any]]) -> list[str]:
                             "recorded")
         if not doc['working_copy_of'] and doc['name'] not in documented:
             problems.append(f"Pipeline '{doc['name']}': no documentation (write_documentation)")
-        if await _shape_stage(gateway_from(ctx), doc['uuid']) in ('indexing', 'discovery'):
-            destination = await elastic_destination(gateway_from(ctx), doc['uuid'])
-            if destination and await agreement_problem(gateway_from(ctx), await gateway_from(ctx).get_doc(
-                    'Pipeline', doc['uuid']), destination):
-                problems.append(f"Pipeline '{doc['name']}': no Elasticsearch index template agreed with the user for "
-                                f"its current code (propose_index_template with their example)")
-            if not await verified(ctx, doc):
-                problems.append(f"Pipeline '{doc['name']}': the sample has not been indexed and verified with its "
-                                f"current code (create_processor_filter, wait_for_processing, verify_index)")
-        kept = await kept_mapping(ctx, doc['uuid'])
-        if not kept:
-            for lost in await lost_mappings(ctx, doc['uuid']):
-                problems.append(f"Pipeline '{doc['name']}': {lost}")
-            continue
-        drift = await (_drift(ctx, kept) if kept['kind'] == 'translation' else _plan_drift(ctx, kept))
-        if drift:
-            problems.append(f"Pipeline '{doc['name']}': {drift}")
-        if doc['name'] in documented:
-            body = body_text(await gateway_from(ctx).get_doc('Documentation', documented[doc['name']]['uuid']))
-            if doc_digest(body) != mapping_digest(kept):
-                # The build's own change (the XSLT is what its mapping generates) blocks; a hand edit only warns.
-                blocks = kept['kind'] == 'translation' and not drift
-                problems.append(f"Pipeline '{doc['name']}': the documentation's Field mapping predates the current mapping "
-                                f"or XSLT (write_documentation build=<this build> pipeline_uuid='{doc['uuid']}' "
-                                f"stream_ids=<its sample streams> change=<what changed>)" + (BLOCKS if blocks else ''))
+        try:
+            if await _shape_stage(gateway_from(ctx), doc['uuid']) in ('indexing', 'discovery'):
+                destination = await elastic_destination(gateway_from(ctx), doc['uuid'])
+                if destination and await agreement_problem(gateway_from(ctx), await gateway_from(ctx).get_doc(
+                        'Pipeline', doc['uuid']), destination):
+                    problems.append(f"Pipeline '{doc['name']}': no Elasticsearch index template agreed with the user for "
+                                    f"its current code (propose_index_template with their example)")
+                if not await verified(ctx, doc):
+                    problems.append(f"Pipeline '{doc['name']}': the sample has not been indexed and verified with its "
+                                    f"current code (create_processor_filter, wait_for_processing, verify_index)")
+            kept = await kept_mapping(ctx, doc['uuid'])
+            if not kept:
+                for lost in await lost_mappings(ctx, doc['uuid']):
+                    problems.append(f"Pipeline '{doc['name']}': {lost}")
+                continue
+            drift = await (_drift(ctx, kept) if kept['kind'] == 'translation' else _plan_drift(ctx, kept))
+            if drift:
+                problems.append(f"Pipeline '{doc['name']}': {drift}")
+            if doc['name'] in documented:
+                body = body_text(await gateway_from(ctx).get_doc('Documentation', documented[doc['name']]['uuid']))
+                if doc_digest(body) != mapping_digest(kept):
+                    # The build's own change (the XSLT is what its mapping generates) blocks; a hand edit only warns.
+                    blocks = kept['kind'] == 'translation' and not drift
+                    problems.append(f"Pipeline '{doc['name']}': the documentation's Field mapping predates the current mapping "
+                                    f"or XSLT (write_documentation build=<this build> pipeline_uuid='{doc['uuid']}' "
+                                    f"stream_ids=<its sample streams> change=<what changed>)" + (BLOCKS if blocks else ''))
+        except ToolError as e:
+            # A pipeline Stroom can't load (a working copy of a production one with a property its element type
+            # lost): one problem said, the build's other checks still made.
+            problems.append(f"Pipeline '{doc['name']}': Stroom can't load it: {refused_reason(e)}")
     return problems
 
 
@@ -1254,7 +1270,7 @@ async def promote_build(
                     # An index from outside the build (a new version writing to an existing index doc): the dashboard
                     # goes with the build's indexing pipeline, into its version folder.
                     feeding = [d for d in docs if d['type'] == 'Pipeline' and not d['working_copy_of']
-                               and await _shape_stage(stroom, d['uuid']) in ('indexing', 'discovery')]
+                               and await _stage_or_none(stroom, d['uuid']) in ('indexing', 'discovery')]
                     if len(feeding) == 1:
                         target = destinations.get(feeding[0]['uuid']) or proposed.get(feeding[0]['uuid'])
                 target = target or destinations.get('Pipeline')
@@ -1358,73 +1374,85 @@ async def promote_build(
         return gate
 
     # The build is done: its changes become one line of each XSLT's version history and one row of each doc's.
-    versioned = await consolidate_versions(ctx, docs)
-    done = []
-    for path in creating:
-        parent, name = path.rsplit('/', 1)
-        # Production folders, so not managed: only generated, to show the server made them.
-        # One made since the review (by someone else, or in Stroom's UI while the form was open) is used, not twinned.
-        folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
-        done.append(f"created folder {path}" if folders[path].get('_created') else f"used the existing folder {path}")
-    done += versioned
-    from tools.processing_writes import development_batch, restore_output_feed
-    build_feeds = {d['uuid'] for d in docs if d['type'] == 'Feed'}
-    for step in plan:
-        if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(
-                ctx, step['doc']['uuid'], False):
-            done.append(f"restored the default batch size on '{step['doc']['name']}'")
-        if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await restore_output_feed(
-                ctx, step['doc']['uuid'], build_feeds):
-            # Its Events went to the build's test feed (an existing feed's streams, processed in the build): in
-            # production they go into the input's feed.
-            done.append(f"'{step['doc']['name']}' writes its Events into its input's feed again (the build's test "
-                        f"feed was for the build only)")
-    order = {'write back': 0, 'move': 1, 'discard': 2, 'keep': 3}
-    for step in sorted(plan, key=lambda p: order[p['action']]):
-        doc = step['doc']
-        if step['action'] == 'keep':
-            done.append(f"left {doc['type']} '{doc['name']}' in the workspace")
-        elif step['action'] == 'discard':
-            await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
-            done.append(f"deleted working-copy pipeline '{doc['name']}'")
-        elif step['action'] == 'move':
-            node = await stroom.post('/explorer/v2/getFromDocRef', {k: doc[k] for k in ('type', 'uuid', 'name')})
-            folder = {k: v for k, v in folders[step['target']].items() if not k.startswith('_')}
-            await stroom.request('PUT', '/explorer/v2/move', {'explorerNodes': [node], 'destinationFolder': folder,
-                                                              'permissionInheritance': 'DESTINATION'})
-            # Now production content: the agent may no longer change it directly.
-            # mcp-generated stays, so it is still known as the server's own.
-            ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
-            await guard.untag([ref], [MANAGED])
-            done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
-        else:
-            original = await stroom.get_doc(doc['type'], step['target'])
-            copy_doc = await stroom.get_doc(doc['type'], doc['uuid'])
-            fields = ('data', 'converterType', 'documentation', 'description')
-            unchanged = all(copy_doc.get(k) == original.get(k) for k in fields)
-            if unchanged:
+    done: list[str] = []
+    doing = 'consolidating version histories'
+    try:
+        versioned = await consolidate_versions(ctx, docs)
+        for path in creating:
+            doing = f"creating folder {path}"
+            parent, name = path.rsplit('/', 1)
+            # Production folders, so not managed: only generated, to show the server made them.
+            # One made since the review (by someone else, or in Stroom's UI while the form was open) is used, not twinned.
+            folders[path] = await guard.create_folder(folders[parent], name, [GENERATED])
+            done.append(f"created folder {path}" if folders[path].get('_created') else f"used the existing folder {path}")
+        done += versioned
+        from tools.processing_writes import development_batch, restore_output_feed
+        build_feeds = {d['uuid'] for d in docs if d['type'] == 'Feed'}
+        for step in plan:
+            doing = f"restoring production settings on '{step['doc']['name']}'"
+            if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await development_batch(
+                    ctx, step['doc']['uuid'], False):
+                done.append(f"restored the default batch size on '{step['doc']['name']}'")
+            if step['action'] == 'move' and step['doc']['type'] == 'Pipeline' and await restore_output_feed(
+                    ctx, step['doc']['uuid'], build_feeds):
+                # Its Events went to the build's test feed (an existing feed's streams, processed in the build): in
+                # production they go into the input's feed.
+                done.append(f"'{step['doc']['name']}' writes its Events into its input's feed again (the build's test "
+                            f"feed was for the build only)")
+        order = {'write back': 0, 'move': 1, 'discard': 2, 'keep': 3}
+        for step in sorted(plan, key=lambda p: order[p['action']]):
+            doc = step['doc']
+            doing = f"{step['action']} {doc['type']} '{doc['name']}'"
+            if step['action'] == 'keep':
+                done.append(f"left {doc['type']} '{doc['name']}' in the workspace")
+            elif step['action'] == 'discard':
                 await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
-                done.append(f"discarded unchanged working copy {doc['type']} '{doc['name']}'")
-                continue
-            backups = await guard.build_folder('backups')
-            original_node = await stroom.post('/explorer/v2/getFromDocRef',
-                                              {'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']})
-            copied = await stroom.post('/explorer/v2/copy', {
-                'explorerNodes': [original_node], 'destinationFolder': {k: v for k, v in backups.items() if not k.startswith('_')},
-                'permissionInheritance': 'DESTINATION', 'allowRename': True,
-                'docName': f"{original['name']} backup {datetime.now(timezone.utc):%Y%m%d%H%M%S}"})
-            backup_refs = [n.get('docRef', n) for n in (copied or {}).get('explorerNodes') or []]
-            if backup_refs:
-                await guard.tag([{k: r[k] for k in ('type', 'uuid', 'name')} for r in backup_refs], [GENERATED])
-            for key in fields:
-                if key in copy_doc:
-                    original[key] = copy_doc[key]
-            await stroom.put_doc(original)
-            if KEPT_MAPPING in await guard.tags({k: doc[k] for k in ('type', 'uuid', 'name')}):
-                # Its description now holds the mapping: the safeguard that notices it deleted goes with it.
-                await guard.tag([{'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']}], [KEPT_MAPPING])
-            await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
-            done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
+                done.append(f"deleted working-copy pipeline '{doc['name']}'")
+            elif step['action'] == 'move':
+                node = await stroom.post('/explorer/v2/getFromDocRef', {k: doc[k] for k in ('type', 'uuid', 'name')})
+                folder = {k: v for k, v in folders[step['target']].items() if not k.startswith('_')}
+                await stroom.request('PUT', '/explorer/v2/move', {'explorerNodes': [node], 'destinationFolder': folder,
+                                                                  'permissionInheritance': 'DESTINATION'})
+                # Now production content: the agent may no longer change it directly.
+                # mcp-generated stays, so it is still known as the server's own.
+                ref = {k: doc[k] for k in ('type', 'uuid', 'name')}
+                await guard.untag([ref], [MANAGED])
+                done.append(f"moved {doc['type']} '{doc['name']}' to {step['target']}")
+            else:
+                original = await stroom.get_doc(doc['type'], step['target'])
+                copy_doc = await stroom.get_doc(doc['type'], doc['uuid'])
+                fields = ('data', 'converterType', 'documentation', 'description')
+                unchanged = all(copy_doc.get(k) == original.get(k) for k in fields)
+                if unchanged:
+                    await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
+                    done.append(f"discarded unchanged working copy {doc['type']} '{doc['name']}'")
+                    continue
+                backups = await guard.build_folder('backups')
+                original_node = await stroom.post('/explorer/v2/getFromDocRef',
+                                                  {'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']})
+                copied = await stroom.post('/explorer/v2/copy', {
+                    'explorerNodes': [original_node], 'destinationFolder': {k: v for k, v in backups.items() if not k.startswith('_')},
+                    'permissionInheritance': 'DESTINATION', 'allowRename': True,
+                    'docName': f"{original['name']} backup {datetime.now(timezone.utc):%Y%m%d%H%M%S}"})
+                backup_refs = [n.get('docRef', n) for n in (copied or {}).get('explorerNodes') or []]
+                if backup_refs:
+                    await guard.tag([{k: r[k] for k in ('type', 'uuid', 'name')} for r in backup_refs], [GENERATED])
+                for key in fields:
+                    if key in copy_doc:
+                        original[key] = copy_doc[key]
+                await stroom.put_doc(original)
+                if KEPT_MAPPING in await guard.tags({k: doc[k] for k in ('type', 'uuid', 'name')}):
+                    # Its description now holds the mapping: the safeguard that notices it deleted goes with it.
+                    await guard.tag([{'type': doc['type'], 'uuid': original['uuid'], 'name': original['name']}], [KEPT_MAPPING])
+                await stroom.request('DELETE', '/explorer/v2/delete', {'docRefs': [{k: doc[k] for k in ('type', 'uuid', 'name')}]})
+                done.append(f"wrote {doc['type']} '{doc['name']}' back over '{original['name']}' (backup kept)")
+    except Exception as e:
+        # Each step is a separate write to Stroom: one that fails leaves the ones before it done. Said, so the user
+        # knows what is in production now and what is still in the build, not only that the promotion failed.
+        reason = refused_reason(e) if isinstance(e, ToolError) else f"{type(e).__name__}: {e}"
+        raise ToolError(f"The promotion stopped while {doing}: {reason}. Done before it: "
+                        f"{'; '.join(done) or 'nothing'}. What wasn't promoted is still in the build '{build}': "
+                        f"show the user both, fix the cause, then call promote_build again for the rest.") from e
     # What the record kept about the promoted docs only meant something inside the build; it goes once nothing is
     # left in the build.
     await build_record.forget(guard, build, [p['doc']['uuid'] for p in plan if p['action'] != 'keep'])

@@ -53,6 +53,14 @@ def not_found(settings: Settings, what: str) -> str:
             f"cluster and the name or UUID. Don't look for another document to use instead, and don't create one.")
 
 
+def refused_reason(error: Exception) -> str:
+    """Stroom's own reason a request was refused, for a reader: without 'Stroom rejected the request', the status and
+    the Java exception's class (a document Stroom can't load, one deleted since a search listed it)."""
+    text = str(error).split('Stroom rejected the request', 1)[-1].lstrip(' :')
+    text = re.sub(r'^\(\d+\):\s*', '', text.split(' (stroom.', 1)[0].split(' (java.', 1)[0])
+    return text.strip()[:300]
+
+
 def _untrusted(error: Exception) -> str:
     """What to tell the user when Stroom's certificate failed the check (a self-signed one, say); '' otherwise."""
     if 'CERTIFICATE_VERIFY_FAILED' not in str(error):

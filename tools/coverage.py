@@ -92,7 +92,10 @@ async def _logged(stroom: StroomGateway, errors: list[dict[str, Any]]) -> list[d
             continue        # counted, and clean (a find doesn't always give the counts: then it is read)
         if not meta.get('parentMetaId'):
             continue
-        body = await stroom.fetch_data(meta['id'], 0, 5000, 'MARKER')
+        try:
+            body = await stroom.fetch_data(meta['id'], 0, 5000, 'MARKER')
+        except ToolError:   # an Error stream Stroom can't read (its volume gone): the batch's others still counted
+            continue
         for marker in body.get('markers') or []:
             parsed = parse_logged(marker.get('message') or '')
             if parsed:
@@ -112,10 +115,13 @@ async def _example(ctx: Context, mapping, raw: int, record: int) -> str | None:
         return None
     text = next(iter(texts.values()), '')
     splitter = None
-    if mapping.input == 'data_splitter':
-        from utils.dsgen import infer_spec
-        splitter, _ = infer_spec(text)
-    records, _ = sample_records(mapping, text, splitter)
+    try:
+        if mapping.input == 'data_splitter':
+            from utils.dsgen import infer_spec
+            splitter, _ = infer_spec(text)
+        records, _ = sample_records(mapping, text, splitter)
+    except Exception:   # only an example: a record this can't read leaves its kind without one
+        return None
     return _shown(records[record]) if record < len(records) else None
 
 
@@ -139,9 +145,13 @@ async def _sampled_unknown(stroom: StroomGateway, pipeline: dict[str, Any], stre
     examples: dict[tuple, dict[str, Any]] = {}
     raws: set[int] = set()
     for meta in [r['meta'] for r in rows if r['meta'].get('status') != 'DELETED']:
-        first = await stroom.fetch_data(meta['id'], 0, 1)
-        total = min((first.get('totalItemCount') or {}).get('count') or 1, per_stream)
-        for body in [first] + [await stroom.fetch_data(meta['id'], i, 1) for i in range(1, total)]:
+        try:
+            first = await stroom.fetch_data(meta['id'], 0, 1)
+            total = min((first.get('totalItemCount') or {}).get('count') or 1, per_stream)
+            bodies = [first] + [await stroom.fetch_data(meta['id'], i, 1) for i in range(1, total)]
+        except ToolError:   # an Events stream Stroom can't read: the others still sampled
+            continue
+        for body in bodies:
             data = body.get('data') or ''
             if 'Unknown' not in data:
                 continue

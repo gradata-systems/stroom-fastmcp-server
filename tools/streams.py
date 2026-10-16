@@ -13,7 +13,7 @@ from pydantic import Field
 
 from tools.pipelines import own_elements
 from utils.params import ONE_OR_MORE
-from utils.stroom import StroomGateway, gateway_from
+from utils.stroom import StroomGateway, gateway_from, refused_reason
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
@@ -386,15 +386,25 @@ async def summarise_errors(
     if not error_streams:
         return {'stream_id': stream_id, 'error_streams': [], **triage([], ctx.lifespan_context['rules'], set())}
 
-    markers, own, accepted = [], set(), []
+    markers, own, accepted, unread = [], set(), [], []
     for error_stream in error_streams:
-        body = await stroom.fetch_data(error_stream['id'], 0, 1000, 'MARKER')
+        # Production streams: an Error stream Stroom can't read (its volume gone), or written by a pipeline it can no
+        # longer load (deleted, or a property its element type lost), is said; the rest are still summarised.
+        try:
+            body = await stroom.fetch_data(error_stream['id'], 0, 1000, 'MARKER')
+        except ToolError as e:
+            unread.append(f"Error stream {error_stream['id']}: {refused_reason(e)}")
+            continue
         markers += [from_stored_error(m) for m in body.get('markers') or [] if m.get('type') == 'storedError']
         if error_stream.get('pipelineUuid'):
-            own |= own_elements(await stroom.pipeline_layers(error_stream['pipelineUuid']))
+            try:
+                own |= own_elements(await stroom.pipeline_layers(error_stream['pipelineUuid']))
+            except ToolError:   # its elements unknown: none of its errors is told apart as the pipeline's own
+                pass
             accepted += await accepted_for(stroom, error_stream['pipelineUuid'])
     result = triage(markers, ctx.lifespan_context['rules'], own, accepted=accepted)
-    return {'stream_id': stream_id, 'error_streams': [e['id'] for e in error_streams], **result}
+    return {'stream_id': stream_id, 'error_streams': [e['id'] for e in error_streams], **result,
+            **({'unread': unread} if unread else {})}
 
 
 EVT = 'event-logging:3'
@@ -448,7 +458,10 @@ async def summarise_events(
     for stream_id in stream_ids:
         records, _ = await read_records(stroom, stream_id, 0, max_events - count, None, 50_000_000)
         for record in records:
-            root = etree.fromstring(record.encode('utf-8'))
+            try:
+                root = etree.fromstring(record.encode('utf-8'))
+            except etree.XMLSyntaxError:   # one record that isn't XML (a truncated or hand-edited stream): passed over
+                continue
             for event in root.iter(f'{{{EVT}}}Event'):
                 count += 1
                 detail = event.find(f'{{{EVT}}}EventDetail')
@@ -521,7 +534,13 @@ async def summarise_streams(
     """
     if kind == 'events':
         return await summarise_events(ctx, stream_ids, max_events)
-    return {'streams': {stream_id: await summarise_errors(ctx, stream_id) for stream_id in stream_ids}}
+    streams: dict[int, Any] = {}
+    for stream_id in stream_ids:
+        try:
+            streams[stream_id] = await summarise_errors(ctx, stream_id)
+        except ToolError as e:   # one stream that isn't there, or can't be read: the others are still summarised
+            streams[stream_id] = {'stream_id': stream_id, 'error': str(e)}
+    return {'streams': streams}
 
 
 ALL_TOOLS = [find_streams, describe_stream, read_stream, summarise_streams]

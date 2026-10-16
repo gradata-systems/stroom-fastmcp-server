@@ -11,10 +11,11 @@ import re
 from typing import Annotated, Any
 
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from utils.params import ONE_OR_MORE
-from utils.stroom import body_text, gateway_from
+from utils.stroom import body_text, gateway_from, refused_reason
 
 MAX_CHARS = 20_000
 
@@ -63,7 +64,8 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
     name = stroom.settings.instructions_doc_name
     found = await stroom.find_documents(name, ['Documentation'], 200)
     candidates = [(v['docRef'], _parts(v.get('path'))) for v in found.get('values') or []
-                  if v['docRef'].get('type') == 'Documentation' and v['docRef'].get('name', '').lower() == name.lower()]
+                  if (v.get('docRef') or {}).get('type') == 'Documentation'
+                  and (v['docRef'].get('name') or '').lower() == name.lower()]
 
     targets = [_parts(f) for f in folders]
     for feed in feeds:
@@ -75,11 +77,17 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
         if folder is not None:
             targets.append(folder)
 
-    applying, elsewhere, used = [], [], 0
+    applying, elsewhere, unread, used = [], [], [], 0
     for ref, folder in sorted(candidates, key=lambda c: (len(c[1]), '/'.join(c[1]))):
         scope = '/'.join(folder) or '(root)'
         if len(folder) <= 1 or any(applies(folder, t) for t in targets):
-            text = body_text(await stroom.get_doc('Documentation', ref['uuid']))
+            try:
+                text = body_text(await stroom.get_doc('Documentation', ref['uuid']))
+            except ToolError as e:
+                # Deleted since the search listed it, or not this user's to read: said, the others still followed
+                # (one such doc had failed every tool that hands back standing instructions).
+                unread.append({'folder': scope, 'uuid': ref['uuid'], 'reason': refused_reason(e)})
+                continue
             room = max(0, MAX_CHARS - used)
             used += min(len(text), room)
             applying.append({'folder': scope, 'uuid': ref['uuid'],
@@ -89,6 +97,7 @@ async def applicable_instructions(ctx: Context, folders: list[str] = (), feeds: 
             elsewhere.append({'folder': scope, 'uuid': ref['uuid']})
     return {
         'doc_name': name, 'instructions': applying, 'other_instruction_docs': elsewhere,
+        **({'unreadable_instruction_docs': unread} if unread else {}),
         'hint': ("Follow these standing instructions, the most specific last; the user's request takes precedence. "
                  "Call again with the folders, feeds or documents involved once you know them." if applying else
                  f"No {name} docs apply. Users can add one: a Documentation doc named {name} in a folder applies to that "

@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from security.guard import GENERATED
-from utils.stroom import body_text, doc_link, gateway_from
+from utils.stroom import body_text, doc_link, gateway_from, refused_reason
 
 PURPOSE_CHARS = 2_000     # a doc's Purpose and data section, up to this
 ROWS_SHOWN = 12           # rows about the field, across the docs
@@ -217,10 +217,13 @@ async def _indexes_written(ctx: Context, stroom, pipeline_uuid: str) -> list[dic
             out.append({'type': 'Index', 'uuid': value['uuid'], 'name': value.get('name')})
     if any(name == 'indexName' for _, name in properties):
         for v in (await stroom.find_documents('*', ['ElasticIndex'], 200)).get('values') or []:
-            ref = v['docRef']
+            ref = v.get('docRef') or {}
             if ref.get('type') != 'ElasticIndex':
                 continue
-            doc = await stroom.get_doc('ElasticIndex', ref['uuid'])
+            try:
+                doc = await stroom.get_doc('ElasticIndex', ref['uuid'])
+            except ToolError:   # one doc gone or unreadable: not this pipeline's index, and the others still checked
+                continue
             if writes_to(properties, 'ElasticIndex', ref['uuid'], doc.get('indexName')):
                 out.append({'type': 'ElasticIndex', 'uuid': ref['uuid'], 'name': ref.get('name'),
                             'index_name': doc.get('indexName'), 'doc': doc})
@@ -307,7 +310,11 @@ async def describe_feed(
     # The feed's pipelines: those reading its raw data, then those reading their Events (indexing, CEF).
     pipelines = await _pipelines_reading(stroom, name)
     for p in [p for p in pipelines if not p['reads_events']]:
-        for follow in await follow_on_pipelines(ctx, p, {name}):
+        try:
+            follows = await follow_on_pipelines(ctx, p, {name})
+        except ToolError:   # this pipeline is listed below with why Stroom couldn't load it
+            follows = []
+        for follow in follows:
             if all(q['uuid'] != follow['uuid'] for q in pipelines):
                 pipelines.append({'uuid': follow['uuid'], 'name': follow['name'], 'reads_events': True})
     described, indexes, kinds, purposes, docs_text = [], [], [], [], []
@@ -316,32 +323,42 @@ async def describe_feed(
             pipeline = await stroom.get_doc('Pipeline', p['uuid'])
         except ToolError:
             continue
-        kept = await kept_mapping(ctx, p['uuid'])
-        # The plan kept with its XSLT says what it is; an XSLT written by hand, the pipeline's elements.
-        kind = (kept or {}).get('kind') or await _shape_stage(stroom, p['uuid'])
-        kind = {'translation': 'events', 'index': 'indexing', 'cef': 'CEF output', 'forwarding': 'CEF output',
-                'discovery': 'discovery index'}.get(kind, kind)
-        entry: dict[str, Any] = {'pipeline': pipeline.get('name'), 'uuid': p['uuid'], 'kind': kind}
-        if kept and kept['kind'] == 'translation':
-            kinds += _event_kinds(kept['payload'])
-        doc_ref = await _generated_doc(stroom, guard, pipeline['name'], await _folder_of(stroom, {**pipeline, 'type': 'Pipeline'}))
-        text = doc_ref and await _text(stroom, doc_ref['uuid'])
-        if text is not None and doc_ref:
-            entry['documentation'] = {'name': doc_ref['name'], 'link': doc_link(stroom.settings, 'Documentation', doc_ref['uuid']),
-                                      'generated': doc_ref['generated']}
-            docs_text.append((doc_ref['name'], text))
-            purpose = section(text, 'Purpose and data')
-            if purpose:
-                purposes.append({'doc': doc_ref['name'], 'text': purpose[:PURPOSE_CHARS]
-                                 + (' ...' if len(purpose) > PURPOSE_CHARS else '')})
-        if kind in ('indexing', 'discovery index'):
-            try:
-                for index in await _indexes_written(ctx, stroom, p['uuid']):
-                    if all(i['uuid'] != index['uuid'] for i in indexes):
-                        indexes.append(index)
-            except ToolError:
-                pass
-        described.append(entry)
+        try:
+            kept = await kept_mapping(ctx, p['uuid'])
+            # The plan kept with its XSLT says what it is; an XSLT written by hand, the pipeline's elements.
+            kind = (kept or {}).get('kind') or await _shape_stage(stroom, p['uuid'])
+            kind = {'translation': 'events', 'index': 'indexing', 'cef': 'CEF output', 'forwarding': 'CEF output',
+                    'discovery': 'discovery index'}.get(kind, kind)
+            entry: dict[str, Any] = {'pipeline': pipeline.get('name'), 'uuid': p['uuid'], 'kind': kind}
+            if kept and kept['kind'] == 'translation':
+                # The kept payload holds the mapping under 'mapping' (with its schema version): passed whole, it never
+                # validated, and no event kinds were ever listed.
+                kinds += _event_kinds(kept['payload'].get('mapping') or {})
+            doc_ref = await _generated_doc(stroom, guard, pipeline['name'], await _folder_of(stroom, {**pipeline, 'type': 'Pipeline'}))
+            text = doc_ref and await _text(stroom, doc_ref['uuid'])
+            if text is not None and doc_ref:
+                entry['documentation'] = {'name': doc_ref['name'], 'link': doc_link(stroom.settings, 'Documentation', doc_ref['uuid']),
+                                          'generated': doc_ref['generated']}
+                docs_text.append((doc_ref['name'], text))
+                purpose = section(text, 'Purpose and data')
+                if purpose:
+                    purposes.append({'doc': doc_ref['name'], 'text': purpose[:PURPOSE_CHARS]
+                                     + (' ...' if len(purpose) > PURPOSE_CHARS else '')})
+            if kind in ('indexing', 'discovery index'):
+                try:
+                    for index in await _indexes_written(ctx, stroom, p['uuid']):
+                        if all(i['uuid'] != index['uuid'] for i in indexes):
+                            indexes.append(index)
+                except ToolError:
+                    pass
+            described.append(entry)
+        except ToolError as e:
+            # Seen in production: a pipeline whose stored structure Stroom no longer loads ('Attempt to set property
+            # "compressionLevel" on element "rollingFileAppender" but property is unknown') failed the whole feed's
+            # description. It is listed with the reason; the rest of the feed is still described.
+            described.append({'pipeline': pipeline.get('name'), 'uuid': p['uuid'], 'kind': 'unknown',
+                              'link': doc_link(stroom.settings, 'Pipeline', p['uuid']),
+                              'problem': f"Stroom couldn't load this pipeline, so it isn't described: {refused_reason(e)}"})
     out['pipelines'] = described
     if kinds:
         out['event_kinds'] = kinds
@@ -355,7 +372,10 @@ async def describe_feed(
         entry = {'name': index['name'], 'uuid': index['uuid'],
                  'backend': 'elasticsearch' if index['type'] == 'ElasticIndex' else 'lucene',
                  **({'index_name': index['index_name']} if index.get('index_name') else {})}
-        doc_ref = await _generated_doc(stroom, guard, index['name'], await _folder_of(stroom, index))
+        try:
+            doc_ref = await _generated_doc(stroom, guard, index['name'], await _folder_of(stroom, index))
+        except ToolError:   # its documentation not found: the index's own fields still given
+            doc_ref = None
         text = doc_ref and await _text(stroom, doc_ref['uuid'])
         if text is not None and doc_ref:
             entry['documentation'] = {'name': doc_ref['name'], 'link': doc_link(stroom.settings, 'Documentation', doc_ref['uuid']),

@@ -12,7 +12,7 @@ from pydantic import Field
 
 from tools.pipelines import merge_layers
 from tools.templates import _shape
-from utils.stroom import gateway_from
+from utils.stroom import gateway_from, refused_reason
 
 REF_NS = 'reference-data:2'
 XSL = 'http://www.w3.org/1999/XSL/Transform'
@@ -90,9 +90,16 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
                 t.get('value') or (t.get('docRef') or {}).get('name') for t in terms
                 if t.get('field') == 'Feed' and (t.get('value') or t.get('docRef')))
     maps: dict[str, dict[str, Any]] = {}
+    # Production content: one document Stroom can't give (deleted since the search listed it, not this user's to
+    # read, a pipeline it can no longer load) is left out and said, not the whole answer lost.
+    unreadable: list[str] = []
     for xslt in xslts.values():
-        doc = await stroom.get(f"/xslt/v1/{xslt['uuid']}")
-        written = maps_in_xslt(doc.get('data') or '')
+        try:
+            doc = await stroom.get(f"/xslt/v1/{xslt['uuid']}")
+        except ToolError as e:
+            unreadable.append(f"XSLT '{xslt.get('name')}': {refused_reason(e)}")
+            continue
+        written = maps_in_xslt((doc or {}).get('data') or '')
         if not written:
             continue
         users = await stroom.post('/explorer/v2/findInContent', {
@@ -103,9 +110,9 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
         for entry in written:
             m = maps.setdefault(entry['map'], {**entry, 'xslt': xslt['name'], 'loaded_by': [], 'feeds': []})
             for p in pipelines:
-                if p['name'] not in m['loaded_by']:
-                    m['loaded_by'].append(p['name'])
-                m['feeds'] += sorted(feeds_by_pipeline.get(p['uuid'], set()) - set(m['feeds']))
+                if p.get('name') not in m['loaded_by']:
+                    m['loaded_by'].append(p.get('name'))
+                m['feeds'] += sorted(feeds_by_pipeline.get(p.get('uuid'), set()) - set(m['feeds']))
     # Loader pipelines, and the (feed, loader) pairs pipelines already reference.
     loaders = []
     referencing = await stroom.post('/explorer/v2/findInContent', {
@@ -116,7 +123,11 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
         ref = (value.get('docContentMatch') or {}).get('docRef') or {}
         if ref.get('type') != 'Pipeline':
             continue
-        merged = merge_layers(await stroom.pipeline_layers(ref['uuid']))
+        try:
+            merged = merge_layers(await stroom.pipeline_layers(ref['uuid']))
+        except ToolError as e:
+            unreadable.append(f"pipeline '{ref.get('name')}': {refused_reason(e)}")
+            continue
         for r in merged['references']:
             feed = (r.get('feed') or {}).get('name')
             loader = r.get('pipeline') or {}
@@ -141,6 +152,7 @@ async def find_reference_data(ctx: Context) -> dict[str, Any]:
     return {'maps': sorted(maps.values(), key=lambda m: m['map']),
             'references_in_use': sorted(used.values(), key=lambda u: u['feed'] or ''),
             'loaders': loaders, 'reference_data_template': template,
+            **({'unreadable': unreadable} if unreadable else {}),
             'hint': ("A mapping entry {lookup: {map, field}} reads a map; the pipeline must name the map's feed and loader "
                      "as a reference (create_pipeline references=[{feed, loader_pipeline}] or update_pipeline (references=...)). "
                      "No map for what you need: build the reference data (create_feed stream_type='Raw Reference', "
@@ -182,7 +194,11 @@ async def resolve_loader(stroom, feed: str) -> str:
         ref = (value.get('docContentMatch') or {}).get('docRef') or {}
         if ref.get('type') != 'Pipeline':
             continue
-        for r in merge_layers(await stroom.pipeline_layers(ref['uuid']))['references']:
+        try:
+            references = merge_layers(await stroom.pipeline_layers(ref['uuid']))['references']
+        except ToolError:   # a pipeline Stroom can no longer load: not the one to learn the loader from
+            continue
+        for r in references:
             if (r.get('feed') or {}).get('name') == feed and (r.get('pipeline') or {}).get('uuid'):
                 return r['pipeline']['uuid']
     loaders = await loader_pipelines(stroom)

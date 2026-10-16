@@ -49,28 +49,32 @@ def merge_layers(layers: list[dict[str, Any]]) -> dict[str, Any]:
         data = layer.get('pipelineData') or {}
         source = _doc_ref(layer.get('sourcePipeline'))
 
+        # An entry missing what it needs (seen in odd stored layers) is passed over: a KeyError here failed every
+        # tool that reads pipelines, over one malformed layer.
         added, removed = _changes(data, 'elements')
         for element in removed:
-            elements.pop(element['id'], None)
+            elements.pop(element.get('id'), None)
         for element in added:
-            elements[element['id']] = element['type']
+            if element.get('id') and element.get('type'):
+                elements[element['id']] = element['type']
 
         added, removed = _changes(data, 'links')
         for link in removed:
-            if (link['from'], link['to']) in links:
+            if (link.get('from'), link.get('to')) in links:
                 links.remove((link['from'], link['to']))
         for link in added:
-            if (link['from'], link['to']) not in links:
+            if link.get('from') and link.get('to') and (link['from'], link['to']) not in links:
                 links.append((link['from'], link['to']))
 
         added, removed = _changes(data, 'properties')
         for prop in removed:
-            properties.pop((prop['element'], prop['name']), None)
+            properties.pop((prop.get('element'), prop.get('name')), None)
         for prop in added:
-            properties[(prop['element'], prop['name'])] = {'value': _value(prop.get('value')), 'from': source}
+            if prop.get('element') and prop.get('name'):
+                properties[(prop['element'], prop['name'])] = {'value': _value(prop.get('value')), 'from': source}
 
         added, removed = _changes(data, 'pipelineReferences')
-        key = lambda r: (r['element'], r['name'], (r.get('pipeline') or {}).get('uuid'), (r.get('feed') or {}).get('uuid'))
+        key = lambda r: (r.get('element'), r.get('name'), (r.get('pipeline') or {}).get('uuid'), (r.get('feed') or {}).get('uuid'))
         removed_keys = {key(r) for r in removed}
         references = [r for r in references if key(r) not in removed_keys]
         for ref in added:
@@ -89,7 +93,7 @@ def merge_layers(layers: list[dict[str, Any]]) -> dict[str, Any]:
         'elements': [{'id': eid, 'type': etype} for eid, etype in elements.items()],
         'links': [{'from': a, 'to': b} for a, b in links],
         'properties': [{'element': e, 'name': n, **v} for (e, n), v in properties.items()],
-        'references': [{'element': r['element'], 'name': r['name'], 'pipeline': _doc_ref(r.get('pipeline')),
+        'references': [{'element': r.get('element'), 'name': r.get('name'), 'pipeline': _doc_ref(r.get('pipeline')),
                         'feed': _doc_ref(r.get('feed')), 'stream_type': r.get('streamType')} for r in references],
         'removed_by_this_pipeline': own_removals,
     }
