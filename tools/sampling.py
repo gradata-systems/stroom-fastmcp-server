@@ -12,7 +12,7 @@ from security.guard import guard_from
 from tools.streams import _meta, _term
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
-from utils.stroom import StroomGateway, body_text, gateway_from, refused_reason, set_body_text
+from utils.stroom import StroomGateway, body_text, gateway_from, refused_reason, set_body_text, stroom_chars
 from utils.survey import Shapes, share, split_records
 from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
 
@@ -137,14 +137,17 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     total = (body.get('totalCharacterCount') or {}).get('count')
     parts = (body.get('totalItemCount') or {}).get('count') or 1
     pages = [text]
-    have = len(text)
+    # Where the next page starts, as Stroom counts (UTF-16 units: an emoji is two). Counted in Python's characters, a
+    # page after any emoji started that many characters early, read them twice, and the join made records that aren't
+    # in the data (seen in production: a survey of tweets found <data ne="..."> and valvalue= in clean streams).
+    have = stroom_chars(text)
     while total and have < min(chars, total - 1):
-        # As raw_text: Stroom's ranges end one past the length asked for, so the next page starts after what came back.
+        # The next page starts after what came back (Stroom widens a range to whole characters and lines).
         data = (await fetch(have, chars - have)).get('data') or ''
         if not data or data.strip() == NO_DATA:
             break
         pages.append(data)
-        have += len(data)
+        have += stroom_chars(data)
     text = ''.join(pages)
     # Stroom rounds a range out to whole lines, so a single-line stream (one big JSON array) can come back
     # whole: cut it here too.
@@ -152,7 +155,7 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     text = text[:chars]
     # Stroom's count can be one more than the text it returns (as raw_text finds): a whole document read as cut had its
     # last line trimmed by sample_format, and an XML sample's closing tag with it (e2e: profiled as unknown text).
-    return text, cut or bool(total and total > len(text) + 1), parts
+    return text, cut or bool(total and total > stroom_chars(text) + 1), parts
 
 
 async def survey_feed(
@@ -338,6 +341,12 @@ async def _keep(ctx: Context, build: str | None, record: dict[str, Any] | None, 
     if not build:
         return result
     stroom = gateway_from(ctx)
+    if record is None:
+        # Made by a call just before this one, which Stroom's explorer can leave out for a moment: looked for again
+        # now, and merged into, not refused as a twin at its creation (seen: two survey calls back to back).
+        record = await _load_record(ctx, build, result['feed'])
+        if record is not None:
+            state = read_state(body_text(record)) or state
     merged = merge(state, result, shapes, examples)
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:

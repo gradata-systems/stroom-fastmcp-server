@@ -13,7 +13,7 @@ from pydantic import Field
 
 from tools.pipelines import own_elements
 from utils.params import ONE_OR_MORE
-from utils.stroom import StroomGateway, gateway_from, refused_reason
+from utils.stroom import StroomGateway, gateway_from, refused_reason, stroom_chars
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
@@ -192,10 +192,12 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
     if body.get('errors'):
         raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
     total = (body.get('totalCharacterCount') or {}).get('count') or 0
-    parts, have = [body.get('data') or ''], len(body.get('data') or '')
+    # Offsets as Stroom counts them (UTF-16 units: an emoji is two), as read_head; in Python's characters, each page
+    # after an emoji re-read that many characters, and the join corrupted the records.
+    parts, have = [body.get('data') or ''], stroom_chars(body.get('data') or '')
     ended = False
     while have < min(total, max_chars):
-        # Stroom's ranges end one past the length asked for, so the next page starts after what came back.
+        # The next page starts after what came back.
         page = await stroom.post('/data/v1/fetch', {
             'sourceLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': 0, 'childType': None,
                                'dataRange': {'charOffsetFrom': have, 'length': min(RAW_PAGE_CHARS, max_chars - have)}},
@@ -205,13 +207,13 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
             ended = True    # past the end: Stroom answers a range beyond the data with its placeholder, not nothing
             break
         parts.append(data)
-        have += len(data)
+        have += stroom_chars(data)
     text = ''.join(parts)
     if text.rstrip().endswith(NO_DATA):
         text = text.rstrip()[:-len(NO_DATA)]
     # Stroom's count can be one more than the text it returns: once past the end, the whole text is read (seen: a
     # JSON array uploaded without a final newline cut back to its last line end, which no longer parsed).
-    truncated = len(text) > max_chars or (len(text) < total and not ended)
+    truncated = len(text) > max_chars or (stroom_chars(text) < total and not ended)
     if truncated:
         text = text[:max_chars]
         text = text[:text.rfind('\n') + 1] or text

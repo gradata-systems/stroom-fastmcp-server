@@ -3,7 +3,7 @@
 Clients check a call against the tool's schema before sending it and refuse one with a property the schema does
 not list; a small model that invents a flag ("save_text_converter": "true") is then stuck. The published schemas
 therefore allow additional properties, and this middleware removes the unknown ones before validation, telling
-the model which were ignored in the result.
+the model which were ignored in the result (inside its JSON, so a client can still read it as JSON).
 
 A choice given with stray punctuation or in another case (",XML_FRAGMENT", "xml_fragment") is read as the choice it
 plainly is, and the result says so: seen, an agent sending ",XML_FRAGMENT" again and again, refused each time.
@@ -11,6 +11,7 @@ plainly is, and the result says so: seen, an agent sending ",XML_FRAGMENT" again
 Text mangled by a Windows code page round trip ('â€”' for '—') is put back in every string argument, and the result
 says so (utils/mojibake): seen in VS Code, an agent stalled a terminal trying to fix a doc body itself.
 """
+import json
 from typing import Any, Sequence
 
 import mcp_types as mt
@@ -104,7 +105,25 @@ class LenientArguments(Middleware):
             + ([mojibake_note(mended)] if mended else [])
         if notes:
             try:
-                result.content = [*result.content, mt.TextContent(type='text', text=' '.join(notes))]
+                _with_notes(result, notes)
             except Exception:
                 pass
         return result
+
+
+def _with_notes(result: ToolResult, notes: list[str]) -> None:
+    """The notes in the result: inside it when it is one JSON object (as argument_notes, first), else as text after
+    it. A note after the JSON made the reply unreadable as JSON to a client that joins its texts (seen in Stroom's
+    assistant: a survey result saved to a file, then jq refused it)."""
+    texts = [c for c in result.content if isinstance(c, mt.TextContent)]
+    if len(texts) == 1 and len(result.content) == 1:
+        try:
+            body = json.loads(texts[0].text)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            body = {'argument_notes': notes, **body}
+            # The text only: structured content stays as the tool's output schema describes it.
+            result.content = [mt.TextContent(type='text', text=json.dumps(body, ensure_ascii=False, separators=(',', ':')))]
+            return
+    result.content = [*result.content, mt.TextContent(type='text', text=' '.join(notes))]
