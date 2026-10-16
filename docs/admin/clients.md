@@ -20,6 +20,7 @@ VS Code is set up and tested end to end: see [Sign-in and VS Code](vscode.md).
 | Room for 57 tools | Some clients cap tools per request | Tool groups a client can switch off, such as Elasticsearch on a Lucene-only instance; each tool's `_meta.group` (with `groupSummary`) for clients that offer tools in groups |
 | The server's instructions in the model's context | They hold the order of work and the rules the tools rely on | The `instructions` returned at initialize |
 | Consent decided per tool (optional) | A client that asks before tool calls | Annotations on every tool (below), and `_meta.confirms` on those that ask in their own forms |
+| A tool for asking the user questions (optional) | Decisions a result leaves to the user, such as an action element or System Name, that no form of the server's asks | The instructions tell the model to ask them all with that tool in one call, each with options and a recommendation; without one, it asks in its answer |
 | Buttons for the user's steps (optional) | Steps only the user takes, such as enabling a processor filter | `user_actions` in a result (below); the same steps are in its text for every client |
 
 ## Tool annotations

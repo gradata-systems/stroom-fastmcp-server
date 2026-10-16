@@ -96,6 +96,17 @@ it with your client's file-reading tool (read_file), which needs no approval, ne
 (seen: a doc body round-tripped through PowerShell came back mangled, and fixing it stalled the terminal): pass it to
 the tool as it is; the server repairs text mangled by a Windows code page itself.
 
+Questions for the user: when a result, hint or note leaves decisions to the user (the event-logging version, an
+action element, System Name and Environment, which records to keep, whether to reindex) and your client gives you a
+tool for asking the user questions (Stroom AI: ask_user), ask them with it, all in one call, rather than listing
+questions in your answer: one question per decision, its options the ones the result lists or that fit, the one you
+recommend first and marked as recommended, and the user's own answer allowed unless only the options make sense.
+Without such a tool, ask in your answer: one numbered question per decision, each with what you recommend. Either
+way, where a result gives the options, their order or labels, or says to recommend none, keep to it. Ask only what
+you can't decide from the result, the standing instructions or what the user has said, and not what a form from this
+server will ask; then carry on with their answers. A request to paste something (an index template, a sample) is
+not such a question: ask for it in your answer and end your turn.
+
 Existing feed: when the user asks to onboard data a feed already holds, work from that feed (onboard_existing_feed):
 start_build feeds=[it], then survey_feed. No feed is created and nothing uploaded, whatever sample files the
 workspace holds: its streams are stepped and processed where they are (create_processor_filter with their stream

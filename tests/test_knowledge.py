@@ -91,3 +91,15 @@ def test_the_evaluation_readme_lists_every_case_and_workflow():
     cases = [p.stem for p in (ROOT / 'dev' / 'eval' / 'cases').glob('*.yaml')]
     assert not [c for c in cases if f'`{c}`' not in readme], 'evaluation cases the README lacks'
     assert not [w for w in workflows.WORKFLOWS if f'`{w}`' not in readme], 'workflows the README lacks'
+
+
+def test_the_instructions_send_the_users_decisions_to_the_clients_question_tool():
+    # Asked for by the user: Stroom AI's agent has ask_user, but ended its answer with a "Questions for you" list,
+    # following the server's "ask the user" wording.
+    text = ' '.join(resources.SERVER_INSTRUCTIONS.split())
+    assert 'a tool for asking the user questions (Stroom AI: ask_user), ask them with it, all in one call' in text
+    assert 'Without such a tool, ask in your answer' in text
+    # Results that fix the options or say to recommend none, forms of the server's and pastes keep their own way.
+    assert 'or says to recommend none, keep to it' in text
+    assert 'not what a form from this server will ask' in text
+    assert 'A request to paste something (an index template, a sample) is not such a question' in text
