@@ -13,6 +13,7 @@ from pydantic import Field
 
 from tools.pipelines import own_elements
 from utils.params import ONE_OR_MORE
+from utils.charsets import UNDECODABLE, note as charset_note, report_for as charset_report
 from utils.stroom import StroomGateway, gateway_from, refused_reason, stroom_chars
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
@@ -107,11 +108,25 @@ async def read_stream(
     """
     stroom = gateway_from(ctx)
     limit = stroom.settings.max_stream_chars
-    records, first_body = await read_records(stroom, stream_id, first_record, record_count, child_type, limit)
+    try:
+        records, first_body = await read_records(stroom, stream_id, first_record, record_count, child_type, limit)
+    except ToolError as e:
+        if child_type is not None or UNDECODABLE not in str(e):
+            raise
+        # Bytes its feed's character set can't decode: Stroom won't show the text. Read as a pipeline reads it, through
+        # the bytes, each such byte replaced (utils/charsets); the records are split from that text below.
+        text, _ = await _cached_raw_text(ctx, stroom, stream_id)
+        meta = await stroom.get(f'/meta/v1/{stream_id}')
+        records = [text[:limit]]
+        first_body = {'feedName': meta.get('feedName'), 'streamTypeName': meta.get('typeName'),
+                      'totalItemCount': {'count': 1}, 'dataType': 'NON_SEGMENTED'}
     result: dict[str, Any] = {
         'stream_id': stream_id, 'feed': first_body.get('feedName'), 'type': first_body.get('streamTypeName'),
         'first_record': first_record, 'total_records': (first_body.get('totalItemCount') or {}).get('count'),
         'available_child_types': first_body.get('availableChildStreamTypes'), 'records': records}
+    report = charset_report(stroom, stream_id) if child_type is None else None
+    if report:
+        result['undecodable_bytes'] = report
     if child_type is None and first_body.get('dataType') != 'SEGMENTED' and (result['total_records'] or 1) <= 1:
         split = await _split_raw(ctx, stroom, stream_id, first_record, record_count, limit)
         if split:
@@ -187,8 +202,29 @@ NO_DATA = '## No Data ##'     # what Stroom's data fetch returns for a range pas
 
 
 async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tuple[str, bool]:
-    """(text, truncated): a raw stream's text, read in pages up to max_chars and then cut at a line end."""
+    """(text, truncated): a raw stream's text, read in pages up to max_chars and then cut at a line end. A stream with
+    bytes its feed's character set can't decode, which Stroom won't show as text, is read through its bytes as a
+    pipeline reads it (utils/charsets)."""
+    from utils.charsets import read_as_bytes
+    try:
+        text, truncated = await _raw_text_pages(stroom, stream_id, max_chars)
+    except _Undecodable:
+        text, truncated, _ = await read_as_bytes(stroom, stream_id, 0, max_chars)
+    if truncated:
+        text = text[:max_chars]
+        text = text[:text.rfind('\n') + 1] or text
+    return text, truncated
+
+
+class _Undecodable(Exception):
+    pass
+
+
+async def _raw_text_pages(stroom: StroomGateway, stream_id: int, max_chars: int) -> tuple[str, bool]:
+    from utils.charsets import undecodable
     body = await stroom.fetch_data(stream_id, 0, 1)
+    if undecodable(body.get('errors')):
+        raise _Undecodable()
     if body.get('errors'):
         raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
     total = (body.get('totalCharacterCount') or {}).get('count') or 0
@@ -202,6 +238,8 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
             'sourceLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': 0, 'childType': None,
                                'dataRange': {'charOffsetFrom': have, 'length': min(RAW_PAGE_CHARS, max_chars - have)}},
             'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
+        if undecodable(page.get('errors')):
+            raise _Undecodable()
         data = page.get('data') or ''
         if not data or data.strip() == NO_DATA:
             ended = True    # past the end: Stroom answers a range beyond the data with its placeholder, not nothing
@@ -214,9 +252,6 @@ async def raw_text(stroom: StroomGateway, stream_id: int, max_chars: int) -> tup
     # Stroom's count can be one more than the text it returns: once past the end, the whole text is read (seen: a
     # JSON array uploaded without a final newline cut back to its last line end, which no longer parsed).
     truncated = len(text) > max_chars or (stroom_chars(text) < total and not ended)
-    if truncated:
-        text = text[:max_chars]
-        text = text[:text.rfind('\n') + 1] or text
     return text, truncated
 
 
@@ -302,6 +337,9 @@ async def read_sample_streams(ctx: Context, stream_ids: list[int]) -> tuple[dict
         texts[f'stream {stream_id}'] = text
         if truncated:
             notes.append(f"stream {stream_id} is read up to its first {len(text):,} characters (max_sample_chars)")
+        report = charset_report(stroom, stream_id)
+        if report:
+            notes.append(charset_note(stream_id, report))
     return texts, notes
 
 

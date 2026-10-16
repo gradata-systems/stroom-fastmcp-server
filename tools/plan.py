@@ -180,6 +180,7 @@ async def _survey_state(stroom, surveys: list[dict[str, Any]]) -> dict[str, Any]
     locations = [e['location'] for e in examples if e.get('location')]
     streams = sorted({int(loc['stream']) for loc in locations if str(loc.get('stream', '')).isdigit()})
     return {'saturated': all(s.get('saturated') for s in states),
+            'format': next((s['format'] for s in states if s.get('format')), None),
             'locations': locations if 0 < len(locations) <= 60 else None,
             'streams': streams[-10:],
             'sample': '\n'.join(e['text'] for e in examples[:20]) or None}
@@ -461,6 +462,15 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         # The format of an existing feed, from the survey's examples: whether a text converter is needed.
         # Seen (e2e_existing_feed): profile()'s own result has no needs_text_converter, and the plan failed.
         fmt = text_format(survey['sample'])
+        if survey.get('format') == 'xml' and fmt['format'] != 'xml' and survey.get('streams'):
+            # The examples are one document's records without its root: joined, they read as XML fragments (seen in
+            # production: a <tweets> feed, and the plan said XMLFragmentParser). A surveyed stream's head is the document.
+            from tools.sampling import read_head
+            try:
+                head = text_format((await read_head(stroom, survey['streams'][-1], 0, 20_000))[0])
+                fmt = head if head['format'] == 'xml' else fmt
+            except ToolError:   # that stream gone under retention: the examples' reading stands
+                pass
     # Which stages the build does: on existing data, those it has the pipelines (or survey, or index doc) for. A CEF
     # output build does neither, whatever it works from.
     cef_only = cef_build and not translation and not indexing and not surveyed

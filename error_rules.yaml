@@ -29,6 +29,10 @@ rules:
      reason: "The index has no such field, so the value is dropped: save the indexing XSLT from its plan (save_xslt index_plan=...), and create_indexing_pipeline adds the plan's fields to the index"}
   - {message: 'No effective stream', class: blocking,
      reason: "No reference data is in effect at the lookup time: the reference feed is not attached (update_pipeline (references=...)), or its stream's effective time is after the events (upload_sample effective_time), or the feed was looked up before its reference data was processed: Stroom keeps that empty answer for 10 minutes (its Reference Data - Effective Stream Cache), so step again once 10 minutes have passed since the first lookup, or ask an administrator to clear that cache (Caches screen)"}
+  # A byte the feed's character set can't decode (seen: Latin-1 and Windows-1252 bytes in a UTF-8 feed). Stroom
+  # replaces it and reads on; the cause is the source's bytes, not the pipeline (inherited parser element).
+  - {message: 'un-decodable byte', class: review,
+     reason: "The source sends bytes that aren't in the feed's character set (its encoding; UTF-8 unless set): Stroom replaces each with the replacement character and reads on, so those characters are lost, but not by anything in the pipeline. read_stream on the raw stream says which bytes they are and how they read. If the whole stream is in one other character set (Windows-1252, say: é, curly quotes), set the feed's encoding to it; if it mixes character sets, no one setting reads it all, and the source is to be fixed. Ask the user which"}
   - {element: '*schema*', severity: [ERROR], class: blocking, reason: 'Output fails schema validation'}
   - {own: true, severity: [ERROR], class: blocking, reason: "Error in this pipeline's own element"}
   - {own: false, severity: [ERROR], class: review, reason: 'Error in an inherited element; check whether our output causes it'}

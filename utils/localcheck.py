@@ -15,7 +15,7 @@ from lxml import etree
 
 from utils.actions import action_rules, described
 from utils.dsgen import SplitterSpec, dry_run
-from utils.profile import _XML_DECL, _flatten, xml_fragments
+from utils.profile import _XML_DECL, _flatten, cut_document, xml_fragments
 from utils.timefmt import check_time_format
 from utils.xsltgen import TranslationMapping, reads_input
 
@@ -151,7 +151,7 @@ def _sample_records(mapping: TranslationMapping, sample: str | list[str], splitt
     try:
         root = etree.fromstring(_XML_DECL.sub('', text, count=1).encode('utf-8')) if mapping.input == 'xml' else None
     except etree.XMLSyntaxError:
-        root = None
+        root = cut_document(text)   # a big document read only to here: its complete records
     if mapping.input == 'xml_fragments' or root is None:
         fragments = xml_fragments(text) or []
         if not fragments:

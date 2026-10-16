@@ -123,15 +123,38 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     Stroom returns about 80,000 characters of a big part a fetch, whatever is asked (seen in production: a survey
     allowed 250,000 characters read 108 of a sample's 1,000 records, and said it had read them all)."""
     from tools.streams import NO_DATA
+    from utils.charsets import read_as_bytes, undecodable
+
+    class Undecodable(Exception):
+        pass
 
     async def fetch(offset: int, length: int) -> dict[str, Any]:
         body = await stroom.post('/data/v1/fetch', {
             'sourceLocation': {'metaId': stream_id, 'partIndex': part, 'recordIndex': 0,
                                'dataRange': {'charOffsetFrom': offset, 'length': length}},
             'displayMode': 'TEXT', 'showAsHtml': False, 'recordCount': 1, 'expandedSeverities': []})
+        if undecodable(body.get('errors')):
+            raise Undecodable()
         if body.get('errors'):
             raise ToolError(f"Stroom could not read stream {stream_id}: {'; '.join(body['errors'])}")
         return body
+    try:
+        return await _read_head_text(fetch, chars, NO_DATA)
+    except Undecodable:
+        # Bytes the feed's character set can't decode, anywhere in what is read: Stroom won't show the text, but its
+        # pipelines read on, replacing them. Read as they do, through the bytes (utils/charsets).
+        return await read_as_bytes(stroom, stream_id, part, chars)
+
+
+def _charset_entry(stroom: StroomGateway, stream_id: int) -> dict[str, Any]:
+    """For a stream read through its bytes: how many its character set couldn't decode, and what to do."""
+    from utils.charsets import report_for
+    report = report_for(stroom, stream_id)
+    return {'undecodable_bytes': {k: report[k] for k in ('encoding', 'undecodable_bytes', 'as_windows_1252', 'advice')}} \
+        if report else {}
+
+
+async def _read_head_text(fetch, chars: int, no_data: str) -> tuple[str, bool, int]:
     body = await fetch(0, chars)
     text = body.get('data') or ''
     total = (body.get('totalCharacterCount') or {}).get('count')
@@ -144,7 +167,7 @@ async def read_head(stroom: StroomGateway, stream_id: int, part: int, chars: int
     while total and have < min(chars, total - 1):
         # The next page starts after what came back (Stroom widens a range to whole characters and lines).
         data = (await fetch(have, chars - have)).get('data') or ''
-        if not data or data.strip() == NO_DATA:
+        if not data or data.strip() == no_data:
             break
         pages.append(data)
         have += stroom_chars(data)
@@ -283,7 +306,8 @@ async def survey_feed(
                            'records': read_here,
                            'parts': parts, 'head_only': cut or parts > max_parts_per_stream
                            or read_here >= max_records_per_stream,
-                           'new_shapes': new_here})
+                           'new_shapes': new_here,
+                           **_charset_entry(stroom, meta['id'])})
     if first_chunk is None:
         raise ToolError(f"Nothing readable in the sampled streams of '{feed}'")
 

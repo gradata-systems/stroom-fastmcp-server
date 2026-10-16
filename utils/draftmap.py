@@ -14,7 +14,7 @@ from typing import Any
 
 from utils.actions import action_rules, described, read
 from utils.dsgen import SplitterSpec, dry_run, infer_spec
-from utils.profile import _flatten, profile, profile_many, value_type, xml_fragments
+from utils.profile import _flatten, cut_document, profile, profile_many, value_type, xml_fragments
 from utils.samples import as_named_samples
 from utils.timefmt import EPOCH_NAMES
 
@@ -134,8 +134,11 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
             if fmt == 'xml fragments':
                 elements = xml_fragments(text) or []
             else:
-                root = etree.fromstring(text.strip().encode('utf-8'))
-                elements = [c for c in root if isinstance(c.tag, str)]
+                try:
+                    root = etree.fromstring(text.strip().encode('utf-8'))
+                except etree.XMLSyntaxError:
+                    root = cut_document(text)   # a big document read only to here: its complete records
+                elements = [c for c in root if isinstance(c.tag, str)] if root is not None else []
             for rec in elements:
                 flat: dict[str, str] = {}
                 for node in rec.iter():

@@ -76,3 +76,34 @@ def test_text_that_starts_as_json_and_does_not_parse_is_said_so():
     assert profile(retyped.replace('\\+', '+'))['format'] == 'json array'
     # Text that only starts with a bracket is not taken for JSON.
     assert profile('[2026-10-01 08:00:00] INFO started\n[2026-10-01 08:00:01] INFO ok\n')['format'] != 'json array'
+
+
+# A big single-document stream read only to its head (seen in production: a 54 MB <tweets> stream, read to 1 MB, was
+# profiled as CSV with no records, and the plan then asked for an XMLFragmentParser).
+TWEETS_HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n<tweets>'
+               + ''.join(f'<tweet><data name="id" value="{n}" /><data name="text" value="t {n}" />'
+                         f'<data name="user_mentions"><data><data name="screen_name" value="u{n}" /></data></data></tweet>'
+                         for n in range(30))
+               + '<tweet><data name="id" value="30" /><data na')
+
+
+def test_a_document_read_only_to_its_head_is_xml_with_its_complete_records():
+    from utils.profile import cut_document
+    found = profile(TWEETS_HEAD)
+    assert (found['format'], found['root'], found['record_element'], found['records']) == ('xml', 'tweets', 'tweet', 30)
+    assert 'read only to here' in found['note']
+    assert profile('<tweet><data name="id" value="1" /></tweet>\n<tweet><data name="id" value="2" /></tweet>\n')['format'] \
+        == 'xml fragments'
+    # A whole document, fragments, a syntax error: not a document cut short.
+    assert cut_document('<r><a/></r>') is None and cut_document('<a/><a/>') is None and cut_document('<r><a/><b x=1>') is None
+
+
+def test_a_document_read_only_to_its_head_drafts_and_checks_from_its_records():
+    from utils.draftmap import draft_mapping
+    from utils.localcheck import sample_records
+    from utils.xsltgen import TranslationMapping
+    draft = draft_mapping([TWEETS_HEAD], 'Twitter')
+    assert draft['mapping']['input'] == 'xml' and draft['mapping']['record'] == 'tweet'
+    mapping = TranslationMapping.model_validate({**draft['mapping'], 'input': 'xml', 'record': 'tweet'})
+    records, note = sample_records(mapping, TWEETS_HEAD)
+    assert len(records) == 30 and note is None

@@ -117,6 +117,35 @@ def event_logging_fragments(fragments: list) -> bool:
             and {'EventTime', 'EventDetail'} <= parts)
 
 
+def cut_document(text: str) -> etree._Element | None:
+    """A single-root XML document of which only the start was read (a big stream's head: no closing root tag): its
+    root holding the complete records before the cut. None when the text isn't the start of one document (fragments,
+    a syntax error, not XML). Seen in production: a 54 MB <tweets> stream, read to 1 MB, failed to parse as a
+    document, wasn't fragments either, and was profiled as CSV with no records."""
+    parser = etree.XMLPullParser(events=('start', 'end'), huge_tree=True)
+    try:
+        parser.feed(_XML_DECL.sub('', text.strip('\ufeff\r\n '), count=1).encode('utf-8'))
+        events = list(parser.read_events())
+    except etree.XMLSyntaxError:
+        return None
+    root, depth, records = None, 0, []
+    for event, element in events:
+        if event == 'start':
+            depth += 1
+            root = element if root is None else root
+        else:
+            depth -= 1
+            if depth == 1 and isinstance(element.tag, str):
+                records.append(element)
+            elif depth == 0:
+                return None     # the document closed: a whole document, which the XML parser reads (or rejects)
+    if root is None or not records:
+        return None
+    whole = etree.Element(root.tag, attrib=dict(root.attrib), nsmap=root.nsmap)
+    whole.extend(records)
+    return whole
+
+
 def xml_fragments(text: str) -> list | None:
     """The top-level elements of text that is XML fragments (several root elements, e.g. one <Event> per line);
     None for a single document or anything that is not XML."""
@@ -560,6 +589,17 @@ def profile(sample: str, max_records: int = 200) -> dict[str, Any]:
                     'suggested_parser': 'XMLParser (a translation template with one: find_pipeline_templates)', 'text_converter': 'none: the XMLParser reads the document'}
         except etree.XMLSyntaxError:
             fragments = xml_fragments(text)
+            cut = None if fragments else cut_document(text)
+            if cut is not None:
+                children = Counter(etree.QName(c).localname for c in cut)
+                records = [_xml_record_fields(rec) for rec in cut][:max_records]
+                return {**result, 'format': 'xml', 'root': etree.QName(cut).localname,
+                        'namespace': etree.QName(cut).namespace, 'record_element': children.most_common(1)[0][0],
+                        'records': len(cut), 'fields': _inventory(records),
+                        'note': f"one XML document, read only to here (no closing </{etree.QName(cut).localname}>): "
+                                f"these are its first {len(cut)} complete records",
+                        'suggested_parser': 'XMLParser (a translation template with one: find_pipeline_templates)',
+                        'text_converter': 'none: the XMLParser reads the document'}
             if fragments:
                 children = Counter(etree.QName(c).localname for c in fragments)
                 record_tag = children.most_common(1)[0][0]
