@@ -42,7 +42,7 @@ def test_changes_that_cannot_apply_are_refused(changes, message):
 
 
 def ctx():
-    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
 
 
 async def test_a_fix_sends_only_the_rule_it_changes():
@@ -72,7 +72,7 @@ async def test_changes_to_a_saved_xslt_start_from_the_mapping_kept_with_it():
     # Another replica, or a new session: nothing remembered, so the mapping saved with the XSLT is changed.
     from utils.mappingstore import with_mapping
     kept = with_mapping('Acme events', 'translation', {'mapping': mapping().model_dump(exclude_none=True)})
-    gateway = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'),
+    gateway = SimpleNamespace(settings=SimpleNamespace(),
                               get_doc=AsyncMock(return_value={'description': kept}))
     from tools import translation
     saved = {'type': 'XSLT', 'uuid': 'x-1', 'name': 'ACME-Events', 'version': 'v2'}
@@ -99,10 +99,9 @@ async def test_a_saved_xslt_is_regenerated_from_its_kept_mapping_without_sending
     # Seen in production: asked to restyle an XSLT, an agent wrote a mapping from memory (refused), then sent the
     # 1,400-line kept mapping back whole. uuid alone regenerates it, as the generator writes it now.
     from utils.mappingstore import with_mapping
-    kept = with_mapping('Acme events', 'translation', {'schema_version': '4.1.0',
+    kept = with_mapping('Acme events', 'translation', {'schema_version': '3.5.2',
                                                        'mapping': mapping().model_dump(exclude_none=True)})
-    gateway = SimpleNamespace(settings=SimpleNamespace(event_logging_version='3.5.2'),
-                              get_doc=AsyncMock(return_value={'description': kept}))
+    gateway = SimpleNamespace(settings=SimpleNamespace(), get_doc=AsyncMock(return_value={'description': kept}))
     from tools import translation
     saved = {'type': 'XSLT', 'uuid': 'x-1', 'name': 'ACME-Events', 'version': 'v3'}
     schema = AsyncMock(return_value=SCHEMA)
@@ -112,7 +111,7 @@ async def test_a_saved_xslt_is_regenerated_from_its_kept_mapping_without_sending
             patch.object(translation, 'update_xslt', AsyncMock(return_value=saved)) as update:
         result = await generation.build_translation_xslt(ctx(), uuid='x-1')
     assert result['ok'] and result['saved']['version'] == 'v3'
-    assert schema.await_args.args[-1] == '4.1.0'            # the version it was saved for, not the configured one
+    assert schema.await_args.args[-1] == '3.5.2'            # the version it was saved for, not the newest installed
     assert update.await_args.kwargs['change'] == 'Regenerated from its mapping'
     assert [r.name for r in update.await_args.kwargs['mapping'].events] == ['logon', 'other']
     # The style is today's defaults: interpolated values, variables just in time.

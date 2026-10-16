@@ -173,7 +173,7 @@ the standard one is a `records` wrapper:
 ```
 
 An `<Events xmlns="event-logging:3">` wrapper is as common (fragments that are event-logging `<Event>`s already
-always take one):
+always take one; `X.Y.Z` is the event-logging version chosen for the build):
 
 ```xml
 <?xml version="1.1" encoding="UTF-8"?>
@@ -181,7 +181,7 @@ always take one):
 <!ENTITY fragment SYSTEM "fragment">
 ]>
 <Events xmlns="event-logging:3" xmlns:stroom="stroom" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-        xsi:schemaLocation="event-logging:3 file://event-logging-v3.5.2.xsd" Version="3.5.2">
+        xsi:schemaLocation="event-logging:3 file://event-logging-vX.Y.Z.xsd" Version="X.Y.Z">
 &fragment;
 </Events>
 ```

@@ -477,9 +477,9 @@ async def record_source_notes(
     fields = [FieldNote.model_validate(f) if isinstance(f, dict) else f for f in fields]
     events = [EventNote.model_validate(e) if isinstance(e, dict) else e for e in events]
     if events:
-        from tools.generation import event_schema
+        from tools.generation import chosen_or_latest, event_schema
         try:
-            schema = await event_schema(ctx, gateway_from(ctx).settings.event_logging_version)
+            schema = await event_schema(ctx, await chosen_or_latest(ctx, build))
             check = lambda detail: detail_problem(schema, detail)   # noqa: E731
         except Exception:   # the schema is unreadable: the events are still checked for twins
             check = None

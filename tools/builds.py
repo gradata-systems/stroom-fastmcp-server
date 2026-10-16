@@ -257,7 +257,8 @@ async def _drift(ctx: Context, kept: dict[str, Any]) -> str | None:
     """Whether the XSLT still is what its mapping generates."""
     from tools.generation import event_schema
     try:
-        version = kept['payload'].get('schema_version') or gateway_from(ctx).settings.event_logging_version
+        from tools.generation import translation_version
+        version = await translation_version(ctx, kept['payload'], kept['xslt'].get('data'))
         regenerated = generate(TranslationMapping.model_validate(kept['payload']['mapping']), await event_schema(ctx, version), version)
     except Exception as e:
         return f"the mapping kept with its XSLT no longer generates ({e})"
@@ -300,8 +301,8 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
     Event marked by its rule) or index plan (with the Events' path population)."""
     stroom = gateway_from(ctx)
     if kept['kind'] == 'translation':
-        from tools.generation import event_schema
-        version = kept['payload'].get('schema_version') or stroom.settings.event_logging_version
+        from tools.generation import event_schema, translation_version
+        version = await translation_version(ctx, kept['payload'], (kept.get('xslt') or {}).get('data'))
         mapping = TranslationMapping.model_validate(kept['payload']['mapping'])
         schema = await event_schema(ctx, version)
         marked = generate(mapping, schema, version, mark_rules=True)
@@ -364,9 +365,9 @@ async def field_mapping_section(ctx: Context, pipeline: dict[str, Any], kept: di
             loaded = await _Pipeline.load(stroom, pipeline['uuid'])
             outputs = await _outputs(stroom, loaded, stream_ids, kept['element'], None, 200)
             documents = index_documents(list(outputs.values()))
-        from tools.generation import event_schema
+        from tools.generation import chosen_or_latest, event_schema
         try:
-            schema = await event_schema(ctx, stroom.settings.event_logging_version)
+            schema = await event_schema(ctx, await chosen_or_latest(ctx))
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
         section = index_field_mapping_markdown(plan, population, documents, schema, layout, described) + _agreed_line(pipeline)
@@ -884,9 +885,9 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
                 planned.setdefault(f.name, f)
     schema = None
     if planned:
-        from tools.generation import event_schema
+        from tools.generation import chosen_or_latest, event_schema
         try:
-            schema = await event_schema(ctx, stroom.settings.event_logging_version)
+            schema = await event_schema(ctx, await chosen_or_latest(ctx))
         except Exception:   # descriptions then come from the plan and the sample alone
             schema = None
     # Every field a feeding pipeline writes must be in the index, or the doc would leave it out unsaid.

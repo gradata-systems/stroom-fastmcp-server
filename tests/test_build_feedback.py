@@ -28,7 +28,7 @@ def patched(read=None, stepped=None):
     return (patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)),
             patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})),
             patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(
-                settings=SimpleNamespace(event_logging_version='4.1.0'))),
+                settings=SimpleNamespace())),
             patch.object(generation, 'read_sample_streams', read),
             patch.object(generation._Pipeline, 'load', AsyncMock(return_value=SimpleNamespace(
                 default_outputs=lambda: ['translationFilter']))),

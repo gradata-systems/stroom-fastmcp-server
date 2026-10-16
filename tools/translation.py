@@ -97,14 +97,18 @@ async def fragment_wrappers(ctx: Context, limit: int = 100) -> list[dict[str, An
 async def with_fragment_setup(ctx: Context, profiled: dict[str, Any]) -> dict[str, Any]:
     """A profile of XML fragments, with the wrapper this environment uses: its own (event-logging fragments: an
     event-logging:3 one, else the most used), else the standard one (an <Events> one for event-logging fragments, in
-    the configured version)."""
+    the version the user chose for the build, else the newest this Stroom holds)."""
     first = next(iter((profiled.get('files') or {}).values()), profiled)     # several files: as the first is read
     record = profiled.get('record_element') or first.get('record_element')
     if profiled.get('format') != 'xml fragments' or not record:
         return profiled
     from collections import Counter
+    from tools.generation import chosen_or_latest
     from utils.profile import EVENTS_FRAGMENT_WRAPPER, xml_fragment_setup
-    version = gateway_from(ctx).settings.event_logging_version
+    try:
+        version = await chosen_or_latest(ctx)
+    except ToolError:     # no event-logging schema in this Stroom: no <Events> wrapper to offer
+        version = None
     try:
         found = await fragment_wrappers(ctx)
     except Exception:     # a convenience on top of the standard wrapper: never fail a profile over it
@@ -115,7 +119,7 @@ async def with_fragment_setup(ctx: Context, profiled: dict[str, Any]) -> dict[st
         most = Counter((w['root'], w['namespace']) for w in fitting).most_common(1)[0][0]
         wrapper = next(w for w in fitting if (w['root'], w['namespace']) == most)
     else:
-        wrapper = {'code': EVENTS_FRAGMENT_WRAPPER.format(version=version)} if events else None
+        wrapper = {'code': EVENTS_FRAGMENT_WRAPPER.format(version=version)} if events and version else None
     others = [w for w in found if w is not wrapper]
     return {**profiled, **xml_fragment_setup(first.get('namespace'), record, wrapper, others)}
 
@@ -283,8 +287,8 @@ async def _described(ctx: Context, doc: dict[str, Any], code: str, mapping: Tran
     what the mapping generates (a hand-edited XSLT is kept, but reported)."""
     extra: dict[str, Any] = {}
     if mapping is not None:
-        from tools.generation import event_schema
-        version = gateway_from(ctx).settings.event_logging_version
+        from tools.generation import event_schema, translation_version
+        version = await translation_version(ctx, None, code)     # the one the code was generated for
         payload = {'schema_version': version, 'mapping': mapping.model_dump(exclude_none=True, exclude_defaults=True)}
         doc['description'] = with_mapping(doc.get('description'), 'translation', payload)
         try:
@@ -356,9 +360,9 @@ async def _kept_code(ctx: Context, kind: str, payload: dict[str, Any]) -> str | 
     """What the mapping or plan kept with an XSLT generates now: the code the server saved, but for its own changes."""
     try:
         if kind == 'translation':
-            from tools.generation import event_schema
+            from tools.generation import event_schema, translation_version
             from utils.xsltgen import generate
-            version = payload.get('schema_version') or gateway_from(ctx).settings.event_logging_version
+            version = await translation_version(ctx, payload, None)
             generated = generate(TranslationMapping.model_validate(payload['mapping']), await event_schema(ctx, version),
                                  version)
             return generated['xslt'] if generated['ok'] else None

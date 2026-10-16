@@ -104,7 +104,7 @@ async def test_a_records_source_is_validated_as_what_it_is_and_never_indexed_as_
     from fastmcp.exceptions import ToolError
     from tools import indexing, validation
     ctx = SimpleNamespace(lifespan_context={})
-    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))
+    stroom = SimpleNamespace(settings=SimpleNamespace())
     cache = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(validate=lambda doc: True, error_log=[])))
     with patch.object(validation, 'gateway_from', lambda ctx: stroom), patch.object(validation, 'SchemaCache', lambda s: cache):
         own = await validation.validate_events(ctx, '<records><record><user>alice</user></record></records>')

@@ -143,7 +143,7 @@ def _ctx(converters: dict[str, tuple[str, str, str]]):
     from types import SimpleNamespace
 
     class Stroom:
-        settings = SimpleNamespace(event_logging_version='3.5.2', workspace_folder='MCP Workspace')
+        settings = SimpleNamespace(workspace_folder='MCP Workspace')
 
         async def find_documents(self, name, types, limit, offset=0):
             return {'values': [{'docRef': {'type': 'TextConverter', 'uuid': u, 'name': n}, 'path': p}
@@ -185,14 +185,18 @@ async def test_fragments_follow_the_environments_own_wrapper():
     assert plain['text_converter']['code'] == XML_FRAGMENT_WRAPPER and plain['xslt_input']['namespace'] == 'records:2'
 
 
-async def test_event_logging_fragments_take_an_events_wrapper_in_the_configured_version():
+async def test_event_logging_fragments_take_an_events_wrapper_in_the_chosen_version_else_the_newest():
     events = ('<Event><EventTime><TimeCreated>2026-10-01T10:00:00.000Z</TimeCreated></EventTime>'
               '<EventSource><System><Name>App</Name><Environment>Prod</Environment></System></EventSource>'
               '<EventDetail><TypeId>1</TypeId></EventDetail></Event>') * 2
     profiled = profile(events)
     assert profiled['event_logging'] and profiled['text_converter']['root'] == 'Events'
     setup = await translation.with_fragment_setup(_ctx({}), profiled)
-    assert 'event-logging-v3.5.2.xsd' in setup['text_converter']['code']
+    assert 'event-logging-v4.1.0.xsd' in setup['text_converter']['code']        # the newest this Stroom holds
+    ctx = _ctx({})
+    from tools.generation import _remember_version
+    _remember_version(ctx, None, '3.5.2')                                        # the user's choice, this session
+    assert 'event-logging-v3.5.2.xsd' in (await translation.with_fragment_setup(ctx, profiled))['text_converter']['code']
     assert setup['xslt_input']['namespace'] == 'event-logging:3'
     # A source's own <Event> (Windows' System, EventData) is not event-logging
     assert not profile(FRAGMENTS['sample']).get('event_logging')

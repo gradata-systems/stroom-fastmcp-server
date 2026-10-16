@@ -187,8 +187,6 @@ spec:
             {{- end }}
             - name: STROOM_MCP_WORKSPACE_FOLDER
               value: {{ .Values.build.workspaceFolder | quote }}
-            - name: STROOM_MCP_EVENT_LOGGING_VERSION
-              value: {{ .Values.build.eventLoggingVersion | quote }}
             - name: STROOM_MCP_INSTRUCTIONS_DOC_NAME
               value: {{ .Values.build.instructionsDocName | quote }}
             {{- with .Values.build.defaultConvention }}

@@ -224,8 +224,8 @@ async def check_xslt(
         ctx: Context,
         xslt: XsltText,
         schema_version: Annotated[str | None, Field(
-            description="Event-logging version the output must follow, e.g. '3.5.2'. Defaults to the Version the "
-                        "XSLT writes on Events, else the configured version.")] = None,
+            description="Event-logging version the output must follow, e.g. '4.1.0'. Defaults to the Version the "
+                        "XSLT writes on Events, else the newest this Stroom holds.")] = None,
         input_namespace: Annotated[str | None, Field(
             description="The namespace of the XSLT's input when known ('' for a source's XML in no namespace, whose "
                         "own records/record elements are then not taken for a Data Splitter's records:2).")] = None,
@@ -234,7 +234,8 @@ async def check_xslt(
     Check an XSLT before saving or stepping it: well-formed, an xsl:stylesheet with a version, the stroom
     namespace declared and only real stroom: functions used (an unknown one comes back with the nearest real
     name), match and select expressions that would select nothing because the input's namespace is not
-    declared, event-logging elements the schema has no place for (e.g. EventDetail/ServerEvent), and
+    declared, event-logging elements the schema has no place for (e.g. EventDetail/ServerEvent), an
+    xsi:schemaLocation naming a schema this Stroom doesn't hold (file:///, three slashes, say), and
     xsl:import / xsl:include targets that exist as XSLT documents in Stroom. Calls that read the environment, files
     or network (doc(), unparsed-text(), environment-variable() and the like), instructions that read or write a
     document by URI (xsl:result-document, xsl:evaluate, ...) and imports by URL are refused. Full compilation
@@ -254,13 +255,19 @@ async def check_xslt(
     errors += function_errors
     errors += [why for _, why in unsafe_in_xslt(xslt)]
     errors += _namespace_problems(root, input_namespace)
+    if 'schemaLocation' in xslt:
+        try:
+            cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx)))
+            errors += await cache.location_problems(root)
+        except ToolError as e:
+            warnings.append(f"Schema locations not checked: {e}")
     warnings += _unguarded_json(root)
     if root.find(f'.//{{{EVT}}}*') is not None:
-        from tools.generation import event_schema
+        from tools.generation import event_schema, translation_version
         events = root.find(f'.//{{{EVT}}}Events')
-        version = schema_version or (events.get('Version') if events is not None else None) \
-            or gateway_from(ctx).settings.event_logging_version
         try:
+            version = schema_version or (events.get('Version') if events is not None else None) \
+                or await translation_version(ctx, None, xslt)
             schema = await event_schema(ctx, version)
         except ToolError as e:
             warnings.append(f"Event-logging element names not checked: {e}")
@@ -282,8 +289,8 @@ async def validate_events(
         ctx: Context,
         events_xml: EventsXml,
         schema_version: Annotated[str | None, Field(
-            description="Event-logging version to validate against, e.g. '3.5.2'. Defaults to the version the "
-                        "document declares in xsi:schemaLocation, else the configured version.")] = None,
+            description="Event-logging version to validate against, e.g. '4.1.0'. Defaults to the version the "
+                        "document declares in xsi:schemaLocation or its Version, else the newest this Stroom holds.")] = None,
 ) -> dict[str, Any]:
     """
     Validate event XML against the event-logging XSD held in this Stroom instance, returning each error
@@ -305,8 +312,9 @@ async def validate_events(
         # Records are records: their own schema, whatever version they declare, else the one Stroom ships.
         system_id = declared if declared and 'records' in declared else RECORDS_SYSTEM_ID
     else:
-        system_id = (event_logging_system_id(schema_version) if schema_version
-                     else declared or event_logging_system_id(stroom.settings.event_logging_version))
+        from tools.generation import event_versions
+        system_id = (event_logging_system_id(schema_version) if schema_version else declared
+                     or event_logging_system_id(root.get('Version') or (await event_versions(ctx))[0]))
     cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(stroom))
     schema = await cache.get(system_id)
     errors = errors_for(schema, root)
@@ -550,8 +558,8 @@ async def check_events(
             description="An <Events> document, e.g. step output. For what processing wrote, give stream_ids "
                         "instead.")] = None,
         schema_version: Annotated[str | None, Field(
-            description="Event-logging version to validate against, e.g. '3.5.2'. Defaults to the version the "
-                        "document declares in xsi:schemaLocation, else the configured version.")] = None,
+            description="Event-logging version to validate against, e.g. '4.1.0'. Defaults to the version the "
+                        "document declares in xsi:schemaLocation or its Version, else the newest this Stroom holds.")] = None,
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
             description="Events streams processing wrote (wait_for_processing lists them): the server reads and "
                         "checks their events itself, up to the server's max_sample_records in all, so they need "
@@ -595,8 +603,8 @@ async def describe_event_element(ctx: Context, path: str = '', version: str | No
     it is required or repeatable, whether it is one of a choice (and whether one of that choice must be given), and
     for a leaf its type and allowed values, each with the schema's description (describe_document's element=).
     Seen: Qwen in VS Code spent twelve minutes writing PowerShell to read these out of the XSD."""
-    from tools.generation import event_schema
-    version = version or gateway_from(ctx).settings.event_logging_version
+    from tools.generation import chosen_or_latest, event_schema
+    version = version or await chosen_or_latest(ctx)
     schema = await event_schema(ctx, version)
     try:
         chain = schema.resolve(path)

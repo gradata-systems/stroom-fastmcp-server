@@ -11,7 +11,7 @@ from pydantic import Field
 from tools.instructions import applicable_instructions
 from utils.eventschema import EventSchema
 from utils.params import ONE_OR_MORE
-from utils.schemas import SchemaCache, event_logging_system_id
+from utils.schemas import SchemaCache, event_logging_system_id, event_logging_version
 from utils.consent import consent_from
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
@@ -42,6 +42,103 @@ async def event_schema(ctx: Context, version: str) -> EventSchema:
         cache = ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx)))
         schemas[version] = EventSchema.parse(await cache.source(event_logging_system_id(version)))
     return schemas[version]
+
+
+async def event_versions(ctx: Context) -> list[str]:
+    """The event-logging versions this Stroom holds, newest first, or ToolError if it holds none."""
+    versions = await ctx.lifespan_context.setdefault('schemas', SchemaCache(gateway_from(ctx))).event_versions()
+    if not versions:
+        raise ToolError("This Stroom holds no event-logging XML schema (System/XML Schemas): ask the user to import "
+                        "Stroom's event-logging schema pack first.")
+    return versions
+
+
+# The version the user chose for a build's translation, this session: so build_translation_xslt doesn't ask again what
+# draft_translation_mapping asked.
+_VERSION_CHOSEN = 'event_logging_version_chosen'
+
+
+def _build_key(ctx: Context, build: str | None) -> str:
+    from tools.plan import _user
+    try:
+        return build or ctx.lifespan_context.get('current_build', {}).get(_user(ctx)) or ''
+    except Exception:
+        return build or ''
+
+
+def _remember_version(ctx: Context, build: str | None, version: str) -> None:
+    from tools.plan import _user
+    try:
+        ctx.lifespan_context.setdefault(_VERSION_CHOSEN, {}).setdefault(_user(ctx), {})[_build_key(ctx, build)] = version
+    except Exception:
+        pass
+
+
+def _version_chosen(ctx: Context, build: str | None) -> str | None:
+    from tools.plan import _user
+    try:
+        return ctx.lifespan_context.get(_VERSION_CHOSEN, {}).get(_user(ctx), {}).get(_build_key(ctx, build))
+    except Exception:
+        return None
+
+
+async def chosen_or_latest(ctx: Context, build: str | None = None) -> str:
+    """The event-logging version to read the schema of where nothing names one: the one the user chose for the
+    build, else the newest this Stroom holds."""
+    chosen = _version_chosen(ctx, build)
+    return chosen if chosen else (await event_versions(ctx))[0]
+
+
+async def translation_version(ctx: Context, payload: dict[str, Any] | None, code: str | None) -> str:
+    """The event-logging version an existing translation targets: the one kept with its mapping, else the one its
+    code writes, else the newest this Stroom holds."""
+    return ((payload or {}).get('schema_version') or event_logging_version(code)
+            or (await event_versions(ctx))[0])
+
+
+_VERSION_QUESTION = "Which event-logging schema version should the translation write?"
+# Seen: an agent took the nearest 3.x to a missing 3.5.2 (3.4.2) where 4.1.0 was installed, as if namespace
+# event-logging:3 bound it to 3.x.
+ONE_NAMESPACE = ("Every version, 4.x as much as 3.x, writes namespace event-logging:3: the namespace doesn't limit "
+                 "the choice to 3.x.")
+
+
+async def _ask_version(ctx: Context, versions: list[str]) -> str | dict[str, Any]:
+    """The version the user picks in a form, the form itself (a modern connection), or the question for the agent
+    to put to them (a client without forms)."""
+    labels = {f"{v} (newest installed, recommended)" if i == 0 else v: v for i, v in enumerate(versions)}
+    store = (getattr(ctx, 'lifespan_context', None) or {}).get('consent')
+    picked = await store.choose(ctx, 'event_logging_version', _VERSION_QUESTION, list(labels)) if store else None
+    if isinstance(picked, str):
+        return labels.get(picked, picked)
+    if picked is not None:
+        return picked
+    return {'status': 'needs_guidance', 'question': _VERSION_QUESTION, 'options': versions, 'recommended': versions[0],
+            'hint': f"Ask the user which event-logging schema version the translation should write, offering these "
+                    f"versions (those this Stroom holds), {versions[0]}, the newest, first and recommended. "
+                    f"{ONE_NAMESPACE} Then call again with schema_version= their choice."}
+
+
+async def target_version(ctx: Context, schema_version: str | None, build: str | None) -> str | dict[str, Any]:
+    """The event-logging version a new translation writes: the one given, else the one the user chose for the build,
+    else the one this Stroom holds if it holds only one, else the user's pick (or the question to return: a form, or
+    needs_guidance). Never a version this Stroom doesn't hold."""
+    versions = await event_versions(ctx)
+    if schema_version:
+        if schema_version not in versions:
+            raise ToolError(f"This Stroom holds no event-logging schema v{schema_version}; it holds "
+                            f"{', '.join(versions)}. Ask the user which to write ({versions[0]}, the newest, "
+                            f"recommended), not the nearest to the one asked for, then call again with schema_version= "
+                            f"their choice. {ONE_NAMESPACE}")
+        _remember_version(ctx, build, schema_version)
+        return schema_version
+    chosen = _version_chosen(ctx, build)
+    if chosen in versions:
+        return chosen
+    picked = versions[0] if len(versions) == 1 else await _ask_version(ctx, versions)
+    if isinstance(picked, str):
+        _remember_version(ctx, build, picked)
+    return picked
 
 
 def _unknown_markdown(kept: list[Any], sampled: dict[str, dict[str, Any]], total: int) -> str:
@@ -321,7 +418,9 @@ async def build_translation_xslt(
                         "XSLT from the mapping kept with it (as the generator now writes it: its current style "
                         "defaults); never send a kept mapping back whole.")] = None,
         schema_version: Annotated[str | None, Field(
-            description="Event-logging version, e.g. '3.5.2'. Defaults to the configured version.")] = None,
+            description="Event-logging version the translation writes, e.g. '4.0.2': the one the user chose (as "
+                        "draft_translation_mapping returned it). Left out: a saved XSLT's own, else the user is asked "
+                        "which of the versions this Stroom holds (the newest recommended).")] = None,
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Feeds the translation is for, so the standing "
                                                       "instructions for their folders are included.")] = [],
         pipeline_uuid: Annotated[str | None, Field(
@@ -394,7 +493,7 @@ async def build_translation_xslt(
     saved doc's section is generated by write_documentation itself from the mapping kept with the XSLT,
     stepped over the sample streams.
     """
-    version = schema_version or gateway_from(ctx).settings.event_logging_version
+    version = None
     from utils.xsltversion import remember_model
     remember_model(ctx, agent_model)
     target = uuid or (f"{build}/{name}" if build and name else '')
@@ -416,7 +515,7 @@ async def build_translation_xslt(
         # Regenerated from the mapping kept with the XSLT, as the generator writes it now (seen: an agent asked to
         # restyle an XSLT sent its 1,400-line kept mapping back whole, after a first attempt written from memory).
         mapping, kept_version = await _kept_mapping(ctx, target, uuid)
-        version = schema_version or kept_version or version
+        version = kept_version
         change = change or 'Regenerated from its mapping'
     if isinstance(mapping, str):
         try:
@@ -452,6 +551,17 @@ async def build_translation_xslt(
             raise ToolError("mapping is not a translation mapping: " + '; '.join(problems) + ". Fix these in the "
                             "mapping you have; to start again, draft_translation_mapping (stream_ids=the sample streams) "
                             "gives one." + (" A whole mapping looks like: " + json.dumps(MAPPING_EXAMPLE) if structural else '')) from e
+    if not version and uuid and not schema_version:
+        # A saved XSLT keeps the version it writes; one that names none (made empty) is asked about like a new one.
+        saved = await gateway_from(ctx).get_doc('XSLT', uuid)
+        kept = read_mapping(saved.get('description'))
+        version = ((kept[1] or {}).get('schema_version') if kept and kept[0] == 'translation' else None) \
+            or event_logging_version(saved.get('data'))
+    if schema_version or not version:
+        chosen = await target_version(ctx, schema_version, build)
+        if not isinstance(chosen, str):
+            return chosen       # the question: a form, or needs_guidance for the agent to ask
+        version = chosen
     schema = await event_schema(ctx, version)
     required = await _required_for(ctx, 'translation', build, feeds)
     missing = [r['href'] for r in required if r['href'] not in
@@ -814,6 +924,9 @@ async def draft_translation_mapping(
                         "field names. Inferred from the sample when left out.")] = None,
         build: Annotated[str | None, Field(description="The build holding the source notes (record_source_notes): the draft "
                                                        "then follows the user's documentation.")] = None,
+        schema_version: Annotated[str | None, Field(
+            description="Event-logging version the translation writes, e.g. '4.0.2', if the user has said. Left out, "
+                        "the user is asked which of the versions this Stroom holds (the newest recommended).")] = None,
 ) -> dict[str, Any]:
     """
     A starting translation mapping drafted from the sample, to edit rather than write from nothing: the input
@@ -823,8 +936,15 @@ async def draft_translation_mapping(
     replace with the right action element: build_translation_xslt refuses a rule with conditions that keeps
     Unknown, unless it sets allow_unknown), every other field carried as Data, and notes on what is left to
     decide. For text formats the Data Splitter spec comes with it. Then build_translation_xslt with the edited
-    mapping, the sample and the splitter.
+    mapping, the sample and the splitter. The user chooses the event-logging version it writes (a form, or
+    needs_guidance), from those this Stroom holds.
     """
+    if samples is None and not stream_ids:
+        raise ToolError("Give the samples' text, or stream_ids of the uploaded sample streams")
+    # Asked first: the schema the draft is checked against, and nothing read before the user answers.
+    version = await target_version(ctx, schema_version, build)
+    if not isinstance(version, str):
+        return version
     if samples is None and stream_ids:
         samples, _ = await read_sample_streams(ctx, stream_ids)
     if not samples:
@@ -833,7 +953,6 @@ async def draft_translation_mapping(
     if build:
         from utils.sourcenotes import merged, notes_in_build
         source_notes = merged(await notes_in_build(ctx, build))
-    version = gateway_from(ctx).settings.event_logging_version
     detail_check = None
     if source_notes and source_notes.get('events'):
         from utils.sourcenotes import detail_problem
@@ -862,9 +981,11 @@ async def draft_translation_mapping(
                                   'warnings': grouped(checked['warnings'])[:6]}
     except ToolError as e:
         result['schema_check'] = {'ok': None, 'note': str(e)}
+    result['schema_version'] = version
     result['hint'] = ("Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
-                      "time zone), then build_translation_xslt(mapping=this mapping, stream_ids=the sample streams (or sample=the "
-                      "texts), splitter=this splitter, build and name to save it). A rule's data lists the fields it carries as Data "
+                      "time zone), then build_translation_xslt(mapping=this mapping, schema_version=this schema_version, "
+                      "stream_ids=the sample streams (or sample=the texts), splitter=this splitter, build and name to "
+                      "save it). A rule's data lists the fields it carries as Data "
                       "of its action element; keep it when you change the element.")
     return result
 

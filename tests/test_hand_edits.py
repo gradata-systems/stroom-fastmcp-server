@@ -48,7 +48,7 @@ class Stroom:
     """Stroom's XSLT docs: what the server saves, and what a user changes in Stroom's editor."""
     def __init__(self):
         self.docs = {'x-1': {'type': 'XSLT', 'uuid': 'x-1', 'name': 'ACME-INDEX-XSLT', 'data': '', 'description': ''}}
-        self.settings = SimpleNamespace(event_logging_version='4.1.0')
+        self.settings = SimpleNamespace()
 
     async def get_doc(self, kind, uuid):
         return dict(self.docs[uuid])

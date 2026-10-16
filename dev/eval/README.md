@@ -133,7 +133,7 @@ Results are written to `results/<time>-reference.json` (ignored by git) with a s
 ```
 STROOM_MCP_STROOM_URL=http://127.0.0.1:18080 STROOM_MCP_STROOM_API_KEY=<admin key from dev/stroom/.env> \
 STROOM_MCP_DEV_NO_AUTH=true STROOM_MCP_HOST=127.0.0.1 STROOM_MCP_PORT=8765 \
-STROOM_MCP_EVENT_LOGGING_VERSION=4.1.0 STROOM_MCP_DEFAULT_CONVENTION=stroom-flat uv run python main.py
+STROOM_MCP_DEFAULT_CONVENTION=stroom-flat uv run python main.py
 
 uv run python dev/eval/run_eval.py --request 06         # the request (with its sample) to paste into the agent
 ```

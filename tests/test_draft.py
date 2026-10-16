@@ -85,7 +85,7 @@ def test_text_formats_come_with_their_splitter_and_naive_times_get_a_zone_note()
 
 
 async def test_a_field_inventory_sent_as_the_mapping_gets_the_draft_back():
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
     with patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)), \
             patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})):
         result = await generation.build_translation_xslt(ctx, INVENTORY, sample=FW_JSON)

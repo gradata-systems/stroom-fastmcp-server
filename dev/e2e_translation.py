@@ -65,6 +65,16 @@ builds.write_documentation = _describing
 
 LIVE = os.environ.get('E2E_TARGET') == 'live'
 VERSION = '3.5.2' if LIVE else '4.1.0'  # the local content pack has 4.1.0; live pipelines use 3.5.2
+
+
+async def _answer_version(ctx, versions):
+    """The user's answer to which event-logging version a translation writes, where Stroom holds several: the
+    suites write VERSION (tests/test_event_versions.py covers the asking)."""
+    return VERSION
+
+
+from tools import generation  # noqa: E402
+generation._ask_version = _answer_version
 # One stamp for every script in a run, so the run can be found and cleaned up.
 def run_stamp() -> str:
     """The stamp a run puts in the names of what it creates: the time and the process, so suites started in the same
@@ -83,7 +93,7 @@ def target_settings() -> 'Settings':
     else:
         url, key = 'http://127.0.0.1:18080', env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
     return Settings(_env_file=None, stroom_url=url, dev_no_auth=True, stroom_api_key=key, oidc_issuer_url='-',
-                    oidc_audience='-', public_base_url='-', event_logging_version=VERSION)
+                    oidc_audience='-', public_base_url='-')
 EVENT_TAIL = """
       <EventDetail>
         <TypeId>{type_id}</TypeId>

@@ -74,7 +74,7 @@ def env(path: Path) -> dict[str, str]:
 async def main(feed: str):
     secrets = env(ROOT / '.ai' / 'secrets')
     settings = Settings(_env_file=None, stroom_url=secrets['STROOM_URL'], dev_no_auth=True,
-                        stroom_api_key=secrets['STROOM_API_KEY'], event_logging_version='3.5.2')
+                        stroom_api_key=secrets['STROOM_API_KEY'])
     stroom = ReadOnlyGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),

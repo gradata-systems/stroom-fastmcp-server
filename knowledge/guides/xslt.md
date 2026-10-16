@@ -31,7 +31,8 @@ the other two; by hand, `xpath-default-namespace` is the first and the default `
 | JSON comes out empty | The JSONParser writes `http://www.w3.org/2013/XSL/json`; `json-to-xml()` writes `http://www.w3.org/2005/xpath-functions` | `input: json` sets it; by hand, read the parser's output in the first, a `json-to-xml()` result in the second |
 | Source XML comes out empty | Its own `xmlns` (Windows events: `http://schemas.microsoft.com/win/2004/08/events/event`) | `xml_namespace` = that namespace; with none, leave it empty |
 | Schema errors on elements that look right (`Event`, `EventTime` "not expected") | The output elements are not in `event-logging:3` (an XSLT with no default `xmlns`, or one copying input elements with their own namespace) | Write output with `xmlns="event-logging:3"` on the stylesheet; never `xsl:copy-of` an input element into an Event |
-| `schemaLocation` names a version this Stroom lacks | The `Events` root's `xsi:schemaLocation` picks the XSD | Use the configured version (`build_translation_xslt` writes it) |
+| `schemaLocation` names a version this Stroom lacks | The `Events` root's `xsi:schemaLocation` picks the XSD | Use a version this Stroom holds: the one the user chose (`build_translation_xslt schema_version=` writes it) |
+| The `Version` attribute "is not facet-valid with respect to enumeration '[3.0.0, ..., 3.2.3]'" for a version this Stroom holds | `xsi:schemaLocation` names a system id Stroom doesn't hold exactly (`file:///`, three slashes, or no `file://`): Stroom then validates against another schema of the namespace, not the one named | Write `file://event-logging-vX.Y.Z.xsd`, two slashes; `check_xslt` refuses any other spelling |
 
 ## Output
 

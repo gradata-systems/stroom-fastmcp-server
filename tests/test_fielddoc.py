@@ -106,7 +106,7 @@ def test_each_index_field_is_described_from_the_schema_and_the_sample():
 
 async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_section_otherwise():
     ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'Acme', 'uuid': 'p'}),
-                                                                       settings=SimpleNamespace(event_logging_version='4.1.0'))})
+                                                                       settings=SimpleNamespace())})
     kept = {'kind': 'translation', 'payload': {'mapping': {}}, 'element': 'translationFilter', 'xslt': {'data': ''}}
     with patch.object(builds, 'kept_mapping', AsyncMock(return_value=kept)), \
             patch.object(builds, '_documentation_of', AsyncMock(return_value=('Acme', None, [], None, None))):
@@ -131,7 +131,7 @@ async def test_write_documentation_needs_streams_for_a_kept_mapping_and_a_sectio
 
 async def test_a_field_mapping_with_no_sampled_events_is_not_written_and_says_why():
     # A section of "(not in the sample)" was written, given an Events stream where the raw input belongs.
-    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'),
+    stroom = SimpleNamespace(settings=SimpleNamespace(),
                              find_meta=AsyncMock(return_value={'values': [{'meta': {'id': 873, 'feedName': 'ACME', 'typeName': 'Events'}}]}))
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     kept = {'kind': 'translation', 'payload': {'mapping': mapping().model_dump(exclude_none=True)},
@@ -464,7 +464,7 @@ async def test_write_documentation_asks_for_descriptions_before_writing_anything
     ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(
         get_doc=AsyncMock(return_value={'name': 'Acme', 'uuid': 'p', 'data': '## Field mapping\n\n<!-- stroom-mcp field '
                                                                              'descriptions\n{"kept": "Kept before."}\n-->'}),
-        settings=SimpleNamespace(event_logging_version='4.1.0'))})
+        settings=SimpleNamespace())})
     kept = {'kind': 'index', 'payload': {}, 'element': 'xsltFilter', 'xslt': {'data': ''}}
 
     async def section(ctx, pipeline, kept, stream_ids, layout, described):

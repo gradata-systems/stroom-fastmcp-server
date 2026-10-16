@@ -12,7 +12,7 @@ from utils.xsltgen import TranslationMapping, generate
 
 
 async def test_no_field_mapping_without_a_sample():
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
     with patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)), \
             patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})):
         result = await generation.build_translation_xslt(ctx, mapping())
@@ -34,7 +34,7 @@ async def test_a_single_stream_id_is_taken_as_a_list_of_one():
     with patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)), \
             patch.object(generation, 'applicable_instructions', AsyncMock(return_value={'instructions': []})), \
             patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(
-                settings=SimpleNamespace(event_logging_version='4.1.0'))), \
+                settings=SimpleNamespace())), \
             patch.object(generation._Pipeline, 'load', AsyncMock(return_value=pipeline)), \
             patch.object(generation, 'read_sample_streams', AsyncMock(return_value=({}, []))), \
             patch.object(generation, '_outputs', stepped):
@@ -56,7 +56,7 @@ def ctx_and_patches():
     async def put_doc(doc):
         docs[doc['uuid']] = {**doc, 'version': doc.get('version', 'v') + "'"}
         return docs[doc['uuid']]
-    stroom = SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'), get_doc=get_doc, put_doc=put_doc,
+    stroom = SimpleNamespace(settings=SimpleNamespace(), get_doc=get_doc, put_doc=put_doc,
                              docs=docs)
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     return ctx, (patch.object(generation, 'event_schema', AsyncMock(return_value=SCHEMA)),
@@ -109,7 +109,7 @@ async def test_tools_read_the_sample_from_its_streams_instead_of_its_text():
     ctx, (schema, instructions) = ctx_and_patches()
     with schema, instructions, patch.object(generation, 'read_sample_streams', read), \
             patch.object(feeds, 'read_sample_streams', read), \
-            patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))):
+            patch.object(generation, 'gateway_from', lambda ctx: SimpleNamespace(settings=SimpleNamespace())):
         splitter = await generation.build_data_splitter(ctx, stream_ids=[7])
         assert splitter['records'] == 2 and splitter['spec']['kind'] == 'delimited'
         draft = await generation.draft_translation_mapping(ctx, stream_ids=[7])
@@ -255,7 +255,7 @@ async def test_a_mapping_refused_for_its_shape_says_what_is_missing_and_shows_a_
     # Seen (a VS Code session): input left out, a rule without name, and an xpath run into its path's string
     # ('EventDetail/View/User/Id**,xpath:'), answered with "Field required" and "give exactly one of".
     from tools.generation import MAPPING_EXAMPLE
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
     bad = {'events': [{'name': 'a'}, {'fields': [{'path': 'EventDetail/View/User/Id**,xpath: "User"'}]}]}
     with pytest.raises(ToolError) as raised:
         await generation.build_translation_xslt(ctx, bad)

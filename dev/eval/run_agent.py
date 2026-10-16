@@ -650,7 +650,7 @@ async def start_server(port: int, log: Path) -> asyncio.subprocess.Process:
     key = e2e.env(ROOT / 'dev' / 'stroom' / '.env')['STROOM_ADMIN_API_KEY']
     env = {**os.environ, 'STROOM_MCP_STROOM_URL': STROOM_URL, 'STROOM_MCP_STROOM_API_KEY': key,
            'STROOM_MCP_DEV_NO_AUTH': 'true', 'STROOM_MCP_HOST': '127.0.0.1', 'STROOM_MCP_PORT': str(port),
-           'STROOM_MCP_EVENT_LOGGING_VERSION': e2e.VERSION, 'STROOM_MCP_DEFAULT_CONVENTION': 'stroom-flat',
+           'STROOM_MCP_DEFAULT_CONVENTION': 'stroom-flat',
            'STROOM_MCP_USE_ELICITATION': 'false'}
     handle = log.open('wb')
     proc = await asyncio.create_subprocess_exec(sys.executable, str(ROOT / 'main.py'), cwd=ROOT, env=env,

@@ -279,7 +279,7 @@ def local_ctx() -> SimpleNamespace:
 
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=e2e.VERSION)
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'])
     return SimpleNamespace(lifespan_context={
         'stroom': StroomGateway(settings), 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),
         'policy': AccessPolicy.load(ROOT / 'access_policy.yaml'), 'consent': ConsentStore(use_elicitation=False)})

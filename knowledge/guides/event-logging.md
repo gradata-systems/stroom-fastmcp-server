@@ -1,8 +1,10 @@
 # Event-logging schema: working guide
 
-Namespace `event-logging:3`. The authority is the XSD installed in Stroom: use `check_events`,
-which picks the version from the document's `xsi:schemaLocation` (e.g.
-`file://event-logging-v3.5.2.xsd`). Use the version the environment's pipelines already target.
+Namespace `event-logging:3`, in every version: 4.x schemas keep it, so it doesn't mean a 3.x schema. The
+authority is the XSD installed in Stroom: use `check_events`, which picks the version from the document's
+`xsi:schemaLocation` (e.g. `file://event-logging-v4.1.0.xsd`). A new translation writes the version the user chooses
+from those this Stroom holds (`draft_translation_mapping` asks, the newest recommended, whatever its major version);
+an existing one keeps its own.
 
 ## Shape of one event
 

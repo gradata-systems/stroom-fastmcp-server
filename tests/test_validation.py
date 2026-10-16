@@ -72,7 +72,7 @@ async def test_validate_events_uses_the_declared_schema_from_stroom(ctx):
 @respx.mock
 async def test_unknown_schema_version_lists_what_stroom_has(ctx):
     mock_schemas()
-    with pytest.raises(Exception, match='event-logging-v9.9.9'):
+    with pytest.raises(Exception, match=r'versions it holds, newest first: 9\.9\.9'):
         await validation.validate_events(ctx, EVENT, schema_version='3.5.2')
 
 
@@ -91,16 +91,21 @@ async def test_unknown_events_are_noted_without_failing(ctx):
 
 
 @respx.mock
-async def test_check_xslt_reports_missing_imports_and_unknown_functions(ctx):
+async def test_check_xslt_reports_missing_imports_and_unknown_functions(ctx, monkeypatch):
     respx.post(f'{API}/explorer/v2/find').mock(return_value=httpx.Response(200, json={'values': []}))
+
+    async def none(self):
+        return []
+    monkeypatch.setattr('utils.schemas.SchemaCache.event_versions', none)
     result = await validation.check_xslt(ctx, XSLT.replace('stroom:lookup', 'stroom:lookp'))
     assert result['ok'] is False
     # An unknown function is an error (it would not compile), with the nearest real name.
     assert result['errors'] == ["stroom:lookp() is not a Stroom function and will not compile; did you mean stroom:lookup()?",
                                 "xsl:import/include targets not found as XSLT documents: IP Lookup"]
     # Stroom here has no event-logging schema, so element names go unchecked and the check says so.
-    assert result['warnings'] == ["Event-logging element names not checked: Stroom has no XML schema "
-                                  "'file://event-logging-v3.5.2.xsd'. Event-logging schemas available: none"]
+    assert result['warnings'] == ["Event-logging element names not checked: This Stroom holds no event-logging XML "
+                                  "schema (System/XML Schemas): ask the user to import Stroom's event-logging schema "
+                                  "pack first."]
 
 
 async def test_check_xslt_rejects_malformed_xml(ctx):
@@ -173,7 +178,7 @@ async def test_describe_event_element_says_what_an_element_takes():
     from unittest.mock import AsyncMock, patch
     from utils.eventschema import EventSchema
     schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
     with patch('tools.generation.event_schema', AsyncMock(return_value=schema)):
         detail = await validation.describe_event_element(ctx, 'EventDetail')
         from tools import explorer

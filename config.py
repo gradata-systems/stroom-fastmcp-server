@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     instructions_doc_name: str = 'AGENTS'
     # Where the agent builds everything before it is promoted.
     workspace_folder: str = 'MCP Workspace'
-    event_logging_version: str = '3.5.2'
     # Ask the user through MCP elicitation when the client supports it.
     use_elicitation: bool = True
     # Reprocessing during development (pipelines this server built): streams per call, and the filter's

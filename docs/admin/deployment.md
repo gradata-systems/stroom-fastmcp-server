@@ -180,7 +180,6 @@ brackets.
 | `TLS_TERMINATED_UPSTREAM` | `false` | Serve plain HTTP behind a TLS proxy [`tls.enabled: false`]. Without it or a certificate, the server only starts when listening on localhost |
 | `HOST`, `PORT` | `0.0.0.0`, `8000` | Listener [`containerPort`] |
 | `WORKSPACE_FOLDER` | `MCP Workspace` | Explorer folder for builds [`build.workspaceFolder`] |
-| `EVENT_LOGGING_VERSION` | `3.5.2` | Event-logging schema version for new translations [`build.eventLoggingVersion`] |
 | `INSTRUCTIONS_DOC_NAME` | `AGENTS` | Name of standing-instruction Documentation docs [`build.instructionsDocName`] |
 | `DEFAULT_CONVENTION` | | Field convention used when none is named [`build.defaultConvention`] |
 | `CONVENTIONS_DIR` | `conventions` | Convention profiles [`conventions`] |

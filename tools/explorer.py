@@ -84,7 +84,8 @@ async def describe_document(
         ctx: Context,
         type: Annotated[DocType, Field(description="Document type, as returned by find_documents.")],
         uuid: Annotated[str, Field(description="Document UUID, as returned by find_documents. Left out with type "
-                                               "XMLSchema and element: the configured event-logging schema.")] = '',
+                                               "XMLSchema and element: the event-logging version chosen for the "
+                                               "build, else the newest this Stroom holds.")] = '',
         element: Annotated[str | None, Field(
             description="XMLSchema of event-logging only: what this element takes, e.g. 'EventDetail' (the action "
                         "elements), 'EventDetail/Authenticate' or 'EventSource/User': its children (required, "

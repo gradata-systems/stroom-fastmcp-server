@@ -506,7 +506,7 @@ async def walk_path(ctx, path: str, stamp: str, es: httpx.AsyncClient | None) ->
 async def main():
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')
     settings = Settings(_env_file=None, stroom_url='http://127.0.0.1:18080', dev_no_auth=True,
-                        stroom_api_key=local['STROOM_ADMIN_API_KEY'], event_logging_version=e2e.VERSION)
+                        stroom_api_key=local['STROOM_ADMIN_API_KEY'])
     stroom = StroomGateway(settings)
     ctx = SimpleNamespace(lifespan_context={
         'stroom': stroom, 'rules': ErrorRules.load(ROOT / 'error_rules.yaml'),

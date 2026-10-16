@@ -152,7 +152,8 @@ async def rebuild_mapping(
     if kept and kept[0] != 'translation':
         raise ToolError(f"XSLT '{xslt.get('name')}' keeps a {kept[0]} plan, not a translation mapping: rebuild_mapping "
                         f"is for translations (for CEF, draft_cef_mapping pipeline_uuid=... reviews what it writes)")
-    version = (kept[1].get('schema_version') if kept else None) or stroom.settings.event_logging_version
+    from tools.generation import translation_version
+    version = await translation_version(ctx, kept[1] if kept else None, code)
     schema = await event_schema(ctx, version)
     base = TranslationMapping.model_validate(kept[1]['mapping']) if kept else None
     base_code = generate(base, schema, version)['xslt'] if base else None

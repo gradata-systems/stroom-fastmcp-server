@@ -27,6 +27,13 @@ With more than one replica, keep sessions and pin each client to one replica (`s
 ClientIP`), and set `requestState.existingSecret` so every replica can read the forms another sent (see
 [Deployment](deployment.md)).
 
+## The event-logging version is chosen, not configured
+
+`EVENT_LOGGING_VERSION` (`build.eventLoggingVersion`) is gone. It defaulted to 3.5.2 whether or not Stroom held that
+schema. A new translation now writes the version the user chooses from the event-logging schemas the Stroom
+instance holds, the newest recommended; an existing translation keeps the version it was saved for. Remove the
+setting from your values; a leftover one is ignored.
+
 ## Earlier versions
 
 Versions before 0.17.13 tagged documents with per-build and per-check tags (`mcp-build-…`, `mcp-copy-of-…`,

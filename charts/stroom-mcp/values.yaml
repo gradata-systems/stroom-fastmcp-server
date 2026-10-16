@@ -81,7 +81,6 @@ requestState:
 build:
   # Explorer folder where builds are made before promotion.
   workspaceFolder: MCP Workspace
-  eventLoggingVersion: 3.5.2
   # Documentation docs with this name hold standing instructions for their folder and below.
   instructionsDocName: AGENTS
   # Convention profile used when the user names none (a file name in conventions, without .yaml).

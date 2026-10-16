@@ -31,7 +31,7 @@ HANDWRITTEN = """<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform
 
 @pytest.fixture
 def ctx():
-    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(event_logging_version='4.1.0'))})
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace())})
 
 
 def with_schema():
