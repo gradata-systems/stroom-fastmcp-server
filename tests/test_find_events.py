@@ -1,5 +1,6 @@
 """find_events: an event the user describes, found in an index through Stroom (asked for by the user: one rare event
 among many indexed streams, which sampling would miss)."""
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -58,7 +59,8 @@ async def test_events_are_located_one_pass_per_raw_stream():
         return {'foundRecord': True, 'foundLocation': {'partIndex': 0, 'recordIndex': n + 1},
                 'stepData': {'elementMap': {'out': {'output': outputs[n]}}}}
     pipeline = SimpleNamespace(default_outputs=lambda: ['out'])
-    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(max_sample_records=500))})
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(max_sample_records=500),
+                                                                   stepping=nullcontext)})
     with patch.object(diagnosis, '_resolve', AsyncMock(return_value={'raw': 6, 'pipeline': 'p', 'events': 8})), \
             patch.object(diagnosis._Pipeline, 'load', AsyncMock(return_value=pipeline)), \
             patch.object(diagnosis, '_step', step):

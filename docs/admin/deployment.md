@@ -163,6 +163,7 @@ brackets.
 | `STROOM_TLS_VERIFY` | `true` | `false`: Stroom's certificate isn't checked at all, for a development Stroom with a self-signed certificate. Anyone between the server and Stroom can then read the users' tokens it forwards, and with `IDENTITY_PROVIDER=stroom_internal` give the server signing keys of their own; the server warns at startup. Prefer `STROOM_CA_CERTS`; the two together are refused [`stroom.tlsVerify`] |
 | `STROOM_REQUEST_TIMEOUT` | `60` | Seconds per Stroom call [`stroom.requestTimeout`] |
 | `STROOM_STEPPING_WAIT_MS` | `55000` | How long Stroom works on a step before answering 'not yet', kept under the request timeout so a slow step finishes in its first request [`extraEnv`] |
+| `STROOM_STEPPING_SESSIONS` | `8` | Stepping sessions open in Stroom at once, across every user and call. Each one is a capture of a stream running in Stroom: a walk through one stream holds one, and a sample spread over streams holds up to four. Calls past the limit wait for a session to close [`extraEnv`] |
 | `DATAFEED_PATH` | `/stroom/datafeed` | Receipt path for sample uploads |
 | `IDENTITY_PROVIDER` | `oidc` | `oidc`: an external provider, for every client. `stroom_internal`: Stroom's own, for Ask Stroom AI ([above](#strooms-internal-identity-provider)) [`oidc.identityProvider`] |
 | `OIDC_ISSUER_URL` | required | The provider's issuer, exactly as in the tokens' `iss` (keep a trailing `/` if it has one); with `stroom_internal`, read from Stroom [`oidc.issuerUrl`] |

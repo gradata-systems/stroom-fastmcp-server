@@ -144,6 +144,8 @@ class StroomGateway:
         self.pipelines_written: set[str] = set()   # pipelines this server wrote, which the search may not list yet
         # Outside a tool call (an upload with a ticket), the caller's token comes with the request, not the context.
         self._fixed_authorization = authorization
+        # Stepping sessions open in Stroom at once, from every user and call (SteppingSession).
+        self.stepping_slots = asyncio.Semaphore(settings.stroom_stepping_sessions)
         self._client = httpx.AsyncClient(
             base_url=settings.stroom_url.rstrip('/') + '/api',
             headers={'Accept': 'application/json'},
@@ -347,28 +349,87 @@ class StroomGateway:
             'expandedSeverities': ['INFO', 'WARN', 'ERROR', 'FATAL'],
         })
 
-    async def step(self, request: dict[str, Any], poll_seconds: float = 0.5, max_wait: float = 120) -> dict[str, Any]:
-        """Run one stepping request to completion.
+    def stepping(self) -> 'SteppingSession':
+        """A stepping session for a walk of one stream: `async with stroom.stepping() as session`."""
+        return SteppingSession(self)
 
-        Each step is a fresh request with no session id; Stroom creates a session, and drops it
-        once the step completes or after 10 s idle. The session id is only used to poll a step
-        that has not completed yet.
-        """
-        request = {k: v for k, v in request.items() if k != 'sessionUuid'}
-        # The session lives on the Stroom node that started the step: a follow-up carries the cookies the first
-        # response set, so an ingress with cookie affinity sends it to that node.
-        result, cookie = await self.request('POST', '/stepping/v1/step', request, with_cookies=True)
+    async def step(self, request: dict[str, Any], poll_seconds: float = 0.5, max_wait: float = 120) -> dict[str, Any]:
+        """Run one step in a session of its own, terminated once the step has answered. Steps of a walk share one
+        session (stepping())."""
+        async with self.stepping() as session:
+            return await session.step(request, poll_seconds, max_wait)
+
+
+class SteppingSession:
+    """One stepping session in Stroom, for a walk of one stream: each step carries the session the last one returned,
+    and the session is terminated when the walk ends, however it ends.
+
+    Stroom's stepping engine (since gchq/stroom#5662) captures the whole stream in a session and keeps the session,
+    and its capture, until it is terminated or has been idle for 10 minutes; a step with no session starts another
+    capture of the whole stream. Seen: step_sample over 500 records of a 52 MB stream, a fresh session a step, ran
+    500 captures of the same stream at once, held Stroom's CPU at 100%, and outlasted the user's token. In one
+    session every step after the first reads what the capture has already made. Before that engine Stroom dropped a
+    session once its step completed and refused its id after ("No stepping session found"): then each step goes
+    without one, as it had to.
+
+    Each open session holds one of the server's stepping slots (STROOM_MCP_STROOM_STEPPING_SESSIONS), across every
+    user and call, so retries and concurrent calls can't multiply Stroom's captures either. A slot is held only while
+    stepping one stream: code holding one never waits for another.
+    """
+
+    def __init__(self, gateway: StroomGateway):
+        self._gateway = gateway
+        self.settings = gateway.settings
+        self.uuid: str | None = None
+        self._cookie: str | None = None
+        self._request: dict[str, Any] = {}      # the last step asked, which terminateStepping is sent with
+        self._kept = True                       # False once this Stroom has refused a completed step's session
+
+    async def __aenter__(self) -> 'SteppingSession':
+        await self._gateway.stepping_slots.acquire()
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        try:
+            if self.uuid:
+                await self._gateway.request('POST', '/stepping/v1/terminateStepping',
+                                            {**self._request, 'sessionUuid': self.uuid}, cookie=self._cookie)
+        except Exception as e:
+            # Most often the user's token ran out during a long walk; Stroom reaps the session once it has been idle
+            # for its maxSessionIdleTime. The walk's own outcome stands.
+            logger.warning("Stepping session %s not terminated: %s", self.uuid, e)
+        finally:
+            self._gateway.stepping_slots.release()
+
+    async def _send(self, body: dict[str, Any]) -> dict[str, Any]:
+        # The session lives on the Stroom node that started it: later requests carry the cookies its responses set, so
+        # an ingress with cookie affinity sends them to that node.
+        result, cookie = await self._gateway.request('POST', '/stepping/v1/step', body, cookie=self._cookie,
+                                                     with_cookies=True)
+        self._cookie = cookie or self._cookie
+        # Stroom answers a session it no longer holds (reaped) with a new one: the walk goes on in that.
+        self.uuid = result.get('sessionUuid') or self.uuid
+        return result
+
+    async def step(self, request: dict[str, Any], poll_seconds: float = 0.5, max_wait: float = 120) -> dict[str, Any]:
+        """Run one stepping request in this session to completion, polling a step Stroom hasn't finished yet."""
+        self._request = request = {k: v for k, v in request.items() if k != 'sessionUuid'}
+        try:
+            result = await self._send({**request, 'sessionUuid': self.uuid} if self.uuid and self._kept else request)
+        except ToolError as e:
+            if not (self.uuid and self._kept) or 'No stepping session found' not in str(e):
+                raise
+            # Stroom before #5662: the last step's session ended with it.
+            self._kept = False
+            result = await self._send(request)
         waited = 0.0
         while not result.get('complete'):
             if waited >= max_wait:
-                await self.request('POST', '/stepping/v1/terminateStepping',
-                                   {**request, 'sessionUuid': result['sessionUuid']}, cookie=cookie)
                 raise ToolError("Stepping did not finish in time; try fewer records or a smaller stream")
             await asyncio.sleep(poll_seconds)
             waited += poll_seconds
             try:
-                result = await self.request('POST', '/stepping/v1/step', {**request, 'sessionUuid': result['sessionUuid']},
-                                            cookie=cookie)
+                result = await self._send({**request, 'sessionUuid': self.uuid})
             except ToolError as e:
                 if 'No stepping session found' not in str(e):
                     raise

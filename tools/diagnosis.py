@@ -80,18 +80,19 @@ async def event_locations(ctx: Context, events: list[EventRef]) -> list[dict[str
         output_element = pipeline.default_outputs()[-1]
         targets = sorted(set(wanted))
         cap, seen, steps = stroom.settings.max_sample_records * 4, 0, 0
-        step = await _step(stroom, pipeline, found['raw'], 'FIRST', None, None)
-        while step.get('foundRecord') and targets and steps < cap:
-            steps += 1
-            elements = (step.get('stepData') or {}).get('elementMap') or {}
-            produced = len(_EVENT.findall((elements.get(output_element) or {}).get('output', '')))
-            location = step['foundLocation']
-            while targets and seen < targets[0] <= seen + produced:
-                out.append({'stream_id': stream_id, 'event_id': targets.pop(0), 'raw': found['raw'],
-                            'part': location.get('partIndex') or 0, 'record': location.get('recordIndex')})
-            seen += produced
-            if targets:
-                step = await _step(stroom, pipeline, found['raw'], 'FORWARD', location, None)
+        async with stroom.stepping() as session:
+            step = await _step(session, pipeline, found['raw'], 'FIRST', None, None)
+            while step.get('foundRecord') and targets and steps < cap:
+                steps += 1
+                elements = (step.get('stepData') or {}).get('elementMap') or {}
+                produced = len(_EVENT.findall((elements.get(output_element) or {}).get('output', '')))
+                location = step['foundLocation']
+                while targets and seen < targets[0] <= seen + produced:
+                    out.append({'stream_id': stream_id, 'event_id': targets.pop(0), 'raw': found['raw'],
+                                'part': location.get('partIndex') or 0, 'record': location.get('recordIndex')})
+                seen += produced
+                if targets:
+                    step = await _step(session, pipeline, found['raw'], 'FORWARD', location, None)
         if targets:
             raise ToolError(f"Event(s) {targets} of Events stream {stream_id} were not found in the first {steps} records "
                             f"of raw stream {found['raw']} ({seen} events produced): the pipeline may have changed "
@@ -155,35 +156,36 @@ async def locate_event(
     # Events records run on across the raw stream's parts, so count output events record by record.
     output_element = pipeline.default_outputs()[-1]
     cap, seen, steps = stroom.settings.max_sample_records, 0, 0
-    step = await _step(stroom, pipeline, found['raw'], 'FIRST', None, None)
-    while step.get('foundRecord') and steps < cap:
-        steps += 1
-        elements = (step.get('stepData') or {}).get('elementMap') or {}
-        output = (elements.get(output_element) or {}).get('output', '')
-        produced = len(_EVENT.findall(output))
-        if seen + produced >= event_id:
-            location = step['foundLocation']
-            now = _nth_event(output, event_id - seen)
-            parser = next((e for e, kind in pipeline.types.items() if kind.endswith('Parser')), None)
-            budget = stroom.settings.max_stream_chars // 4
-            result.update({
-                'event_id': event_id,
-                'location': {'part': location.get('partIndex'), 'record': location.get('recordIndex'),
-                             'event_within_record': event_id - seen, 'events_from_record': produced},
-                'record_input': ((elements.get(parser) or {}).get('input')
-                                 or (elements.get(output_element) or {}).get('input', ''))[:budget],
-                'stored_event': stored_xml[:budget],
-                'stepped_event_now': (now or output)[:budget],
-                'same_as_stored': (_field_values(now) == _field_values(stored_xml)) if now else None,
-                'errors_now': _markers(step, location.get('recordIndex')),
-                'hint': "Step it with step_pipeline(stream_id=raw_stream, record=location.record, "
-                        "part=location.part); try a fix with draft_code, then summarise_fix."})
-            if result['same_as_stored'] is False:
-                result['note'] = ("Stepping now gives a different event than the one stored: the translation or "
-                                  "reference data changed since it was processed.")
-            return result
-        seen += produced
-        step = await _step(stroom, pipeline, found['raw'], 'FORWARD', step['foundLocation'], None)
+    async with stroom.stepping() as session:
+        step = await _step(session, pipeline, found['raw'], 'FIRST', None, None)
+        while step.get('foundRecord') and steps < cap:
+            steps += 1
+            elements = (step.get('stepData') or {}).get('elementMap') or {}
+            output = (elements.get(output_element) or {}).get('output', '')
+            produced = len(_EVENT.findall(output))
+            if seen + produced >= event_id:
+                location = step['foundLocation']
+                now = _nth_event(output, event_id - seen)
+                parser = next((e for e, kind in pipeline.types.items() if kind.endswith('Parser')), None)
+                budget = stroom.settings.max_stream_chars // 4
+                result.update({
+                    'event_id': event_id,
+                    'location': {'part': location.get('partIndex'), 'record': location.get('recordIndex'),
+                                 'event_within_record': event_id - seen, 'events_from_record': produced},
+                    'record_input': ((elements.get(parser) or {}).get('input')
+                                     or (elements.get(output_element) or {}).get('input', ''))[:budget],
+                    'stored_event': stored_xml[:budget],
+                    'stepped_event_now': (now or output)[:budget],
+                    'same_as_stored': (_field_values(now) == _field_values(stored_xml)) if now else None,
+                    'errors_now': _markers(step, location.get('recordIndex')),
+                    'hint': "Step it with step_pipeline(stream_id=raw_stream, record=location.record, "
+                            "part=location.part); try a fix with draft_code, then summarise_fix."})
+                if result['same_as_stored'] is False:
+                    result['note'] = ("Stepping now gives a different event than the one stored: the translation or "
+                                      "reference data changed since it was processed.")
+                return result
+            seen += produced
+            step = await _step(session, pipeline, found['raw'], 'FORWARD', step['foundLocation'], None)
     raise ToolError(f"Event {event_id} was not found in the first {steps} records of raw stream {found['raw']} "
                     f"({seen} events produced); the pipeline may have changed since it was processed")
 

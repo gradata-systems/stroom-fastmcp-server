@@ -2,7 +2,7 @@ from pathlib import Path
 
 from typing import Annotated, Literal
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # How long Stroom works on a step before answering 'not yet' (a follow-up then needs the same Stroom node): under
     # stroom_request_timeout, so a slow step finishes in its first request.
     stroom_stepping_wait_ms: int = 55000
+    # Stepping sessions open in Stroom at once, across every user and call: each one is a capture of a stream running
+    # in Stroom. A walk of one stream holds one; a sample spread over streams up to four.
+    stroom_stepping_sessions: int = Field(8, ge=1)
     # Path of the data receiver, relative to stroom_url.
     datafeed_path: str = '/stroom/datafeed'
 

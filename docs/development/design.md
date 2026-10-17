@@ -657,7 +657,7 @@ A model that is weak at XSLT only has to produce the mapping. The generator carr
 | `step_records` | Step chosen records of existing streams in place (e.g. `survey_feed`'s locations: stream, part, record) with optional draft code; one verdict like `step_sample`, plus which shapes did not step clean. A location with `expect: none` (a kind left untranslated) is clean when it writes no Event and flagged when it writes one. Nothing is copied or processed The same Unknown check as `step_sample`. | `stepping/v1/step` |
 | `compare_outputs` | Step the same records through two pipelines, or one pipeline with current and draft code, and diff each record's output (event XML or index document); reports fields added, removed and changed `events` compares exactly the found events' records, as `summarise_fix` does. | `stepping/v1/step` |
 
-Stepping holds no session between calls: each step is a fresh request from the last record's location, and a session id only polls a step that is still running (Stroom drops it when the step completes). So there is nothing to release afterwards.
+Stepping holds no session between calls. Within a call, the steps through one stream share a session: each step carries the session the last one returned, and the session is terminated when the walk ends, however it ends. Stroom's stepping engine since gchq/stroom#5662 captures the whole stream in a session and keeps it, capture and all, until it is terminated or has been idle for 10 minutes, so a step with no session starts another capture of the whole stream. Seen: `step_sample` over 500 records of a 52 MB stream, with a fresh session a step, ran 500 captures of that stream at once, held Stroom's CPU at 100%, and outlasted the user's token. In one session, every step after the first reads what the capture has already made. An earlier Stroom drops a session once its step completes and refuses its id after: the server then steps that walk without one. A single step (`step_pipeline`) has a session of its own, terminated once it answers. At most `STROOM_STEPPING_SESSIONS` sessions (default 8) are open at once, across every user and call, so concurrent calls and retries can't multiply Stroom's captures either. A walk holds one, and a sample spread over streams holds up to four. A terminate Stroom refuses (the token ran out mid-walk) is logged, and Stroom reaps that session once it has been idle.
 
 **Indexing** (`tools/indexing.py`; Lucene or Elasticsearch per build)
 
@@ -921,7 +921,7 @@ Rules live in `error_rules.yaml` (message regex, element, severity, class) so an
 **Idempotency and concurrency**
 
 - Update tools take the `version` from the last read and refuse the save if the doc changed since, so the model re-reads and reapplies its change.
-- Stepping holds no session between calls (see Stepping), so there is nothing to end on disconnect.
+- Stepping holds no session between calls (see Stepping): a call's sessions are terminated when it ends, so there is nothing to end on disconnect.
 - Confirmations, approvals and clean-step records are held in Stroom or in sealed form state, not in the server's memory, so several replicas can serve one user (with shared sealing keys).
 
 **Naming**

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from itertools import groupby
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.params import ONE_OR_MORE
-from utils.stroom import StroomGateway, gateway_from
+from utils.stroom import SteppingSession, StroomGateway, gateway_from
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
@@ -204,8 +205,9 @@ def _criteria(stream_id: int) -> dict[str, Any]:
         {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': str(stream_id)}]}, 'fetchRelationships': False}
 
 
-async def _step(stroom: StroomGateway, pipeline: _Pipeline, stream_id: int, step_type: str,
+async def _step(stroom: StroomGateway | SteppingSession, pipeline: _Pipeline, stream_id: int, step_type: str,
                 location: dict[str, Any] | None, code: dict[str, str] | None) -> dict[str, Any]:
+    """One step: in a walk's session (stroom.stepping()), or with the gateway, in a session of its own."""
     request = {'pipelineDoc': pipeline.doc, 'criteria': _criteria(stream_id), 'stepType': step_type, 'stepSize': 1,
                'timeout': stroom.settings.stroom_stepping_wait_ms, 'code': code or {}}
     if location:
@@ -468,36 +470,37 @@ async def step_sample(
     per_stream: dict[int, int] = {}
     first_output = None
     for stream_id in stream_ids:
-        result = await _step(stroom, pipeline, stream_id, 'FIRST', None, draft_code)
-        if not result.get('foundRecord'):
-            # An element that fails before the first record (an XSLT that doesn't compile, say) reports it here.
-            markers += _markers(result, str(stream_id))
-        stream_start = len(records)
-        while result.get('foundRecord') and len(records) < cap and (
-                records_per_stream is None or len(records) - stream_start < records_per_stream):
-            per_stream[stream_id] = per_stream.get(stream_id, 0) + 1
-            location = result['foundLocation']
-            key = record_key(stream_id, location)
-            found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
-            markers += found
-            records.append({'record': key, 'errors': len(found)})
-            output = (((result.get('stepData') or {}).get('elementMap') or {})
-                      .get(pipeline.default_outputs()[-1]) or {}).get('output') or ''
-            if _EVENTS_ROOT.search(output):
-                wrote_events += 1
-                wrote_an_event += bool(_EVENT.search(output))
-            if _REFERENCE_ROOT.search(output):
-                wrote_reference += 1
-                wrote_a_reference += bool(_REFERENCE.search(output))
-            if _writes_unknown(result, pipeline.default_outputs()[-1]):
-                unknown.append(key)
-                unknown_out.append((((result.get('stepData') or {}).get('elementMap') or {})
-                                    .get(pipeline.default_outputs()[-1]) or {}).get('output') or '')
-            if first_output is None:
-                elements = (result.get('stepData') or {}).get('elementMap') or {}
-                first_output = {e: (elements.get(e) or {}).get('output', '')[:stroom.settings.max_stream_chars // 4]
-                                for e in pipeline.default_outputs()}
-            result = await _step(stroom, pipeline, stream_id, 'FORWARD', location, draft_code)
+        async with stroom.stepping() as session:
+            result = await _step(session, pipeline, stream_id, 'FIRST', None, draft_code)
+            if not result.get('foundRecord'):
+                # An element that fails before the first record (an XSLT that doesn't compile, say) reports it here.
+                markers += _markers(result, str(stream_id))
+            stream_start = len(records)
+            while result.get('foundRecord') and len(records) < cap and (
+                    records_per_stream is None or len(records) - stream_start < records_per_stream):
+                per_stream[stream_id] = per_stream.get(stream_id, 0) + 1
+                location = result['foundLocation']
+                key = record_key(stream_id, location)
+                found = _markers(result, key) + _empty_output(result, pipeline.default_outputs()[-1], key)
+                markers += found
+                records.append({'record': key, 'errors': len(found)})
+                output = (((result.get('stepData') or {}).get('elementMap') or {})
+                          .get(pipeline.default_outputs()[-1]) or {}).get('output') or ''
+                if _EVENTS_ROOT.search(output):
+                    wrote_events += 1
+                    wrote_an_event += bool(_EVENT.search(output))
+                if _REFERENCE_ROOT.search(output):
+                    wrote_reference += 1
+                    wrote_a_reference += bool(_REFERENCE.search(output))
+                if _writes_unknown(result, pipeline.default_outputs()[-1]):
+                    unknown.append(key)
+                    unknown_out.append((((result.get('stepData') or {}).get('elementMap') or {})
+                                        .get(pipeline.default_outputs()[-1]) or {}).get('output') or '')
+                if first_output is None:
+                    elements = (result.get('stepData') or {}).get('elementMap') or {}
+                    first_output = {e: (elements.get(e) or {}).get('output', '')[:stroom.settings.max_stream_chars // 4]
+                                    for e in pipeline.default_outputs()}
+                result = await _step(session, pipeline, stream_id, 'FORWARD', location, draft_code)
 
     summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
                      accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))
@@ -590,33 +593,36 @@ async def step_records(
     records: list[dict[str, Any]] = []
     unknown: list[str] = []
     unknown_out: list[str] = []
-    for loc in [RecordLocation.model_validate(x) for x in locations[:stroom.settings.max_sample_records]]:
-        where = {'metaId': loc.stream, 'partIndex': loc.part, 'recordIndex': loc.record}
-        key = record_key(loc.stream, where)
-        result = await _step(stroom, pipeline, loc.stream, 'REFRESH', where, draft_code)
-        if not result.get('foundRecord'):
-            found = _markers(result, key)
-            markers += found
-            records.append({'record': key, 'shape': loc.shape, 'found': False, **({'errors': len(found)} if found else {})})
-            continue
-        found = _markers(result, key) + _empty_output(result, output_element, key)
-        output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
-        events = len(_EVENT.findall(output))
-        if _UNKNOWN.search(output):
-            unknown.append(key)
-            unknown_out.append(output)
-        if loc.expect == 'none':
-            # Left untranslated by choice: the no-elements check doesn't apply, but an Event does.
-            found = [f for f in found if not f['message'].startswith('Output contains no XML elements')]
-            if events:
-                found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
-                              'message': f'The record produced {events} Event(s), but its kind is left untranslated'})
-        elif events == 0 and not found and not sends_on(output):
-            found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
-                          'message': 'The record produced no Event'})
-        markers += found
-        records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found),
-                        **({'expect': 'none'} if loc.expect == 'none' else {})})
+    # Locations in a row from one stream are stepped in one session: Stroom captures the stream once for them.
+    for _, run in groupby(locations[:stroom.settings.max_sample_records], key=lambda loc: loc.stream):
+        async with stroom.stepping() as session:
+            for loc in run:
+                where = {'metaId': loc.stream, 'partIndex': loc.part, 'recordIndex': loc.record}
+                key = record_key(loc.stream, where)
+                result = await _step(session, pipeline, loc.stream, 'REFRESH', where, draft_code)
+                if not result.get('foundRecord'):
+                    found = _markers(result, key)
+                    markers += found
+                    records.append({'record': key, 'shape': loc.shape, 'found': False, **({'errors': len(found)} if found else {})})
+                    continue
+                found = _markers(result, key) + _empty_output(result, output_element, key)
+                output = (((result.get('stepData') or {}).get('elementMap') or {}).get(output_element) or {}).get('output', '')
+                events = len(_EVENT.findall(output))
+                if _UNKNOWN.search(output):
+                    unknown.append(key)
+                    unknown_out.append(output)
+                if loc.expect == 'none':
+                    # Left untranslated by choice: the no-elements check doesn't apply, but an Event does.
+                    found = [f for f in found if not f['message'].startswith('Output contains no XML elements')]
+                    if events:
+                        found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
+                                      'message': f'The record produced {events} Event(s), but its kind is left untranslated'})
+                elif events == 0 and not found and not sends_on(output):
+                    found.append({'severity': 'WARNING', 'element': output_element, 'record': key, 'location': None,
+                                  'message': 'The record produced no Event'})
+                markers += found
+                records.append({'record': key, 'shape': loc.shape, 'events': events, 'errors': len(found),
+                                **({'expect': 'none'} if loc.expect == 'none' else {})})
 
     summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
                      accepted=await accepted_for(stroom, pipeline.doc.get('uuid')))
@@ -684,23 +690,26 @@ async def step_spread(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: li
     streams stepped side by side, then what a short stream left over taken from those with more. In stream order,
     then record order.
 
-    Stroom reads a stream from its start for every step, so a step costs more the further in its record is (seen in
-    production: 0.15 s near the start, 1.1 s at the 151st record), and 200 records from one stream took 132 s of a
-    write_documentation call. Fifty from each of four, four at a time, are a fraction of that, and a better sample:
-    kinds that only the later streams hold are in it."""
+    Stroom before gchq/stroom#5662 read a stream from its start for every step, so a step cost more the further in
+    its record was (seen in production: 0.15 s near the start, 1.1 s at the 151st record), and 200 records from one
+    stream took 132 s of a write_documentation call. Fifty from each of four, four at a time, are a fraction of that,
+    and a better sample: kinds that only the later streams hold are in it. Each stream's share is stepped in one
+    session, so a later Stroom captures the stream once for it."""
     states: dict[int, dict[str, Any]] = {sid: {'steps': [], 'result': None, 'done': False} for sid in stream_ids}
     gate = asyncio.Semaphore(STEP_STREAMS_AT_ONCE)
 
     async def take(stream_id: int, budget: int) -> None:
         state = states[stream_id]
-        async with gate:
+        # A session for the share, closed with it: one kept across rounds would hold its slot while this waits for
+        # the gate, and the server's slots could all be held by streams waiting for each other.
+        async with gate, stroom.stepping() as session:
             if state['result'] is None:
-                state['result'] = await _step(stroom, pipeline, stream_id, 'FIRST', None, code)
+                state['result'] = await _step(session, pipeline, stream_id, 'FIRST', None, code)
             while budget > 0 and state['result'].get('foundRecord'):
                 location = state['result']['foundLocation']
                 state['steps'].append((stream_id, location, state['result']))
                 budget -= 1
-                state['result'] = await _step(stroom, pipeline, stream_id, 'FORWARD', location, code)
+                state['result'] = await _step(session, pipeline, stream_id, 'FORWARD', location, code)
             state['done'] = not state['result'].get('foundRecord')
 
     await asyncio.gather(*[take(sid, -(-cap // max(1, len(stream_ids)))) for sid in stream_ids])

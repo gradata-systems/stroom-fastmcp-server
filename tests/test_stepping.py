@@ -54,19 +54,23 @@ def mock_pipeline():
 
 
 @respx.mock
-async def test_step_sample_steps_every_record_with_fresh_requests(ctx):
+async def test_step_sample_walks_a_stream_in_one_session_and_terminates_it(ctx):
+    # Seen: a fresh session a step started a capture of the whole 52 MB stream for each of 500 steps, all at once.
     mock_pipeline()
     bad = [{'severity': 'ERROR', 'elementId': {'id': 'schemaFilter'}, 'message': 'bad TimeCreated',
             'location': {'lineNo': 5, 'colNo': 6}}]
-    responses = [httpx.Response(200, json=record(0)), httpx.Response(200, json=record(1, bad)),
-                 httpx.Response(200, json={'complete': True, 'foundRecord': False})]
+    session = {'sessionUuid': 'walk'}
+    responses = [httpx.Response(200, json={**record(0), **session}), httpx.Response(200, json={**record(1, bad), **session}),
+                 httpx.Response(200, json={'complete': True, 'foundRecord': False, **session})]
     route = respx.post(f'{API}/stepping/v1/step').mock(side_effect=responses)
+    terminated = respx.post(f'{API}/stepping/v1/terminateStepping').mock(return_value=httpx.Response(200, json=True))
 
     result = await stepping.step_sample(ctx, 'p-1', [7])
 
     sent = [json.loads(c.request.content) for c in route.calls]
     assert [r['stepType'] for r in sent] == ['FIRST', 'FORWARD', 'FORWARD']
-    assert all('sessionUuid' not in r for r in sent)
+    assert [r.get('sessionUuid') for r in sent] == [None, 'walk', 'walk']
+    assert [json.loads(c.request.content)['sessionUuid'] for c in terminated.calls] == ['walk']
     assert sent[2]['stepLocation']['recordIndex'] == 1
     assert (result['records_stepped'], result['records_with_errors'], result['verdict']) == (2, 1, 'blocking')
     # These outputs have no Event: that is blocking too (the record templates select nothing), besides the error.
@@ -247,6 +251,62 @@ async def test_a_lost_stepping_session_says_the_pipeline_first_then_the_network(
 
 
 @respx.mock
+async def test_a_stroom_that_ends_a_session_with_its_step_is_stepped_without_one(ctx):
+    # Stroom before gchq/stroom#5662 dropped a session once its step completed and refused its id after.
+    stroom = ctx.lifespan_context['stroom']
+    route = respx.post(f'{API}/stepping/v1/step').mock(side_effect=[
+        httpx.Response(200, json=record(0)),
+        httpx.Response(500, json={'message': 'No stepping session found for key: s0'}),
+        httpx.Response(200, json=record(1)), httpx.Response(200, json=record(2))])
+    respx.post(f'{API}/stepping/v1/terminateStepping').mock(return_value=httpx.Response(200, json=False))
+    async with stroom.stepping() as session:
+        for step_type in ('FIRST', 'FORWARD', 'FORWARD'):
+            await session.step({'stepType': step_type}, poll_seconds=0)
+    assert [json.loads(c.request.content).get('sessionUuid') for c in route.calls] == [None, 's0', None, None]
+
+
+@respx.mock
+async def test_a_failed_walk_still_terminates_its_session_and_frees_its_slot(ctx):
+    stroom = ctx.lifespan_context['stroom']
+    respx.post(f'{API}/stepping/v1/step').mock(side_effect=[
+        httpx.Response(200, json=record(0)), httpx.Response(500, json={'message': 'boom'})])
+    terminated = respx.post(f'{API}/stepping/v1/terminateStepping').mock(return_value=httpx.Response(200, json=True))
+    with pytest.raises(ToolError, match='boom'):
+        async with stroom.stepping() as session:
+            await session.step({'stepType': 'FIRST'})
+            await session.step({'stepType': 'FORWARD'})
+    assert [json.loads(c.request.content)['sessionUuid'] for c in terminated.calls] == ['s0']
+    assert stroom.stepping_slots._value == stroom.settings.stroom_stepping_sessions
+
+
+@respx.mock
+async def test_a_session_that_cant_be_terminated_doesnt_fail_the_walk(ctx):
+    # The user's token running out during a long walk: Stroom reaps the session once it has been idle.
+    stroom = ctx.lifespan_context['stroom']
+    respx.post(f'{API}/stepping/v1/step').mock(return_value=httpx.Response(200, json=record(0)))
+    respx.post(f'{API}/stepping/v1/terminateStepping').mock(return_value=httpx.Response(401))
+    assert (await stroom.step({'stepType': 'FIRST'}))['foundRecord']
+    assert stroom.stepping_slots._value == stroom.settings.stroom_stepping_sessions
+
+
+async def test_stepping_sessions_open_at_once_are_capped_across_calls():
+    import asyncio
+    stroom = StroomGateway(SETTINGS.model_copy(update={'stroom_stepping_sessions': 2}))
+    open_now, most = 0, 0
+
+    async def walk():
+        nonlocal open_now, most
+        async with stroom.stepping():
+            open_now += 1
+            most = max(most, open_now)
+            await asyncio.sleep(0)
+            open_now -= 1
+    await asyncio.gather(*[walk() for _ in range(6)])
+    await stroom.close()
+    assert most == 2
+
+
+@respx.mock
 async def test_large_streams_are_stepped_from_their_head(ctx, monkeypatch):
     mock_pipeline()
     monkeypatch.setattr(stepping, 'PER_STREAM', 2)
@@ -317,9 +377,11 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
     # further in it was (Stroom reads the stream from its start). An even share from each stream, four at a time, a
     # short stream's leftover taken from the others, in stream order.
     import asyncio
+    from contextlib import nullcontext
     from unittest.mock import patch
     from tools import stepping
     sizes = {1: 300, 2: 10, 3: 300, 4: 300, 5: 300}
+    stroom = SimpleNamespace(stepping=nullcontext)
     running, most = 0, 0
 
     async def step(stroom, pipeline, stream_id, step_type, location, code):
@@ -334,7 +396,7 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
         return {'foundRecord': True, 'foundLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': at},
                 'stepData': {'elementMap': {'x': {'output': f'{stream_id}:{at}'}}}}
     with patch.object(stepping, '_step', step):
-        steps = await stepping.step_spread(None, None, [1, 2, 3, 4, 5], None, 200)
+        steps = await stepping.step_spread(stroom, None, [1, 2, 3, 4, 5], None, 200)
     taken = [s for s, _, _ in steps]
     assert len(steps) == 200 and taken == sorted(taken)                  # stream order, then record order
     counts = {sid: taken.count(sid) for sid in sizes}
@@ -342,5 +404,5 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
     assert max(r['recordIndex'] for _, r, _ in steps) < 60                     # never deep in one stream
     assert most <= stepping.STEP_STREAMS_AT_ONCE
     with patch.object(stepping, '_step', step):
-        outputs = await stepping._outputs(None, None, [2], 'x', None, 5)
+        outputs = await stepping._outputs(stroom, None, [2], 'x', None, 5)
     assert list(outputs.values()) == ['2:0', '2:1', '2:2', '2:3', '2:4']
