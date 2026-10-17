@@ -104,8 +104,9 @@ async def describe_document(
     runs it (template chain, effective elements and properties and which layer set each, reference data,
     what it removes from its template); for an XSLT, what the translation does (each output element's
     source, the input fields read, imports, dictionaries and lookups); for an Elastic Index or Lucene Index doc, a
-    survey of what the index holds, read through Stroom: its fields, the newest documents (how often each field
-    is populated, sample values) and the pipelines that feed it. A long Documentation doc (a vendor manual) comes
+    survey of what the index holds, read through Stroom: its fields, a sample of up to 100 documents, recent ones
+    where there are any (how often each field is populated, sample values) and the pipelines that feed it; not the
+    whole index's totals, which write_documentation counts. A long Documentation doc (a vendor manual) comes
     back cut short with its outline; find= returns the passages about one thing instead. For the event-logging
     XMLSchema, element= says what an element takes (children, required, choices, allowed values), uuid optional.
     """
@@ -139,7 +140,9 @@ async def describe_document(
     elif type in ('ElasticIndex', 'Index'):
         from tools.indexing import survey_index
         try:
-            survey = await survey_index(ctx, type, uuid)
+            # Without the index's totals: counting them reads every document through Stroom, minutes on a large index
+            # (seen: three minutes before the agent could go on). write_documentation counts them.
+            survey = await survey_index(ctx, type, uuid, profile=False)
         except ToolError as e:
             # The cluster may be unreachable: the doc itself is still worth having (e.g. to copy its settings).
             doc['survey_error'] = f"Could not survey the index through Stroom: {e}"

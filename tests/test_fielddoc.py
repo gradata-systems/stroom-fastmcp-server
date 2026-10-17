@@ -1,4 +1,5 @@
 """The mapping kept with an XSLT, and the documentation generated from it."""
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -258,9 +259,16 @@ async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids()
     searched = []
 
     async def search(ctx, dashboard, expression, length=100):
-        columns = [c['name'] for c in dashboard['dashboardConfig']['components'][1]['settings']['fields']]
-        searched.append(columns)
-        return {'rows': [{c: d.get(c) for c in columns} for d in reversed(docs)], 'errors': []}
+        fields = dashboard['dashboardConfig']['components'][1]['settings']['fields']
+        columns = [c['name'] for c in fields]
+        searched.append((columns, expression, any('sort' in c for c in fields)))
+        held = docs
+        if 'day()-30d' in str(expression):
+            held = docs[1:]     # the recent window: one document, too few to fill the sample
+        elif expression['op'] == 'OR':
+            wanted = [{t['field']: t['value'] for t in pair['children']} for pair in expression['children']]
+            held = [d for d in docs if {'StreamId': d['StreamId'], 'EventId': d['EventId']} in wanted]
+        return {'rows': [{c: d.get(c) for c in columns} for d in reversed(held)], 'errors': [], 'complete': True}
 
     async def post(path, body):
         if path == '/dataSource/v1/findFields':
@@ -273,9 +281,60 @@ async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids()
     with patch.object(indexing, '_search', search), \
             patch.object(indexing, 'index_profile', AsyncMock(return_value={'documents': 2})):
         survey = await indexing.survey_index(ctx, 'ElasticIndex', 'i')
-    assert len(searched) == 3 and all(len(c) <= 100 and c[:3] == ['StreamId', 'EventId', '@timestamp'] for c in searched)
+    assert all(len(c) <= 100 and c[:3] == ['StreamId', 'EventId', '@timestamp'] for c, _, _ in searched)
+    # Never sorted: Stroom sorts a table itself, reading every document in the index to do it.
+    assert not any(sorted_ for _, _, sorted_ in searched)
+    # The recent window first; with too few there, any documents; then the other groups, by the first's ids.
+    assert ['day()-30d' in str(e) for _, e, _ in searched[:2]] == [True, False] and survey['sampled_from'] == 'any time'
+    assert len(searched) == 4 and all(e['op'] == 'OR' and len(e['children']) == 2 for _, e, _ in searched[2:])
     assert len(survey['surveyed_fields']) == 253 and survey['populated']['f249'] == 100.0
     assert survey['values']['f249'] == ['v249-2', 'v249-1'] and survey['documents_sampled'] == 2
+    # A recent window that fills the sample is the sample, and the survey asks for no more.
+    searched.clear()
+    with patch.object(indexing, '_search', search):
+        survey = await indexing.survey_index(ctx, 'ElasticIndex', 'i', max_documents=1, profile=False)
+    assert survey['sampled_from'] == 'the last 30 days' and 'profile' not in survey
+    assert ['day()-30d' in str(e) for _, e, _ in searched] == [True, False, False]     # the first group, then two by id
+
+
+async def test_a_search_is_destroyed_once_read_and_a_count_cut_short_says_so():
+    # Seen: three whole-index scans carried on in Stroom after the survey stopped waiting for them.
+    import httpx
+    import respx
+    from tests.test_gateway import API, SETTINGS
+    from tools import indexing
+    from utils.stroom import StroomGateway
+    stroom = StroomGateway(SETTINGS)
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    dashboard = {'uuid': 'd', 'name': 'probe', 'dashboardConfig': {'components': [
+        {'type': 'query', 'id': 'q', 'settings': {'dataSource': {'type': 'ElasticIndex', 'uuid': 'i'}}},
+        {'type': 'table', 'id': 't', 'name': 'Table', 'settings': {'fields': [{'name': 'documents'}]}}]}}
+    with respx.mock:
+        respx.post(f'{API}/dashboard/v1/search').mock(return_value=httpx.Response(200, json={
+            'complete': False, 'node': 'node-b', 'queryKey': {'uuid': 'k'},
+            'results': [{'componentId': 't', 'rows': [{'values': ['12']}]}]}))
+        destroyed = respx.post(f'{API}/result-store/v1/destroy/node-b').mock(return_value=httpx.Response(200, json=True))
+        with patch.object(indexing, 'SEARCH_WAIT', 0):
+            found = await indexing._search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': []})
+    await stroom.close()
+    assert found['rows'] == [{'documents': '12'}] and found['complete'] is False
+    assert [json.loads(c.request.content) for c in destroyed.calls] == [
+        {'queryKey': {'uuid': 'k'}, 'destroyReason': 'NO_LONGER_NEEDED'}]
+
+    async def counted(ctx, dashboard, expression, length=100):
+        return {'rows': [{'documents': '1200'}], 'errors': [], 'complete': False}
+    with patch.object(indexing, '_search', counted):
+        profile = await indexing.index_profile(ctx, {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'x'}, None, ['f'])
+    assert profile['documents'] == 1200 and 'not the whole index' in profile['partial']
+
+
+async def test_describe_document_surveys_an_index_without_counting_all_of_it():
+    from tools import explorer, indexing
+    survey = AsyncMock(return_value={'fed_by': [], 'documents': []})
+    with patch.object(explorer, 'get_document', AsyncMock(return_value={'name': 'IDX', 'indexName': 'idx'})), \
+            patch.object(indexing, 'survey_index', survey):
+        await explorer.describe_document(None, 'ElasticIndex', 'i')
+    assert survey.call_args.kwargs == {'profile': False}
 
 
 def test_a_pipeline_writes_to_an_index_by_its_effective_properties_not_a_mention():
@@ -337,7 +396,12 @@ def test_the_data_surveyed_summary_says_what_the_index_holds_and_where_it_comes_
             "The feed's description: Proxy access logs.") in text
     assert '(Sources from the 20 streams with the most documents.)' in text
     assert 'Indexed by pipeline `Web - Indexing`, from the index plan kept with its XSLT.' in text
-    assert 'The field table is drawn from the 2 newest documents' in text and 'In sample and Sample values' in text
+    assert 'The field table is drawn from 2 documents (' in text and 'In sample and Sample values' in text
+    recent = existing_index_summary({**survey, 'sampled_from': 'the last 30 days'})
+    assert 'The field table is drawn from 2 documents of the last 30 days (' in recent
+    # A count Stroom hadn't finished is a floor, and says so.
+    partial = existing_index_summary({**survey, 'profile': {**survey['profile'], 'partial': 'Stroom had not finished'}})
+    assert '`legacy-web` holds at least 1200 documents' in partial and '(Stroom had not finished.)' in partial
 
 
 def test_the_summary_goes_under_the_agents_own_purpose():

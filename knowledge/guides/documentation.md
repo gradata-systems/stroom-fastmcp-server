@@ -106,7 +106,8 @@ documents held, with how often and sample values. The agreed Elasticsearch index
 the user confirms the index doc first. The doc is named after the index doc and its Field mapping section is
 generated from a survey through Stroom (`describe_document` on the index doc shows the same survey): every field
 Stroom has for the index, with a description, its type, its event-logging source path when a feeding pipeline
-keeps an index plan, how often the newest documents (up to 100) held it, and sample values. Write Purpose and
+keeps an index plan, how often a sample of up to 100 documents (recent ones where there are any) held it, and sample
+values. Write Purpose and
 data yourself, from what you have seen of the source: what the source system is and what it records (the
 feeds, their descriptions, the feeding and events pipelines and their docs), the kinds of events in the sample,
 and who searches it; say what you do not know. The tool adds a "Data surveyed" summary under your text: the

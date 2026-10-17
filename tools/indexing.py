@@ -1370,6 +1370,11 @@ async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | Non
     row = found['rows'][0]
     profile: dict[str, Any] = {'documents': int(row.get('documents') or 0), 'earliest': row.get('earliest'),
                                'latest': row.get('latest'), 'streams': int(row['streams']) if row.get('streams') else None}
+    if not found['complete']:
+        # Counting reads every document through Stroom: on a large index it can outlast the wait, and what was counted
+        # by then is a floor, not the index.
+        profile['partial'] = (f"Stroom had not finished counting after {SEARCH_WAIT} s: these are the documents it "
+                              f"had read by then, not the whole index")
     if 'StreamId' not in names:
         return profile
     by_stream = await _search(ctx, probe([column('StreamId', '${StreamId}', group=0),
@@ -1402,14 +1407,27 @@ async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | Non
                 pass
     profile['sources'] = sorted(sources.values(), key=lambda e: -e['documents'])
     profile['streams_examined'] = len(by_stream['rows'][:streams])
+    if not by_stream['complete'] and 'partial' not in profile:
+        profile['partial'] = (f"Stroom had not finished grouping the documents by stream after {SEARCH_WAIT} s: the "
+                              f"sources are from the documents it had read by then")
     return profile
 
 
-async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: int = 100) -> dict[str, Any]:
-    """What an existing index holds, surveyed through Stroom: the fields Stroom has for the index doc, the newest
-    documents read through dashboard searches that are never saved (each field: how often the sample held it, its
-    values), and the pipelines that feed it. A wide index is read in groups of columns, joined on StreamId and
-    EventId; past SURVEY_FIELDS fields, the rest are listed as not surveyed."""
+RECENT_DAYS = 30   # the sample is read from documents this recent when the index has any
+
+
+async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: int = 100,
+                       profile: bool = True) -> dict[str, Any]:
+    """What an existing index holds, surveyed through Stroom: the fields Stroom has for the index doc, a sample of
+    its documents read through dashboard searches that are never saved (each field: how often the sample held it, its
+    values), and the pipelines that feed it; with profile, the whole index's totals and sources too (index_profile).
+    A wide index is read in groups of columns, joined on StreamId and EventId; past SURVEY_FIELDS fields, the rest
+    are listed as not surveyed.
+
+    The sample is not sorted: Stroom sorts a table itself, so a sorted search reads every document in the index,
+    while an unsorted one stops at max_documents (seen: the newest 100 documents of a large Elasticsearch index,
+    sorted on its time field, took searches of a minute each, and describe_document three minutes). It is read from
+    the last RECENT_DAYS days when there are documents that recent, so it shows what the index is written with now."""
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(doc_type, uuid)
     ref = {'type': doc_type, 'uuid': uuid, 'name': index.get('name')}
@@ -1426,8 +1444,7 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
         groups = groups[:1]    # without both ids, groups of columns cannot be joined: the first is read
 
     def probe(columns: list[str]) -> dict[str, Any]:
-        cols = [{**_column(n), **({'sort': {'order': 0, 'direction': 'DESCENDING'}} if n == time_field else {})}
-                for n in columns]
+        cols = [_column(n) for n in columns]
         return {'uuid': str(uuidlib.uuid4()), 'name': f"{index.get('name')} survey", 'dashboardConfig': {'components': [
             {'type': 'query', 'id': 'query-SURVEY', 'name': 'Query', 'settings': {
                 'type': 'query', 'dataSource': ref, 'expression': {'type': 'operator', 'op': 'AND', 'children': []}}},
@@ -1435,33 +1452,51 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
                 'type': 'table', 'queryId': 'query-SURVEY', 'fields': cols, 'extractValues': False,
                 'maxResults': [max_documents], 'pageSize': max_documents}}]}}
 
-    expression = {'type': 'operator', 'op': 'AND', 'children': []}
-    first = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
-    if not first['rows'] and time_field:
-        # Some backends want a term: every time there is.
-        expression = {'type': 'operator', 'op': 'AND', 'children': [
-            {'type': 'term', 'field': time_field, 'condition': 'BETWEEN', 'value': '1970-01-01T00:00:00.000Z,day()+1d'}]}
-        first = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
+    def between(span: str) -> dict[str, Any]:
+        return {'type': 'operator', 'op': 'AND', 'children': [
+            {'type': 'term', 'field': time_field, 'condition': 'BETWEEN', 'value': span}]}
+    # The last RECENT_DAYS days; else any documents; else every time there is (some backends want a term). A recent
+    # window too sparse to fill the sample gives way to any documents when those are more: five documents say little
+    # of how often each field is held.
+    tries = ([('recent', between(f'day()-{RECENT_DAYS}d,day()+1d'))] if time_field in names else []) \
+        + [('any', {'type': 'operator', 'op': 'AND', 'children': []})] \
+        + ([('any', between('1970-01-01T00:00:00.000Z,day()+1d'))] if time_field else [])
+    first: dict[str, Any] = {'rows': [], 'errors': []}
+    sampled_from = None
+    for tried, expression in tries:
+        found = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
+        if len(found['rows']) > len(first['rows']) or not first['rows']:
+            first, sampled_from = found, tried
+        if len(first['rows']) >= max_documents or (first['rows'] and tried == 'any'):
+            break
     errors = list(first['errors'])
     rows = [dict(r) for r in first['rows']]
     key = lambda r: tuple(str(r.get(n)) for n in ids)
     by_key = {key(r): r for r in rows}
-    for group in groups[1:] if rows else []:
-        more = await _search(ctx, probe(base + group), expression, length=max_documents)
-        errors += more['errors']
-        for r in more['rows']:
-            if key(r) in by_key:
-                by_key[key(r)].update({n: r.get(n) for n in group})
+    if rows and groups[1:]:
+        # The other groups read exactly the documents the first did, by their ids: an unsorted search returns
+        # whichever documents it reaches first, which need not be the same ones twice. At the same time: each is a
+        # short search for up to max_documents documents.
+        same = {'type': 'operator', 'op': 'OR', 'children': [
+            {'type': 'operator', 'op': 'AND', 'children': [
+                {'type': 'term', 'field': n, 'condition': 'EQUALS', 'value': str(r.get(n))} for n in ids]}
+            for r in rows]}
+        for group, more in zip(groups[1:], await asyncio.gather(
+                *[_search(ctx, probe(base + group), same, length=max_documents) for group in groups[1:]])):
+            errors += more['errors']
+            for r in more['rows']:
+                if key(r) in by_key:
+                    by_key[key(r)].update({n: r.get(n) for n in group})
     surveyed = base + [n for g in groups for n in g]
     documents = [{n: [str(r[n])] if r.get(n) not in (None, '') else [] for n in surveyed} for r in rows]
     times = sorted(d[time_field][0] for d in documents if time_field and d.get(time_field))
     total = len(documents)
-    profile: dict[str, Any] = {}
-    if total:
+    totals: dict[str, Any] = {}
+    if total and profile:
         try:
-            profile = await index_profile(ctx, ref, time_field, names)
+            totals = await index_profile(ctx, ref, time_field, names)
         except ToolError as e:
-            profile = {'error': str(e)}
+            totals = {'error': str(e)}
     note = None
     if not total:
         note = ("No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in "
@@ -1473,7 +1508,10 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
             **({'note': note} if note else {}),
             'backend': 'lucene' if doc_type == 'Index' else 'elasticsearch',
             'index_name': index.get('indexName'), 'time_field': time_field, 'fields': fields,
-            'surveyed_fields': surveyed, 'documents_sampled': total, 'profile': profile,
+            'surveyed_fields': surveyed, 'documents_sampled': total,
+            **({'sampled_from': f'the last {RECENT_DAYS} days' if sampled_from == 'recent' else 'any time'}
+               if total else {}),
+            **({'profile': totals} if profile else {}),
             'earliest': times[0] if times else None, 'latest': times[-1] if times else None,
             'populated': {n: round(100 * sum(1 for d in documents if d.get(n)) / total, 1) for n in surveyed} if total else {},
             'values': {n: list(dict.fromkeys(v for d in documents for v in d.get(n, [])))[:3] for n in surveyed},
@@ -1502,16 +1540,37 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
         'dateTimeSettings': {'localZoneId': 'UTC', 'referenceTime': int(time.time() * 1000)},
         'storeHistory': False, 'timeout': 5000}
     started = time.monotonic()
-    while True:
-        result = await stroom.post('/dashboard/v1/search', request)
-        if result.get('complete') or time.monotonic() - started > 60:
-            break
-        request['queryKey'] = result.get('queryKey')
-        await asyncio.sleep(0.5)
+    result: dict[str, Any] = {}
+    try:
+        while True:
+            result = await stroom.post('/dashboard/v1/search', request)
+            if result.get('complete') or time.monotonic() - started > SEARCH_WAIT:
+                break
+            request['queryKey'] = result.get('queryKey')
+            await asyncio.sleep(0.5)
+    finally:
+        await _destroy_search(stroom, result)
     table_result = next((r for r in result.get('results') or [] if r.get('componentId') == table['id']), {})
     columns = [f['name'] for f in settings['fields']]
     rows = [dict(zip(columns, row.get('values') or [])) for row in table_result.get('rows') or []]
-    return {'rows': rows, 'errors': (result.get('errors') or []) + (table_result.get('errors') or [])}
+    return {'rows': rows, 'errors': (result.get('errors') or []) + (table_result.get('errors') or []),
+            'complete': bool(result.get('complete'))}
+
+
+SEARCH_WAIT = 60    # seconds a search is polled; past that, what it has found so far is the answer, said to be partial
+
+
+async def _destroy_search(stroom, result: dict[str, Any]) -> None:
+    """End a search and free what Stroom holds for it. A search left behind runs to its end even when nobody asks for
+    its results (seen: three whole-index scans of a large Elasticsearch index carried on after the survey gave up on
+    them), and Stroom keeps its result store for 24 hours by default."""
+    if not (result.get('queryKey') and result.get('node')):
+        return
+    try:
+        await stroom.post(f"/result-store/v1/destroy/{result['node']}",
+                          {'queryKey': result['queryKey'], 'destroyReason': 'NO_LONGER_NEEDED'})
+    except ToolError as e:      # a Stroom without the result store API: it ends the search itself, later
+        logger.info("Search %s not destroyed: %s", result['queryKey'], e)
 
 
 async def _count(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any]) -> tuple[int | None, list]:

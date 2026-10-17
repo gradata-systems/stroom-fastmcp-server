@@ -683,8 +683,10 @@ def existing_index_summary(survey: dict[str, Any]) -> str:
     if profile.get('documents'):
         span = f", from {profile['earliest']} to {profile['latest']}" if profile.get('earliest') else ''
         streams = f", in {profile['streams']} stream{'s' if profile['streams'] != 1 else ''}" if profile.get('streams') else ''
-        lines.append(f"- `{index['name']}` holds {profile['documents']} document{'s' if profile['documents'] != 1 else ''}"
-                     f"{span}{streams}.")
+        at_least = 'at least ' if profile.get('partial') else ''
+        lines.append(f"- `{index['name']}` holds {at_least}{profile['documents']} "
+                     f"document{'s' if profile['documents'] != 1 else ''}{span}{streams}."
+                     + (f" ({profile['partial']}.)" if profile.get('partial') else ''))
         sources = profile.get('sources') or []
         examined = profile.get('streams_examined') or 0
         for s in sources[:10]:
@@ -703,7 +705,8 @@ def existing_index_summary(survey: dict[str, Any]) -> str:
         lines.append('- No pipeline was found that writes to it (pipelines are looked for by the index name they '
                      'write; one that builds the name from values, or writes through an alias, is not found this way).')
     if survey.get('documents_sampled'):
-        lines.append(f"- The field table is drawn from the {survey['documents_sampled']} newest documents"
+        recent = f" of {survey['sampled_from']}" if (survey.get('sampled_from') or '').startswith('the last') else ''
+        lines.append(f"- The field table is drawn from {survey['documents_sampled']} documents{recent}"
                      + (f" ({survey['earliest']} to {survey['latest']})" if survey.get('earliest') else '')
                      + ': In sample and Sample values are what they held.')
     return '\n'.join(lines) + '\n'
