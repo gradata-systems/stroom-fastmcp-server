@@ -18,6 +18,8 @@ the server runs, for probes and for checking an upgrade took.
 
 ## Stateless HTTP: keep it off for VS Code
 
+Nor for Ask Stroom AI. Stateless, each request is handled on its own, so the server can't ask the user in a form during a call: the answer would have nowhere to land. Confirmations and approvals then come back as ids for the agent to pass back, which a model can do without asking the user. MCP's Java SDK, which Stroom AI's client is built on, speaks protocol 2025-11-25 at most as a client (to 2.2.0-M1), which asks the user that way; the 2026-07-28 protocol, which repeats the call with the answer instead and so works stateless, is in the SDK for servers only so far. `dev/e2e_stateless.py` shows it against Stroom.
+
 `statelessHttp` (`FASTMCP_STATELESS_HTTP`) is `false` by default, and should stay so for VS Code. Tried on a live
 deployment, VS Code then refused the server's tools as "disabled" one after another, though they were ticked and
 the server was never called, and confirmations and approvals came back as ids instead of forms, which the model
