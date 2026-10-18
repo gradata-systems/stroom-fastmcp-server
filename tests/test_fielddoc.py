@@ -258,7 +258,7 @@ async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids()
              **{f'f{n:03}': f'v{n}-{e}' for n in range(250)}} for e in (1, 2)]
     searched = []
 
-    async def search(ctx, dashboard, expression, length=100, wait=None):
+    async def search(ctx, dashboard, expression, length=100, wait=None, doing=None):
         fields = dashboard['dashboardConfig']['components'][1]['settings']['fields']
         columns = [c['name'] for c in fields]
         searched.append((columns, expression, any('sort' in c for c in fields)))
@@ -321,7 +321,7 @@ async def test_a_search_is_destroyed_once_read_and_a_count_cut_short_says_so():
     assert [json.loads(c.request.content) for c in destroyed.calls] == [
         {'queryKey': {'uuid': 'k'}, 'destroyReason': 'NO_LONGER_NEEDED'}]
 
-    async def counted(ctx, dashboard, expression, length=100, wait=None):
+    async def counted(ctx, dashboard, expression, length=100, wait=None, doing=None):
         return {'rows': [{'documents': '1200'}], 'errors': [], 'complete': False}
     with patch.object(indexing, '_search', counted):
         profile = await indexing.index_profile(ctx, {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'x'}, None, ['f'])
@@ -333,7 +333,7 @@ async def test_a_sample_stroom_is_still_looking_for_is_cut_short_and_says_so():
     from tools import indexing
     waits = []
 
-    async def search(ctx, dashboard, expression, length=100, wait=None):
+    async def search(ctx, dashboard, expression, length=100, wait=None, doing=None):
         waits.append(wait)
         return {'rows': [{'StreamId': '7', 'EventId': '1', '@timestamp': '2026-10-01T00:00:00.000Z'}],
                 'errors': [], 'complete': False}
@@ -351,7 +351,7 @@ async def test_a_sample_stroom_is_still_looking_for_is_cut_short_and_says_so():
     assert survey['documents_sampled'] == 1 and 'what Stroom had found after 10 s' in survey['note']
 
     # None it can show: the streams were deleted, the index kept. No last try with a term once Stroom was cut short.
-    async def none(ctx, dashboard, expression, length=100, wait=None):
+    async def none(ctx, dashboard, expression, length=100, wait=None, doing=None):
         waits.append(wait)
         return {'rows': [], 'errors': [], 'complete': 'day()-30d' in str(expression)}
     waits.clear()

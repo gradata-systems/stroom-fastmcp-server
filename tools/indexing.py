@@ -28,6 +28,7 @@ from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_act
 from utils.xsltgen import SharedTemplate
 from utils.mappingstore import read_mapping, with_agreed_template
 from utils.params import ONE_OR_MORE
+from utils.progress import progress_from
 from utils.stroom import doc_link, gateway_from, refused_reason, set_body_text
 from utils.sharedxslt import json_values
 from utils.templatecheck import (compare, compose, composition, from_example, json_xml_documents, names_from_example,
@@ -1338,7 +1339,7 @@ async def feeding_pipelines(ctx: Context, doc_type: str, uuid: str, index: dict[
 
 
 async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | None, names: list[str],
-                        streams: int = 20) -> dict[str, Any]:
+                        streams: int = 20, label: str | None = None) -> dict[str, Any]:
     """The whole index at a glance, through grouped dashboard searches: how many documents, the time they span and
     how many streams they came from; and, for the streams with the most documents, the feed and stream type each
     belongs to and the pipeline that produced it (from the stream's meta)."""
@@ -1364,7 +1365,9 @@ async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | Non
                    column('latest', f'max(${{{time_field}}})')]
     if 'StreamId' in names:
         totals.append(column('streams', 'countUnique(${StreamId})'))
-    found = await _search(ctx, probe(totals, 1), everything, length=1)
+    label = label or ref['name']
+    found = await _search(ctx, probe(totals, 1), everything, length=1,
+                          doing=f"Counting every document in {label} (this reads the whole index)")
     if not found['rows']:
         return {}
     row = found['rows'][0]
@@ -1379,7 +1382,10 @@ async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | Non
         return profile
     by_stream = await _search(ctx, probe([column('StreamId', '${StreamId}', group=0),
                                           column('documents', 'count()', sort={'order': 0, 'direction': 'DESCENDING'})],
-                                         streams), everything, length=streams)
+                                         streams), everything, length=streams,
+                        doing=f"Grouping the documents in {label} by stream (this reads the whole index)")
+    say = await progress_from(ctx)
+    await say(f"Looking up where the {min(streams, len(by_stream['rows']))} streams with the most documents came from")
     sources: dict[tuple, dict[str, Any]] = {}
     pipelines: dict[str, str | None] = {}
     for r in by_stream['rows'][:streams]:
@@ -1435,8 +1441,12 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
     for any 100 documents of an Elasticsearch index written mostly from outside Stroom). The sample's searches wait
     SAMPLE_WAIT seconds in all, and the sample is then what they had found, said to be partial."""
     stroom = gateway_from(ctx)
+    say = await progress_from(ctx)
     index = await stroom.get_doc(doc_type, uuid)
     ref = {'type': doc_type, 'uuid': uuid, 'name': index.get('name')}
+    label = index.get('indexName') or index.get('name')     # what the user knows the index by: its name in Elasticsearch
+    await say(f"Reading the fields of {index.get('name')}"
+              + (f" ({index['indexName']})" if index.get('indexName') else ''))
     fields = await _index_fields(stroom, doc_type, ref)
     names = [f['name'] for f in fields]
     time_field = (index.get('timeField') or index.get('timeFieldName')
@@ -1464,17 +1474,19 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
     # The last RECENT_DAYS days; else any documents; else every time there is (some backends want a term). A recent
     # window too sparse to fill the sample gives way to any documents when those are more: five documents say little
     # of how often each field is held.
-    tries = ([('recent', between(f'day()-{RECENT_DAYS}d,day()+1d'))] if time_field in names else []) \
-        + [('any', {'type': 'operator', 'op': 'AND', 'children': []})] \
-        + ([('any', between('1970-01-01T00:00:00.000Z,day()+1d'))] if time_field else [])
+    tries = ([('recent', between(f'day()-{RECENT_DAYS}d,day()+1d'), f'from the last {RECENT_DAYS} days')]
+             if time_field in names else []) \
+        + [('any', {'type': 'operator', 'op': 'AND', 'children': []}, 'of any time')] \
+        + ([('any', between('1970-01-01T00:00:00.000Z,day()+1d'), 'of any time')] if time_field else [])
     first: dict[str, Any] = {'rows': [], 'errors': []}
     sampled_from = None
     deadline = time.monotonic() + SAMPLE_WAIT
-    for tried, expression in tries:
+    for tried, expression, span in tries:
         left = deadline - time.monotonic()
         if left <= 0 and first['rows']:
             break
-        found = await _search(ctx, probe(base + groups[0]), expression, length=max_documents, wait=max(left, 2))
+        found = await _search(ctx, probe(base + groups[0]), expression, length=max_documents, wait=max(left, 2),
+                              doing=f"Searching {label} for up to {max_documents} documents {span}")
         if len(found['rows']) > len(first['rows']) or not first['rows']:
             first, sampled_from = found, tried
         if len(first['rows']) >= max_documents or (tried == 'any' and (first['rows'] or not found.get('complete', True))):
@@ -1494,6 +1506,8 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
             {'type': 'operator', 'op': 'AND', 'children': [
                 {'type': 'term', 'field': n, 'condition': 'EQUALS', 'value': str(r.get(n))} for n in ids]}
             for r in rows]}
+        await say(f"Reading {len(groups) - 1} more group{'s' if len(groups) > 2 else ''} of columns for the "
+                  f"{len(rows)} documents")
         for group, more in zip(groups[1:], await asyncio.gather(
                 *[_search(ctx, probe(base + group), same, length=max_documents) for group in groups[1:]])):
             errors += more['errors']
@@ -1507,7 +1521,7 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
     totals: dict[str, Any] = {}
     if total and profile:
         try:
-            totals = await index_profile(ctx, ref, time_field, names)
+            totals = await index_profile(ctx, ref, time_field, names, label=label)
         except ToolError as e:
             totals = {'error': str(e)}
     note = None
@@ -1523,6 +1537,7 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
         note = (f"The sample is {total} documents, what Stroom had found after {SAMPLE_WAIT} s: it was still looking. "
                 f"Stroom returns a hit only when its StreamId is a stream you may read, so an index written mostly "
                 f"from outside Stroom holds few it can show, and it reads the whole index looking for them.")
+    await say(f"Looking for the pipelines that write to {label}")
     return {'index': {**ref, 'path': await _path_of(stroom, ref), 'link': doc_link(stroom.settings, doc_type, uuid)},
             **({'note': note} if note else {}),
             'backend': 'lucene' if doc_type == 'Index' else 'elasticsearch',
@@ -1543,10 +1558,14 @@ async def _path_of(stroom, ref: dict[str, Any]) -> str | None:
 
 
 async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any], length: int = 100,
-                  wait: float | None = None) -> dict[str, Any]:
+                  wait: float | None = None, doing: str | None = None) -> dict[str, Any]:
     """The table's rows, polling for up to wait seconds (SEARCH_WAIT by default); past that, the rows Stroom had found
-    by then, with complete false."""
+    by then, with complete false. With doing (e.g. 'Searching ecs-web-v1 for ...'), the client is told so, and told
+    again at every poll Stroom hasn't finished."""
     wait = SEARCH_WAIT if wait is None else wait
+    say = await progress_from(ctx) if doing else None
+    if say:
+        await say(doing)
     stroom = gateway_from(ctx)
     components = dashboard['dashboardConfig']['components']
     query = next(c for c in components if c['type'] == 'query')
@@ -1571,6 +1590,8 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
             result = await stroom.post('/dashboard/v1/search', request)
             if result.get('complete') or time.monotonic() - started >= wait:
                 break
+            if say:
+                await say(f"{doing}: still searching, {int(time.monotonic() - started)} s of {int(wait)}")
             request['queryKey'] = result.get('queryKey')
             await asyncio.sleep(0.5)
     finally:

@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import quote
 from typing import Annotated, Any
@@ -27,6 +28,7 @@ from utils.consent import consent_from
 from utils import useractions
 from utils.mappingstore import digest, normalise_xslt, read_agreed_template
 from utils.params import ONE_OR_MORE
+from utils.progress import progress_from
 from utils.stroom import StroomGateway, doc_link, gateway_from
 
 STREAM_STORE = {'type': 'StreamStore', 'uuid': '0', 'name': 'StreamStore'}
@@ -1151,6 +1153,7 @@ async def wait_for_processing(
     from tools.plan import build_of, with_next
     inferred = output_type is None
     checked = None
+    say = await progress_from(ctx)
     while True:
         status = await processing_status(ctx, pipeline_uuid)
         if not status['filters']:
@@ -1196,6 +1199,14 @@ async def wait_for_processing(
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
         if (all_have_output and finished) or time.monotonic() > deadline:
             break
+        # Where processing is, now and then while waiting (seen: three minutes of silence until the timeout).
+        tasks = Counter()
+        for f in status['filters']:
+            tasks.update(f['tasks'])
+        await say.now_and_then(
+            f"Waiting for processing: {sum(1 for metas in outputs.values() if metas)} of {len(stream_ids)} streams "
+            f"have output; tasks: {', '.join(f'{n} {s.lower()}' for s, n in sorted(tasks.items())) or 'none yet'}; "
+            f"{max(0, int(deadline - time.monotonic()))} s left")
         await asyncio.sleep(3)
     per_stream, problems = [], []
     for raw, metas in outputs.items():

@@ -633,6 +633,17 @@ async def test_waiting_goes_on_while_a_filter_selects_the_stream(ctx):
 
 
 @respx.mock
+async def test_waiting_says_where_processing_is_now_and_then(ctx):
+    # Seen: three minutes with nothing shown until the timeout.
+    waiting_on({'min': FEED_MADE, 'enabled': True, 'terms': [('Feed', 'acme'), ('Type', 'Raw Events')]})
+    ctx.report_progress = AsyncMock()
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=5)
+    said = [c.args[2] for c in ctx.report_progress.call_args_list]
+    assert len(said) == 1 and said[0].startswith('Waiting for processing: 0 of 1 streams have output; tasks: ')
+
+
+@respx.mock
 async def test_indexing_events_from_another_pipeline_needs_the_users_confirmation(ctx):
     create = mock_stroom(elastic=False, streams={6: ('Events', 'ev')})
     respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(side_effect=lambda request: httpx.Response(200, json=[

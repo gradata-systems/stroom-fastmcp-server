@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.params import ONE_OR_MORE
+from utils.progress import current_progress, progress_from
 from utils.stroom import SteppingSession, StroomGateway, gateway_from
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
@@ -469,13 +470,20 @@ async def step_sample(
     wrote_reference, wrote_a_reference = 0, 0
     per_stream: dict[int, int] = {}
     first_output = None
-    for stream_id in stream_ids:
+    say = await progress_from(ctx)
+    for n, stream_id in enumerate(stream_ids, 1):
+        stream_start = len(records)
+        limit = cap - stream_start if records_per_stream is None else min(records_per_stream, cap - stream_start)
+        # Told when each stream starts, and while one is stepped only now and then (Progress.now_and_then), never at
+        # every record.
+        if limit > 0:
+            await say(f"Stepping stream {stream_id} ({n} of {len(stream_ids)}) through {pipeline.doc.get('name')}: "
+                      f"up to {limit} records")
         async with stroom.stepping() as session:
             result = await _step(session, pipeline, stream_id, 'FIRST', None, draft_code)
             if not result.get('foundRecord'):
                 # An element that fails before the first record (an XSLT that doesn't compile, say) reports it here.
                 markers += _markers(result, str(stream_id))
-            stream_start = len(records)
             while result.get('foundRecord') and len(records) < cap and (
                     records_per_stream is None or len(records) - stream_start < records_per_stream):
                 per_stream[stream_id] = per_stream.get(stream_id, 0) + 1
@@ -500,6 +508,8 @@ async def step_sample(
                     elements = (result.get('stepData') or {}).get('elementMap') or {}
                     first_output = {e: (elements.get(e) or {}).get('output', '')[:stroom.settings.max_stream_chars // 4]
                                     for e in pipeline.default_outputs()}
+                await say.now_and_then(f"Stepping stream {stream_id} ({n} of {len(stream_ids)}): "
+                                       f"{len(records) - stream_start} of up to {limit} records stepped")
                 result = await _step(session, pipeline, stream_id, 'FORWARD', location, draft_code)
 
     summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
@@ -697,6 +707,11 @@ async def step_spread(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: li
     session, so a later Stroom captures the stream once for it."""
     states: dict[int, dict[str, Any]] = {sid: {'steps': [], 'result': None, 'done': False} for sid in stream_ids}
     gate = asyncio.Semaphore(STEP_STREAMS_AT_ONCE)
+    # Told once, then now and then while stepping (seen: 200 records took 132 s of a write_documentation call).
+    say = await current_progress()
+    name = pipeline.doc.get('name')
+    await say(f"Stepping up to {cap} records of {len(stream_ids)} stream{'s' if len(stream_ids) != 1 else ''} "
+              f"through {name}")
 
     async def take(stream_id: int, budget: int) -> None:
         state = states[stream_id]
@@ -709,6 +724,8 @@ async def step_spread(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: li
                 location = state['result']['foundLocation']
                 state['steps'].append((stream_id, location, state['result']))
                 budget -= 1
+                await say.now_and_then(f"Stepping through {name}: {sum(len(s['steps']) for s in states.values())} "
+                                       f"of up to {cap} records stepped")
                 state['result'] = await _step(session, pipeline, stream_id, 'FORWARD', location, code)
             state['done'] = not state['result'].get('foundRecord')
 

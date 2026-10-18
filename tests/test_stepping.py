@@ -382,6 +382,7 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
     from tools import stepping
     sizes = {1: 300, 2: 10, 3: 300, 4: 300, 5: 300}
     stroom = SimpleNamespace(stepping=nullcontext)
+    pipeline = SimpleNamespace(doc={'name': 'ACME'})
     running, most = 0, 0
 
     async def step(stroom, pipeline, stream_id, step_type, location, code):
@@ -396,7 +397,7 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
         return {'foundRecord': True, 'foundLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': at},
                 'stepData': {'elementMap': {'x': {'output': f'{stream_id}:{at}'}}}}
     with patch.object(stepping, '_step', step):
-        steps = await stepping.step_spread(stroom, None, [1, 2, 3, 4, 5], None, 200)
+        steps = await stepping.step_spread(stroom, pipeline, [1, 2, 3, 4, 5], None, 200)
     taken = [s for s, _, _ in steps]
     assert len(steps) == 200 and taken == sorted(taken)                  # stream order, then record order
     counts = {sid: taken.count(sid) for sid in sizes}
@@ -404,5 +405,5 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
     assert max(r['recordIndex'] for _, r, _ in steps) < 60                     # never deep in one stream
     assert most <= stepping.STEP_STREAMS_AT_ONCE
     with patch.object(stepping, '_step', step):
-        outputs = await stepping._outputs(stroom, None, [2], 'x', None, 5)
+        outputs = await stepping._outputs(stroom, pipeline, [2], 'x', None, 5)
     assert list(outputs.values()) == ['2:0', '2:1', '2:2', '2:3', '2:4']

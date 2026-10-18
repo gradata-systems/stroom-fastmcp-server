@@ -12,6 +12,7 @@ from security.guard import guard_from
 from tools.streams import _meta, _term
 from utils.consent import consent_from
 from utils.params import ONE_OR_MORE
+from utils.progress import current_progress, progress_from
 from utils.stroom import StroomGateway, body_text, gateway_from, refused_reason, set_body_text, stroom_chars
 from utils.survey import Shapes, share, split_records
 from utils.surveydoc import doc_name, dropped, merge, read_state, render, resolve, set_handling
@@ -45,8 +46,11 @@ def spread_order(n: int) -> list[int]:
 
 async def pick_spread(stroom: StroomGateway, terms: list[dict[str, Any]], count: int,
                       skip: set[int]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Up to `count` unread streams spread over the feed's lifetime, in bisection order."""
+    """Up to `count` unread streams spread over the feed's lifetime, in bisection order. A stream search a slice of
+    time (seen: 28 of them, 2.4 s each, most of a 35 s survey_feed call): the client is told now and then."""
     live = lambda rows: [r['meta'] for r in rows.get('values') or [] if r['meta'].get('status') != 'DELETED']
+    say = await current_progress()
+    await say(f"Finding up to {count} streams spread over the feed's time range")
     newest = live(await stroom.find_meta(terms, 1))
     oldest = live(await stroom.find_meta(terms, 1, newest_first=False))
     if not newest:
@@ -62,6 +66,8 @@ async def pick_spread(stroom: StroomGateway, terms: list[dict[str, Any]], count:
         choice = next((m for m in rows if m['id'] not in skip and m['id'] not in {p['id'] for p in picked}), None)
         if choice:
             picked.append(choice)
+        await say.now_and_then(f"Finding streams spread over the feed's time range: {len(picked)} of up to {count} "
+                               f"found")
     if len(picked) < count:  # thin or clustered feeds: fill with any unread streams
         for m in live(await stroom.find_meta(terms, len(skip) + count * 2)):
             if len(picked) >= count:
@@ -273,7 +279,11 @@ async def survey_feed(
         raise ToolError(f"No {stream_type} streams in feed '{feed}'")
     shapes = Shapes(known_signatures, examples_per_shape)
     per_stream, records_read, fmt, first_chunk = [], 0, None, None
-    for meta in streams:
+    say = await progress_from(ctx)
+    await say(f"Reading the head of {len(streams)} stream{'s' if len(streams) != 1 else ''} of {feed}")
+    for n, meta in enumerate(streams, 1):
+        await say.now_and_then(f"Reading stream {meta['id']} ({n} of {len(streams)}): {records_read} records read so "
+                               f"far")
         new_here, read_here, cut = 0, 0, False
         parts = 1
         part = 0
