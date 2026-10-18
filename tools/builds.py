@@ -556,6 +556,10 @@ async def write_documentation(
             description="Instead of a pipeline, an existing index to document: its Elastic Index or Lucene Index doc, "
                         "confirmed with the user. The Field mapping section is generated from a survey of the index "
                         "through Stroom (describe_document shows it), and the doc is named after the index doc.")] = None,
+        index_itself: Annotated[bool, Field(
+            description="With index_uuid of an index this build made: document the index doc itself too. Only when "
+                        "the user asks for it: by default its documentation is its indexing pipeline's, and the call "
+                        "says which pipeline to document instead.")] = False,
         document_missing_fields: Annotated[bool, Field(
             description="With index_uuid: document the index though fields its feeding pipelines write aren't in it "
                         "(listed as not in the index). Only when the user chooses it over reindexing or checking "
@@ -615,11 +619,18 @@ async def write_documentation(
     if not isinstance(field_descriptions, dict):
         raise ToolError("field_descriptions is an object, {field: description}")
     if index_uuid:
-        if stream_ids or accept_errors:
-            raise ToolError("stream_ids and accept_errors are for a pipeline's documentation; an existing index is "
-                            "surveyed through Stroom instead. Leave them out with index_uuid.")
-        return await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id, field_mapping_layout,
-                                     document_missing_fields, field_descriptions)
+        if accept_errors:
+            # Not ignored as stream_ids are: the user's word that errors are benign would be lost unsaid.
+            raise ToolError("accept_errors are for a pipeline's documentation, whose processing made the errors; an "
+                            "index is surveyed through Stroom instead. Accept them with write_documentation "
+                            "pipeline_uuid= the pipeline that made them.")
+        result = await _document_index(ctx, build, index_uuid, body, change or 'Created', confirmation_id,
+                                       field_mapping_layout, document_missing_fields, field_descriptions, index_itself)
+        if stream_ids:
+            # Seen: refused for them, the agent sent its whole markdown again without them. They change nothing here.
+            result['ignored'] = {'stream_ids': "an index is surveyed through Stroom, not stepped over streams: they "
+                                               "are only for a pipeline's documentation"}
+        return result
     if not pipeline_uuid:
         raise ToolError("Give pipeline_uuid (a pipeline to document) or index_uuid (an existing index)")
     if evaluation:
@@ -840,10 +851,33 @@ async def _layout(ctx: Context, ref: dict[str, str], asked: str | None) -> tuple
                              f"{ruled['from'] or '(root)'} says"]
 
 
+async def _own_indexing_pipeline(ctx: Context, build: str, doc_type: str, index_uuid: str,
+                                 index: dict[str, Any]) -> dict[str, Any] | None:
+    """The build's own pipeline that writes to the index, when the index doc is the build's too; else None."""
+    from tools.indexing import writes_to
+    from tools.pipelines import merge_layers
+    docs = await _build_docs(ctx, build)
+    if not any(d['uuid'] == index_uuid for d in docs):
+        return None
+    stroom = gateway_from(ctx)
+    for d in docs:
+        if d['type'] != 'Pipeline':
+            continue
+        try:
+            merged = merge_layers(await stroom.pipeline_layers(d['uuid']))
+        except ToolError:   # one Stroom can't load says nothing about the index
+            continue
+        properties = {(q['element'], q['name']): q['value'] for q in merged['properties']}
+        if writes_to(properties, doc_type, index_uuid, index.get('indexName')):
+            return d
+    return None
+
+
 async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, change: str,
                           confirmation_id: str | None, field_mapping_layout: str | None = None,
                           document_missing_fields: bool = False,
-                          field_descriptions: dict[str, str] | None = None) -> dict[str, Any]:
+                          field_descriptions: dict[str, str] | None = None,
+                          index_itself: bool = False) -> dict[str, Any]:
     """The documentation of an existing index, its Field mapping section generated from a survey through Stroom. A doc
     already beside the index doc is changed through a working copy, written back (after a backup) on promotion."""
     from tools.indexing import _path_of, survey_index
@@ -861,6 +895,16 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
         raise ToolError(f"No Elastic Index or Lucene Index doc {index_uuid}: find it with find_documents "
                         f"types=['ElasticIndex', 'Index']")
     ref = {'type': doc_type, 'uuid': index_uuid, 'name': index.get('name')}
+    if not index_itself:
+        own = await _own_indexing_pipeline(ctx, build, doc_type, index_uuid, index)
+        if own:
+            # Seen: asked to document the indexing pipeline, the agent documented the build's new index doc instead,
+            # surveying it for a minute, then documented the pipeline as well.
+            raise ToolError(f"'{ref['name']}' is an index this build made: its documentation is its indexing "
+                            f"pipeline's. Call write_documentation pipeline_uuid='{own['uuid']}' ('{own['name']}') "
+                            f"stream_ids=<the Events streams it indexed> instead; index_uuid is for documenting an "
+                            f"index that exists already. Only if the user asked for a doc of the index doc itself as "
+                            f"well: index_itself=true.")
     folder = await _path_of(stroom, ref)                      # the explorer's path is the doc's folder
     beside = await _documentation_beside(stroom, ref)
     existing = next((d for d in await _build_docs(ctx, build)

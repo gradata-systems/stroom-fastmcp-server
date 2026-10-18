@@ -130,6 +130,15 @@ def _of_types(found: Any, types: list[str] | None) -> Any:
     return {**found, 'values': [v for v in found['values'] if (v.get('docRef') or {}).get('type') in types]}
 
 
+TOKEN_MARGIN = 15     # seconds of a caller's token kept in hand for a call's last requests (token_seconds_left)
+
+
+def out_of_time(what: str) -> str:
+    """What a call that stopped before the caller's token ran out tells the agent."""
+    return (f"Stopped {what} before your sign-in (access token) ran out. Call again: your client sends a fresh token "
+            f"with every call, so there is nothing for the user to do.")
+
+
 class StroomGateway:
     """Calls the Stroom REST API (`/api/...`) as the MCP caller.
 
@@ -159,6 +168,19 @@ class StroomGateway:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    def token_seconds_left(self) -> float | None:
+        """Seconds until the caller's access token runs out, less TOKEN_MARGIN for the call's last requests; None when
+        there is no expiry to keep to (an API key, a token without one). A call that waits or loops stops by then and
+        says to call again, and the client's next call carries a fresh token: seen with Stroom's internal identity
+        provider, whose tokens for this server live 5 minutes and come with as little as 1 left, a call that outlasted
+        its token failed part way."""
+        if self._fixed_authorization or self.settings.dev_no_auth:
+            return None
+        token = get_access_token()
+        if token is None or not token.expires_at:
+            return None
+        return token.expires_at - time.time() - TOKEN_MARGIN
 
     def _authorization(self) -> dict[str, str]:
         if self._fixed_authorization:

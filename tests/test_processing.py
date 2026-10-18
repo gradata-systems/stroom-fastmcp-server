@@ -633,6 +633,19 @@ async def test_waiting_goes_on_while_a_filter_selects_the_stream(ctx):
 
 
 @respx.mock
+async def test_waiting_stops_before_the_callers_token_runs_out(ctx):
+    # Seen with Stroom's internal identity provider: a token for this server with as little as a minute left, and a
+    # wait of three minutes failed part way. It stops in time and says to call again, with a fresh token.
+    waiting_on({'min': FEED_MADE, 'enabled': True, 'terms': [('Feed', 'acme'), ('Type', 'Raw Events')]})
+    started = time.monotonic()
+    with patch.object(StroomGateway, 'token_seconds_left', return_value=6),             patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=180)
+    assert time.monotonic() - started < 20
+    assert result['hint'].startswith('Stopped waiting, with tasks still running, before your sign-in (access token) '
+                                     'ran out. Call again')
+
+
+@respx.mock
 async def test_waiting_says_where_processing_is_now_and_then(ctx):
     # Seen: three minutes with nothing shown until the timeout.
     waiting_on({'min': FEED_MADE, 'enabled': True, 'terms': [('Feed', 'acme'), ('Type', 'Raw Events')]})

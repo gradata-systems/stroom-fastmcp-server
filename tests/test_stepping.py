@@ -381,7 +381,7 @@ async def test_records_are_stepped_spread_over_the_streams_side_by_side():
     from unittest.mock import patch
     from tools import stepping
     sizes = {1: 300, 2: 10, 3: 300, 4: 300, 5: 300}
-    stroom = SimpleNamespace(stepping=nullcontext)
+    stroom = SimpleNamespace(stepping=nullcontext, token_seconds_left=lambda: None)
     pipeline = SimpleNamespace(doc={'name': 'ACME'})
     running, most = 0, 0
 

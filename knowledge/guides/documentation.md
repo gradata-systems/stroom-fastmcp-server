@@ -102,8 +102,10 @@ documents held, with how often and sample values. The agreed Elasticsearch index
 
 ### An existing index
 
-`write_documentation index_uuid=<the Elastic Index or Lucene Index doc>` documents an index rather than a pipeline;
-the user confirms the index doc first. The doc is named after the index doc and its Field mapping section is
+`write_documentation index_uuid=<the Elastic Index or Lucene Index doc>` documents an index that exists already
+rather than a pipeline; the user confirms the index doc first. An index your build made is documented by its
+indexing pipeline's doc (`pipeline_uuid=`), not with `index_uuid`: the call says so, unless the user asked for a doc
+of the index doc itself as well (`index_itself=true`). The doc is named after the index doc and its Field mapping section is
 generated from a survey through Stroom (`describe_document` on the index doc shows the same survey): every field
 Stroom has for the index, with a description, its type, its event-logging source path when a feeding pipeline
 keeps an index plan, how often a sample of up to 100 documents (recent ones where there are any) held it, and sample

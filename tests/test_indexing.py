@@ -560,15 +560,78 @@ async def test_documents_are_counted_not_the_rows_of_one_page():
         {'type': 'query', 'id': 'q', 'settings': {'dataSource': {}}},
         {'type': 'table', 'id': 't', 'name': 'T', 'settings': {'fields': [{'name': 'StreamId'}, {'name': 'EventId'}]}}]}}
 
-    async def search(ctx, dash, expression, length=100):
+    async def search(ctx, dash, expression, length=100, doing=None):
         table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
         if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
             return {'rows': [{'All': 'all', 'Count': '32000'}], 'errors': []}
         return {'rows': [{'StreamId': '706', 'EventId': str(n)} for n in range(1, 101)], 'errors': []}
-    with patch.object(indexing, '_search', search):
+    with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={706: None, 707: None})):
         result = await indexing.run_test_searches(SimpleNamespace(), 'd', [706, 707], 32000, retries=0,
                                                   dashboard_doc=dashboard)
     assert result['passed'] and result['checks'][0]['returned'] == 32000 and len(result['checks'][0]['sample']) == 3
+
+
+VERIFY_DASHBOARD = {'uuid': 'd', 'name': 'V', 'dashboardConfig': {'components': [
+    {'type': 'query', 'id': 'q', 'settings': {'dataSource': {'name': 'web-v1'}}},
+    {'type': 'table', 'id': 't', 'name': 'T', 'settings': {'fields': [
+        {'name': 'StreamId'}, {'name': 'EventId'},
+        {'name': '@timestamp', 'sort': {'order': 0, 'direction': 'DESCENDING'}}]}}]}}
+
+
+async def test_verification_checks_only_the_sample_unsorted_and_a_large_stream_by_its_ends():
+    # Asked for by the user: an index of millions of documents, a stream of 100,000. Checks of the whole index answered
+    # for other streams' documents, sorted searches read every match, and the count read every document, 7 times.
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from tools import indexing
+    asked = []
+
+    async def search(ctx, dash, expression, length=100, doing=None):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        asked.append((expression, [f for f in table['settings']['fields'] if 'sort' in f]))
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            terms = {(t['field'], t['condition']): t['value'] for t in expression['children'][1:]}
+            if ('EventId', 'GREATER_THAN') in terms:
+                n = 0
+            elif terms.get(('EventId', 'GREATER_THAN_OR_EQUAL_TO')) in ('1', '99001'):
+                n = 1000
+            else:
+                n = 7     # stream 8, counted whole
+            return {'rows': [{'All': 'all', 'Count': str(n)}], 'errors': [], 'complete': True}
+        return {'rows': [{'StreamId': '6', 'EventId': '1', 'user.name': 'alice'}], 'errors': [], 'complete': True}
+    with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 100_000, 8: 7})):
+        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [6, 8], 100_007, retries=0,
+                                                  exact=[{'field': 'user.name', 'value': 'alice'}],
+                                                  dashboard_doc=VERIFY_DASHBOARD)
+    assert result['passed'], result
+    parts = result['checks'][0]['parts']
+    assert [(p['streams'], p.get('of'), p['expected']) for p in parts] == [
+        ([8], None, 7), ([6], 'events 1 to 1000', 1000), ([6], 'events 99001 to 100000', 1000),
+        ([6], 'none past event 100000', 0)]
+    # Every search of the sample's streams, and none sorted.
+    streams = {'type': 'operator', 'op': 'OR', 'children': [
+        {'type': 'term', 'field': 'StreamId', 'condition': 'EQUALS', 'value': str(i)} for i in (6, 8)]}
+    assert all(not sorted_ for _, sorted_ in asked)
+    assert all(e == streams or e['children'][0]['op'] == 'OR' for e, _ in asked)
+    assert asked[-1][0] == {'type': 'operator', 'op': 'AND', 'children': [streams, {
+        'type': 'term', 'field': 'user.name', 'condition': 'EQUALS', 'value': 'alice'}]}
+
+
+async def test_a_count_stroom_had_not_finished_is_unproven_not_missing_documents():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from tools import indexing
+
+    async def search(ctx, dash, expression, length=100, doing=None):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            return {'rows': [{'All': 'all', 'Count': '4000'}], 'errors': [], 'complete': False}
+        return {'rows': [], 'errors': [], 'complete': True}
+    with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 9000})):
+        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [6], 9000, retries=0,
+                                                  dashboard_doc=VERIFY_DASHBOARD)
+    check = result['checks'][0]
+    assert not result['passed'] and check['returned'] == 4000 and 'not missing documents' in check['unproven']
 
 
 def xml_to_json(xml: str) -> str:

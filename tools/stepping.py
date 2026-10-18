@@ -15,7 +15,7 @@ from security.guard import MANAGED, guard_from
 from tools.pipelines import merge_layers, own_elements, translation_docs
 from utils.params import ONE_OR_MORE
 from utils.progress import current_progress, progress_from
-from utils.stroom import SteppingSession, StroomGateway, gateway_from
+from utils.stroom import SteppingSession, StroomGateway, gateway_from, out_of_time
 from utils.accepted import accepted_for
 from utils.triage import from_stored_error, triage
 
@@ -471,7 +471,10 @@ async def step_sample(
     per_stream: dict[int, int] = {}
     first_output = None
     say = await progress_from(ctx)
+    cut = False     # stopped before the caller's token ran out
     for n, stream_id in enumerate(stream_ids, 1):
+        if cut:
+            break
         stream_start = len(records)
         limit = cap - stream_start if records_per_stream is None else min(records_per_stream, cap - stream_start)
         # Told when each stream starts, and while one is stepped only now and then (Progress.now_and_then), never at
@@ -510,6 +513,10 @@ async def step_sample(
                                     for e in pipeline.default_outputs()}
                 await say.now_and_then(f"Stepping stream {stream_id} ({n} of {len(stream_ids)}): "
                                        f"{len(records) - stream_start} of up to {limit} records stepped")
+                left = stroom.token_seconds_left()
+                if left is not None and left <= 0:
+                    cut = True
+                    break
                 result = await _step(session, pipeline, stream_id, 'FORWARD', location, draft_code)
 
     summary = triage(markers, ctx.lifespan_context['rules'], pipeline.own, record_count=len(records),
@@ -556,6 +563,11 @@ async def step_sample(
         result.update(verdict=summary['verdict'], groups=summary['groups'], groups_by_class=summary['groups_by_class'])
     if not records:
         _nothing_stepped(result, markers, f"streams {stream_ids}")
+    if cut:
+        # A verdict of fewer records than asked for isn't the clean step promotion relies on: not recorded.
+        result['stopped_early'] = True
+        result['hint'] = out_of_time(f"after {len(records)} records") + " The verdict is of those records only."
+        return result
     await remember_clean(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline.doc.get('name')}, draft_code,
                          result, stream_ids)
     if result['verdict'] == 'clean' and not draft_code:
@@ -726,6 +738,11 @@ async def step_spread(stroom: StroomGateway, pipeline: _Pipeline, stream_ids: li
                 budget -= 1
                 await say.now_and_then(f"Stepping through {name}: {sum(len(s['steps']) for s in states.values())} "
                                        f"of up to {cap} records stepped")
+                left = stroom.token_seconds_left()
+                if left is not None and left <= 0:
+                    # Before the caller's token runs out: fewer records, rather than a call refused part way.
+                    state['done'] = True
+                    return
                 state['result'] = await _step(session, pipeline, stream_id, 'FORWARD', location, code)
             state['done'] = not state['result'].get('foundRecord')
 

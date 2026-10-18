@@ -16,7 +16,7 @@ NOT_TOOLS = {'data_splitter', 'record_start', 'record_end', 'xml_fragments', 'js
              'in_dictionary', 'data_name', 'xml_namespace', 'key_xpath', 'pair_separator', 'body_field',
              'strip_domain', 'event_logging_path', 'type_id', 'event_detail', 'stream_type', 'stream_ids',
              'loader_pipeline', 'replace_parser', 'output_type', 'source_pipeline_uuid', 'draft_code', 'pipeline_uuid',
-             'index_uuid', 'records_per_stream', 'skip_stream_ids', 'known_signatures', 'expect_events', 'filter_id',
+             'index_uuid', 'index_itself', 'records_per_stream', 'skip_stream_ids', 'known_signatures', 'expect_events', 'filter_id',
              'events_stream_ids',
              'source_confirmation_id', 'confirmation_id', 'approval_id', 'field_mapping', 'pipeline_link', 'extra_fields',
              'index_name', 'timestamp_field', 'source_docs', 'sample_size', 'input_fields', 'working_copy', 'set_properties',

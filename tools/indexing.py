@@ -1569,6 +1569,9 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
     by then, with complete false. With doing (e.g. 'Searching ecs-web-v1 for ...'), the client is told so, and told
     again at every poll Stroom hasn't finished."""
     wait = SEARCH_WAIT if wait is None else wait
+    left = gateway_from(ctx).token_seconds_left()
+    if left is not None:
+        wait = max(1.0, min(wait, left))    # what it has found by then, partial, rather than a request refused
     say = await progress_from(ctx) if doing else None
     if say:
         await say(doing)
@@ -1625,23 +1628,34 @@ async def _destroy_search(stroom, result: dict[str, Any]) -> None:
         logger.info("Search %s not destroyed: %s", result['queryKey'], e)
 
 
-async def _count(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any]) -> tuple[int | None, list]:
+async def _count(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any],
+                 doing: str | None = None) -> tuple[int | None, list]:
     """How many documents the expression finds, however many: the dashboard's table asked for count() grouped on a
     constant, so one row holds it. Counting the rows of a search stopped at its first page (100) and at the table's
     maxResults (seen: 32,000 documents counted as 100)."""
+    n, errors, _ = await _counted(ctx, dashboard, expression, doing)
+    return n, errors
+
+
+async def _counted(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any],
+                   doing: str | None = None) -> tuple[int | None, list, bool]:
+    """_count, and whether Stroom finished counting: a count cut off at SEARCH_WAIT is a floor, not the number (seen:
+    compared with the documents expected, it failed verification as if they were missing)."""
     components = dashboard['dashboardConfig']['components']
     table = next(c for c in components if c['type'] == 'table')
     counting = {**table['settings'], 'fields': [
         {'id': 'mcp-all', 'name': 'All', 'expression': '"all"', 'group': 0, 'visible': True},
         {'id': 'mcp-count', 'name': 'Count', 'expression': 'count()', 'format': {'type': 'NUMBER'}, 'visible': True}]}
     found = await _search(ctx, {**dashboard, 'dashboardConfig': {**dashboard['dashboardConfig'], 'components': [
-        c if c is not table else {**table, 'settings': counting} for c in components]}}, expression, length=1)
+        c if c is not table else {**table, 'settings': counting} for c in components]}}, expression, length=1,
+        doing=doing)
+    complete = found.get('complete', True)
     if not found['rows']:
-        return (0 if not found['errors'] else None), found['errors']
+        return (0 if not found['errors'] else None), found['errors'], complete
     try:
-        return int(float(found['rows'][0].get('Count') or 0)), found['errors']
+        return int(float(found['rows'][0].get('Count') or 0)), found['errors'], complete
     except ValueError:
-        return None, found['errors']
+        return None, found['errors'], complete
 
 
 Condition = Literal['EQUALS', 'NOT_EQUALS', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH', 'MATCHES_REGEX', 'GREATER_THAN',
@@ -1686,6 +1700,88 @@ async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: 
             **({} if holds else {'why': f"record {event}'s document has {field} = {document.get(field)}, not {value}"})}
 
 
+FULL_COUNT = 10_000     # a stream's documents counted one by one; past this, its first and last ENDS events are
+ENDS = 1_000            # (and none past its last): every document of a stream would be read through Stroom
+
+
+def _unsorted(dashboard: dict[str, Any]) -> dict[str, Any]:
+    """The dashboard with its table unsorted, for checks: Stroom sorts a table itself, reading every match to do it,
+    while an unsorted search stops once its page is full."""
+    def plain(c: dict[str, Any]) -> dict[str, Any]:
+        if c.get('type') != 'table':
+            return c
+        settings = c['settings']
+        return {**c, 'settings': {**settings, 'fields': [{k: v for k, v in f.items() if k != 'sort'}
+                                                         for f in settings.get('fields') or []]}}
+    config = dashboard['dashboardConfig']
+    return {**dashboard, 'dashboardConfig': {**config, 'components': [plain(c) for c in config['components']]}}
+
+
+def _cut_off(n: int | None) -> str:
+    return (f"Stroom had not finished counting after {SEARCH_WAIT} s: at least {n or 0} so far, not missing "
+            f"documents. Call again to check once more.")
+
+
+async def _stream_events(ctx: Context, stream_ids: list[int]) -> dict[int, int | None]:
+    """Events in each stream, for a segmented one (an Events stream: a record each), as Stroom's data API says; None
+    for a raw stream, whose count is of parts, or one it can't read."""
+    stroom = gateway_from(ctx)
+    sizes: dict[int, int | None] = {}
+    for sid in stream_ids:
+        try:
+            first = await stroom.fetch_data(sid, 0, 1)
+        except ToolError:
+            sizes[sid] = None
+            continue
+        sizes[sid] = (first.get('totalItemCount') or {}).get('count') if first.get('dataType') == 'SEGMENTED' else None
+    return sizes
+
+
+async def _completeness(ctx: Context, dashboard: dict[str, Any], stream_ids: list[int],
+                        sizes: dict[int, int | None], expected: int, label: str) -> dict[str, Any]:
+    """Whether every document of the streams is in the index. A stream of more than FULL_COUNT events is checked by
+    its first and last ENDS (EventId is the event's number in its stream, from 1) and by none past its last: a few
+    thousand documents read, however large the stream (asked for by the user: a stream of 100,000 records was
+    counted through Stroom, seven times over while the index caught up). The others are counted whole."""
+    term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
+    of = lambda sids, *terms: {'type': 'operator', 'op': 'AND', 'children': [
+        {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in sids]}, *terms]}
+    large = {sid: n for sid, n in sizes.items() if n and n > FULL_COUNT}
+    rest = [sid for sid in stream_ids if sid not in large]
+    parts, errors = [], []
+    if rest:
+        want = expected - sum(large.values())
+        n, found_errors, counted_all = await _counted(
+            ctx, dashboard, of(rest), doing=f"Counting the documents of streams {rest} in {label}")
+        errors += found_errors
+        parts.append({'streams': rest, 'expected': want, 'returned': n, 'pass': counted_all and n == want,
+                      **({} if counted_all else {'unproven': _cut_off(n)})})
+    for sid, n in large.items():
+        for what, terms, want in (
+                (f'events 1 to {ENDS}', [term('EventId', 'GREATER_THAN_OR_EQUAL_TO', 1),
+                                          term('EventId', 'LESS_THAN_OR_EQUAL_TO', ENDS)], ENDS),
+                (f'events {n - ENDS + 1} to {n}', [term('EventId', 'GREATER_THAN_OR_EQUAL_TO', n - ENDS + 1),
+                                                    term('EventId', 'LESS_THAN_OR_EQUAL_TO', n)], ENDS),
+                (f'none past event {n}', [term('EventId', 'GREATER_THAN', n)], 0)):
+            got, found_errors, counted_all = await _counted(
+                ctx, dashboard, of([sid], *terms), doing=f"Counting stream {sid}'s {what} in {label}")
+            errors += found_errors
+            parts.append({'streams': [sid], 'of': what, 'expected': want, 'returned': got,
+                          'pass': counted_all and got == want, **({} if counted_all else {'unproven': _cut_off(got)})})
+    passed = all(p['pass'] for p in parts)
+    if not large:
+        only = parts[0]
+        return {'check': f'documents for streams {stream_ids}', 'expected': expected, 'returned': only['returned'],
+                'pass': passed, 'errors': errors, **({'unproven': only['unproven']} if 'unproven' in only else {}),
+                'progress': f"{only['returned'] or 0} of {expected} documents indexed so far"}
+    held = sum(p['returned'] or 0 for p in parts)
+    return {'check': f'documents for streams {stream_ids}', 'expected': expected, 'pass': passed, 'errors': errors,
+            'how': f"streams of more than {FULL_COUNT} events by their first and last {ENDS} and none past their last; "
+                   f"the others counted whole",
+            'parts': parts, 'progress': f"{sum(1 for p in parts if p['pass'])} of {len(parts)} counts as expected, "
+                                        f"{held} documents found"}
+
+
 async def run_test_searches(
         ctx: Context,
         dashboard_uuid: Annotated[str, Field(description="A verification dashboard.")],
@@ -1711,40 +1807,53 @@ async def run_test_searches(
     dashboard = dashboard_doc or await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
     term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
     by_stream = {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in stream_ids]}
+    # What each search is, told to the client as it runs (asked for by the user), by the index the dashboard queries.
+    say = await progress_from(ctx)
+    label = next((((c.get('settings') or {}).get('dataSource') or {}).get('name') for c in
+                  dashboard['dashboardConfig']['components'] if c.get('type') == 'query'), None) or dashboard.get('name')
+    # Every check is of the sample's streams, and unsorted. The index may hold millions of other documents: a check
+    # of the whole index answered for them (a time range counted everyone's documents in it, an exact match passed on
+    # any stream's), and the dashboard's table, sorted newest first, made Stroom read every match to sort it. The
+    # user's dashboard stays sorted.
+    dashboard = _unsorted(dashboard)
+    scoped = lambda *terms: {'type': 'operator', 'op': 'AND', 'children': [by_stream, *terms]}
+    sizes = await _stream_events(ctx, stream_ids)
     for attempt in range(retries + 1):
-        counted, count_errors = await _count(ctx, dashboard, by_stream)
-        if (counted or 0) >= expected_documents or attempt == retries:
+        complete = await _completeness(ctx, dashboard, stream_ids, sizes, expected_documents, label)
+        if complete['pass'] or attempt == retries:
             break
+        await say(f"Waiting for {label} to catch up: {complete['progress']} (try {attempt + 1} of {retries + 1})")
         await asyncio.sleep(5)
-    found = await _search(ctx, dashboard, by_stream)
-    counted = len(found['rows']) if counted is None else counted
-    checks = [{'check': f'documents for streams {stream_ids}', 'expected': expected_documents,
-               'returned': counted, 'pass': counted == expected_documents,
-               'errors': count_errors + found['errors'], 'sample': found['rows'][:3]}]
+    found = await _search(ctx, dashboard, by_stream, doing=f"Reading the documents of streams {stream_ids} in {label}")
+    complete.pop('progress')
+    checks = [{**complete, 'errors': complete['errors'] + found['errors'], 'sample': found['rows'][:3]}]
     for item in exact:
-        res = await _search(ctx, dashboard, {'type': 'operator', 'op': 'AND', 'children': [
-            term(item['field'], 'EQUALS', item['value'])]})
+        res = await _search(ctx, dashboard, scoped(term(item['field'], 'EQUALS', item['value'])),
+                            doing=f"Searching {label}: {item['field']} = {item['value']}")
         checks.append({'check': f"{item['field']} = {item['value']}", 'returned': len(res['rows']),
                        'pass': len(res['rows']) >= 1, 'errors': res['errors'], 'sample': res['rows'][:2]})
     if time_range:
-        between = {'type': 'operator', 'op': 'AND', 'children': [
-            term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}")]}
-        n, errors = await _count(ctx, dashboard, between)
-        n = n if n is not None else len((await _search(ctx, dashboard, between))['rows'])
+        between = scoped(term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}"))
+        doing = f"Searching {label}: {time_range['field']} between {time_range['from']} and {time_range['to']}"
+        n, errors, counted_all = await _counted(ctx, dashboard, between, doing=doing)
+        n = n if n is not None else len((await _search(ctx, dashboard, between, doing=doing))['rows'])
         checks.append({'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
                        'expected': time_range.get('expected'), 'returned': n,
-                       'pass': n == time_range.get('expected', n), 'errors': errors})
+                       'pass': counted_all and n == time_range.get('expected', n), 'errors': errors,
+                       **({} if counted_all else {'unproven': _cut_off(n)})})
     for search in searches or []:
-        expression = {'type': 'operator', 'op': 'AND', 'children': [term(search.field, search.condition, search.value)]}
-        res = await _search(ctx, dashboard, expression)
-        n = len(res['rows'])
+        expression = scoped(term(search.field, search.condition, search.value))
+        doing = f"Searching {label}: {search.field} {search.condition} {search.value}".rstrip()
+        res = await _search(ctx, dashboard, expression, doing=doing)
+        n, counted_all = len(res['rows']), True
         if search.expected is not None and n >= 100:
             # A page is full: the number is counted, not the rows of the first page.
-            counted, _ = await _count(ctx, dashboard, expression)
+            counted, _, counted_all = await _counted(ctx, dashboard, expression, doing=doing)
             n = n if counted is None else counted
         checks.append({'check': f"{search.field} {search.condition} {search.value}".rstrip(), 'expected': search.expected,
                        'returned': n, 'pass': (n >= 1 if search.expected is None else n == search.expected)
-                       and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],
+                       and counted_all and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],
+                       **({} if counted_all else {'unproven': _cut_off(n)}),
                        '_first': res['rows'][0] if res['rows'] else None,
                        '_spec': {'field': search.field, 'condition': search.condition, 'value': search.value}})
     if pipeline_uuid:
@@ -1755,6 +1864,7 @@ async def run_test_searches(
         checks[0]['_first'], checks[0]['_spec'] = first, {}
         for check in checks:
             if check.get('_first'):
+                await say(f"Tracing the first hit of '{check['check']}' back to its record")
                 check['trace'] = await _traced(ctx, pipeline_uuid, check['_first'], check['_spec'])
                 check['pass'] = check['pass'] and check['trace']['traced']
     for check in checks:
@@ -2239,8 +2349,10 @@ async def verify_index(
     """
     Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc,
     then the test searches: the sample stream ids, an exact match on each key field, a time range and any further
-    searches; with the indexing pipeline, each hit traced back to the record it came from. Passes when every check
-    returns what it should. The dashboard (created once per build, for an index the build made, after the user
+    searches, each of the sample's streams only (the rest of the index never answers for them); with the indexing
+    pipeline, each hit traced back to the record it came from. Passes when every check returns what it should. A
+    stream of more than 10,000 events is checked by its first and last 1,000 and none past its last, not counted
+    whole; a count Stroom hadn't finished in time is unproven, not a failure: call again. The dashboard (created once per build, for an index the build made, after the user
     confirms its columns) has a query on the time field from the sample's earliest event (rounded back to a 30-day
     boundary) through the end of today, a table of the user's fields newest first, and a text pane on the selected row's record
     with stepping. An index from elsewhere is searched without saving a dashboard, unless pipeline_uuid is the build's
@@ -2284,7 +2396,8 @@ async def verify_index(
     # The window starts at the sample's earliest event: found by searching its streams first, saving nothing.
     probe = {'uuid': str(uuidlib.uuid4()), 'name': name, 'dashboardConfig': dashboard_config(source, fields, time_field, None)}
     sample = await _search(ctx, probe, {'type': 'operator', 'op': 'OR', 'children': [
-        {'type': 'term', 'field': 'StreamId', 'condition': 'EQUALS', 'value': str(i)} for i in stream_ids]})
+        {'type': 'term', 'field': 'StreamId', 'condition': 'EQUALS', 'value': str(i)} for i in stream_ids]},
+        doing=f"Reading a sample of streams {stream_ids} from {index.get('indexName') or index.get('name')}")
     window = window_start([r.get(time_field) for r in sample['rows']]) if time_field else None
     design = {'columns (newest first)': fields, 'hidden': list(_IDS) + ([time_field] if time_field and time_field not in fields else []),
               'initial query': f"{time_field} from {window} through today" if window else 'none',
@@ -2469,8 +2582,12 @@ async def find_events(
 
     columns = [{**_column(n), **({'sort': {'order': 0, 'direction': 'DESCENDING'}} if n == time_field else {})}
                for n in shown]
-    found = await _search(ctx, probe(columns, limit), expression, length=limit)
-    total, count_errors = await _count(ctx, probe(columns, limit), expression)
+    label = index.get('indexName') or index.get('name')
+    searched = ' AND '.join(f"{c['field']} {c['condition']} {c['value']}".rstrip() for c in children)
+    found = await _search(ctx, probe(columns, limit), expression, length=limit,
+                          doing=f"Searching {label} for {searched}")
+    total, count_errors = await _count(ctx, probe(columns, limit), expression,
+                                       doing=f"Counting the events in {label} matching {searched}")
     hits = [{k: (str(v)[:120] if v is not None else None) for k, v in row.items()} for row in found['rows'][:limit]]
     by_stream: list[dict[str, Any]] = []
     affected: dict[str, Any] | None = None
@@ -2479,7 +2596,8 @@ async def find_events(
         grouped = await _search(ctx, probe([
             {**_column('StreamId'), 'group': 0},
             {'id': 'mcp-n', 'name': 'events', 'expression': 'count()', 'format': {'type': 'NUMBER'}, 'visible': True,
-             'sort': {'order': 0, 'direction': 'DESCENDING'}}], streams), expression, length=streams)
+             'sort': {'order': 0, 'direction': 'DESCENDING'}}], streams), expression, length=streams,
+            doing=f"Grouping the matching events in {label} by stream")
         by_stream = [{'stream_id': r.get('StreamId'), 'events': r.get('events')} for r in grouped['rows']]
         if all_streams:
             affected = await _affected(stroom, index, by_stream, total)

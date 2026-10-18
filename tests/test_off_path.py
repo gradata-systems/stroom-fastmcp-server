@@ -167,7 +167,8 @@ async def test_every_named_call_takes_the_arguments_it_is_given(name, state, ste
 def context():
     from config import Settings
     settings = Settings(_env_file=None, stroom_url='https://stroom.example', dev_no_auth=True, stroom_api_key='k')
-    stroom = SimpleNamespace(settings=settings, get_doc=AsyncMock(return_value={'uuid': 'p1', 'name': 'Acme'}))
+    stroom = SimpleNamespace(settings=settings, get_doc=AsyncMock(return_value={'uuid': 'p1', 'name': 'Acme'}),
+                             token_seconds_left=lambda: None)
     return SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(use_elicitation=False)})
 
 

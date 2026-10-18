@@ -29,7 +29,7 @@ from utils import useractions
 from utils.mappingstore import digest, normalise_xslt, read_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.progress import progress_from
-from utils.stroom import StroomGateway, doc_link, gateway_from
+from utils.stroom import StroomGateway, doc_link, gateway_from, out_of_time
 
 STREAM_STORE = {'type': 'StreamStore', 'uuid': '0', 'name': 'StreamStore'}
 # The pipelines whose reprocessing in a build runs on the user's approval (asked for by the user): events (or records)
@@ -1150,6 +1150,10 @@ async def wait_for_processing(
     """
     stroom = gateway_from(ctx)
     deadline = time.monotonic() + timeout_seconds
+    left = stroom.token_seconds_left()
+    token_bound = left is not None and left < timeout_seconds
+    if token_bound:
+        deadline = time.monotonic() + max(left, 5)
     from tools.plan import build_of, with_next
     inferred = output_type is None
     checked = None
@@ -1233,7 +1237,8 @@ async def wait_for_processing(
                         "step_sample over the sample streams until the verdict is clean, then reprocess_streams")
     result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
               'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
-              'hint': None if finished else "Tasks were still running at the timeout; call again."}
+              'hint': None if finished else out_of_time("waiting, with tasks still running,") if token_bound
+              else "Tasks were still running at the timeout; call again."}
     try:
         restored = result['gate'] == 'pass' and await development_batch(ctx, pipeline_uuid, False)
     except Exception:       # housekeeping: never a reason for the wait to fail

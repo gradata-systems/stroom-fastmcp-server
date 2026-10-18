@@ -411,11 +411,39 @@ async def test_describe_document_still_returns_an_index_doc_when_its_survey_fail
     assert doc['name'] == 'IDX' and 'cluster unreachable' in doc['survey_error'] and 'survey' not in doc
 
 
-async def test_documenting_an_index_takes_no_pipeline_arguments():
+async def test_documenting_an_index_ignores_stream_ids_but_not_accepted_errors():
+    # Seen: refused for stream_ids, the agent sent its whole markdown again without them.
     from tools import builds
-    with pytest.raises(ToolError, match='Leave them out with index_uuid'):
-        await builds.write_documentation(None, 'b', index_uuid='i', markdown='## Purpose and data\n\nx\n',
-                                         change='Created', stream_ids=[1])
+    markdown = '## Purpose and data\n\nx\n'
+    with patch.object(builds, '_document_index', AsyncMock(return_value={'type': 'Documentation'})) as documented:
+        result = await builds.write_documentation(None, 'b', index_uuid='i', markdown=markdown, change='Created',
+                                                  stream_ids=[1])
+    assert documented.called and 'surveyed through Stroom' in result['ignored']['stream_ids']
+    # The user's word that errors are benign isn't dropped unsaid.
+    accepted = [{'element': 'x', 'example': 'boom', 'reason': 'known'}]
+    with pytest.raises(ToolError, match='accept_errors are for a pipeline'):
+        await builds.write_documentation(None, 'b', index_uuid='i', markdown=markdown, change='Created',
+                                         accept_errors=accepted)
+
+
+async def test_an_index_the_build_made_is_documented_as_its_indexing_pipeline():
+    # Seen: asked to document the indexing pipeline, the agent documented the build's new index doc instead (a minute's
+    # survey), then the pipeline as well.
+    from tools import builds
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'TWITTER-EVENTS', 'indexName': 'stroom-ecs-twitter-v1'}),
+                             pipeline_layers=AsyncMock(return_value=[]))
+    docs = [{'type': 'ElasticIndex', 'uuid': 'i', 'name': 'TWITTER-EVENTS'},
+            {'type': 'Pipeline', 'uuid': 'p', 'name': 'TWITTER-Indexing-V1.0'}]
+    writes = {'properties': [{'element': 'indexer', 'name': 'indexName', 'value': {'value': 'stroom-ecs-twitter-v1'}}]}
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)), \
+            patch('tools.pipelines.merge_layers', return_value=writes):
+        with pytest.raises(ToolError, match=r"pipeline_uuid='p' \('TWITTER-Indexing-V1.0'\)"):
+            await builds._document_index(ctx, 'b', 'i', 'x', 'Created', None)
+        # Asked for by the user: the index doc itself as well. It goes on (to the path lookup, not mocked here).
+        with pytest.raises(Exception) as e:
+            await builds._document_index(ctx, 'b', 'i', 'x', 'Created', None, index_itself=True)
+        assert 'indexing pipeline' not in str(e.value)
 
 
 def test_an_existing_index_describes_its_ids_and_time_field_without_repeating_the_sample():

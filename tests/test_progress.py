@@ -128,7 +128,7 @@ async def test_stepping_a_spread_of_records_says_so_once_and_then_now_and_then()
         return {'foundRecord': at < 30, 'foundLocation': {'metaId': stream_id, 'partIndex': 0, 'recordIndex': at}}
     with patch.object(stepping, '_step', step), patch.object(progress, 'get_context', lambda: ctx), \
             patch.object(progress, 'time', SimpleNamespace(monotonic=lambda: clock[0])):
-        steps = await stepping.step_spread(SimpleNamespace(stepping=nullcontext), SimpleNamespace(doc={'name': 'ACME'}),
+        steps = await stepping.step_spread(SimpleNamespace(stepping=nullcontext, token_seconds_left=lambda: None), SimpleNamespace(doc={'name': 'ACME'}),
                                            [1, 2], None, 40)
     said = [m for _, m in ctx.sent]
     assert len(steps) == 40 and said[0] == 'Stepping up to 40 records of 2 streams through ACME'

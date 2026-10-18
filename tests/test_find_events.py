@@ -33,8 +33,8 @@ async def test_hits_come_with_their_stream_and_event_and_where_the_rest_are():
     rows = [{'StreamId': '7', 'EventId': '3', '@timestamp': '2026-10-13T00:00:00.000Z', 'user.name': 'alice'}]
     searches = []
 
-    async def search(ctx, dashboard, expression, length=100):
-        searches.append((dashboard, expression))
+    async def search(ctx, dashboard, expression, length=100, doing=None):
+        searches.append((dashboard, expression, doing))
         table = next(c for c in dashboard['dashboardConfig']['components'] if c['type'] == 'table')
         if any(f.get('group') == 0 for f in table['settings']['fields']):
             return {'rows': [{'StreamId': '7', 'events': '2'}], 'errors': []}
@@ -46,6 +46,10 @@ async def test_hits_come_with_their_stream_and_event_and_where_the_rest_are():
     assert found['total'] == 2 and found['hits'] == rows and found['by_stream'] == [{'stream_id': '7', 'events': '2'}]
     assert found['searched'] == ['user.name EQUALS alice', '@timestamp BETWEEN day()-7d,day()+1d']
     assert 'locate_event stream_id=<its StreamId> event_id=<its EventId>' in found['next']
+    # Each search told to the client as it runs (asked for by the user).
+    assert [d for _, _, d in searches] == [
+        'Searching web for user.name EQUALS alice AND @timestamp BETWEEN day()-7d,day()+1d',
+        'Grouping the matching events in web by stream']
 
 
 async def test_events_are_located_one_pass_per_raw_stream():

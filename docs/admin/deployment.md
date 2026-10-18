@@ -142,6 +142,10 @@ the `client_id` in its `oauth_client` table, and the `aud` of its users' access 
   every Stroom call does (`STROOM_CA_CERTS`, or `STROOM_TLS_VERIFY`). Set `OIDC_ISSUER_URL` only to pin it.
 - Tokens are checked as any provider's: signature, expiry, issuer, the audience, `openid` scope, `sub`. They are
   forwarded to Stroom as they came, and `STROOM_AUDIENCE` follows `OIDC_AUDIENCE`.
+- Stroom issues the tokens it sends this server for 5 minutes, and reuses one until it has 1 minute left, so a
+  call can start with only a minute of token. Calls that wait or loop (`wait_for_processing`, `step_sample`,
+  searches) stop shortly before the token runs out and tell the agent to call again, with a fresh token. Fewer such
+  stops need a longer-lived token from Stroom.
 - No sign-in is offered to other clients (no OAuth metadata): Stroom's provider accepts only Stroom's own
   redirect, so VS Code and other clients can't sign in through it.
 - Sample uploads through `upload_sample` (pasted text) reach Stroom's receipt, which can't authenticate a token
