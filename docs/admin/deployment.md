@@ -47,7 +47,7 @@ tls:
 ```
 
 ```
-helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.18.33 -f values.yaml
+helm install stroom-mcp oci://ghcr.io/gradata-systems/charts/stroom-mcp --version 0.18.34 -f values.yaml
 ```
 
 The chart refuses to render without `publicBaseUrl` (https), `stroom.url`, `oidc.issuerUrl`, and, with TLS on,
@@ -73,7 +73,7 @@ a certificate source. Everything else has a default; see `charts/stroom-mcp/valu
   token. The XPath and XSLT the server runs itself (checking a mapping on the sample, a CEF plan's example line)
   read no files, URLs or environment variables, and samples' external entities aren't loaded; the XSLT it saves for
   Stroom can't either ([What it changes](../operate/what-it-changes.md#what-it-never-does)). `/healthz` is unauthenticated and doesn't depend on Stroom or the identity provider; it answers `ok` and
-  the running version, e.g. `ok 0.18.33`, which MCP clients also see in the server's `serverInfo`.
+  the running version, e.g. `ok 0.18.34`, which MCP clients also see in the server's `serverInfo`.
 - **Audit**: JSON lines on stdout for the cluster's log shipping: every tool call, resource read, Stroom request,
   confirmation, approval and refusal, with the user behind it. Events and fields: [Audit log](../operate/audit.md). To write
   it to a file instead, set `audit.file.enabled`. The file is on an `emptyDir` and lost with the pod, unless you
@@ -125,7 +125,7 @@ docker run -p 8443:8000 -v ./tls:/etc/stroom-mcp/tls:ro \
   -e STROOM_MCP_OIDC_AUDIENCE=stroom-mcp \
   -e STROOM_MCP_PUBLIC_BASE_URL=https://stroom-mcp.example.com \
   -e STROOM_MCP_TLS_CERTFILE=/etc/stroom-mcp/tls/tls.crt -e STROOM_MCP_TLS_KEYFILE=/etc/stroom-mcp/tls/tls.key \
-  ghcr.io/gradata-systems/stroom-fastmcp-server:0.18.33
+  ghcr.io/gradata-systems/stroom-fastmcp-server:0.18.34
 ```
 
 ## Stroom's internal identity provider
