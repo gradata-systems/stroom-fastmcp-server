@@ -258,7 +258,7 @@ async def test_a_wide_index_is_surveyed_in_groups_of_columns_joined_on_the_ids()
              **{f'f{n:03}': f'v{n}-{e}' for n in range(250)}} for e in (1, 2)]
     searched = []
 
-    async def search(ctx, dashboard, expression, length=100):
+    async def search(ctx, dashboard, expression, length=100, wait=None):
         fields = dashboard['dashboardConfig']['components'][1]['settings']['fields']
         columns = [c['name'] for c in fields]
         searched.append((columns, expression, any('sort' in c for c in fields)))
@@ -321,11 +321,64 @@ async def test_a_search_is_destroyed_once_read_and_a_count_cut_short_says_so():
     assert [json.loads(c.request.content) for c in destroyed.calls] == [
         {'queryKey': {'uuid': 'k'}, 'destroyReason': 'NO_LONGER_NEEDED'}]
 
-    async def counted(ctx, dashboard, expression, length=100):
+    async def counted(ctx, dashboard, expression, length=100, wait=None):
         return {'rows': [{'documents': '1200'}], 'errors': [], 'complete': False}
     with patch.object(indexing, '_search', counted):
         profile = await indexing.index_profile(ctx, {'type': 'ElasticIndex', 'uuid': 'i', 'name': 'x'}, None, ['f'])
     assert profile['documents'] == 1200 and 'not the whole index' in profile['partial']
+
+
+async def test_a_sample_stroom_is_still_looking_for_is_cut_short_and_says_so():
+    # Seen: 38 s for any 100 documents of an index written mostly from outside Stroom, whose hits Stroom drops.
+    from tools import indexing
+    waits = []
+
+    async def search(ctx, dashboard, expression, length=100, wait=None):
+        waits.append(wait)
+        return {'rows': [{'StreamId': '7', 'EventId': '1', '@timestamp': '2026-10-01T00:00:00.000Z'}],
+                'errors': [], 'complete': False}
+
+    async def post(path, body):
+        return {'values': [{'fldName': n, 'fldType': 'KEYWORD'} for n in ('StreamId', 'EventId', '@timestamp')]} \
+            if path == '/dataSource/v1/findFields' else {'values': []}
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'debug', 'indexName': 'debug*', 'timeField': '@timestamp'}),
+                             post=post, find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(stroom_ui_url=None, stroom_url='http://s'))
+    with patch.object(indexing, '_search', search):
+        survey = await indexing.survey_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'ElasticIndex', 'i',
+                                             profile=False)
+    assert all(w <= indexing.SAMPLE_WAIT for w in waits) and len(waits) == 2
+    assert survey['documents_sampled'] == 1 and 'what Stroom had found after 10 s' in survey['note']
+
+    # None it can show: the streams were deleted, the index kept. No last try with a term once Stroom was cut short.
+    async def none(ctx, dashboard, expression, length=100, wait=None):
+        waits.append(wait)
+        return {'rows': [], 'errors': [], 'complete': 'day()-30d' in str(expression)}
+    waits.clear()
+    with patch.object(indexing, '_search', none):
+        survey = await indexing.survey_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'ElasticIndex', 'i',
+                                             profile=False)
+    assert len(waits) == 2 and survey['documents_sampled'] == 0
+    assert survey['note'].startswith('Stroom found no document it could show within 10 s')
+
+
+async def test_a_search_poll_is_never_held_past_its_wait():
+    import httpx
+    import respx
+    from tests.test_gateway import API, SETTINGS
+    from tools import indexing
+    from utils.stroom import StroomGateway
+    stroom = StroomGateway(SETTINGS)
+    dashboard = {'uuid': 'd', 'name': 'probe', 'dashboardConfig': {'components': [
+        {'type': 'query', 'id': 'q', 'settings': {'dataSource': {'type': 'ElasticIndex', 'uuid': 'i'}}},
+        {'type': 'table', 'id': 't', 'name': 'Table', 'settings': {'fields': [{'name': 'x'}]}}]}}
+    with respx.mock:
+        route = respx.post(f'{API}/dashboard/v1/search').mock(
+            return_value=httpx.Response(200, json={'complete': True, 'results': []}))
+        await indexing._search(SimpleNamespace(lifespan_context={'stroom': stroom}), dashboard,
+                               {'type': 'operator', 'op': 'AND', 'children': []}, wait=2)
+    await stroom.close()
+    assert json.loads(route.calls[0].request.content)['timeout'] == 2000
 
 
 async def test_describe_document_surveys_an_index_without_counting_all_of_it():

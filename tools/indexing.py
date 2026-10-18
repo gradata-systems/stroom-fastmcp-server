@@ -1414,6 +1414,7 @@ async def index_profile(ctx: Context, ref: dict[str, Any], time_field: str | Non
 
 
 RECENT_DAYS = 30   # the sample is read from documents this recent when the index has any
+SAMPLE_WAIT = 10   # seconds the sample's searches wait in all, before the sample is what Stroom has found by then
 
 
 async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: int = 100,
@@ -1427,7 +1428,12 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
     The sample is not sorted: Stroom sorts a table itself, so a sorted search reads every document in the index,
     while an unsorted one stops at max_documents (seen: the newest 100 documents of a large Elasticsearch index,
     sorted on its time field, took searches of a minute each, and describe_document three minutes). It is read from
-    the last RECENT_DAYS days when there are documents that recent, so it shows what the index is written with now."""
+    the last RECENT_DAYS days when there are documents that recent, so it shows what the index is written with now.
+
+    An unsorted search stops early only once it has its rows, and Stroom drops every hit whose StreamId isn't a
+    stream the user may read: an index holding fewer readable documents than asked for is read to its end (seen: 38 s
+    for any 100 documents of an Elasticsearch index written mostly from outside Stroom). The sample's searches wait
+    SAMPLE_WAIT seconds in all, and the sample is then what they had found, said to be partial."""
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(doc_type, uuid)
     ref = {'type': doc_type, 'uuid': uuid, 'name': index.get('name')}
@@ -1463,13 +1469,20 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
         + ([('any', between('1970-01-01T00:00:00.000Z,day()+1d'))] if time_field else [])
     first: dict[str, Any] = {'rows': [], 'errors': []}
     sampled_from = None
+    deadline = time.monotonic() + SAMPLE_WAIT
     for tried, expression in tries:
-        found = await _search(ctx, probe(base + groups[0]), expression, length=max_documents)
+        left = deadline - time.monotonic()
+        if left <= 0 and first['rows']:
+            break
+        found = await _search(ctx, probe(base + groups[0]), expression, length=max_documents, wait=max(left, 2))
         if len(found['rows']) > len(first['rows']) or not first['rows']:
             first, sampled_from = found, tried
-        if len(first['rows']) >= max_documents or (first['rows'] and tried == 'any'):
+        if len(first['rows']) >= max_documents or (tried == 'any' and (first['rows'] or not found.get('complete', True))):
+            # Any documents found, or Stroom still looking for some when the wait ran out: a term would find none it
+            # hasn't (seen: a dev Stroom whose streams were deleted in a migration, its indices kept).
             break
     errors = list(first['errors'])
+    cut_short = not first.get('complete', True)
     rows = [dict(r) for r in first['rows']]
     key = lambda r: tuple(str(r.get(n)) for n in ids)
     by_key = {key(r): r for r in rows}
@@ -1504,6 +1517,12 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
                 "outside Stroom, without StreamId or with another system's, are not shown: the index is described "
                 "from its mapping only, its values not read." if doc_type == 'ElasticIndex' else
                 "No documents came back through Stroom: the index is empty, or holds no stored values to show.")
+        if cut_short:
+            note = (f"Stroom found no document it could show within {SAMPLE_WAIT} s, and was still looking. " + note)
+    elif cut_short and total < max_documents:
+        note = (f"The sample is {total} documents, what Stroom had found after {SAMPLE_WAIT} s: it was still looking. "
+                f"Stroom returns a hit only when its StreamId is a stream you may read, so an index written mostly "
+                f"from outside Stroom holds few it can show, and it reads the whole index looking for them.")
     return {'index': {**ref, 'path': await _path_of(stroom, ref), 'link': doc_link(stroom.settings, doc_type, uuid)},
             **({'note': note} if note else {}),
             'backend': 'lucene' if doc_type == 'Index' else 'elasticsearch',
@@ -1523,7 +1542,11 @@ async def _path_of(stroom, ref: dict[str, Any]) -> str | None:
     return next(((v.get('path') or '').replace(' / ', '/') for v in found if v['docRef'].get('uuid') == ref['uuid']), None)
 
 
-async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any], length: int = 100) -> dict[str, Any]:
+async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str, Any], length: int = 100,
+                  wait: float | None = None) -> dict[str, Any]:
+    """The table's rows, polling for up to wait seconds (SEARCH_WAIT by default); past that, the rows Stroom had found
+    by then, with complete false."""
+    wait = SEARCH_WAIT if wait is None else wait
     stroom = gateway_from(ctx)
     components = dashboard['dashboardConfig']['components']
     query = next(c for c in components if c['type'] == 'query')
@@ -1538,13 +1561,15 @@ async def _search(ctx: Context, dashboard: dict[str, Any], expression: dict[str,
                                      'requestedRange': {'offset': 0, 'length': length}, 'tableName': table['name'],
                                      'tableSettings': {k: v for k, v in settings.items() if k in _TABLE_SETTINGS}}],
         'dateTimeSettings': {'localZoneId': 'UTC', 'referenceTime': int(time.time() * 1000)},
-        'storeHistory': False, 'timeout': 5000}
+        'storeHistory': False}
     started = time.monotonic()
     result: dict[str, Any] = {}
     try:
         while True:
+            # Stroom holds each poll until the search completes or this many ms pass: never past the wait.
+            request['timeout'] = max(500, min(5000, int((wait - (time.monotonic() - started)) * 1000)))
             result = await stroom.post('/dashboard/v1/search', request)
-            if result.get('complete') or time.monotonic() - started > SEARCH_WAIT:
+            if result.get('complete') or time.monotonic() - started >= wait:
                 break
             request['queryKey'] = result.get('queryKey')
             await asyncio.sleep(0.5)
