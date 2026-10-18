@@ -63,6 +63,10 @@ async def test_the_users_pick_in_the_form_is_drafted_for_and_not_asked_again():
         drafted = await generation.draft_translation_mapping(ctx, {'acme.csv': CSV}, 'Acme', build='b1')
         assert consent.asked == [['4.1.0 (newest installed, recommended)', '3.5.2']]
         assert drafted['schema_version'] == '4.1.0' and 'schema_version=this schema_version' in drafted['hint']
+        # Seen in Ask Stroom AI: told only schema_version 4.1.0, the agent asked the user again, 4.1.0 the one option.
+        assert drafted['schema_version_settled'] == ("The user chose event-logging 4.1.0 in the server's form: don't "
+                                                     "ask them for the version again.")
+        assert drafted['hint'].startswith(drafted['schema_version_settled'])
         # build_translation_xslt, given no schema_version, writes the version chosen for the build.
         assert await generation.target_version(ctx, None, 'b1') == '4.1.0'
         assert len(consent.asked) == 1
@@ -100,8 +104,12 @@ async def test_a_schema_stroom_doesnt_hold_is_refused_with_its_versions_newest_f
 async def test_with_one_version_installed_nothing_is_asked():
     consent = Choosing(pick=0)
     with _holding('4.0.2'):
-        assert await generation.target_version(_ctx(consent), None, 'b1') == '4.0.2'
+        ctx = _ctx(consent)
+        assert await generation.target_version(ctx, None, 'b1') == '4.0.2'
     assert consent.asked == []
+    assert 'only event-logging version this Stroom holds' in generation.version_settled(ctx, 'b1', '4.0.2')
+    generation._remember_version(ctx, 'b2', '4.0.2')                # given by the agent: nothing to add
+    assert generation.version_settled(ctx, 'b2', '4.0.2') is None
 
 
 async def test_no_event_logging_schema_at_all_says_to_import_it():

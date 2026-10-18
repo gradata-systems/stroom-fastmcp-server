@@ -56,6 +56,7 @@ async def event_versions(ctx: Context) -> list[str]:
 # The version the user chose for a build's translation, this session: so build_translation_xslt doesn't ask again what
 # draft_translation_mapping asked.
 _VERSION_CHOSEN = 'event_logging_version_chosen'
+_VERSION_HOW = 'event_logging_version_how'
 
 
 def _build_key(ctx: Context, build: str | None) -> str:
@@ -66,12 +67,31 @@ def _build_key(ctx: Context, build: str | None) -> str:
         return build or ''
 
 
-def _remember_version(ctx: Context, build: str | None, version: str) -> None:
+def _remember_version(ctx: Context, build: str | None, version: str, how: str = 'given') -> None:
+    """The version for the build, and how it was settled: 'given' (schema_version), 'form' (the user picked it in the
+    server's form) or 'only' (the one version this Stroom holds)."""
     from tools.plan import _user
     try:
-        ctx.lifespan_context.setdefault(_VERSION_CHOSEN, {}).setdefault(_user(ctx), {})[_build_key(ctx, build)] = version
+        key = _build_key(ctx, build)
+        ctx.lifespan_context.setdefault(_VERSION_CHOSEN, {}).setdefault(_user(ctx), {})[key] = version
+        ctx.lifespan_context.setdefault(_VERSION_HOW, {}).setdefault(_user(ctx), {})[key] = how
     except Exception:
         pass
+
+
+def version_settled(ctx: Context, build: str | None, version: str) -> str | None:
+    """For the agent, where the version was settled without it: seen in Ask Stroom AI, the user picked 4.1.0 in the
+    draft's form, and the agent, told only schema_version 4.1.0, asked them again with it as the one option."""
+    from tools.plan import _user
+    try:
+        how = ctx.lifespan_context.get(_VERSION_HOW, {}).get(_user(ctx), {}).get(_build_key(ctx, build))
+    except Exception:
+        return None
+    if how == 'form':
+        return f"The user chose event-logging {version} in the server's form: don't ask them for the version again."
+    if how == 'only':
+        return f"{version} is the only event-logging version this Stroom holds: there is no version to ask about."
+    return None
 
 
 def _version_chosen(ctx: Context, build: str | None) -> str | None:
@@ -137,7 +157,7 @@ async def target_version(ctx: Context, schema_version: str | None, build: str | 
         return chosen
     picked = versions[0] if len(versions) == 1 else await _ask_version(ctx, versions)
     if isinstance(picked, str):
-        _remember_version(ctx, build, picked)
+        _remember_version(ctx, build, picked, 'only' if len(versions) == 1 else 'form')
     return picked
 
 
@@ -570,6 +590,8 @@ async def build_translation_xslt(
         mapping = mapping.model_copy(update={'imports': [*mapping.imports, *missing]})
     result = generate(mapping, schema, version)
     result['schema_version'] = version
+    if schema_version is None and (settled := version_settled(ctx, build, version)):
+        result['schema_version_settled'] = settled
     if required:
         result['required_imports'] = await _import_notes(ctx, required, functions=True)
     if unknown_keys:
@@ -982,7 +1004,11 @@ async def draft_translation_mapping(
     except ToolError as e:
         result['schema_check'] = {'ok': None, 'note': str(e)}
     result['schema_version'] = version
-    result['hint'] = ("Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
+    settled = version_settled(ctx, build, version)
+    if settled:
+        result['schema_version_settled'] = settled
+    result['hint'] = ((f"{settled} " if settled else '') +
+                      "Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
                       "time zone), then build_translation_xslt(mapping=this mapping, schema_version=this schema_version, "
                       "stream_ids=the sample streams (or sample=the texts), splitter=this splitter, build and name to "
                       "save it). A rule's data lists the fields it carries as Data "
