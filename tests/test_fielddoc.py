@@ -378,7 +378,8 @@ async def test_a_search_poll_is_never_held_past_its_wait():
         await indexing._search(SimpleNamespace(lifespan_context={'stroom': stroom}), dashboard,
                                {'type': 'operator', 'op': 'AND', 'children': []}, wait=2)
     await stroom.close()
-    assert json.loads(route.calls[0].request.content)['timeout'] == 2000
+    # What is left of the wait: a little under 2 s once any time has passed (Linux's clock always has; Windows' often not)
+    assert 1900 <= json.loads(route.calls[0].request.content)['timeout'] <= 2000
 
 
 async def test_describe_document_surveys_an_index_without_counting_all_of_it():
