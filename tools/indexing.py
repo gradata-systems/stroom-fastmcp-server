@@ -231,7 +231,24 @@ async def get_field_conventions(
                 backend = backends.pop()
                 templates = [{k: c.get(k) for k in ('uuid', 'name', 'path', 'backend')} for c in found]
         except Exception:   # the lookup is a shortcut; without it, the agent is told to find the backend itself
-            pass
+            backends = set()
+        if not backend and {'elasticsearch', 'lucene'} <= backends:
+            # Asked here, in a form, and the naming after it: seen in Ask Stroom AI, the agent, given the profiles
+            # before the backend, asked the user both in the chat, and draft_index_mapping asked the naming again
+            # in its own form (the agent's word isn't the user's).
+            labels = {'Elasticsearch': 'elasticsearch', 'Lucene (kept inside Stroom, no cluster)': 'lucene'}
+            picked = await _choose(ctx, "Which backend should the new index use?", list(labels))
+            if picked is not None and not isinstance(picked, str):
+                return picked       # the form, on a modern connection: the answer comes with the repeated call
+            if picked:
+                backend = labels[picked]
+            else:
+                return {'status': 'needs_guidance', 'question': 'Which backend should the new index use?',
+                        'options': list(labels),
+                        'hint': "Ask the user only which backend, Elasticsearch or Lucene, and call again with "
+                                "backend= their answer. Don't ask how fields are named yet: the choices for that follow "
+                                "from the backend (for Elasticsearch, the user's own index template first), and the "
+                                "server asks them."}
     if not name and backend == 'elasticsearch':
         # Field names, types and structure come from what the environment already indexes: the user's example.
         found = await gateway_from(ctx).find_documents('*', ['ElasticIndex'], 60)

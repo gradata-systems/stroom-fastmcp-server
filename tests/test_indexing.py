@@ -528,7 +528,26 @@ async def test_without_a_backend_the_only_indexing_backend_is_taken():
     with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {'description': 'ECS'}}), \
             patch.object(templates, 'find_pipeline_templates', AsyncMock(return_value=both)):
         asked = await indexing.get_field_conventions(ctx)
-    assert 'profiles' in asked and asked['hint'].startswith('Which backend first')
+    # Both backends: the backend alone is asked first. Seen in Ask Stroom AI: given the profiles before the backend,
+    # the agent asked the naming in the chat, and draft_index_mapping asked it again in its form.
+    assert 'profiles' not in asked and asked['question'] == 'Which backend should the new index use?'
+    assert "Don't ask how fields are named yet" in asked['hint']
+
+    # With forms: the backend, then the naming, each asked once, in the server's forms.
+    questions = []
+
+    async def choose(ctx, action, question, options):
+        questions.append(question)
+        return options[0] if 'backend' in question else next(o for o in options if o.startswith('Elastic Common'))
+    ctx.lifespan_context['consent'] = SimpleNamespace(choose=choose)
+    with patch.object(indexing, '_conventions', lambda ctx: {'ecs': {'description': 'ECS'}}), \
+            patch.object(indexing, '_PROFILE_LABELS', {'ecs': 'Elastic Common Schema (ECS)'}), \
+            patch('tools.plan._user', lambda ctx: 'u'), \
+            patch.object(templates, 'find_pipeline_templates', AsyncMock(return_value=both)):
+        chosen = await indexing.get_field_conventions(ctx)
+        # Remembered: draft_index_mapping convention=ecs doesn't ask again.
+        assert chosen['status'] == 'chosen' and indexing._naming_chosen(ctx)['convention'] == 'ecs'
+    assert questions == ['Which backend should the new index use?', "How should the new index's fields be named?"]
 
 
 async def test_an_index_doc_given_as_the_cluster_is_named_with_its_cluster():
