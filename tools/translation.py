@@ -608,8 +608,8 @@ async def save_xslt(
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
             "processed'."))] = None,
         agent_model: Annotated[str | None, Field(description=(
-            "The model you are, e.g. 'claude-haiku-5-5', for the version history; once given, remembered for the "
-            "session."))] = None,
+            "The model you are, for the version history, only if your instructions name it: don't guess. "
+            "Once given, remembered for the session."))] = None,
         discard_hand_edit: DiscardHandEdit = False,
         hand_edit_choices: HandEditChoices = None,
 ) -> dict[str, Any]:

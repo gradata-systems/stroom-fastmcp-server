@@ -124,7 +124,8 @@ async def rebuild_mapping(
         accept_differences: Annotated[bool, Field(description=(
             "Save even though the regenerated XSLT writes some records differently (shown in differences): only when "
             "the user, shown them, accepts what the mapping writes instead."))] = False,
-        agent_model: Annotated[str | None, Field(description="The model you are, for the version history.")] = None,
+        agent_model: Annotated[str | None, Field(description=(
+            "The model you are, for the version history, only if your instructions name it: don't guess."))] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """

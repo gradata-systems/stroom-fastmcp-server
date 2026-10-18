@@ -458,8 +458,8 @@ async def build_translation_xslt(
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
             "processed'."))] = None,
         agent_model: Annotated[str | None, Field(description=(
-            "The model you are, e.g. 'claude-haiku-5-5', for the version history; once given, remembered for the "
-            "session."))] = None,
+            "The model you are, for the version history, only if your instructions name it: don't guess. "
+            "Once given, remembered for the session."))] = None,
         changes: Annotated[dict[str, Any] | str | None, Field(description=(
             "Instead of mapping, to fix one: only what changes, merged into the mapping last sent for this XSLT (the "
             "same uuid, or build and name; else the one saved with uuid). events: rules, each replacing the rule of "

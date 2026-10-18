@@ -193,8 +193,8 @@ def consolidate(description: str | None, code: str, now: datetime | None = None)
 
 
 def agent_line(ctx: Any) -> str:
-    """Who made an agent change: this server's version, the client (from the MCP handshake) and the model the
-    agent said it is (remembered for the session once given)."""
+    """Who made an agent change: this server's version, the client (from the MCP handshake) and the model, as the
+    client names it on the request or else as the agent said it is (remembered for the session once given)."""
     from utils.version import SERVER_VERSION
     parts = [f'stroom-mcp {SERVER_VERSION}']
     try:
@@ -202,10 +202,24 @@ def agent_line(ctx: Any) -> str:
         parts.append(f"{info.name} {info.version}".strip())
     except Exception:
         pass
-    model = remembered_model(ctx)
+    model = client_model(ctx)
     if model:
+        parts.append(f"model {model}")
+    elif model := remembered_model(ctx):
         parts.append(f"model {model} (as the agent said)")
     return ', '.join(parts)
+
+
+MODEL_META_KEY = 'stroom.ai/model'
+
+
+def client_model(ctx: Any) -> str | None:
+    """The model the client says is calling, in the request's _meta (asked for by the user: not a header). Seen:
+    Qwen 3.8 in Ask Stroom AI said it was claude-opus-4-5, so a client that knows is believed over the agent."""
+    meta = getattr(getattr(ctx, 'request_context', None), 'meta', None)
+    if meta is not None and not isinstance(meta, dict):
+        meta = getattr(meta, 'model_extra', None) or {}
+    return str((meta or {}).get(MODEL_META_KEY) or '').strip()[:80] or None
 
 
 def remember_model(ctx: Any, model: str | None) -> None:

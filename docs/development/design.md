@@ -707,8 +707,9 @@ pipeline has written Events with it.
 
 **Version history.** Each XSLT the server saves keeps a `## Version history` table in its description (the XSLT's
 Documentation tab in Stroom), one row a version: number, date, author, `agent` or `by hand`, what changed, for an
-agent change the server's version, the MCP client (from its handshake) and the model the agent said it is
-(`agent_model`, remembered for the session), and the code's digest. The code itself is left as generated: a comment
+agent change the server's version, the MCP client (from its handshake) and the model: as the client names it in
+the request's `_meta` (`stroom.ai/model`), else as the agent said it is (`agent_model`, remembered for the session,
+marked "as the agent said": Qwen 3.8 in Ask Stroom AI said it was claude-opus-4-5), and the code's digest. The code itself is left as generated: a comment
 there (0.16.43 to 0.16.45) changed the code, and every check comparing code had to look past it; one left by those
 versions is moved to the table when the XSLT is next saved. Each pipeline doc ends with a `## Version control` table
 (version, date, by, change, code: the XSLT's Stroom version and the mapping's digest); an older `## Change log`
