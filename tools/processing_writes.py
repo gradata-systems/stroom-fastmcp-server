@@ -952,6 +952,20 @@ async def _outputs(stroom: StroomGateway, raw_id: int, pipeline_uuid: str,
             and (filter_id is None or r['meta'].get('processorFilterId') == filter_id)]
 
 
+async def _tasks_ended(stroom: StroomGateway, filter_ids: list[int], stream_ids: list[int]) -> set[int]:
+    """The streams one of these filters has a task for that ended (complete or failed)."""
+    ended = set()
+    for filter_id in filter_ids:
+        tasks = await stroom.post('/processorTask/v1/find', {
+            'expression': {'type': 'operator', 'op': 'AND', 'children': [
+                {'type': 'term', 'field': 'Processor Filter Id', 'condition': 'EQUALS', 'value': str(filter_id)},
+                {'type': 'operator', 'op': 'OR', 'children': [
+                    {'type': 'term', 'field': 'Meta Id', 'condition': 'EQUALS', 'value': str(i)} for i in stream_ids]}]},
+            'pageRequest': {'offset': 0, 'length': 1000}})
+        ended |= {t.get('metaId') for t in tasks.get('values') or [] if t.get('status') in ('COMPLETE', 'FAILED')}
+    return ended
+
+
 async def reprocess_streams(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server built, after a change.")],
@@ -1201,6 +1215,11 @@ async def wait_for_processing(
                             "create_processor_filter with stream_ids= them, then wait."})
         all_have_output = all(outputs.values()) or not expect_events
         finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
+        if finished and not expect_events:
+            # No output to show for it, so its own task: seen in e2e, a promoted indexing pipeline's earlier tasks
+            # were all complete before its filter made one for the new stream, and the gate passed with nothing indexed.
+            filter_ids = [filter_id] if filter_id is not None else [f['id'] for f in status['filters']]
+            finished = not set(stream_ids) - await _tasks_ended(stroom, filter_ids, stream_ids)
         if (all_have_output and finished) or time.monotonic() > deadline:
             break
         # Where processing is, now and then while waiting (seen: three minutes of silence until the timeout).

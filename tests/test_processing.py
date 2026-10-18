@@ -325,6 +325,31 @@ async def test_wait_counts_only_the_given_filters_outputs(ctx):
     assert latest['gate'] == 'pass' and latest['streams'] == [{'input': 5, 'events': [30], 'errors': []}]
 
 
+@respx.mock
+async def test_with_no_events_to_show_the_wait_is_for_the_streams_own_task(ctx):
+    # Seen in e2e: a promoted indexing pipeline's earlier tasks were all complete before its filter made one for the
+    # new stream, and the gate passed with nothing indexed.
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9, 'pipelineUuid': 'p1'}}]}))
+    asked = []
+
+    def tasks(request):
+        if b'Meta Id' not in request.content:
+            return httpx.Response(200, json={'values': [{'status': 'COMPLETE', 'metaId': 4}]})
+        asked.append(1)
+        return httpx.Response(200, json={'values': [{'status': 'COMPLETE', 'metaId': 5}] if len(asked) > 1 else []})
+    respx.post(f'{API}/processorTask/v1/find').mock(side_effect=tasks)
+    respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': []}))
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD), \
+            patch('tools.processing_writes.asyncio.sleep', AsyncMock()):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=60, expect_events=False,
+                                                             filter_id=9)
+    assert len(asked) == 2 and result['finished'] and result['gate'] == 'pass'
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD), \
+            patch.object(processing_writes, '_tasks_ended', AsyncMock(return_value=set())):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=0, expect_events=False)
+    assert not result['finished'] and result['gate'] == 'fail'
+
 
 @respx.mock
 async def test_wait_fails_while_the_current_code_has_not_stepped_clean(ctx):

@@ -27,15 +27,16 @@ async def _pipeline_of(ctx: Context, uuid: str) -> tuple[dict[str, Any], str]:
     """The pipeline that runs the XSLT as its own (not through a template), and the element it is set on."""
     from tools.pipelines import translation_docs
     stroom = gateway_from(ctx)
-    for attempt in range(5):
+    for wait in (1, 1, 2, 2, 3, 3, 0):
         body = await stroom.post('/explorer/v2/findInContent', {
             'filter': {'matchType': 'CONTAINS', 'pattern': uuid, 'caseSensitive': False},
             'pageRequest': {'offset': 0, 'length': 50}})
         if any(((v.get('docContentMatch') or {}).get('docRef') or {}).get('type') == 'Pipeline'
                for v in (body or {}).get('values') or []):
             break
-        # Stroom's content index can lag a pipeline set up moments ago (seen under load): look again first.
-        await asyncio.sleep(1)
+        # Stroom's content index can lag a pipeline set up moments ago (seen under load, and in e2e for one set up
+        # minutes before, just after its XSLT was saved): look again for some seconds first.
+        await asyncio.sleep(wait)
     found = []
     for value in (body or {}).get('values') or []:
         ref = (value.get('docContentMatch') or {}).get('docRef') or {}

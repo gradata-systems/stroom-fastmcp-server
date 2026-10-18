@@ -236,7 +236,7 @@ UNKNOWN_XSLT = """<?xml version="1.1" encoding="UTF-8"?>
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns="event-logging:3" xmlns:stroom="stroom"
     xpath-default-namespace="records:2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.0">
   <xsl:template match="records">
-    <Events xsi:schemaLocation="event-logging:3 file://event-logging-v3.5.2.xsd" Version="3.5.2">
+    <Events xsi:schemaLocation="event-logging:3 file://event-logging-vVERSION.xsd" Version="VERSION">
       <xsl:apply-templates/>
     </Events>
   </xsl:template>
@@ -270,7 +270,7 @@ async def guessed(ctx, stroom: StroomGateway, stamp: str) -> None:
     await feeds.record_source_notes(ctx, build, 'Firewall', 'A firewall.', [], fixed)
 
     await translation.create_text_converter(ctx, build, feed, *e2e.CASES['csv']['converter'])
-    hand = await translation.save_xslt(ctx, build, f'{feed}-Events', code=UNKNOWN_XSLT)
+    hand = await translation.save_xslt(ctx, build, f'{feed}-Events', code=UNKNOWN_XSLT.replace('VERSION', e2e.VERSION))
     template = next(v['docRef'] for v in (await stroom.find_documents('Event Data (Text)', ['Pipeline'], 20))['values']
                     if v['docRef']['name'] == 'Event Data (Text)')
     pipeline = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{feed}-Events',
