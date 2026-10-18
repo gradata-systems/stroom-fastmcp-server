@@ -2360,6 +2360,45 @@ def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] =
         raise ToolError('These searches would give a misleading answer: ' + '; '.join(problems))
 
 
+async def _columns_not_in_index(ctx: Context, ref: dict[str, Any], columns: list[str], pipeline_uuid: str | None) -> None:
+    """Refuses table columns Stroom doesn't list for the index: a column on one is empty in every row. Seen in Ask
+    Stroom AI: EventSource.User.Id, the Events path, was offered and chosen in place of user.name, the field the plan
+    indexed it as; the dashboard was saved and verification passed with that column empty. A path the pipeline's plan
+    indexes is answered with the field it became."""
+    stroom = gateway_from(ctx)
+    try:
+        missing = (await fields_not_in_index(stroom, ref['type'], ref, {'columns': list(columns)})).get('columns')
+        if not missing:
+            return
+        listed = sorted(f['name'] for f in await _index_fields(stroom, ref['type'], ref))
+    except Exception:    # a check on the columns, not a reason for verification to fail
+        return
+    planned: list[PlannedField] = []
+    if pipeline_uuid:
+        from tools.builds import kept_mapping
+        try:
+            kept = await kept_mapping(ctx, pipeline_uuid)
+            if kept and kept['kind'] == 'index':
+                planned = FieldPlan.model_validate(kept['payload']).fields
+        except Exception:    # without the plan, the index's fields are still listed
+            planned = []
+    from utils import ecs
+    said = []
+    for name in missing:
+        path = name.replace('.', '/').strip('/')
+        became = next((f.name for f in planned if source_matches(f.source.strip('/'), path)), None)
+        if became and became in listed:
+            said.append(f"{name} (an Events path: the plan indexes it as {became})")
+        elif ref['type'] == 'ElasticIndex' and ecs.component_type(name) in ecs.STROOM_UNLISTED:
+            said.append(_unlisted(name))
+        else:
+            said.append(name)
+    raise ToolError(f"Not fields of index '{ref.get('name')}' in Stroom, so a dashboard column on them would be empty "
+                    f"in every row: {'; '.join(said)}. A column is the index's field name, not the Events path it "
+                    f"comes from. Its fields: {', '.join(listed[:60])}. Confirm the corrected columns with the user, "
+                    f"then call again.")
+
+
 async def verify_index(
         ctx: Context,
         build: Build,
@@ -2368,8 +2407,10 @@ async def verify_index(
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams that were indexed.")],
         expected_documents: Annotated[int, Field(description="Events records in those streams.")],
         fields: Annotated[list[str] | str, ONE_OR_MORE, Field(
-            description="The dashboard table's columns, which the user chose: suggest the time field and the plan's key "
-                        "fields (user, host, address, event type, outcome) and confirm them with the user. StreamId and "
+            description="The dashboard table's columns, which the user chose: the index's field names (as the plan "
+                        "named them, e.g. user.name), not the Events paths they come from (EventSource/User/Id). Suggest "
+                        "the time field and the plan's key fields (user, host, address, event type, outcome) and "
+                        "confirm them with the user. StreamId and "
                         "EventId are kept as hidden columns, for the text pane and tracing hits.")],
         exact: Annotated[list[dict[str, str]] | str, ONE_OR_MORE, Field(
             description="Exact-match checks, each {'field': ..., 'value': ...} using values from stepped documents; "
@@ -2427,6 +2468,7 @@ async def verify_index(
     fields = [f for f in fields if f not in _IDS]
     time_field = index.get('timeField') or index.get('timeFieldName')
     source = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
+    await _columns_not_in_index(ctx, source, fields, pipeline_uuid)
     contents = await guard_from(ctx).folder_contents(build)
     # The build's index, or one from elsewhere that the build's own indexing pipeline writes to (a new version writing
     # through the existing index doc): the dashboard is the build's, and promoted with it (seen in production: a new

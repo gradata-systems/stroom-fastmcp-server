@@ -131,6 +131,25 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
     assert searched.await_args.kwargs['dashboard_doc']['dashboardConfig']['components'][0]['settings']['dataSource']['uuid'] == 'i'
 
 
+async def test_verify_index_refuses_a_column_the_index_lacks_naming_the_field_the_plan_indexed_its_path_as():
+    # Seen in Ask Stroom AI: EventSource.User.Id, the Events path, chosen as a column in place of user.name; the
+    # dashboard was saved and verification passed with the column empty in every row.
+    from tools import builds
+    listed = [{'fldName': n} for n in ('@timestamp', 'StreamId', 'EventId', 'user.name', 'event.code')]
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'IDX', 'timeField': '@timestamp'}),
+                             post=AsyncMock(return_value={'values': listed}))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    plan = {'kind': 'index', 'payload': {'backend': 'elasticsearch', 'convention': 'ecs', 'index_name': 'idx',
+                                         'time_field': '@timestamp', 'fields': [
+        {'name': '@timestamp', 'type': 'date', 'source': 'EventTime/TimeCreated'},
+        {'name': 'user.name', 'type': 'keyword', 'source': 'EventSource/User/Id'}]}}
+    with patch.object(indexing, '_FIELD_WAITS', ()), patch.object(builds, 'kept_mapping', AsyncMock(return_value=plan)), \
+            patch.object(indexing, 'guard_from') as guard:
+        with pytest.raises(ToolError, match=r'EventSource\.User\.Id \(an Events path: the plan indexes it as user\.name\)'):
+            await indexing.verify_index(ctx, 'b', 'i', 'elasticsearch', [1], 1, ['@timestamp', 'EventSource.User.Id'], pipeline_uuid='p')
+        assert guard.call_count == 0     # refused before any dashboard is made or asked for
+
+
 async def test_every_page_of_documents_is_read_when_there_are_more_than_one():
     from utils.stroom import StroomGateway
     # Stroom returns folders of the name whatever the types (a build's Indexing subfolder, for the 'Indexing'

@@ -167,6 +167,8 @@ one that isn't fails verification: tell the user, who reindexes or has you check
 
 The dashboard is for the people who will search the index. Suggest its columns (the time field and the key fields:
 user, host, address, event type, outcome) and confirm them with the user; `verify_index` asks before making it.
+Columns are the index's field names, as the plan named them (`user.name`), never the Events paths they come from
+(`EventSource.User.Id`): `verify_index` refuses a column the index lacks, naming the field the plan indexed its path as.
 StreamId and EventId are never shown: they are hidden columns, for the text pane and tracing hits. The query is the
 time field from the sample's earliest event (rounded back to a 30-day boundary) through today, run on open; the table
 is newest first; a text pane shows the selected row's record, with stepping and no extraction pipeline.
