@@ -41,10 +41,11 @@ def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
     no index_patterns, so which indices it covers is not checked."""
     text = text.strip()
     name = None
-    first, _, rest = text.partition('\n')
-    match = re.match(r'^(PUT|POST)\s+/?_index_template/([^\s?]+)', first.strip(), re.I)
+    # The request line, then the body on the next line or the same one (seen in Ask Stroom AI: an agent gave the
+    # server's own dev_tools on one line, and it was refused as not JSON).
+    match = re.match(r'^(PUT|POST)\s+/?_index_template/([^\s?{]+)[^\n{]*', text, re.I)
     if match:
-        name, text = match.group(2), rest
+        name, text = match.group(2), text[match.end():]
     body = _json(text, 'index template')
     if isinstance(body, dict) and 'index_templates' in body:
         entry = (body['index_templates'] or [{}])[0]
@@ -68,9 +69,8 @@ def parse_component_templates(texts: list[str]) -> dict[str, dict[str, Any]]:
     found: dict[str, dict[str, Any]] = {}
     for text in texts:
         text = text.strip()
-        first, _, rest = text.partition('\n')
-        match = re.match(r'^(PUT|POST)\s+/?_component_template/([^\s?]+)', first.strip(), re.I)
-        body = _json(rest if match else text, 'component template')
+        match = re.match(r'^(PUT|POST)\s+/?_component_template/([^\s?{]+)[^\n{]*', text, re.I)
+        body = _json(text[match.end():] if match else text, 'component template')
         if isinstance(body, dict) and 'component_templates' in body:
             for entry in body['component_templates'] or []:
                 found[entry.get('name')] = entry.get('component_template') or {}

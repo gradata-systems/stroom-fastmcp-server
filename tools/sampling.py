@@ -44,16 +44,23 @@ def spread_order(n: int) -> list[int]:
     return order + [i for i in range(n) if i not in seen]
 
 
+NOT_DELETED = {'type': 'operator', 'op': 'NOT', 'children': [
+    {'type': 'term', 'field': 'Status', 'condition': 'EQUALS', 'value': 'Deleted'}]}
+
+
 async def pick_spread(stroom: StroomGateway, terms: list[dict[str, Any]], count: int,
                       skip: set[int]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Up to `count` unread streams spread over the feed's lifetime, in bisection order. A stream search a slice of
     time (seen: 28 of them, 2.4 s each, most of a 35 s survey_feed call): the client is told now and then."""
     live = lambda rows: [r['meta'] for r in rows.get('values') or [] if r['meta'].get('status') != 'DELETED']
+    # Deleted streams left out by Stroom, not after: seen in Ask Stroom AI, TWITTER's oldest stream was deleted, the
+    # one row asked for was dropped, and the survey failed with "list index out of range".
+    terms = terms + [NOT_DELETED]
     say = await current_progress()
     await say(f"Finding up to {count} streams spread over the feed's time range")
     newest = live(await stroom.find_meta(terms, 1))
     oldest = live(await stroom.find_meta(terms, 1, newest_first=False))
-    if not newest:
+    if not newest or not oldest:
         return [], {}
     span = {'oldest': _iso(oldest[0]['createMs']), 'newest': _iso(newest[0]['createMs'])}
     start, end = oldest[0]['createMs'], newest[0]['createMs'] + 1

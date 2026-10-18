@@ -268,3 +268,19 @@ async def test_a_few_of_an_existing_feeds_streams_by_id_are_the_users_to_confirm
     with patch('tools.sampling._meta', meta), patch('tools.sampling._in_a_build', AsyncMock(return_value=True)), \
             patch('tools.sampling.read_head', AsyncMock(return_value=('{"a": 1}\n', False, 1))):
         assert (await sampling.survey_feed(_survey_ctx(), stream_ids=[1, 2, 3, 4, 5]))['streams_read'] == [1, 2, 3, 4, 5]
+
+
+async def test_a_feeds_deleted_streams_are_left_out_by_stroom_not_after():
+    # Seen in Ask Stroom AI: TWITTER's oldest stream was deleted; the one row asked for was dropped as deleted, and
+    # survey_feed failed with "list index out of range".
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from tools import sampling
+    live = {'id': 73146, 'createMs': 1_700_000_000_000, 'status': 'UNLOCKED'}
+    gone = {'id': 73100, 'createMs': 1_600_000_000_000, 'status': 'DELETED'}
+
+    async def find_meta(terms, limit, newest_first=True):
+        kept = [live] if sampling.NOT_DELETED in terms else [live, gone]
+        return {'values': [{'meta': m} for m in (kept if newest_first else kept[::-1])[:limit]]}
+    picked, span = await sampling.pick_spread(SimpleNamespace(find_meta=find_meta), [], 3, set())
+    assert picked == [live] and span['oldest'] == span['newest']

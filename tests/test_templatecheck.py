@@ -395,6 +395,12 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         assert kept['name'] == 'ecs-acme-v2' and kept['index'] == 'ecs-acme-v2' and kept['xslt'] == 'abc'
         assert kept['dev_tools'] == agreed['dev_tools'] and saved['description'].startswith('Indexes Acme.')
 
+        # The agreed template checked again, retyped on one line: already agreed, not reviewed and confirmed again
+        # (seen in Ask Stroom AI, once the user said it was committed).
+        again = f"PUT _index_template/ecs-acme-v2 {json.dumps(agreed['template'])}"
+        checked = await indexing.check_index_template(context, 'p1', again, [8], component_templates=COMPONENTS)
+        assert checked['agreed'] and 'status' not in checked
+
         # The user corrects it (a higher priority): their version is confirmed and replaces the agreed one.
         corrected = {**agreed['template'], 'priority': 500}
         text = f"PUT _index_template/ecs-acme-v2\n{json.dumps(corrected)}"
@@ -662,3 +668,14 @@ def test_a_flat_template_leaves_nominated_components_fields_to_them_too():
     org = {'template': {'mappings': {'properties': {'user': {'properties': {'name': {'type': 'keyword'}}}}}}}
     out, _ = with_components(body, {'org-users': org}, ['org-users'])
     assert out['composed_of'] == ['org-users'] and list(out['template']['mappings']['properties']) == ['host.name']
+
+
+def test_a_dev_tools_request_on_one_line_is_read():
+    # Seen in Ask Stroom AI: the server's own dev_tools given on one line, refused as not JSON.
+    from utils.templatecheck import parse_component_templates, parse_template
+    body = '{"index_patterns": ["stroom-twitter-onboard-test*"], "template": {"mappings": {}}}'
+    for text in (f'PUT _index_template/stroom-twitter-onboard-test {body}',
+                 f'PUT _index_template/stroom-twitter-onboard-test\n{body}',
+                 f'PUT /_index_template/stroom-twitter-onboard-test?pretty\n{body}'):
+        assert parse_template(text) == ('stroom-twitter-onboard-test', json.loads(body))
+    assert parse_component_templates(['PUT _component_template/acme {"template": {}}']) == {'acme': {'template': {}}}

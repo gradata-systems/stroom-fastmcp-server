@@ -93,6 +93,49 @@ async def test_indexing_pipeline_for_elasticsearch_sets_index_name_and_open_clus
                      ('elasticIndexingFilter', 'cluster'): 'c'}
 
 
+async def test_the_index_docs_cluster_is_set_over_the_templates_own():
+    # Seen in Ask Stroom AI: the index doc on ES_DEV, the user's choice, and the pipeline left on the template's
+    # ES_PROD, so its index template was drafted for production.
+    shape = {'stage': 'indexing', 'backend': 'elasticsearch',
+             'child_must_supply': [{'element': 'xsltFilter', 'type': 'XSLTFilter', 'property': 'xslt'},
+                                   {'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'indexName'}],
+             'shared': [{'element': 'elasticIndexingFilter', 'type': 'ElasticIndexingFilter', 'property': 'cluster',
+                         'value': {'type': 'ElasticCluster', 'uuid': 'prod', 'name': 'ES_PROD'}}]}
+    docs = {'XSLT': {}, 'ElasticIndex': {'indexName': 'stroom-ecs-twitter-v1', 'clusterRef': {'uuid': 'dev'}}}
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[t]))})
+    with patch('tools.indexing._shape', AsyncMock(return_value=shape)), \
+            patch('tools.indexing._events_available', AsyncMock()), \
+            patch('tools.indexing.create_pipeline', AsyncMock(return_value={'uuid': 'p'})) as create:
+        await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_uuid='i')
+        props = {(p.element, p.name): (p.value or p.doc_uuid) for p in create.call_args.args[3]}
+        assert props[('elasticIndexingFilter', 'cluster')] == 'dev'
+        assert props[('elasticIndexingFilter', 'indexName')] == 'stroom-ecs-twitter-v1'
+        docs['ElasticIndex']['clusterRef'] = {'uuid': 'prod'}       # the template's own: nothing set over it
+        await indexing.create_indexing_pipeline(ctx, 'b', 'n', 't', 'x', index_uuid='i')
+        props = {(p.element, p.name) for p in create.call_args.args[3]}
+        assert ('elasticIndexingFilter', 'cluster') not in props
+
+
+async def test_the_index_doc_reply_names_the_index_as_the_user_corrected_it():
+    # Seen in Ask Stroom AI: the user renamed the index in the form, the doc took it, and the reply kept the old name,
+    # which the agent then offered back to the user as what the doc held.
+    stroom = SimpleNamespace(settings=SimpleNamespace(),
+                             get_doc=AsyncMock(side_effect=lambda t, u: {'name': 'ES_DEV'} if t == 'ElasticCluster'
+                                               else {'uuid': 'i', 'name': 'TWITTER-ECS'}),
+                             put_doc=AsyncMock(side_effect=lambda d: d), post=AsyncMock(return_value={'ok': True}))
+    guard = SimpleNamespace(create=AsyncMock(return_value={'uuid': 'i'}))
+    consent = SimpleNamespace(require=AsyncMock(return_value=None))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with patch.object(indexing, 'consent_from', lambda c: consent), patch.object(indexing, 'guard_from', lambda c: guard), \
+            patch.object(indexing, 'edited', lambda c, key, value: 'stroom-ecs-twitter-v1' if key == 'index_name' else value), \
+            patch('tools.plan.with_next', AsyncMock(side_effect=lambda c, b, r: r)):
+        made = await indexing.create_index_doc(ctx, build='b', backend='elasticsearch', name='TWITTER-ECS',
+                                               index_name='stroom-twitter-onboard-test', cluster_uuid='dev',
+                                               time_field='@timestamp')
+    assert made['index name'] == 'stroom-ecs-twitter-v1'
+    assert stroom.put_doc.await_args.args[0]['indexName'] == 'stroom-ecs-twitter-v1'
+
+
 async def test_an_indexing_pipeline_gets_the_fields_its_xslt_writes():
     # Haiku created the Lucene index without its plan: every value was dropped with only a warning ("Attempt to index
     # unknown field"). The refusal that followed told it to call set_index_fields, which is not a tool; now the plan

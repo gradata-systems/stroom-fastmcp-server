@@ -949,6 +949,10 @@ async def create_index_doc(
     # The user may have corrected the names in the form.
     name = edited(ctx, 'name', name)
     index_name = edited(ctx, 'index_name', index_name) if index_name else index_name
+    if backend == 'elasticsearch':
+        # The reply says what was made: seen in Ask Stroom AI, it kept the index name from before the user's edit,
+        # and the agent offered that back to them as what the doc held.
+        target['index name'] = index_name
     doc_type = INDEX_TYPE[backend]
     ref = await guard_from(ctx).create(doc_type, name, build, role='Indexing')
     doc = await stroom.get_doc(doc_type, ref['uuid'])
@@ -1071,7 +1075,8 @@ async def create_indexing_pipeline(
         template_uuid: Annotated[str, Field(description="Indexing template (find_pipeline_templates stage=indexing).")],
         xslt_uuid: Annotated[str, Field(description="The indexing XSLT, e.g. created from draft_index_mapping's draft.")],
         index_uuid: Annotated[str | None, Field(description="Lucene: the Index doc. Elasticsearch: the Elastic Index "
-                                                            "doc, which names the index and its cluster.")] = None,
+                                                            "doc, which names the index and its cluster (set on the "
+                                                            "pipeline, over the template's own cluster).")] = None,
         index_name: Annotated[str | None, Field(description="Elasticsearch: the index or data stream name.")] = None,
         cluster_uuid: Annotated[str | None, Field(
             description="Elasticsearch: the cluster, if the template does not already set one.")] = None,
@@ -1107,7 +1112,7 @@ async def create_indexing_pipeline(
         element = next(e for e, p in open_props if p == 'index')
         props.append(PropertyValue(element=element, name='index', doc_uuid=index_uuid, doc_type='Index'))
     else:
-        if not index_name and index_uuid:
+        if index_uuid:
             # The Elastic Index doc names the index and its cluster (seen in VS Code: refused for want of index_name
             # though the doc was given).
             try:
@@ -1115,16 +1120,22 @@ async def create_indexing_pipeline(
             except ToolError as e:
                 raise ToolError(f"index_uuid {index_uuid} is not an Elastic Index doc this template can index into: "
                                 f"give index_name (and cluster_uuid)") from e
-            index_name = elastic.get('indexName')
+            index_name = index_name or elastic.get('indexName')
             cluster_uuid = cluster_uuid or (elastic.get('clusterRef') or {}).get('uuid')
         if not index_name:
             raise ToolError("This template indexes into Elasticsearch: give index_name, or index_uuid (the Elastic "
                             "Index doc, which names it)")
         element = next((e for e, p in open_props if p == 'indexName'), 'elasticIndexingFilter')
         props.append(PropertyValue(element=element, name='indexName', value=index_name))
+        inherited = next(((s.get('value') or {}) for s in shape.get('shared') or []
+                          if s.get('element') == element and s.get('property') == 'cluster'), {})
         if (element, 'cluster') in open_props:
             if not cluster_uuid:
                 raise ToolError("The template leaves the cluster open: give cluster_uuid")
+            props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
+        elif cluster_uuid and inherited.get('uuid') and inherited['uuid'] != cluster_uuid:
+            # Seen in Ask Stroom AI: the index doc on ES_DEV, the user's choice, and the pipeline left on the template's
+            # ES_PROD, so its index template was drafted for production.
             props.append(PropertyValue(element=element, name='cluster', doc_uuid=cluster_uuid, doc_type='ElasticCluster'))
     result = await create_pipeline(ctx, name, template_uuid, props, build=build, confirmation_id=confirmation_id,
                                    accept_parser_mismatch=True)   # an indexing pipeline reads Events, not the raw sample
@@ -2002,6 +2013,19 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
     await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
     dev_tools = f"PUT _index_template/{name}\n{json.dumps(body, indent=2)}"
+    from utils.mappingstore import read_agreed_template
+    kept = read_agreed_template(doc.get('description')) or {}
+    try:
+        same = bool(kept.get('dev_tools')) and parse_template(kept['dev_tools']) == (name, body) and \
+            kept.get('index') == destination['index name'] and kept.get('cluster') == destination['cluster'] and \
+            sorted(kept.get('component_templates') or []) == sorted(components) and \
+            kept.get('xslt') == await indexing_xslt_digest(stroom, pipeline_uuid)
+    except ValueError:
+        same = False
+    if same:
+        # Already agreed, as it is: seen in Ask Stroom AI, the template the user had agreed was checked again once
+        # committed, and they were asked to review and confirm it a second time.
+        return None
     if not reviewed:
         return {'status': 'needs_review', 'dev_tools': dev_tools,
                 'hint': f"Show the user this index template before anything else: dev_tools in the chat as a json code "
