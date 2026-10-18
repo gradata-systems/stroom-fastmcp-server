@@ -284,10 +284,49 @@ async def _build_feeds_only(ctx: Context, pipeline: dict[str, Any], stream_ids: 
     return None
 
 
+async def _feed_taken(stroom: StroomGateway, name: str) -> bool:
+    """A feed of this name in Stroom, whatever its case (Stroom keeps one feed per name)."""
+    try:
+        ref = await stroom.get(f'/feed/v1/getDocRefForName/{quote(name, safe="")}')     # exact, and not lagging
+    except ToolError:
+        ref = None
+    from tools.feeds import feeds_named
+    return bool((ref or {}).get('uuid')) or bool(await feeds_named(stroom, name))
+
+
+async def _free_feed_name(stroom: StroomGateway, name: str) -> str:
+    """The name, or the first of name-2, name-3, ... no feed has."""
+    for candidate in [name] + [f'{name}-{n}' for n in range(2, 100)]:
+        if not await _feed_taken(stroom, candidate):
+            return candidate
+    raise ToolError(f"Feeds {name} to {name}-99 all exist: name the build's test feed (create_feed test_feed=true)")
+
+
+async def make_test_feed(ctx: Context, build: str, name: str, sources: list[str]) -> dict[str, Any]:
+    """The build's test feed for the existing feeds it works from: their settings, holding only the Events its
+    pipelines make from their streams, recorded as their output (output_feed then writes there)."""
+    stroom = gateway_from(ctx)
+    guard = guard_from(ctx)
+    source = await stroom.get(f'/feed/v1/getDocRefForName/{quote(sources[0], safe="")}')
+    settings = await stroom.get_doc('Feed', source['uuid']) if source else {}
+    ref = await guard.create('Feed', name, build)
+    doc = await stroom.get_doc('Feed', ref['uuid'])
+    doc.update(encoding=settings.get('encoding') or 'UTF-8', streamType=settings.get('streamType') or 'Raw Events',
+               description=f"Build '{build}': the Events its pipelines make from {', '.join(sources)}'s streams. "
+                           f"Nothing is uploaded to it; it stays in the workspace at promotion.")
+    found = await stroom.put_doc(doc)
+    from security import record
+    await record.update(guard, build, {'type': 'Feed', 'uuid': found['uuid'], 'name': found['name']},
+                        lambda entry: entry.update(output_for=sources))
+    return found
+
+
 async def output_feed(ctx: Context, pipeline: dict[str, Any], sources: list[str], build: str) -> dict[str, Any] | None:
     """The build's test feed for a pipeline processing the existing feeds it works from (asked for by the user): the
-    pipeline's StreamAppender writes there (its feed property) instead of into the production feed. Made here, with the
-    source feed's settings, holding only output: nothing is uploaded to it. Promotion leaves it in the workspace and
+    pipeline's StreamAppender writes there (its feed property) instead of into the production feed. The one the user
+    named (create_feed test_feed=true), or else made here as '<FEED>-MCP-TEST' (the next free name if another build
+    has it), with the source feed's settings, holding only output: nothing is uploaded to it. Promotion leaves it in
+    the workspace and
     takes the property off (restore_output_feed). None for a pipeline with no StreamAppender (nothing written to a
     feed)."""
     stroom = gateway_from(ctx)
@@ -296,23 +335,19 @@ async def output_feed(ctx: Context, pipeline: dict[str, Any], sources: list[str]
     appenders = [e['id'] for e in merged['elements'] if e['type'] == 'StreamAppender']
     if not appenders:
         return None
+    from security import record
     from tools.builds import TEST_FEED
+    feeds = {d['uuid']: d for d in await guard.folder_contents(build) if d['type'] == 'Feed'}
+    # The build's newest test feed: one the user named (create_feed test_feed=true) is made after the server's own.
+    named = [feeds[uuid] for uuid, entry in (await record.load(guard, build))['docs'].items()
+             if entry.get('output_for') and uuid in feeds]
     name = f"{sources[0]}{TEST_FEED}"
-    found = next((d for d in await guard.folder_contents(build)
-                  if d['type'] == 'Feed' and d['name'].lower() == name.lower()), None)
+    found = named[-1] if named else next((d for d in feeds.values() if d['name'].lower() == name.lower()), None)
     made = False
     if found is None:
-        source = await stroom.get(f'/feed/v1/getDocRefForName/{quote(sources[0], safe="")}')
-        settings = await stroom.get_doc('Feed', source['uuid']) if source else {}
-        ref = await guard.create('Feed', name, build)
-        doc = await stroom.get_doc('Feed', ref['uuid'])
-        doc.update(encoding=settings.get('encoding') or 'UTF-8', streamType=settings.get('streamType') or 'Raw Events',
-                   description=f"Build '{build}': the Events its pipelines make from {', '.join(sources)}'s streams. "
-                               f"Nothing is uploaded to it; it stays in the workspace at promotion.")
-        found = await stroom.put_doc(doc)
-        from security import record
-        await record.update(guard, build, {'type': 'Feed', 'uuid': found['uuid'], 'name': found['name']},
-                            lambda entry: entry.update(output_for=sources))
+        # Seen in Ask Stroom AI: an earlier build's test feed held the name, and every filter failed on Stroom's 500.
+        name = await _free_feed_name(stroom, name)
+        found = await make_test_feed(ctx, build, name, sources)
         made = True
     feed_ref = {'type': 'Feed', 'uuid': found['uuid'], 'name': found['name']}
     doc = await stroom.get_doc('Pipeline', pipeline['uuid'])
@@ -825,6 +860,9 @@ async def create_processor_filter(
     if feed:
         await _refuse_duplicate(stroom, pipeline_uuid, expression, min_ms)
     details = {'pipeline': pipeline['name'], 'scope': scope, 'priority': priority, 'max tasks': max_tasks or 'unlimited'}
+    if output:
+        details['events go to'] = (f"test feed {output['name']} in the build (for another name, decline and have "
+                                   f"the agent create_feed test_feed=true with it)")
     if await _sends_to_kafka(stroom, pipeline_uuid):
         # Stepping sends nothing; processing does: the destination (ArcSight, say) receives these records.
         details['sends'] = ("each processed Event as a Kafka record, through the pipeline's KafkaConfig: the destination "

@@ -179,6 +179,10 @@ async def create_feed(
             description="Only in a build on an existing feed's data: the sample files the user chose to use instead "
                         "of that feed's data, as they named them. Files you found in the workspace aren't their "
                         "choice: ask them.")] = [],
+        test_feed: Annotated[bool, Field(
+            description="Only in a build on an existing feed's data: true for the build's test feed, where processing "
+                        "writes the Events made from that feed's streams, under the name the user chose (else the "
+                        "server makes '<FEED>-MCP-TEST'). Processing writes to the newest one from then on.")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -187,7 +191,8 @@ async def create_feed(
     name against its feed-name rule; a rejected name comes back with the rule so a compliant one can be proposed. A
     feed of the same name elsewhere is refused before the user is asked, saying where it is; one already in this
     build is returned as it is (existing: true). A build on an existing feed's data creates no feed, unless the user
-    chooses sample files of their own instead (user_samples): then it is a test feed for those.
+    chooses sample files of their own instead (user_samples): then it is a test feed for those; or names the test
+    feed its Events are written to (test_feed).
     """
     existing = await _existing_feed(ctx, name, build)
     if existing:
@@ -197,17 +202,29 @@ async def create_feed(
     chosen = [f.strip() for f in ([user_samples] if isinstance(user_samples, str) else user_samples) if f.strip()]
     from tools.plan import works_from
     sources = await works_from(ctx, build)
-    if sources and not chosen:
+    # Seen in Ask Stroom AI: the user chose a name for the test feed (an earlier build's held the server's), and the
+    # agent's create_feed (stream_type Events) was refused as a feed the build doesn't make.
+    as_output = bool(sources) and not chosen and (test_feed or stream_type == 'Events')
+    if test_feed and not sources:
+        raise ToolError(f"Build '{build}' doesn't work from an existing feed: its pipelines write their Events into "
+                        f"the input's feed, so it has no test feed to name. Leave test_feed out.")
+    if sources and not chosen and not as_output:
         # Asked for by the user: an agent asked to onboard an existing feed used the sample files in the VS Code
         # workspace (seen on the local stack: refused processing the feed's stream, it made '<FEED>-MCP-TEST' for a
         # copy of the sample).
         raise ToolError(_works_from_message(build, sources) + " If the user wants sample files of their own used "
                         "instead (ask them: files in the workspace aren't a choice they made), call again with "
-                        "user_samples= the files they named.")
-    details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type,
-               **({'works from': sources, "the user's sample files, instead of its data": chosen} if sources else {})}
-    summary = (f"Create test feed '{name}' for your sample files ({', '.join(chosen)}) instead of the data in "
-               f"{', '.join(sources)}" if sources else f"Create feed '{name}'")
+                        "user_samples= the files they named. To name the test feed the Events go to, call again "
+                        "with test_feed=true and the name.")
+    if as_output:
+        details = {'build': build, 'feed name': name, 'works from': sources,
+                   'holds': "the Events the build's pipelines make from their streams; nothing is uploaded to it"}
+        summary = f"Create test feed '{name}' for the Events made from {', '.join(sources)}"
+    else:
+        details = {'build': build, 'feed name': name, 'encoding': encoding, 'stream type': stream_type,
+                   **({'works from': sources, "the user's sample files, instead of its data": chosen} if sources else {})}
+        summary = (f"Create test feed '{name}' for your sample files ({', '.join(chosen)}) instead of the data in "
+                   f"{', '.join(sources)}" if sources else f"Create feed '{name}'")
     gate = await consent_from(ctx).require(ctx, 'confirmation', 'create_feed', summary, details,
                                            confirmation_id, editable={'name': ('Feed name', name)})
     if gate:
@@ -222,6 +239,15 @@ async def create_feed(
             return await with_next(ctx, build, existing)
         await _refuse_case_twin(stroom, name)
     try:
+        if as_output:
+            from tools.processing_writes import make_test_feed
+            made = await make_test_feed(ctx, build, name, sources)
+            from tools.plan import with_next
+            return await with_next(ctx, build, {
+                'type': 'Feed', 'uuid': made['uuid'], 'name': made['name'], 'test_feed': True,
+                'works_from': sources, 'link': doc_link(stroom.settings, 'Feed', made['uuid']),
+                'hint': "The build's Events go here from now on: create_processor_filter (or reprocess_streams) "
+                        "with the source feed's stream ids. Nothing is uploaded to it."})
         ref = await guard_from(ctx).create('Feed', name, build)
     except ToolError as e:
         if 'Invalid name' in str(e):
@@ -317,7 +343,7 @@ def _works_from_message(build: str, sources: list[str]) -> str:
     return (f"Build '{build}' works from the existing feed(s) {feeds}: it is built on their data where it is, stepped "
             f"(survey_feed, step_sample with their stream ids, step_records over the survey's locations) and processed "
             f"(create_processor_filter with their stream ids: the server writes the Events to a test feed it makes in "
-            f"the build). It creates no feed and uploads nothing, and sample files in the user's workspace aren't "
+            f"the build, or to one the user names: create_feed test_feed=true). It creates no other feed and uploads nothing, and sample files in the user's workspace aren't "
             f"used.")
 
 

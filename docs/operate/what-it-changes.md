@@ -67,7 +67,8 @@ Anything else is refused by the server's write guard, whatever the model asks fo
 - **Put a pipeline under development's Events into a production feed.** A translation pipeline in a build
   processes streams from the build's own feeds, or from the feed already in Stroom that the build works from. Those
   streams are processed where they are: the pipeline's StreamAppender writes their Events to a test feed the server
-  makes in the build (`<FEED>-MCP-TEST`), and promotion takes that setting off and leaves the test feed in the
+  makes in the build (`<FEED>-MCP-TEST`, the next free name if an earlier build has it, or a name you give it when
+  the agent proposes one), and promotion takes that setting off and leaves the test feed in the
   workspace. Stroom still writes a stream's Error stream, if processing reports any, into the input stream's own feed: no pipeline property moves it, so Error streams from a build's pipeline can appear there, beside the raw streams.
   Such a build creates no feed for raw samples and uploads nothing, whatever sample files your workspace holds,
   unless you choose sample files of your own instead of the feed's data.

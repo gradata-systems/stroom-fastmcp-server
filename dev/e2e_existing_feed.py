@@ -17,8 +17,9 @@ also has a file read and a logout, the second oldest a password change. Then, as
 7. a single-line JSON stream of about 3 MB is surveyed from its head only (max_chars_per_stream): a bounded
    read, complete records only, and its locations step clean.
 Stepping copies nothing. 8. Then the feed's streams are processed where they are (asked for by the user): the
-   Events go to a test feed the server makes in the build, through the pipeline's StreamAppender; no feed is
-   made for raw samples and nothing is uploaded. 9. Promotion takes the StreamAppender's feed off, leaves
+   Events go to a test feed in the build, through the pipeline's StreamAppender; no feed is made for raw samples
+   and nothing is uploaded. Another build holds '<SOURCE>-MCP-TEST', so the server's name would be '-2'; the
+   user names the test feed instead (create_feed test_feed=true), and the Events go there. 9. Promotion takes the StreamAppender's feed off, leaves
    the test feed in the workspace, and the feed's filter leaves none of the sample out.
 """
 import asyncio
@@ -254,13 +255,20 @@ async def main():
         print('\n### 8. processed where it is: the Events go to a test feed the server makes in the build')
         # Asked for by the user: no feed made for raw samples and nothing uploaded; the build's pipeline processes the
         # existing feed's streams, its StreamAppender writing to a test feed in the build.
-        test_feed = f'{source}-MCP-TEST'
         try:
             await feeds.create_feed(ctx, build, f'{source}-SAMPLES')
             e2e.check(False, 'a feed for raw samples is refused in a build on an existing feed')
         except ToolError as e:
-            e2e.check('works from the existing feed' in str(e) and 'user_samples=' in str(e),
-                      f"a feed for raw samples is refused: {str(e)[:160]}")
+            e2e.check('works from the existing feed' in str(e) and 'user_samples=' in str(e)
+                      and 'test_feed=true' in str(e), f"a feed for raw samples is refused: {str(e)[:160]}")
+        # Seen in Ask Stroom AI: an earlier build's test feed held the server's name, every filter failed on Stroom's
+        # 500, and the name the user chose instead was refused.
+        await e2e.agreed(feeds.create_feed, ctx=ctx, build=f'src-{stamp}', name=f'{source}-MCP-TEST')
+        free = await processing_writes._free_feed_name(stroom, f'{source}-MCP-TEST')
+        e2e.check(free == f'{source}-MCP-TEST-2', f"another build's {source}-MCP-TEST: the server's name would be {free}")
+        test_feed = f'{source}-OUT'
+        named = await e2e.agreed(feeds.create_feed, ctx=ctx, build=build, name=test_feed, test_feed=True)
+        e2e.check(named.get('test_feed') and named['name'] == test_feed, f"the user's name for the test feed: {test_feed}")
         started = await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=pipeline['uuid'],
                                    stream_ids=ids)
         e2e.check(started['output_feed'] == test_feed and 'not into the production feed' in started['output_note'],

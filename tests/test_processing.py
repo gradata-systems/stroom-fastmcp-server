@@ -2,6 +2,7 @@ import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -838,20 +839,31 @@ def _layers(own_properties):
             {'pipelineData': {'properties': {'add': own_properties}}}]
 
 
-async def test_the_test_feed_is_made_once_and_set_on_the_stream_appender():
-    stroom = SimpleNamespace(
-        pipeline_layers=AsyncMock(return_value=_layers([])),
-        get=AsyncMock(return_value={'type': 'Feed', 'uuid': 'pf', 'name': 'PROD-FEED'}),
+def _feeds_stroom(taken: set[str]) -> SimpleNamespace:
+    """A Stroom holding PROD-FEED and the feeds named in taken, elsewhere."""
+    async def get(path):
+        name = unquote(path.rsplit('/', 1)[1])
+        if name == 'PROD-FEED' or name in taken:
+            return {'type': 'Feed', 'uuid': 'pf' if name == 'PROD-FEED' else 'other', 'name': name}
+        raise ToolError('404')
+    return SimpleNamespace(
+        pipeline_layers=AsyncMock(return_value=_layers([])), get=get,
+        find_documents=AsyncMock(return_value={'values': []}),
         get_doc=AsyncMock(side_effect=lambda t, u: {
             'pf': {'uuid': 'pf', 'encoding': 'UTF-16LE', 'streamType': 'Raw Events'},
             'tf': {'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST'},
             'p1': {'uuid': 'p1', 'name': 'P', 'pipelineData': {}}}[u]),
         put_doc=AsyncMock(side_effect=lambda d: d))
+
+
+async def test_the_test_feed_is_made_once_and_set_on_the_stream_appender():
+    stroom = _feeds_stroom(set())
     guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[]),
                             create=AsyncMock(return_value={'type': 'Feed', 'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST'}))
     recorded = AsyncMock()
     with patch.object(processing_writes, 'gateway_from', lambda c: stroom), \
             patch.object(processing_writes, 'guard_from', lambda c: guard), \
+            patch('security.record.load', AsyncMock(return_value={'docs': {}})), \
             patch('security.record.update', recorded):
         made = await processing_writes.output_feed(None, {'uuid': 'p1', 'name': 'P'}, ['PROD-FEED'], 'b')
     assert made == {'name': 'PROD-FEED-MCP-TEST', 'uuid': 'tf', 'made': True, 'works_from': ['PROD-FEED']}
@@ -865,6 +877,35 @@ async def test_the_test_feed_is_made_once_and_set_on_the_stream_appender():
     entry = {}
     recorded.await_args.args[3](entry)
     assert entry == {'output_for': ['PROD-FEED']}
+
+
+async def test_the_test_feed_takes_a_free_name_or_the_one_the_user_gave():
+    # Seen in Ask Stroom AI: an earlier build's PROD-FEED-MCP-TEST held the name, and every filter failed on Stroom's
+    # 500 ("A feed named ... already exists"); the user's own name for it was refused.
+    stroom = _feeds_stroom({'PROD-FEED-MCP-TEST', 'PROD-FEED-MCP-TEST-2'})
+    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[]),
+                            create=AsyncMock(return_value={'type': 'Feed', 'uuid': 'tf', 'name': 'PROD-FEED-MCP-TEST-3'}))
+    with patch.object(processing_writes, 'gateway_from', lambda c: stroom), \
+            patch.object(processing_writes, 'guard_from', lambda c: guard), \
+            patch('security.record.load', AsyncMock(return_value={'docs': {}})), \
+            patch('security.record.update', AsyncMock()):
+        made = await processing_writes.output_feed(None, {'uuid': 'p1', 'name': 'P'}, ['PROD-FEED'], 'b')
+    assert guard.create.await_args.args == ('Feed', 'PROD-FEED-MCP-TEST-3', 'b') and made['made']
+
+    # The user's, made by create_feed test_feed=true after the server's own: the newest is written to.
+    stroom = _feeds_stroom(set())
+    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[
+        {'type': 'Feed', 'uuid': 'old', 'name': 'PROD-FEED-MCP-TEST'}, {'type': 'Feed', 'uuid': 'u', 'name': 'MINE'}]),
+        create=AsyncMock())
+    state = {'docs': {'old': {'output_for': ['PROD-FEED']}, 'u': {'output_for': ['PROD-FEED']}}}
+    with patch.object(processing_writes, 'gateway_from', lambda c: stroom), \
+            patch.object(processing_writes, 'guard_from', lambda c: guard), \
+            patch('security.record.load', AsyncMock(return_value=state)):
+        made = await processing_writes.output_feed(None, {'uuid': 'p1', 'name': 'P'}, ['PROD-FEED'], 'b')
+    assert made == {'name': 'MINE', 'uuid': 'u', 'made': False, 'works_from': ['PROD-FEED']}
+    assert not guard.create.called
+    [pipeline_doc] = [c.args[0] for c in stroom.put_doc.await_args_list]
+    assert pipeline_doc['pipelineData']['properties']['add'][0]['value']['entity']['uuid'] == 'u'
 
 
 async def test_promotion_takes_the_test_feed_off_the_stream_appender():

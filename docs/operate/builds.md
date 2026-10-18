@@ -59,7 +59,8 @@ up a promotion.
 
     A build that works from data already in Stroom (an existing feed, or a new version or working copy of a
     production pipeline) keeps any feed it made in the workspace: those are test feeds, holding the Events its
-    pipelines made from production streams (`<FEED>-MCP-TEST`, made by the server), or sample files you chose
+    pipelines made from production streams (`<FEED>-MCP-TEST` made by the server, or a name you chose), or sample
+    files you chose
     instead. Give one a folder of its own if it is really a new production feed (a new feed version, say).
 2. The user approves the layout they confirmed, in a short form.
 3. New documents are moved into place. Their UUIDs don't change, so references keep working. They lose

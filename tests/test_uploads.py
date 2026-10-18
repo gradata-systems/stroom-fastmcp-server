@@ -217,6 +217,35 @@ async def test_a_build_on_an_existing_feed_makes_a_feed_only_for_samples_the_use
     assert details['works from'] == ['VPN-GATEWAY']
 
 
+async def test_a_build_on_an_existing_feed_makes_its_test_feed_under_the_users_name():
+    # Seen in Ask Stroom AI: the server's VPN-GATEWAY-MCP-TEST name was an earlier build's, the user chose another, and
+    # the agent's create_feed (stream_type Events) was refused as a feed the build doesn't make.
+    from unittest.mock import AsyncMock, patch
+    import pytest
+    from fastmcp.exceptions import ToolError
+    from tools import feeds, processing_writes
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}), get=AsyncMock(return_value=None),
+                             settings=SimpleNamespace(stroom_url='http://stroom'))
+    asked = AsyncMock(return_value=None)
+    made = AsyncMock(return_value={'uuid': 'u', 'name': 'VPN-GATEWAY-TEST-V2'})
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
+            patch.object(feeds, 'consent_from', lambda ctx: SimpleNamespace(require=asked)), \
+            patch.object(feeds, 'edited', lambda ctx, key, value: value), \
+            patch.object(feeds, 'doc_link', lambda *a: 'link'), \
+            patch.object(processing_writes, 'make_test_feed', made), \
+            patch('tools.plan.with_next', AsyncMock(side_effect=lambda ctx, build, result: result)), \
+            patch('tools.plan.works_from', AsyncMock(return_value=['VPN-GATEWAY'])):
+        for asked_as in ({'test_feed': True}, {'stream_type': 'Events'}):
+            result = await feeds.create_feed(None, 'b', 'VPN-GATEWAY-TEST-V2', **asked_as)
+            assert result['test_feed'] and result['name'] == 'VPN-GATEWAY-TEST-V2'
+            assert made.await_args.args[1:] == ('b', 'VPN-GATEWAY-TEST-V2', ['VPN-GATEWAY'])
+        assert asked.await_args.args[3] == "Create test feed 'VPN-GATEWAY-TEST-V2' for the Events made from VPN-GATEWAY"
+    with patch.object(feeds, 'gateway_from', lambda ctx: stroom), \
+            patch('tools.plan.works_from', AsyncMock(return_value=[])):
+        with pytest.raises(ToolError, match="no test feed to name"):
+            await feeds.create_feed(None, 'b', 'ACME-TEST', test_feed=True)
+
+
 async def test_samples_go_to_a_build_on_an_existing_feed_only_through_a_feed_made_for_the_users_files():
     # The test feed the server makes for the Events (output_for) takes no samples either.
     from unittest.mock import AsyncMock, patch
