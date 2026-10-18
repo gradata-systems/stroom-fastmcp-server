@@ -992,6 +992,7 @@ The riskiest parts are driving stepping and pipeline JSON through REST APIs buil
 - [x] Processing after promotion: decided, pre-created disabled, with no minimum creation time, with the pipeline link.
 - [x] Translation pipelines: decided, the build's own feeds only.
 - [x] Indexing Events from a pipeline the agent did not build: decided, allowed once the user confirms that exact source pipeline; the Pipeline condition still applies.
+- [ ] Stateless HTTP: review once Ask Stroom AI's client supports it. Stateless, a form can't be asked during a call (its answer has nowhere to land), so confirmations and approvals come back as ids, which a model can pass back without asking the user; keep it off until then (see [Upgrading](../admin/upgrading.md#stateless-http-keep-it-off-for-vs-code)). Stroom AI's client is MCP's Java SDK, which speaks protocol 2025-11-25 at most as a client (to 2.2.0-M1, October 2026). Once it speaks 2026-07-28, where the call is repeated with the user's answer (the server already serves that path), run `dev/e2e_stateless.py` with the client at that version: forms should then be asked, not turned into ids, and stateless could be recommended for replicas without session affinity.
 
 **Risks**
 
