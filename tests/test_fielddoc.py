@@ -647,3 +647,23 @@ def test_the_vendors_documentation_comes_first():
     asking = Descriptions(ask=True, notes=notes)
     index_field_mapping_markdown(plan, None, None, SCHEMA, described=asking)
     assert asking.wanted['user.name']['schemas_say']['vendor documentation'] == 'Login of the account that signed in.'
+
+
+async def test_a_lucene_index_with_nothing_to_show_says_its_streams_may_be_gone():
+    # Stroom checks every hit's stream for Lucene as for Elasticsearch: a dev Stroom's streams were deleted in a
+    # migration, its indices kept.
+    from tools import indexing
+
+    async def search(ctx, dashboard, expression, length=100, wait=None, doing=None):
+        return {'rows': [], 'errors': [], 'complete': True}
+
+    async def post(path, body):
+        return {'values': [{'fldName': n, 'fldType': 'ID'} for n in ('StreamId', 'EventId')]} \
+            if path == '/index/v2/findFields' else {'values': []}
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'name': 'LUCENE-IDX'}), post=post,
+                             find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(stroom_ui_url=None, stroom_url='http://s'))
+    with patch.object(indexing, '_search', search):
+        survey = await indexing.survey_index(SimpleNamespace(lifespan_context={'stroom': stroom}), 'Index', 'i',
+                                             profile=False)
+    assert survey['documents_sampled'] == 0 and 'or that have been deleted' in survey['note']

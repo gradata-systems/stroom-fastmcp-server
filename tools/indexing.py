@@ -1526,11 +1526,17 @@ async def survey_index(ctx: Context, doc_type: str, uuid: str, max_documents: in
             totals = {'error': str(e)}
     note = None
     if not total:
+        # Stroom checks every hit's stream, Lucene's as Elasticsearch's (ExtractionDecorator, shared by both): a
+        # document whose stream is gone (seen: a dev Stroom whose streams were deleted in a migration) or unreadable
+        # never comes back.
         note = ("No documents came back through Stroom. Stroom returns a hit only when its StreamId is a stream in "
                 "this Stroom that you may read (it checks the stream's feed for every hit), so documents written from "
-                "outside Stroom, without StreamId or with another system's, are not shown: the index is described "
-                "from its mapping only, its values not read." if doc_type == 'ElasticIndex' else
-                "No documents came back through Stroom: the index is empty, or holds no stored values to show.")
+                "outside Stroom, without StreamId or with another system's, or whose streams have been deleted, are "
+                "not shown: the index is described from its mapping only, its values not read."
+                if doc_type == 'ElasticIndex' else
+                "No documents came back through Stroom: the index is empty, holds no stored values to show, or holds "
+                "only documents whose streams you may not read or that have been deleted (Stroom returns a hit only "
+                "when its StreamId is a stream in this Stroom that you may read).")
         if cut_short:
             note = (f"Stroom found no document it could show within {SAMPLE_WAIT} s, and was still looking. " + note)
     elif cut_short and total < max_documents:
