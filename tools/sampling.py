@@ -213,10 +213,10 @@ async def survey_feed(
         max_chars_per_stream: Annotated[int | None, Field(
             ge=1000, le=5_000_000, description="Read at most this many characters from the start of each part; "
                                                "big streams are only sampled at their head. Default 250,000, or "
-                                               "SAMPLE_CHARS for stream_ids (a sample is read whole).")] = None,
+                                               "2,000,000 for stream_ids and a feed's last streams (read whole).")] = None,
         max_parts_per_stream: Annotated[int, Field(ge=1, le=20)] = 3,
         max_records_per_stream: Annotated[int | None, Field(
-            ge=10, le=10_000, description="Default 1,000, or 10,000 for stream_ids.")] = None,
+            ge=10, le=10_000, description="Default 1,000, or 10,000 for stream_ids and a feed's last streams.")] = None,
         examples_per_shape: Annotated[int, Field(ge=1, le=10)] = 2,
         build: Annotated[str | None, Field(
             description="Keep the survey record in this build: a Documentation doc '<feed> - Survey' with the kinds "
@@ -230,8 +230,8 @@ async def survey_feed(
     and group their records into shapes (kinds of event): by fields and event-naming values for structured
     data, by masked message templates for syslog and other text. Only the head of each stream is read
     (max_chars_per_stream per part, max_parts_per_stream parts), so multi-GB streams cost the same as small
-    ones; a sample's streams (stream_ids) are read whole up to 2,000,000 characters, and coverage says when one
-    wasn't. Every call reads all max_streams streams it picks (a quiet feed's rare kinds of event can sit behind
+    ones; a sample's streams (stream_ids), and a feed's last streams (fewer left than max_streams), are read whole up
+    to 2,000,000 characters, and coverage says when one wasn't (the feed is then not covered). Every call reads all max_streams streams it picks (a quiet feed's rare kinds of event can sit behind
     several streams with nothing new: asked for by the user). The feed counts as covered (saturated) when a call
     with known_signatures reads a full max_streams with nothing new, or when every stream has been read. Returns each shape with its count, share and examples, and where each example is (stream,
     part, record) for step_records. Call again with skip_stream_ids (all streams read so far) and
@@ -240,10 +240,6 @@ async def survey_feed(
     """
     stroom = gateway_from(ctx)
     chosen = [await _meta(stroom, i) for i in stream_ids]
-    # A sample is read whole where it can be: seen in production, a 750 KB sample read only to its 108th record of
-    # 1,000 hid most of its kinds of event.
-    max_chars_per_stream = max_chars_per_stream or (SAMPLE_CHARS if chosen else FEED_CHARS)
-    max_records_per_stream = max_records_per_stream or (10_000 if chosen else 1000)
     if not feed:
         if not chosen:
             raise ToolError("Give feed, or stream_ids")
@@ -264,6 +260,7 @@ async def survey_feed(
         gate = await _fewer_streams(ctx, feed, len(chosen), confirmation_id)
         if gate:
             return gate
+    given_skip = list(skip_stream_ids)
     record = await _load_record(ctx, build, feed) if build else None
     state = read_state(body_text(record)) if record else None
     if state:
@@ -272,11 +269,19 @@ async def survey_feed(
     terms = [_term('Feed', feed), _term('Type', stream_type)]
     skip = set(skip_stream_ids)
     if chosen:
-        streams = [m for m in chosen if m['id'] not in skip]
+        # Streams named are read, even ones the build's survey record read before (in part, say): only the ones the
+        # call says to skip are not.
+        streams = [m for m in chosen if m['id'] not in set(given_skip)]
         times = [m['createMs'] for m in chosen if m.get('createMs')]
         span = {'oldest': _iso(min(times)), 'newest': _iso(max(times))} if times else {}
     else:
         streams, span = await pick_spread(stroom, terms, max_streams, skip)
+    # Fewer streams left than a call reads: the feed's last ones, so each is read whole where it can be, as a
+    # sample's are. Seen in production: a 750 KB sample read only to its 108th record of 1,000 hid most of its kinds
+    # of event; and in Ask Stroom AI, a one-stream feed read to its 334th record of 1,000 was called covered.
+    exhausted = not chosen and len(streams) < max_streams
+    max_chars_per_stream = max_chars_per_stream or (SAMPLE_CHARS if chosen or exhausted else FEED_CHARS)
+    max_records_per_stream = max_records_per_stream or (10_000 if chosen or exhausted else 1000)
     if not streams and skip:
         result = {'feed': feed, 'streams_read': [], 'records_read': 0, 'saturated': True, 'shapes': [],
                   'new_shapes': 0, 'locations': [], 'time_range': span,
@@ -337,21 +342,29 @@ async def survey_feed(
     partly = [p['stream'] for p in per_stream if p.get('head_only')]
     # Covered: a full batch after the first added nothing new, or the feed has no unread streams left (fewer than
     # asked for were there to pick); chosen streams: every one was read, so the sample is covered as far as it goes.
-    exhausted = not chosen and len(streams) < max_streams
     saturated = ((bool(known_signatures) and not new_shapes and len(read_ids) >= max_streams) or exhausted
                  or bool(chosen))
-    # Not when a given stream was read only in part: the kinds of event further in weren't seen.
-    saturated = saturated and not (chosen and partly)
+    # Not when a given stream, or the feed's last, was read only in part: the kinds of event further in weren't seen.
+    # Seen in Ask Stroom AI: 334 of a stream's 1,000 records read, and "covered: every stream ... read".
+    whole_only = chosen or exhausted
+    saturated = saturated and not (whole_only and partly)
+    again = (f"Survey them again with stream_ids={partly} and max_chars_per_stream="
+             f"{min(5_000_000, max_chars_per_stream * 4)} (up to 5,000,000)")
+    heads = f" (only the start of stream(s) {partly}: big streams are sampled at their head)" if partly else ''
     result = {
         'feed': feed, 'format': fmt, 'time_range': span, 'streams_read': read_ids, 'records_read': records_read,
+        # An XML document's root, with its namespace, which its records (the examples) inherit.
+        **({'records_in': first_chunk.root.splitlines()[0]} if fmt == 'xml' and first_chunk.root else {}),
         'saturated': saturated,
         'coverage': (f"NOT COVERED: only the start of stream(s) {partly} was read ({records_read} records); there may be "
-                     f"other kinds of event further in. Survey them again with max_chars_per_stream="
-                     f"{min(5_000_000, max_chars_per_stream * 4)} (up to 5,000,000)" if chosen and partly else
+                     f"other kinds of event further in. {again}" if chosen and partly else
                      f'all {len(read_ids)} given stream(s) read whole: these are the kinds of event the sample holds'
                      if chosen else
-                     'covered: every stream in the feed has been read' if exhausted else
-                     f'covered: no new kinds of event in the last {len(read_ids)} streams read' if saturated else
+                     f"NOT COVERED: every stream in the feed was picked, but only the start of stream(s) {partly} was "
+                     f"read ({records_read} records); there may be other kinds of event further in. {again}"
+                     if exhausted and partly else
+                     'covered: every stream in the feed has been read whole' if exhausted else
+                     f'covered: no new kinds of event in the last {len(read_ids)} streams read{heads}' if saturated else
                      'NOT COVERED YET: keep surveying before treating the translation as complete'),
         'per_stream': per_stream,
         'shapes': [{'signature': s['signature'], 'new': not s['known'], 'count': s['count'],

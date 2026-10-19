@@ -284,3 +284,37 @@ async def test_a_feeds_deleted_streams_are_left_out_by_stroom_not_after():
         return {'values': [{'meta': m} for m in (kept if newest_first else kept[::-1])[:limit]]}
     picked, span = await sampling.pick_spread(SimpleNamespace(find_meta=find_meta), [], 3, set())
     assert picked == [live] and span['oldest'] == span['newest']
+
+
+async def test_a_feeds_last_streams_are_read_whole_and_one_read_only_in_part_is_not_covered():
+    # Seen in Ask Stroom AI: a one-stream feed read to its 334th record of 1,000 was "covered: every stream in the
+    # feed has been read", saturated, and the agent found the other 666 records only through read_stream.
+    from unittest.mock import AsyncMock, patch
+    from tools import sampling
+    stream = {'id': 15911122, 'createMs': 1_760_000_000_000}
+    records = ''.join(f'{{"action": "a{i}"}}\n' for i in range(3))
+    with patch('tools.feeds.resolve_feed', AsyncMock(return_value='SecretServer')), \
+            patch('tools.sampling.pick_spread', AsyncMock(return_value=([stream], {}))), \
+            patch('tools.sampling.read_head', AsyncMock(return_value=(records, True, 1))) as read:
+        result = await sampling.survey_feed(_survey_ctx(), feed='SecretServer')
+    assert read.await_args.args[3] == sampling.SAMPLE_CHARS       # the feed's last stream: read whole where it can be
+    assert not result['saturated'] and result['per_stream'][0]['head_only']
+    assert result['coverage'].startswith('NOT COVERED: every stream in the feed was picked, but only the start of '
+                                         'stream(s) [15911122]') and 'stream_ids=[15911122]' in result['coverage']
+    with patch('tools.feeds.resolve_feed', AsyncMock(return_value='SecretServer')), \
+            patch('tools.sampling.pick_spread', AsyncMock(return_value=([stream], {}))), \
+            patch('tools.sampling.read_head', AsyncMock(return_value=(records, False, 1))):
+        whole = await sampling.survey_feed(_survey_ctx(), feed='SecretServer')
+    assert whole['saturated'] and whole['coverage'] == 'covered: every stream in the feed has been read whole'
+
+
+def test_xml_fragments_keep_their_namespace_in_the_examples():
+    # Seen in Ask Stroom AI: Windows events shown as <Event> without their xmlns, which the XSLT must match; the
+    # agent read the stream again to find it.
+    ns = 'http://schemas.microsoft.com/win/2004/08/events/event'
+    chunk = split_records(f'<Event xmlns="{ns}"><EventID>1000</EventID></Event>\n'
+                          f'<Event xmlns="{ns}"><EventID>1001</EventID></Event>\n')
+    assert chunk.format == 'xml fragments' and all(r.startswith(f'<Event xmlns="{ns}">') for r in chunk.records)
+    document = split_records(f'<Events xmlns="{ns}"><Event><EventID>1</EventID></Event>'
+                             f'<Event><EventID>2</EventID></Event></Events>')
+    assert document.records[0] == '<Event><EventID>1</EventID></Event>' and f'xmlns="{ns}"' in document.root

@@ -111,8 +111,8 @@ not such a question: ask for it in your answer and end your turn.
 Existing feed: when the user asks to onboard data a feed already holds, work from that feed (onboard_existing_feed):
 start_build feeds=[it], then survey_feed. No feed is created and nothing uploaded, whatever sample files the
 workspace holds: its streams are stepped and processed where they are (create_processor_filter with their stream
-ids), the server writing their Events to a test feed it makes in the build, and promotion gives the pipeline its
-filter on the feed.
+ids), the server writing their Events to a test feed it makes in the build; then stage 2 indexes those Events, as for
+a new source, and promotion gives the pipeline its filter on the feed.
 
 Samples (a new source): ask for every sample file the user has. Files on their disk: start_onboarding files=[their paths], then
 create_feed, upload_sample files=[the same paths], and start_onboarding again with the build and stream_ids, which
@@ -617,9 +617,10 @@ every field, what it holds and the values it has. Change nothing except the docu
 
 {_RULES}"""
 
-    @mcp.prompt(description="Build an events pipeline for a feed that already holds data.")
+    @mcp.prompt(description="Build an events pipeline for a feed that already holds data, then index its Events.")
     def onboard_existing_feed(feed: str, source_docs: str = '') -> str:
-        return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only.
+        return f"""Build an events pipeline for the existing feed "{feed}" from the data it already holds, by stepping only,
+then index its Events.
 
 1. start_build feeds=[{feed}], then survey_feed feed={feed} build=<the build>: it samples streams spread over the
    feed's lifetime, reading only the head of each (big streams are fine), and groups records into kinds of event,
@@ -644,9 +645,13 @@ every field, what it holds and the values it has. Change nothing except the docu
 5. Process the surveyed streams where they are: create_processor_filter stream_ids=[them] (up to 10). Their Events
    go to a test feed the server makes in the build (output_feed), not into {feed}. The user approves it in a form and
    it runs; then wait_for_processing, then check_events on the Events.
-6. write_documentation for the pipeline. Then {_PROMOTE} Promotion gives it a filter on {feed}, disabled: enabled, it
-   processes the feed's existing data too; when is the user's. Once its Events exist, indexing them is a build of its
-   own (start_build feeds=[{feed}], then the index).
+6. write_documentation for the pipeline.
+
+Stage 2, indexing the Events step 5 wrote, in the same build (as for a new source; `next` counts it):
+{_indexing_steps(7, '<the Events streams of step 5>', '<the events pipeline from step 2>')}
+
+Finish: {_PROMOTE} Promotion gives the events pipeline a filter on {feed}, disabled: enabled, it processes the feed's
+existing data too; when is the user's.
 
 {_RULES}{_docs(source_docs)}"""
 

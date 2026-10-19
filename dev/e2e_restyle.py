@@ -176,7 +176,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     old_style = {**MAPPING, 'style': {'variables': 'top', 'data_values': 'attribute', 'data_entries': 'guarded',
                                       'data_run_min': 99}}
     built = await generation.build_translation_xslt(ctx, old_style, stream_ids=raws, build=build, name=f'{feed}-Events',
-                                                    agent_model='e2e-model', include_xslt=False)
+                                                    include_xslt=False)
     check(built['ok'] and not any('vpntunnel' in p for p in built['problems']),
           f"over all {sum(len(s) for s in STREAMS)} records, the VPN keys are found: {built['problems'][:2]}")
     xslt = built['saved']

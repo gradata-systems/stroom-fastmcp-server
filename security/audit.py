@@ -136,8 +136,11 @@ class AuditMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        return await _audited(context, call_next, 'tool_call',
-                              tool=context.message.name, arguments=context.message.arguments)
+        # The model the client names in the request's _meta, so a log shows which model made each call.
+        from utils.xsltversion import client_model
+        model = client_model(context.fastmcp_context)
+        return await _audited(context, call_next, 'tool_call', tool=context.message.name,
+                              arguments=context.message.arguments, **({'model': model} if model else {}))
 
     async def on_read_resource(self, context: MiddlewareContext[mt.ReadResourceRequestParams],
                                call_next: CallNext[mt.ReadResourceRequestParams, Any]) -> Any:

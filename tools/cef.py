@@ -214,9 +214,6 @@ async def draft_cef_mapping(
             "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
             "processed'."))] = None,
-        agent_model: Annotated[str | None, Field(description=(
-            "The model you are, for the version history, only if your instructions name it: don't guess. "
-            "Once given, remembered for the session."))] = None,
         feeds: Annotated[list[str] | str, ONE_OR_MORE, Field(description="The Events feed: its folder's standing "
                                                                          "instructions apply.")] = [],
         folders: Annotated[list[str] | str, ONE_OR_MORE, Field(description="Folders the pipeline will live in.")] = [],
@@ -244,8 +241,6 @@ async def draft_cef_mapping(
     With build and name (or uuid) it saves the XSLT with the plan: a Kafka record per Event (kafka-records:1, one
     Event a record) or lines of text. With pipeline_uuid it reviews an existing CEF pipeline instead.
     """
-    from utils.xsltversion import remember_model
-    remember_model(ctx, agent_model)
     if isinstance(overrides, str):
         try:
             overrides = json.loads(overrides)

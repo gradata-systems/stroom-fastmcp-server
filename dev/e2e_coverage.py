@@ -85,8 +85,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     first = (await feeds.upload_sample(ctx, feed, SAMPLE))['stream_id']
     later = (await feeds.upload_sample(ctx, feed, LATER))['stream_id']
     converter = (await generation.build_data_splitter(ctx, stream_ids=[first], save_as=f'{feed}-CSV', build=build))['saved']
-    built = await generation.build_translation_xslt(ctx, MAPPING, stream_ids=[first], build=build, name=f'{feed}-Events',
-                                                    agent_model='e2e-model')
+    built = await generation.build_translation_xslt(ctx, MAPPING, stream_ids=[first], build=build, name=f'{feed}-Events')
     e2e.check(built['ok'] and built.get('saved'), f"XSLT saved: {built.get('problems')}")
     xslt = built['saved']
     template = next(c for c in (await templates.find_pipeline_templates(ctx, 'translation'))['candidates']
@@ -159,7 +158,7 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     pending =pending_of((await stroom.get_doc('XSLT', xslt['uuid'])).get('description'))
     e2e.check([e['change'] for e in pending['entries']] == ['Created from its mapping',
                                                             'Rule for view events, found once the whole feed was processed']
-              and 'e2e-model' in pending['entries'][0]['by'],
+              and 'stroom-mcp' in pending['entries'][0]['by'],
               f"the XSLT's changes pending, for one version line at promotion: {[e['change'] for e in pending['entries']]}")
 
     await kept_and_batched(ctx, stroom, stamp, build, feed, pipeline, xslt, [first, later])

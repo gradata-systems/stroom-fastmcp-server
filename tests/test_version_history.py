@@ -21,7 +21,7 @@ def saved(description: str, previous: dict | None, change: str, code: str, when:
 def test_a_builds_saves_become_one_row_when_it_is_promoted_and_are_previewed_until_then():
     first = saved('Acme events', None, 'Created from its mapping', CODE, DAY1, 'stroom-mcp 0.16.45')
     second = saved(first, {'data': CODE}, "Mapping changes: rule 'logon' replaced", CHANGED, DAY1,
-                   'stroom-mcp 0.16.45, model claude-haiku-5-5 (as the agent said)')
+                   'stroom-mcp 0.16.45, model claude-haiku-5-5')
     # Asked for by the user: what a build has done, seen before it is released, without a row a save.
     assert second.startswith('Acme events\n\n## Version history') and xsltversion.history(second) == []
     [preview] = [line for line in second.splitlines() if line.startswith('| Unreleased |')]

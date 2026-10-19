@@ -52,13 +52,30 @@ async def _pipeline_index(ctx: Context) -> dict[str, dict[str, Any]]:
             try:
                 doc = await stroom.get(f"/pipeline/v1/{value['docRef']['uuid']}")
             except ToolError:
-                return None     # written here, and deleted since
+                # Written here, and deleted since: forgotten, not asked for again each time the index is read (seen in
+                # the pod log: a pipeline an earlier session made and deleted, "Document not found" 4 times).
+                getattr(stroom, 'pipelines_written', set()).discard(value['docRef']['uuid'])
+                return None
         parent = doc.get('parentPipeline') or {}
         return value['docRef']['uuid'], {'uuid': value['docRef']['uuid'], 'name': doc.get('name'),
                                          'path': _path(value.get('path')), 'parent_uuid': parent.get('uuid')}
     index = dict(entry for entry in await asyncio.gather(*(load(v) for v in refs)) if entry)
     ctx.lifespan_context['pipeline_index'] = (time.monotonic(), index)
     return index
+
+
+_UNLOADABLE_TTL = 3600
+
+
+def _unloadable(ctx: Context) -> dict[str, tuple[float, str]]:
+    """Pipelines Stroom refused to build (a 500), with why, remembered for an hour rather than asked for again on
+    every search: seen in the pod log, one with an element type this Stroom doesn't have (StateFilter) refused 5 times
+    in a session, by find_pipeline_templates and get_field_conventions calling it."""
+    store = ctx.lifespan_context.setdefault('unloadable_pipelines', {})
+    now = time.monotonic()
+    for uuid in [u for u, (at, _) in store.items() if now - at > _UNLOADABLE_TTL]:
+        store.pop(uuid)
+    return store
 
 
 def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
@@ -165,15 +182,21 @@ async def find_pipeline_templates(
             ranked.append((why, p))
     order = {'configured': 0, 'inherited_by_others': 1, 'standard': 2, 'template_like': 3}
     candidates, unreadable = [], []
+    unloadable = _unloadable(ctx)
     for why, p in sorted(ranked, key=lambda x: (order[x[0]], -children.get(x[1]['uuid'], 0))):
         if len(candidates) >= 10:
             break
+        if p['uuid'] in unloadable:
+            unreadable.append(f"{p['path']}/{p['name']}: {unloadable[p['uuid']][1]}")
+            continue
         try:
             shape = await _shape(stroom, p['uuid'], policy.markers())
         except ToolError as e:
             # One pipeline Stroom can't build (seen: an element type this Stroom doesn't have, StateFilter) must
             # not hide the others: the whole search failed, and the agent fell back to a template by its name.
             unreadable.append(f"{p['path']}/{p['name']}: {str(e)[:160]}")
+            if 'Stroom rejected the request (500)' in str(e):
+                unloadable[p['uuid']] = (time.monotonic(), str(e)[:160])
             continue
         if shape['stage'] != stage or (why == 'template_like' and not shape['child_must_supply']):
             continue
@@ -181,7 +204,8 @@ async def find_pipeline_templates(
                            'children': children.get(p['uuid'], 0), **{k: v for k, v in shape.items() if k != 'properties'}})
     result: dict[str, Any] = {'stage': stage, 'candidates': candidates[:10]}
     if unreadable:
-        result['unreadable'] = unreadable[:5]   # left out: Stroom can't build them
+        # Left out, said: Stroom can't build them (each asked for once an hour, not on every search).
+        result['unreadable'] = unreadable[:5]
     if not candidates:
         result['hint'] = "No template found for this stage; ask the user which pipeline to base it on."
     elif stage == 'translation' and not any(c['parser'] in ('XMLFragmentParser', 'CombinedParser') for c in candidates):

@@ -124,8 +124,6 @@ async def rebuild_mapping(
         accept_differences: Annotated[bool, Field(description=(
             "Save even though the regenerated XSLT writes some records differently (shown in differences): only when "
             "the user, shown them, accepts what the mapping writes instead."))] = False,
-        agent_model: Annotated[str | None, Field(description=(
-            "The model you are, for the version history, only if your instructions name it: don't guess."))] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -142,8 +140,6 @@ async def rebuild_mapping(
     from tools.generation import event_schema
     from tools.stepping import _field_values, _Pipeline, record_key, step_spread
     from tools.translation import update_xslt
-    from utils.xsltversion import remember_model
-    remember_model(ctx, agent_model)
     stroom = gateway_from(ctx)
     ids = [int(i) for i in (stream_ids if isinstance(stream_ids, list) else str(stream_ids).split(',')) if str(i).strip()]
     xslt = await stroom.get_doc('XSLT', uuid)

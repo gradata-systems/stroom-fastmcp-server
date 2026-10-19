@@ -607,9 +607,6 @@ async def save_xslt(
             "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
             "processed'."))] = None,
-        agent_model: Annotated[str | None, Field(description=(
-            "The model you are, for the version history, only if your instructions name it: don't guess. "
-            "Once given, remembered for the session."))] = None,
         discard_hand_edit: DiscardHandEdit = False,
         hand_edit_choices: HandEditChoices = None,
 ) -> dict[str, Any]:
@@ -622,8 +619,6 @@ async def save_xslt(
     that undoes it is refused, saying what it changed, to carry into the plan; where the plan changes a field the
     edit changed too, the user is asked whether to keep their edit or use the proposed field.
     """
-    from utils.xsltversion import remember_model
-    remember_model(ctx, agent_model)
     said = change or (('Saved again' if uuid else 'Created') + (' from its index plan' if index_plan and code is None
                                                                 else ' by hand' if code else ''))
     if code is None and index_plan is not None and (build or uuid):

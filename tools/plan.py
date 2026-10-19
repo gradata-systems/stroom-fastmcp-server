@@ -58,7 +58,7 @@ STAGE_1 = [
     ('converter', 'Text converter for the format: build_data_splitter infers the Data Splitter from the sample text (for XML fragments: the wrapper, as the environment writes them)', 'build_data_splitter stream_ids=<the sample streams>, save_text_converter'),
     ('translation', 'Translation XSLT from a mapping: draft it from the sample, decide the action elements, generate and save it with the mapping', 'draft_translation_mapping, build_translation_xslt build=... name=... (uuid=... to replace)'),
     ('pipeline', 'Events pipeline as a child of the right template, with its text converter and XSLT set (create_pipeline fills them from the build; update_pipeline sets a missing one)', 'find_pipeline_templates stage=translation, create_pipeline, update_pipeline'),
-    ('stepped', 'Every sample record stepped clean', 'step_sample over all sample streams; fix the mapping and build_translation_xslt uuid=... in between'),
+    ('stepped', 'Every sample record stepped clean', "step_sample over all sample streams (an existing feed's: step_records over the survey's locations when next gives them); fix the mapping and build_translation_xslt uuid=... in between"),
     ('covered', "An existing feed surveyed until covered: no new kind of event in a full batch, or every stream read; every location stepped clean", 'survey_feed build=..., step_records over every location'),
     ('processed', 'Sample streams processed into Events', 'create_processor_filter, wait_for_processing'),
     ('validated', 'Events validated against the schema and the quality rules', 'check_events'),
@@ -477,7 +477,12 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     cef_only = cef_build and not translation and not indexing and not surveyed
     new_source = not existing and not cef_only
     stage_1 = new_source or bool(translation) or surveyed
-    stage_2 = new_source or bool(indexing) or bool(by_type.get('Index') or by_type.get('ElasticIndex'))
+    # Indexing too when the build onboards an existing feed (surveyed for its events pipeline), as for a new source,
+    # or holds any indexing work (an indexing XSLT saved from its plan comes before the index doc and pipeline). Seen
+    # in Ask Stroom AI: the user asked for an index, and after the events pipeline's documentation, and again after
+    # save_xslt index_plan=, next said "step 9 of 9, promoted".
+    stage_2 = (new_source or surveyed or bool(indexing) or bool(by_type.get('Index') or by_type.get('ElasticIndex'))
+               or any(x['mapping'] == 'index' for x in xslts))
     for p in pipelines:
         if p.get('working_copy_of'):
             # A working copy's documentation is the production pipeline's, under its name.
@@ -601,7 +606,9 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         processing = 'edited'
         kept = await kept_mapping(ctx, translation[0]['uuid'])
         edited = ((kept or {}).get('xslt') or {}).get('uuid')
-    elif nxt and nxt['step'] == 'stepped' and survey:
+    elif nxt and nxt['step'] == 'stepped' and survey and survey.get('locations'):
+        # The survey's locations, when there are few enough to give: else step_sample over its streams, as the plan
+        # says (seen in Ask Stroom AI: 66 locations, and create_pipeline's next said step_records with a placeholder).
         processing = 'surveyed'
     if cef_only or (cef_build and not raw):
         events_ids = events_ids or (f"<recent Events streams from {named} (find_streams stream_type=Events)>")

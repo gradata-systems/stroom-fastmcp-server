@@ -58,6 +58,8 @@ async def test_a_pipeline_this_server_wrote_is_in_the_index_before_the_search_li
     with patch.object(templates, 'gateway_from', lambda ctx: stroom):
         index = await templates._pipeline_index(SimpleNamespace(lifespan_context={}))
     assert sorted(index) == ['a', 'new'] and index['new']['parent_uuid'] == 't'     # one deleted since: left out
+    # And forgotten: seen in the pod log, one an earlier session made and deleted read 4 times ("Document not found").
+    assert stroom.pipelines_written == {'new'}
 
 
 @respx.mock

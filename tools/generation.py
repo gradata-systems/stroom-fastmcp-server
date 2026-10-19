@@ -477,9 +477,6 @@ async def build_translation_xslt(
             "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
             "processed'."))] = None,
-        agent_model: Annotated[str | None, Field(description=(
-            "The model you are, for the version history, only if your instructions name it: don't guess. "
-            "Once given, remembered for the session."))] = None,
         changes: Annotated[dict[str, Any] | str | None, Field(description=(
             "Instead of mapping, to fix one: only what changes, merged into the mapping last sent for this XSLT (the "
             "same uuid, or build and name; else the one saved with uuid). events: rules, each replacing the rule of "
@@ -514,8 +511,6 @@ async def build_translation_xslt(
     stepped over the sample streams.
     """
     version = None
-    from utils.xsltversion import remember_model
-    remember_model(ctx, agent_model)
     target = uuid or (f"{build}/{name}" if build and name else '')
     applied = None
     if changes is not None:

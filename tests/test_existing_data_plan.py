@@ -58,8 +58,8 @@ async def test_an_existing_feed_needs_no_feed_or_upload_before_any_pipeline():
 async def test_a_surveyed_feed_goes_on_to_the_translation_not_a_feed():
     result = await status([_doc('Documentation', 's', 'ACME - Survey')], sources=['ACME'])
     assert result['next']['step'] == 'translation'
-    # Processed where it is, into a test feed the server makes (asked for by the user); indexing is a build of its own.
-    assert states(result)['processed'] == 'to do' and states(result)['index'] == 'not needed'
+    # Processed where it is, into a test feed the server makes (asked for by the user); then indexed, as a new source is.
+    assert states(result)['processed'] == 'to do' and states(result)['index'] == 'to do'
 
 
 async def test_a_new_version_of_an_events_pipeline_steps_production_records():
@@ -122,6 +122,40 @@ async def test_start_build_records_the_existing_feeds_it_works_from():
     assert result['works_from'] == ['ACME'] and recorded.await_args.args[2] == ['ACME']
     # One not here is said, naming the cluster: the user may mean another.
     assert result['not_found'].startswith("No feed named 'NEW' in Stroom 'PROD' (http://s).")
+
+
+async def test_an_onboarded_existing_feed_goes_on_to_indexing_after_its_documentation():
+    # Seen in Ask Stroom AI: the user asked for an index, and after the events pipeline's documentation, and again
+    # after save_xslt index_plan=, next said "step 9 of 9, promoted": a build on an existing feed counted indexing only
+    # once it held an index doc or an indexing pipeline.
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'),
+            _doc('XSLT', 'x', 'ACME-Events'), _doc('Documentation', 'd', 'ACME-Events')]
+    args = dict(sources=['ACME'], stages={'ev': 'translation'}, stepped=True,
+                survey={'saturated': True, 'locations': None, 'streams': [5]})
+    result = await status(docs, mappings={'x': ('translation', {})}, **args)
+    step = states(result)
+    assert step['index'] == step['indexing_pipeline'] == step['indexed'] == step['index_documented'] == 'to do'
+    assert step['index_template'] == 'not needed'     # until the backend is known to be Elasticsearch
+    assert result['next']['progress'].startswith('step 5 of 12, processed')
+    with_plan = await status(docs + [_doc('XSLT', 'ixx', 'ACME - Indexing')],
+                             mappings={'x': ('translation', {}), 'ixx': ('index', {})}, **args)
+    assert states(with_plan)['index'] == 'to do'
+
+
+async def test_indexing_an_existing_feeds_events_counts_from_its_indexing_xslt():
+    # save_xslt index_plan= before the index doc (as the agent did): the indexing steps are counted from then.
+    result = await status([_doc('XSLT', 'ixx', 'ACME - Indexing')], sources=['ACME-EVENTS'],
+                          mappings={'ixx': ('index', {})})
+    assert result['next']['step'] == 'index' and states(result)['indexed'] == 'to do'
+
+
+async def test_a_surveyed_feed_with_more_locations_than_next_can_give_is_stepped_over_its_streams():
+    # Seen in Ask Stroom AI: 66 locations, and create_pipeline's next said step_records with a placeholder for them,
+    # while the plan's step says step_sample.
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'), _doc('XSLT', 'x', 'X')]
+    result = await status(docs, sources=['ACME'], stages={'ev': 'translation'}, mappings={'x': ('translation', {})},
+                          survey={'saturated': True, 'locations': None, 'streams': [5]})
+    assert result['next']['call'] == {'tool': 'step_sample', 'arguments': {'pipeline_uuid': 'ev', 'stream_ids': [5]}}
 
 
 async def test_a_new_sources_survey_of_its_own_feed_keeps_indexing_to_do():

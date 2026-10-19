@@ -182,7 +182,10 @@ def _xml_records(text: str, max_records: int) -> Chunk | None:
     (several root elements, one <Event> per line), the complete fragments themselves."""
     _, fragments = _complete_children('<fragments>' + _XML_DECL.sub('', text, count=1) + '</fragments>', max_records)
     if len(fragments) > 1:
-        return Chunk('xml fragments', [_xml_text(r) for r in fragments], [_xml_fields(r) for r in fragments])
+        # A fragment's own namespace is kept in its text: seen in Ask Stroom AI, Windows events shown without theirs
+        # sent the agent to read_stream to learn what its XSLT must match.
+        return Chunk('xml fragments', [etree.tostring(r, encoding='unicode', with_tail=False) for r in fragments],
+                     [_xml_fields(r) for r in fragments])
     root, records = _complete_children(text, max_records)
     if root is None:
         return None

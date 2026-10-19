@@ -69,3 +69,25 @@ async def test_a_pipeline_stroom_cant_build_is_left_out_of_the_template_search()
         found = await templates.find_pipeline_templates(ctx, 'translation')
     assert [c['name'] for c in found['candidates']] == ['json-in v3']
     assert found['unreadable'][0].startswith('System/Standard Pipelines/State Store Loader: ')
+
+
+async def test_a_pipeline_stroom_cant_build_is_asked_for_once_and_still_said_on_later_searches():
+    # Seen in the pod log: the StateFilter pipeline refused with a 500 five times in a session, by every
+    # find_pipeline_templates call and get_field_conventions calling it.
+    index = {'t': {'uuid': 't', 'name': 'json-in v3', 'path': 'Acme/Bases', 'parent_uuid': None},
+             'b': {'uuid': 'b', 'name': 'State Store Loader', 'path': 'System/Standard Pipelines', 'parent_uuid': None}}
+    asked = []
+
+    async def shape(stroom, uuid, markers=None):
+        asked.append(uuid)
+        if uuid == 'b':
+            raise ToolError('Stroom rejected the request (500): Element type "StateFilter" is unknown')
+        return {'stage': 'translation', 'backend': None, 'parser': 'JSONParser', 'properties': {},
+                'child_must_supply': [{'element': 'translationFilter', 'property': 'xslt'}]}
+    ctx = SimpleNamespace(lifespan_context={'policy': AccessPolicy()})
+    with patch.object(templates, '_pipeline_index', AsyncMock(return_value=index)), \
+            patch.object(templates, 'gateway_from', lambda c: None), patch.object(templates, '_shape', shape):
+        first = await templates.find_pipeline_templates(ctx, 'translation')
+        again = await templates.find_pipeline_templates(ctx, 'translation')
+    assert asked.count('b') == 1 and asked.count('t') == 2
+    assert again['unreadable'] == first['unreadable'] and 'StateFilter' in again['unreadable'][0]
