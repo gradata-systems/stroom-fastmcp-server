@@ -6,6 +6,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from security.guard import explorer_path
 from utils.params import ONE_OR_MORE
 from utils.stroom import RESOURCES, gateway_from
 
@@ -38,8 +39,9 @@ async def find_documents(
 ) -> dict[str, Any]:
     """
     Find Stroom documents by name and type (or by text in their content), returning each one's type, UUID,
-    name and folder path. Start here to locate feeds, pipelines, XSLTs, template pipelines or existing
-    Elastic indices, and, with content, translations of similar sources to reuse ideas from.
+    name and folder path (/Feeds/Events/Acme: the explorer's root, System, left out, as Stroom's folder tools take
+    it; this server's tools take it with or without). Start here to locate feeds, pipelines, XSLTs, template
+    pipelines or existing Elastic indices, and, with content, translations of similar sources to reuse ideas from.
     """
     if content:
         body = await gateway_from(ctx).post('/explorer/v2/findInContent', {
@@ -51,10 +53,10 @@ async def find_documents(
             ref = match.get('docRef') or {}
             if not types or ref.get('type') in types:
                 matches.append({'type': ref.get('type'), 'uuid': ref.get('uuid'), 'name': ref.get('name'),
-                                'path': (value.get('path') or '').replace(' / ', '/'), 'sample': (match.get('sample') or '')[:300]})
+                                'path': explorer_path(value.get('path')), 'sample': (match.get('sample') or '')[:300]})
         return {'content': content, 'documents': matches[:limit]}
     body = await gateway_from(ctx).find_documents(name, list(types) if types else None, limit)
-    documents = [{**v['docRef'], 'path': v.get('path')} for v in body.get('values', [])]
+    documents = [{**v['docRef'], 'path': explorer_path(v.get('path'))} for v in body.get('values', [])]
     if types:
         # Stroom also returns the folders that contain a match; keep only what was asked for.
         documents = [d for d in documents if d.get('type') in types]

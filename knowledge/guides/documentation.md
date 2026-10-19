@@ -86,8 +86,13 @@ where they say, building on the schemas where they fit: a `subject` Data value u
 "Subject line of the email sent"; a CEF custom slot (`cs1`, deviceCustomString1) is what this source puts in it, and
 is described for each kind of event (`View: cs1`). Where the values don't make it clear, say what they look like and
 that the meaning is unconfirmed. Until a field is described, the doc shows the first of those that says anything of it, the vendor's first. Call again with the
-same arguments plus `field_descriptions={field: description}` (and any ids the reply gives). They are kept with the
-documentation: an update asks only for fields new since, and a description given again replaces the kept one.
+same arguments plus `field_descriptions={field: description}`, each field as the reply names it (and any ids the
+reply gives). A Data value read from the same source under several elements is asked once, by its name
+(`Data[@Name='Folder']`, with `under` listing the elements): one description covers it under all of them; where it
+means something else under one, describe that one by its full path too. A row of event types shown together is
+asked by the path the table shows (`EventDetail/(Authenticate|Process)/Action`). They are kept with the
+documentation: an update asks only for fields new since, and a description given again replaces the kept one. The
+reply says whether the doc was `created` or `updated` (`written`).
 
 ### What the section holds (indexing pipelines)
 

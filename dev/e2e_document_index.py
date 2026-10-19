@@ -172,7 +172,7 @@ async def nothing_feeds(ctx, stroom, es: httpx.AsyncClient, stamp: str) -> None:
     rewritten = await e2e.agreed(builds.write_documentation, ctx=ctx, build=again, index_uuid=doc['uuid'],
                                  change='Surveyed again',
                                  markdown='## Purpose and data\n\nWeb access logs, surveyed again.\n')
-    e2e.check(rewritten['updated'] and rewritten['uuid'] != written['uuid'], 'drafted as a working copy in the new build')
+    e2e.check(rewritten['written'].startswith('created, as a working copy') and rewritten['uuid'] != written['uuid'], 'drafted as a working copy in the new build')
     result = await e2e.agreed(builds.promote_build, ctx=ctx, build=again, destinations={})
     print(f"    {result.get('promoted')}")
     found = (await stroom.find_documents(index, ['Documentation'], 20)).get('values') or []

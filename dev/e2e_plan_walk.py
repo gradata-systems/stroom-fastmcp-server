@@ -331,8 +331,7 @@ class Walk:
             elif call['tool'] == 'create_processor_filter':
                 result = await run(self.ctx, 'create_processor_filter', **fill(call))
                 # Not verified yet: promotion's approval would say so.
-                gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations(),
-                                             reviewed=True)
+                gate = await self._promotion_approval()
                 check(any('has not been indexed and verified' in w for w in gate['details'].get('warnings') or []),
                       "promoting now: the approval warns the sample isn't indexed and verified")
             elif call['tool'] == 'wait_for_processing':
@@ -404,8 +403,7 @@ class Walk:
         set_body_text(doc, written)
         await stroom.put_doc(doc)
         try:
-            gate = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations(),
-                                             reviewed=True)
+            gate = await self._promotion_approval()
             warnings = gate['details'].get('warnings') or []
             check(gate.get('status', '').startswith('needs_approval') or 'approval_id' in json.dumps(gate),
                   'a hand edit: the approval is still offered')
@@ -417,6 +415,12 @@ class Walk:
             await stroom.put_doc(restored)
 
     # -------------------------------------------------------------------------------------------------------
+
+    async def _promotion_approval(self) -> dict:
+        """promote_build's approval, as after the user has seen the layout: its review, then the call with its id."""
+        review = await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations())
+        return await TOOLS['promote_build'](self.ctx, build=self.build, destinations=self._destinations(),
+                                            reviewed=review['review_id'])
 
     def _destinations(self) -> dict:
         folder = f'System/Walk Promoted {self.stamp}/{self.path}'

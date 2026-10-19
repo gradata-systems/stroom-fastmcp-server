@@ -61,8 +61,9 @@ for the event type, not the convention profile's `user.name`), fields it has no 
 template then follows its field types (`ignore_above`, sub-fields, date formats), its objects (`"type": "object"`,
 object-level `dynamic`) and its settings. The example's own fields this source doesn't write are listed, not copied.
 Before they confirm it, the user sees it whole: the template first comes back as `needs_review`, its Dev Tools
-request to show in the chat as a code block; called again with `reviewed=true`, the form is a short summary (name,
-pattern and priority, settings, fields and types). They confirm it, or correct it (`check_index_template`); once
+request to show in the chat as a code block, with a `review_id`; called again with `reviewed=<review_id>` (not
+`true`: a template that changes gets a new id, to show again), the form is a short summary (name, pattern and
+priority, settings, fields and types). They confirm it, or correct it (`check_index_template`); once
 they say the cluster admin has committed it, `create_processor_filter` starts indexing once the user approves it
 (the approval confirms the template is committed). An alias in the example
 becomes a field when the pipeline writes that field (documents can't write to an alias), typed as its target.

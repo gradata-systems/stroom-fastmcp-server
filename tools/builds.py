@@ -1,6 +1,5 @@
 """Tools for builds: the workspace folder, Documentation docs, and promotion out of the workspace."""
 import asyncio
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -26,7 +25,7 @@ from utils.mappingstore import (DOC_MARK, digest, doc_digest, normalise_xslt, re
 from utils.xsltgen import TranslationMapping, generate
 from utils import useractions
 from utils.accepted import entry as accepted_entry, merge as merge_accepted, read_accepted
-from utils.consent import consent_from
+from utils.consent import consent_from, review_id, review_note, was_reviewed
 from utils.params import ONE_OR_MORE
 from utils.stroom import body_text, doc_link, gateway_from, refused_reason, set_body_text
 
@@ -570,9 +569,10 @@ async def write_documentation(
                         "left as it is. Its sections are the report's, nothing generated.")] = False,
         field_descriptions: Annotated[dict[str, str] | str, Field(
             description="What each field means for this source, {field: description}, when a needs_descriptions reply "
-                        "asks: inferred from its name, where it comes from and its sample values (and the user's "
-                        "source notes). Kept with the documentation, so later updates ask only for new fields; give "
-                        "one again to change it.")] = {},
+                        "asks, each field as the reply names it: inferred from its name, where it comes from and its "
+                        "sample values (and the user's source notes). A Data name (Data[@Name='x']) covers it under "
+                        "every element; a full path, that one row. Kept with the documentation, so later updates ask "
+                        "only for new fields; give one again to change it.")] = {},
         field_mapping_layout: Annotated[str | None, Field(
             description="Only when the user asks for a layout: 'by_event_type' (a table of the fields every event "
                         "type has, then a section with a table per event type) or 'compact' (the common fields, then "
@@ -751,7 +751,7 @@ async def write_documentation(
         doc = await guard.create_filled('Documentation', name, build, write, role=await pipeline_role(stroom, pipeline_uuid))
     if not copy_of and not any(d['uuid'] == pipeline_uuid for d in in_build) and beside:
         # Not the build's plan (it has no pipeline of its own to make): what happens to this doc.
-        return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': True,
+        return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'written': _written(existing, beside),
                 'working_copy_of': {k: beside[k] for k in ('type', 'uuid', 'name')},
                 'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
                 **({'field_mapping': generated_section} if generated_section else {}),
@@ -759,12 +759,19 @@ async def write_documentation(
                         f"working copy in build '{build}'. Give the user the link to review it; promote_build "
                         f"build='{build}' (approved by the user) writes it back over the promoted doc, after a backup."}
     from tools.plan import with_next
-    return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing),
+    return await with_next(ctx, build, {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'written': _written(existing, beside),
                                         'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
                                         **useractions.actions(useractions.open_document(
                                             stroom.settings, {**doc, 'type': 'Documentation'}, 'review it')),
                                         **({'field_mapping': generated_section} if generated_section else {}),
                                         **({'note': '; '.join(noted)} if noted else {})})
+
+
+def _written(existing: Any, beside: Any = None) -> str:
+    """What became of the documentation doc, said plainly: seen, a doc just created came back as updated: false, and
+    the agent spent two or three calls checking it had been written."""
+    return ('updated' if existing else
+            'created, as a working copy of the promoted doc (written back over it at promotion)' if beside else 'created')
 
 
 async def _raw_parents(stroom, stream_ids: list[int], pipeline_uuid: str) -> tuple[list[int], list[str]]:
@@ -822,7 +829,9 @@ async def _vendor_notes(ctx: Context, build: str) -> list[dict[str, Any]]:
 def needs_descriptions(described: Descriptions, **ids: str) -> dict[str, Any]:
     """The round asking the agent what each field means (asked for by the user: the schema's generic words, or 'the
     x value recorded in a Data element of Send', add nothing a reader can't see for themselves)."""
-    return {'status': 'needs_descriptions', 'fields': list(described.wanted.values()), **ids,
+    fields = list(described.wanted.values())
+    shared = any(f.get('under') for f in fields)
+    return {'status': 'needs_descriptions', 'fields': fields, **ids,
             'hint': "Nothing is written yet. For each field, say in one short sentence what it means for this source, "
                     "for someone searching or reading the data: infer it from the field's name, where it comes from "
                     "(from) and its sample values, and the user's source notes where they say. E.g. a Data value "
@@ -833,9 +842,12 @@ def needs_descriptions(described: Descriptions, **ids: str) -> dict[str, Any]:
                     "they fit this source, the vendor's first, and use them "
                     "where its values add nothing; never only repeat their generic words, nor where it comes from, "
                     "which the table shows. Where the values don't make the meaning clear, say what they look like "
-                    "and that its meaning is unconfirmed, rather than guess. Then call write_documentation again with the "
-                    "same arguments plus field_descriptions={field: description}" + (", and the ids given here" if ids
-                                                                                      else '') + "."}
+                    "and that its meaning is unconfirmed, rather than guess."
+                    + (" A field named Data[@Name='x'] is a Data value read from the same source under every element "
+                       "in under: one description covers it under all of them (only where it means something else "
+                       "under one, describe that one by its full path too)." if shared else '')
+                    + " Then call write_documentation again with the same arguments plus "
+                      "field_descriptions={field: description}" + (", and the ids given here" if ids else '') + "."}
 
 
 async def _layout(ctx: Context, ref: dict[str, str], asked: str | None) -> tuple[str, list[str]]:
@@ -989,7 +1001,7 @@ async def _document_index(ctx: Context, build: str, index_uuid: str, body: str, 
     destination = (f"written back into the existing doc beside the index doc ({folder}), after a backup" if beside
                    else f"beside the index doc ({folder}) unless they choose another folder "
                         f"(destinations={{'Documentation': '<folder>'}})")
-    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
+    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'written': _written(existing, beside),
             'link': doc_link(stroom.settings, 'Documentation', doc['uuid']), 'index': survey['index'],
             'field_mapping': section, 'data_surveyed': summary,
             **({'not_in_index': missing, 'note': (
@@ -1049,7 +1061,7 @@ async def _write_evaluation(ctx: Context, build: str, pipeline_uuid: str, body: 
         doc = await write(made)
     else:
         doc = await guard.create_filled('Documentation', name, build, write, role=await pipeline_role(stroom, pipeline_uuid))
-    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'updated': bool(existing or beside),
+    return {'type': 'Documentation', 'uuid': doc['uuid'], 'name': doc['name'], 'written': _written(existing, beside),
             'link': doc_link(stroom.settings, 'Documentation', doc['uuid']),
             'hint': f"Give the user the link. Once they approve, promote_build puts it beside pipeline "
                     f"'{target['name']}'" + (" (over the earlier report, after a backup)" if beside else '') + "."}
@@ -1229,14 +1241,17 @@ async def promote_build(
         build: Build,
         destinations: Annotated[dict[str, str], Field(
             description="Destination folder per document type or per document UUID, e.g. {'Feed': "
-                        "'System/Feeds/Events/Acme', 'Pipeline': 'System/Feeds/Events/Acme', 'XSLT': ...}. "
-                        "Working copies ignore this: they are written back over their originals. A new version of a "
-                        "production document (copy_pipeline) goes in a version subfolder beside it unless given here. "
-                        "'keep' for a document UUID leaves it in the build's workspace folder, not promoted (a test "
-                        "feed made while fixing, say).")] = {},
-        reviewed: Annotated[bool, Field(description="True once the user has been shown the layout (the tree a "
-                                                    "needs_review reply gives) in the chat and confirmed it: they then "
-                                                    "approve it in a short form.")] = False,
+                        "'/Feeds/Events/Acme', 'Pipeline': '/Feeds/Events/Acme', 'XSLT': ...}: an explorer path, "
+                        "with or without the root System ('System / Feeds / Events', as find_documents once gave it, "
+                        "works too). Working copies ignore this: they are written back over their originals. A new "
+                        "version of a production document (copy_pipeline) goes in a version subfolder beside it "
+                        "unless given here. 'keep' for a document UUID leaves it in the build's workspace folder, not "
+                        "promoted (a test feed made while fixing, say). Documents with no destination are named all "
+                        "at once.")] = {},
+        reviewed: Annotated[str | bool | None, Field(
+            description="The review_id of the needs_review reply, once the user has been shown its layout in the chat "
+                        "and confirmed it: they then approve it in a short form. Not true: a layout that changes "
+                        "(other destinations) gets a new id, to show again.")] = None,
         role_subfolders: Annotated[bool, Field(
             description="Keep the build's role subfolders (Events or Records, Indexing, CEF, Reference) under each "
                         "destination, as the layout shows them by default; false puts each document straight in its "
@@ -1246,11 +1261,12 @@ async def promote_build(
     """
     Promote a build out of the workspace, after the user has seen where everything goes and approved it. The first
     call returns the layout as a tree (needs_review) to show in the chat; once the user confirms it (or after the
-    destinations they asked for), call again with reviewed=true for a short approval bound to that layout. New
-    documents are moved to their destination folders (UUIDs are kept, so filters and references keep working); a
-    new version of a production pipeline (copy_pipeline) goes in a version subfolder beside its predecessor, with
-    its index, documentation and dashboard; destination folders that don't exist yet are created first. A working copy is written back over its
-    original after the original is backed up to <workspace>/backups, then the copy is deleted. The build's
+    destinations they asked for), call again with reviewed=<its review_id> for a short approval bound to that layout.
+    Documents with no destination are named all at once, to ask the user about together. New documents are moved
+    to their destination folders (UUIDs are kept, so filters and references keep working); a new version of a
+    production pipeline (copy_pipeline) goes in a version subfolder beside its predecessor, with its index,
+    documentation and dashboard; destination folders that don't exist yet are created first. A working copy is
+    written back over its original after the original is backed up to <workspace>/backups, then the copy is deleted. The build's
     workspace folder is removed afterwards if nothing is left in it. What build_status says is missing goes in the
     approval, except documentation the build's own change left behind: write_documentation again first (once
     promoted, documentation only changes through a working copy).
@@ -1273,6 +1289,7 @@ async def promote_build(
     # filters name the feeds it works from (seen in VS Code: the promoted filter selected the test feed).
     sources = await source_feeds(ctx, build, docs)
     plan = []
+    unplaced: list[dict[str, Any]] = []     # every document with no destination, said at once
     for doc in docs:
         beside_production = False
         if doc['working_copy_of'] and doc['type'] == 'Pipeline':
@@ -1331,12 +1348,22 @@ async def promote_build(
                 target = await _folder_of(stroom, outside[0]) if len(outside) == 1 else None
                 beside_production = bool(target)
             if not target:
-                raise ToolError(f"No destination for {doc['type']} '{doc['name']}'; add it to destinations")
+                unplaced.append(doc)
+                continue
             target = '/'.join(folder_parts(target))
             if doc['uuid'] not in destinations and doc['type'] != 'Feed' and target in joins:
                 target = joins[target]          # with the version it belongs to
             plan.append({'doc': doc, 'action': 'move', 'target': target,
                          'role': doc.get('role') if doc['uuid'] not in destinations and not beside_production else None})
+    if unplaced:
+        # Seen (Delinea SecretServer): raised one document at a time, the Dashboard's, then the TextConverter's, a
+        # failed call each.
+        placed = sorted({p['target'] for p in plan if p['action'] == 'move'})
+        raise ToolError("No destination for " + '; '.join(f"{d['type']} '{d['name']}' ({d['uuid']})" for d in unplaced)
+                        + ". Add each to destinations, by type (" + ', '.join(sorted({d['type'] for d in unplaced}))
+                        + ": a folder) or by document uuid (a folder, or 'keep' to leave it in the workspace), where "
+                          "the user wants it; a folder is an explorer path, e.g. /Feeds/Events/Acme"
+                        + (f". The others have one: {', '.join(placed)}" if placed else '') + ". Nothing was changed.")
     # The build's role subfolders kept in production (asked for by the user), unless they say otherwise: where they
     # tell stages apart, so only when it promotes documents of more than one role (an index documented, or a new
     # indexing version, is all Indexing: a subfolder there only adds a level).
@@ -1388,10 +1415,11 @@ async def promote_build(
             for e in processing]
     tree = await promotion_tree(stroom, plan, creating)
     roles = len(roles_moved) > 1          # the question applies: documents of several roles
-    if not reviewed and not approval_id:
+    if not was_reviewed(reviewed, tree) and not approval_id:
         # Shown in the chat first: a list of moves crammed into a form was hard to read, and where things would go
-        # wasn't plain (asked for by the user).
-        return {'status': 'needs_review', 'build': build, 'layout': tree,
+        # wasn't plain (asked for by the user). Passed on only with this layout's id (seen: reviewed=true on the
+        # first call, and the user approved a form whose layout was never shown).
+        return {'status': 'needs_review', 'build': build, 'layout': tree, 'review_id': review_id(tree),
                 **({'warnings': details['warnings']} if details.get('warnings') else {}),
                 **({'processing_after_promotion': details[PROCESSING]}
                    if processing else {}),
@@ -1401,13 +1429,14 @@ async def promote_build(
                         + ("; and whether to keep the build's role subfolders under each destination, as shown "
                            "(role_subfolders=false puts each document straight in its folder: show the tree again)"
                            if roles else '')
-                        + ". Then promote_build again with the same destinations"
-                        + (" and role_subfolders" if roles else '') + " and reviewed=true: they approve it in a "
-                        "short form."}
+                        + ". Once they confirm it, promote_build again with the same destinations"
+                        + (" and role_subfolders" if roles else '') + f" and reviewed='{review_id(tree)}' (this "
+                        "layout's review_id): they approve it in a short form. If they change something, call again "
+                        "with their changes and no reviewed: the new layout is shown the same way."
+                        + review_note(reviewed)}
     # The form stays short; the approval is bound to the exact layout shown, through its digest.
     promoting = sum(1 for p in plan if p['action'] in ('move', 'write back'))
-    short = {'build': build, 'layout': f"{promoting} document(s), as shown in the chat "
-                                       f"({hashlib.sha256(tree.encode()).hexdigest()[:12]})",
+    short = {'build': build, 'layout': f"{promoting} document(s), as shown in the chat ({review_id(tree)})",
              'folders': sorted({p['target'] for p in plan if p['action'] == 'move'}),
              **({'role subfolders': 'kept under each destination' if role_subfolders else 'not kept'} if roles else {}),
              **({'warnings': details['warnings']} if details.get('warnings') else {}),

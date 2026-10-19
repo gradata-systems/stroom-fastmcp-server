@@ -606,6 +606,65 @@ def test_each_field_is_described_from_its_meaning_not_the_schemas_generic_words(
     assert '--' not in block.split('\n', 1)[1].rsplit('\n', 1)[0] and read_descriptions(f'# Doc\n\n{block}\n') == {'a': 'x -- y'}
 
 
+def test_a_data_name_is_asked_once_and_a_shared_row_by_its_own_path():
+    # Seen (Delinea SecretServer): 224 fields asked, 18 Data names once per action element, and rows of event types
+    # shown together asked under the first type's path (Process/Action's values as Authenticate/Action).
+    from utils.fielddoc import Descriptions, field_mapping_markdown
+    from utils.xsltgen import TranslationMapping
+
+    def data(action, name, field):
+        return {'path': f'EventDetail/{action}/Data', 'data_name': name, 'field': field}
+    m = TranslationMapping.model_validate({'input': 'data_splitter', 'unmatched': 'skip', 'common': [], 'events': [
+        {'name': 'login', 'when': [{'field': 'a', 'equals': 'login'}], 'fields': [
+            {'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'},
+            {'path': 'EventDetail/Authenticate/User/Id', 'field': 'user'},
+            data('Authenticate', 'Folder', 'folder'), data('Authenticate', 'Result', 'result')]},
+        {'name': 'checkout', 'when': [{'field': 'a', 'equals': 'checkout'}], 'fields': [
+            {'path': 'EventDetail/Process/Action', 'value': 'Access'},
+            {'path': 'EventDetail/Process/User/Id', 'field': 'user'},
+            data('Process', 'Folder', 'folder'), data('Process', 'Result', 'result')]},
+        {'name': 'view', 'fields': [{'path': 'EventDetail/View/Object/Id', 'field': 'id'},
+                                    data('View', 'Folder', 'folder'), data('View', 'Result', 'outcome')]}]})
+    asking = Descriptions(ask=True)
+    field_mapping_markdown(m, SCHEMA, described=asking)
+    assert sorted(asking.wanted) == [
+        "Data[@Name='Folder']", 'EventDetail/(Authenticate|Process)/Action',
+        "EventDetail/(Authenticate|Process)/Data[@Name='Result']/@Value", 'EventDetail/(Authenticate|Process)/User/Id',
+        "EventDetail/View/Data[@Name='Result']/@Value", 'EventDetail/View/Object/Id']     # Result: read from two fields
+    assert asking.wanted["Data[@Name='Folder']"]['under'] == ['EventDetail/(Authenticate|Process)', 'EventDetail/View']
+    assert asking.wanted["Data[@Name='Folder']"]['from'] == '`folder`'
+    # One description covers the name everywhere; one by full path wins for its row; an older doc's, kept under the
+    # first type's path, still covers the row it was given for.
+    given = Descriptions({"Data[@Name='Folder']": 'Folder holding the secret.',
+                          "EventDetail/View/Data[@Name='Folder']/@Value": 'Folder of the secret viewed.',
+                          'EventDetail/Authenticate/Action': 'What the user did.'}, ask=True)
+    text = field_mapping_markdown(m, SCHEMA, described=given)
+    assert "| `EventDetail/(Authenticate\\|Process)/Data[@Name='Folder']/@Value` | Folder holding the secret. |" in text
+    assert "| `EventDetail/View/Data[@Name='Folder']/@Value` | Folder of the secret viewed. |" in text
+    assert '| `EventDetail/(Authenticate\\|Process)/Action` | What the user did. |' in text
+    assert "Data[@Name='Folder']" not in given.wanted and 'EventDetail/(Authenticate|Process)/Action' not in given.wanted
+
+
+async def test_a_new_documentation_doc_says_plainly_it_was_created():
+    # Seen (Delinea SecretServer): a doc just created came back as updated: false, and the agent spent two or three
+    # calls checking it had been written.
+    docs = {'p': {'uuid': 'p', 'name': 'ACME-Events'}, 'd': {'uuid': 'd', 'name': 'ACME-Events - Evaluation', 'data': ''}}
+    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda kind, uuid: docs[uuid]),
+                             put_doc=AsyncMock(side_effect=lambda doc: doc),
+                             find_documents=AsyncMock(return_value={'values': []}),
+                             settings=SimpleNamespace(stroom_ui_url=None, stroom_url='http://s'))
+
+    async def create_filled(kind, name, build, fill, **kw):
+        return await fill({'uuid': 'd'})
+    guard = SimpleNamespace(copy_of=AsyncMock(return_value=None), create_filled=create_filled)
+    with patch.object(builds, 'guard_from', lambda c: guard), patch.object(builds, '_build_docs', AsyncMock(return_value=[])), \
+            patch.object(builds, '_folder_of', AsyncMock(return_value='System/Feeds/Acme')), \
+            patch('tools.templates.pipeline_role', AsyncMock(return_value='Events')):
+        made = await builds.write_documentation(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b', 'p',
+                                                '## Findings\n\nClean.\n', evaluation=True)
+    assert made['written'] == 'created' and 'updated' not in made
+
+
 async def test_write_documentation_asks_for_descriptions_before_writing_anything():
     ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(
         get_doc=AsyncMock(return_value={'name': 'Acme', 'uuid': 'p', 'data': '## Field mapping\n\n<!-- stroom-mcp field '

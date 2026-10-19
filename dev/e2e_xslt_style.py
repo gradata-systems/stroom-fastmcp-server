@@ -300,11 +300,11 @@ async def run(ctx, stroom: StroomGateway, stamp: str) -> None:
     e2e.check(shown.get('status') == 'needs_review' and 'Their values suggest' in shown.get('show_user', '')
               and "Records rule `traffic` matches" in shown.get('show_user', ''),
               f"the user is shown the records, told what the values suggest:\n{shown.get('show_user')}")
-    asked = await generation.build_translation_xslt(**keep, reviewed=True)
+    asked = await generation.build_translation_xslt(**keep, reviewed=shown['review_id'])
     e2e.check(asked.get('status') == 'needs_confirmation'
               and asked['summary'] == 'Translate the records shown in the chat as Unknown events',
               f"then a short form: {asked.get('summary')}")
-    kept = await generation.build_translation_xslt(**keep, reviewed=True, confirmation_id=asked['confirmation_id'])
+    kept = await generation.build_translation_xslt(**keep, reviewed=shown['review_id'], confirmation_id=asked['confirmation_id'])
     e2e.check(kept['ok'] and kept.get('saved'), 'kept as Unknown once the user agrees')
     pipeline = await pipeline_for(ctx, build, f'{feed}-unknown-Events', template['uuid'], tc['uuid'], kept['saved']['uuid'])
     sample = await stepping.step_sample(ctx, pipeline['uuid'], [raw])

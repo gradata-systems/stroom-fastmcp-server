@@ -294,7 +294,7 @@ async def agreed(call, **kwargs):
             # confirmed in a form.
             shown = result.get('layout') or result.get('dev_tools') or result.get('show_user') or ''
             print(f"    needs_review:\n" + '\n'.join(f'      {line}' for line in shown.splitlines()[:30]))
-            kwargs['reviewed'] = True
+            kwargs['reviewed'] = result['review_id']     # the id of what was shown: true is no review
             continue
         key = 'confirmation_id' if result['status'] == 'needs_confirmation' else 'approval_id'
         print(f"    {result['status']}: {result['summary']}")

@@ -22,7 +22,7 @@ from tools.pipelines import merge_layers
 from tools.stepping import _outputs, _Pipeline, remember_verified
 from tools.streams import _meta, summarise_events
 from tools.templates import _shape
-from utils.consent import consent_from, edited
+from utils.consent import consent_from, edited, review_id, review_note, was_reviewed
 from utils.fielddoc import index_field_mapping_markdown
 from utils.fieldplan import Backend, Discovery, FieldPlan, PlannedField, any_action, population_of, source_matches
 from utils.xsltgen import SharedTemplate
@@ -2005,7 +2005,7 @@ def _template_summary(name: str, body: dict[str, Any], components: dict[str, Any
 
 async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dict[str, Any], name: str,
                  body: dict[str, Any], components: dict[str, Any], notes: list[str],
-                 confirmation_id: str | None, reviewed: bool = False) -> Any:
+                 confirmation_id: str | None, reviewed: str | bool | None = None) -> Any:
     """The user reviews the index template in the chat, then confirms it in a short form; once they have, it is
     kept with the pipeline as the agreed one, which create_processor_filter asks them to confirm is committed to the
     cluster. None once agreed."""
@@ -2026,15 +2026,17 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
         # Already agreed, as it is: seen in Ask Stroom AI, the template the user had agreed was checked again once
         # committed, and they were asked to review and confirm it a second time.
         return None
-    if not reviewed:
-        return {'status': 'needs_review', 'dev_tools': dev_tools,
+    if not was_reviewed(reviewed, dev_tools):
+        # Passed on only with this template's id, as promote_build's layout (seen there: reviewed=true from the start).
+        return {'status': 'needs_review', 'dev_tools': dev_tools, 'review_id': review_id(dev_tools),
                 'hint': f"Show the user this index template before anything else: dev_tools in the chat as a json code "
                         f"block, exactly as it is (a form can't show it readably), with the notes on what came from "
                         f"where, and say it is not to go on the cluster until they've confirmed it. Then, in the same "
                         f"turn, without waiting for a reply, call {action} again with the same arguments (example_template "
-                        f"and component_templates included) plus reviewed=true: the form that opens is where they "
-                        f"confirm it or say what to change. Seen: an agent ended its turn after showing it, and the user "
-                        f"committed the template before it was agreed."}
+                        f"and component_templates included) plus reviewed='{review_id(dev_tools)}' (this template's "
+                        f"review_id): the form that opens is where they confirm it or say what to change. Seen: an "
+                        f"agent ended its turn after showing it, and the user committed the template before it was "
+                        f"agreed." + review_note(reviewed)}
     gate = await consent_from(ctx).require(
         ctx, 'confirmation', action, f"Use Elasticsearch index template '{name}' for index "
         f"'{destination['index name']}' (cluster {destination['cluster']}), as shown in the chat",
@@ -2091,8 +2093,10 @@ async def propose_index_template(
         without_example: Annotated[bool, Field(
             description="Only when the user has said they have no example: the template is built from the field plan "
                         "alone, and they confirm it as shown.")] = False,
-        reviewed: Annotated[bool, Field(description="True once the user has been shown the template (dev_tools) in the "
-                                                    "chat, after a needs_review reply: they then confirm it in a form.")] = False,
+        reviewed: Annotated[str | bool | None, Field(
+            description="The review_id of the needs_review reply, once the user has been shown its template "
+                        "(dev_tools) in the chat: they then confirm it in a form. Not true: a template that changes "
+                        "gets a new id, to show again.")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -2211,8 +2215,10 @@ async def check_index_template(
             description="Only when the user can't give some of the example's component templates: their names. The "
                         "template is then built without their fields, which it may repeat or contradict.")] = [],
         max_records: Annotated[int, Field(ge=1, le=500)] = 50,
-        reviewed: Annotated[bool, Field(description="True once the user has been shown the template (dev_tools) in the "
-                                                    "chat, after a needs_review reply: they then confirm it in a form.")] = False,
+        reviewed: Annotated[str | bool | None, Field(
+            description="The review_id of the needs_review reply, once the user has been shown its template "
+                        "(dev_tools) in the chat: they then confirm it in a form. Not true: a template that changes "
+                        "gets a new id, to show again.")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """

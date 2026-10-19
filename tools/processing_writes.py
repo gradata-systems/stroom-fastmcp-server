@@ -703,7 +703,7 @@ async def agreement_problem(stroom: StroomGateway, pipeline: dict[str, Any], des
                 f"pipeline_uuid={pipeline['uuid']} with the field plan, the Events streams and example_template= the "
                 f"example index template (or index mapping) the user gave, exactly as they pasted it, with any component "
                 f"templates it is composed of; the user confirms the result in a form. If you showed them a template "
-                f"for review (needs_review) and they've replied, that is the same call with reviewed=true, nothing "
+                f"for review (needs_review) and they've replied, that is the same call with reviewed=<its review_id>, nothing "
                 f"left out: the form is still to come. Without an example, ask the user for one first. A template put "
                 f"on the cluster without that agreement does not count (if they've committed it already, it needs "
                 f"agreeing all the same, and recommitting only if they change it). Until it is "

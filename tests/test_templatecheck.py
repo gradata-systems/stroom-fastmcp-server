@@ -371,10 +371,10 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
                                                       component_templates=COMPONENTS)
         assert shown['status'] == 'needs_review' and read_agreed_template(saved['description']) is None
         assert shown['dev_tools'].startswith('PUT _index_template/ecs-acme-v2\n{\n  ')
-        assert 'json code block' in shown['hint'] and 'reviewed=true' in shown['hint']
+        assert 'json code block' in shown['hint'] and f"reviewed='{shown['review_id']}'" in shown['hint']
         # Then confirmed in a short form: lines, not the JSON.
         asked = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
-                                                      component_templates=COMPONENTS, reviewed=True)
+                                                      component_templates=COMPONENTS, reviewed=shown['review_id'])
         assert asked['status'] == 'needs_confirmation'
         assert asked['summary'] == ("Use Elasticsearch index template 'ecs-acme-v2' for index 'ecs-acme-v2' (cluster "
                                     "ES_DEV), as shown in the chat")
@@ -384,7 +384,7 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         assert '{' not in json.dumps({k: v for k, v in details.items() if k != 'notes'}).replace('{"', '').replace('"}', '')
         assert 'check_index_template with their version' in asked['hint']
         agreed = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
-                                                       component_templates=COMPONENTS, reviewed=True,
+                                                       component_templates=COMPONENTS, reviewed=shown['review_id'],
                                                        confirmation_id=asked['confirmation_id'])
         assert agreed['agreed'] and 'commit to the cluster' in agreed['hint']
         # As a button for the cluster admin to copy (asked for by the user): the request exactly as agreed.
@@ -404,13 +404,19 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         # The user corrects it (a higher priority): their version is confirmed and replaces the agreed one.
         corrected = {**agreed['template'], 'priority': 500}
         text = f"PUT _index_template/ecs-acme-v2\n{json.dumps(corrected)}"
+        # Reviewed only as shown: the first template's id, or true, is no review of this one.
+        first = shown['review_id']
+        for reviewed in (True, first):
+            stale = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS,
+                                                        reviewed=reviewed)
+            assert stale['status'] == 'needs_review' and stale['review_id'] != first, reviewed
         shown = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS)
         assert shown['status'] == 'needs_review' and '"priority": 500' in shown['dev_tools']
         asked = await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS,
-                                                    reviewed=True)
+                                                    reviewed=shown['review_id'])
         assert asked['status'] == 'needs_confirmation' and '(priority 500)' in asked['details']['applies to']
-        await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS, reviewed=True,
-                                            confirmation_id=asked['confirmation_id'])
+        await indexing.check_index_template(context, 'p1', text, [8], component_templates=COMPONENTS,
+                                            reviewed=shown['review_id'], confirmation_id=asked['confirmation_id'])
         assert json.loads(read_agreed_template(saved['description'])['dev_tools'].split('\n', 1)[1])['priority'] == 500
         assert saved['description'].count('<!-- stroom-mcp agreed index template: kept by the server') == 1
 

@@ -1,5 +1,4 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
-import hashlib
 import re
 import json
 from typing import Annotated, Any, Literal
@@ -12,7 +11,7 @@ from tools.instructions import applicable_instructions
 from utils.eventschema import EventSchema
 from utils.params import ONE_OR_MORE
 from utils.schemas import SchemaCache, event_logging_system_id, event_logging_version
-from utils.consent import consent_from
+from utils.consent import consent_from, review_id, review_note, was_reviewed
 from utils.stroom import gateway_from
 from tools.stepping import _outputs, _Pipeline
 from tools.streams import SampleStreams, read_sample_streams
@@ -470,9 +469,10 @@ async def build_translation_xslt(
         include_xslt: Annotated[bool, Field(description="When saving, also return the code (to read it).")] = False,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply (rules kept "
                                                                  "as Unknown).")] = None,
-        reviewed: Annotated[bool, Field(description=(
-            "True once a needs_review reply's show_user (the records to translate as Unknown) is shown to the user in "
-            "the chat: the short form to agree to it then opens."))] = False,
+        reviewed: Annotated[str | bool | None, Field(description=(
+            "The review_id of a needs_review reply, once its show_user (the records to translate as Unknown) is shown "
+            "to the user in the chat: the short form to agree to it then opens. Not true: what changes gets a new "
+            "id."))] = None,
         change: Annotated[str | None, Field(description=(
             "What this change is and why, in a line: recorded in the XSLT's version history (and the documentation's "
             "version control when it is written), e.g. 'Rule for Secret Checkout events, seen once the whole feed was "
@@ -711,15 +711,17 @@ async def build_translation_xslt(
             # Shown in the chat first, the form kept short (asked for by the user: "Keep rest as Unknown (what happened
             # is not known) in the saved XSLT: rest: ..." was cryptic, and the detail too much tiny text in a form).
             shown = _unknown_markdown(kept, sampled, check['records'])
-            if not reviewed:
-                return {'status': 'needs_review', 'show_user': shown,
+            if not was_reviewed(reviewed, shown):
+                # Passed on only with this id, as promote_build's layout (seen there: reviewed=true from the start).
+                return {'status': 'needs_review', 'show_user': shown, 'review_id': review_id(shown),
                         'hint': "Show the user show_user in the chat exactly as it is (markdown), then, in the same "
                                 "turn, without waiting for a reply, call build_translation_xslt again with the same "
-                                "arguments plus reviewed=true: a short form asks them to agree, or they say what "
-                                "to change (a rule's action instead of Unknown)."}
+                                f"arguments plus reviewed='{review_id(shown)}' (its review_id): a short form asks them "
+                                "to agree, or they say what to change (a rule's action instead of Unknown)."
+                                + review_note(reviewed)}
             short = {f"rule '{r.name}'": f"{sampled[r.name]['records']} of {check['records']} sample records"
                      for r in kept}
-            short['as shown in the chat'] = hashlib.sha256(shown.encode()).hexdigest()[:12]
+            short['as shown in the chat'] = review_id(shown)
             gate = await consent_from(ctx).require(ctx, 'confirmation', 'build_translation_xslt',
                                                    "Translate the records shown in the chat as Unknown events",
                                                    short, confirmation_id)

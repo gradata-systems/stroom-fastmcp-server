@@ -197,17 +197,22 @@ async def test_keeping_unknown_needs_the_users_confirmation_before_saving():
         # Seen in VS Code: "Keep rest as Unknown (what happened is not known) in the saved XSLT: rest:" was cryptic, and
         # the detail too much tiny text in a form (asked for by the user): shown in the chat first, the form short.
         shown = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample)
-        assert shown['status'] == 'needs_review' and not create.await_count and 'reviewed=true' in shown['hint']
+        assert shown['status'] == 'needs_review' and not create.await_count
+        assert f"reviewed='{shown['review_id']}'" in shown['hint']
+        # Not passed by saying it was reviewed: only by the id of what was shown (seen in promote_build).
+        again = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=True)
+        assert again['status'] == 'needs_review' and 'true is not one' in again['hint']
         md = shown['show_user']
         assert md.startswith("**Records to translate as Unknown events**\n\nAn Unknown event says what happened isn't "
                              "known: it has no Authenticate, Create or other action.\n\n**Records rule `status` matches**"
                              "\n\n- 2 of the 4 sample records\n- What they hold:\n  - "), md
         assert '  - action: status\n' in md and md.endswith('- Reason given: status lines carry no activity\n'), md
-        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=True)
+        asked = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample,
+                                                       reviewed=shown['review_id'])
         assert asked['status'] == 'needs_confirmation' and not create.await_count
         assert asked['summary'] == 'Translate the records shown in the chat as Unknown events'
         assert asked['details']["rule 'status'"] == '2 of 4 sample records' and asked['details']['as shown in the chat']
-        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=True,
+        done = await generation.build_translation_xslt(ctx, kept, build='b', name='N', sample=sample, reviewed=shown['review_id'],
                                                       confirmation_id=asked['confirmation_id'])
         assert done['saved']['uuid'] == 'x-1'
         # Checking without saving asks nothing.

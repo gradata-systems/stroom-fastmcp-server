@@ -86,7 +86,7 @@ async def test_find_documents_flattens_results_and_hints_when_truncated(gateway)
     ctx = SimpleNamespace(lifespan_context={'stroom': gateway})
     result = await explorer.find_documents(ctx, 'Keycloak', ['Pipeline'], 1)
     assert result['documents'] == [{'type': 'Pipeline', 'uuid': 'p-1', 'name': 'Keycloak - Indexing',
-                                    'path': 'System / Elastic Indices / Keycloak'}]
+                                    'path': '/Elastic Indices/Keycloak'}]     # as Stroom's folder tools take it
     assert 'hint' in result
 
 

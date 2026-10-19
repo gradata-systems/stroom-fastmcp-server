@@ -16,7 +16,7 @@ _RULES = """Rules for every run:
   the build's pipelines still lack (a clean step of their current code, documentation): resolve it first.
 - Confirm key details with the user when a tool returns needs_confirmation, and ask for approval when it returns
   needs_approval: show the summary, and only pass the id back once the user has agreed. needs_review (promote_build's
-  layout, propose_index_template's template): show what it returns in the chat, then call again with reviewed=true,
+  layout, propose_index_template's template): show what it returns in the chat, then call again with reviewed=<its review_id>,
   and the user approves it in a short form.
 - Never assume a field convention, cluster, index name, template or feed name: propose one with where it came
   from, and let the user confirm or correct it. For a name a tool confirms (create_feed, create_pipeline,
@@ -220,7 +220,7 @@ index's mappings and settings on the cluster (propose_index_template, check_inde
    text given to draft_index_mapping) and any component templates builds the template for the new index, following
    their naming, field type and structure conventions (its from_example notes say what came from where). When it
    fits the documents it comes back as needs_review: show the user its dev_tools in the chat as a json code block,
-   then call again with reviewed=true, and they confirm it in a short form. If they correct it instead,
+   then call again with reviewed=<its review_id>, and they confirm it in a short form. If they correct it instead,
    check_index_template with their version: when it fits, they confirm it there; when it doesn't, show the pipeline
    changes it needs and ask whether to make them (update the index plan, save_xslt, step again) or change the
    template. Without an example, propose_index_template builds nothing: ask the user for one; only if they say they
@@ -241,7 +241,7 @@ index's mappings and settings on the cluster (propose_index_template, check_inde
 
 
 _PROMOTE = ("promote_build (it returns the layout first: show it in the chat; once the user confirms it, call again\n"
-            "   with reviewed=true, and they approve it in a short form).")
+            "   with reviewed=<its review_id>, and they approve it in a short form).")
 
 _HANDOVER = """Reprocessing production data is the user's: tell them which raw streams to reprocess (exactly those: from
 find_events all_streams with the conditions that pick out the events, or review_coverage's affected streams), and for
@@ -403,7 +403,7 @@ Finish: {_PROMOTE} The documents go to the folders sibling sources use.
    requested fields may differ.
 4. Elasticsearch: propose_index_template for v2 with v1's agreed template as the example (v2's pattern, the added
    fields, everything else as v1's). It comes back as needs_review: show its dev_tools in the chat, call again with
-   reviewed=true, and the user confirms it (or corrects it: check_index_template). Give them its dev_tools for the
+   reviewed=<its review_id>, and the user confirms it (or corrects it: check_index_template). Give them its dev_tools for the
    cluster admin to commit, and wait until they say it is.
 5. create_processor_filter on v2 with stream_ids=<the recent Events streams> and source_pipeline_uuid=<the events
    pipeline that wrote them> (the user confirms one this server didn't build). The user approves it in a form
@@ -536,7 +536,7 @@ profile_sample, no reading through the streams. Only StreamId, EventId and @time
    templates if it is composed of any (as GET _index_template/<name> and GET _component_template/<name> return them):
    a permissive template (dynamic mapping, strings as keywords, a total-fields limit, malformed values ignored) with
    the example's settings and components. Without an example it is not offered to agree: ask for one first. It comes
-   back as needs_review: show its dev_tools, call again with reviewed=true, and the user confirms it (or corrects it:
+   back as needs_review: show its dev_tools, call again with reviewed=<its review_id>, and the user confirms it (or corrects it:
    check_index_template). Give them its dev_tools for the cluster admin to commit.
 5. create_processor_filter on the raw streams. The user approves it in a form, once the template is committed, and it
    runs. Then wait_for_processing expect_events=false; create_index_doc for the index; verify_index (pipeline_uuid = the discovery pipeline, so hits

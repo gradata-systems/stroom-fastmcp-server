@@ -355,6 +355,26 @@ class ConsentStore:
             self._spent[token] = payload['expires'] if payload else time.time() + TTL_SECONDS
 
 
+def review_id(shown: str) -> str:
+    """The id of what a needs_review reply shows the user in the chat (a promotion's layout, an index template, the
+    records kept as Unknown), which the call after the review passes back as reviewed. Seen: promote_build called with
+    reviewed=true from the start, its layout never shown before the approval form. What it shows changing since
+    gives another id, so it is reviewed again."""
+    return hashlib.sha256(shown.encode()).hexdigest()[:12]
+
+
+def was_reviewed(reviewed: Any, shown: str) -> bool:
+    """Whether reviewed is the review id of exactly this (true, or another's id, is not)."""
+    return isinstance(reviewed, str) and reviewed.strip().lower() == review_id(shown)
+
+
+def review_note(reviewed: Any) -> str:
+    """Said in a needs_review reply when reviewed was given but isn't its id."""
+    return (" reviewed takes the review_id of a needs_review reply, once the user has seen what it shows: "
+            + ("true is not one." if reviewed is True or str(reviewed).strip().lower() == 'true' else
+               "the one given was for something else, or what is shown has changed since: show this.")) if reviewed else ''
+
+
 def _not_agreed(summary: str, action: str, unanswered: bool) -> str:
     """What the agent is told when a form wasn't accepted. A form closed or run out without an answer (cancel) is not
     the user declining (asked for by the user: Stroom answers cancel when its form expires, and an agent took 'did not

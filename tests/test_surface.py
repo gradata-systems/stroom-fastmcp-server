@@ -234,9 +234,54 @@ async def test_a_document_can_be_kept_in_the_workspace_rather_than_promoted():
         assert shown['layout'] == ('System/Feeds/Acme/\n└── ACME-Events  (Pipeline)\n\n'
                                    'Left in the workspace: ACME-TEST (Feed)')
         gate = await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
-                                          destinations={'Pipeline': 'System/Feeds/Acme', 'f': 'keep'}, reviewed=True)
+                                          destinations={'Pipeline': '/Feeds/Acme', 'f': 'keep'},   # the same folder
+                                          reviewed=shown['review_id'])
     assert gate['status'] == 'needs_approval'
     assert asked['folders'] == ['System/Feeds/Acme'] and asked['layout'].startswith('1 document(s), as shown in the chat')
+    assert f"({shown['review_id']})" in asked['layout']
+
+
+async def test_the_layout_cant_be_skipped_only_reviewed_as_shown():
+    # Seen (Delinea SecretServer): reviewed=true on promote_build's first call, so the user approved a form whose layout
+    # was never shown in the chat.
+    from tools import builds
+    docs = [{'type': 'Pipeline', 'uuid': 'p', 'name': 'ACME-Events', 'path': 'x', 'working_copy_of': None}]
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}))
+    guard = SimpleNamespace(resolve_folder=AsyncMock(side_effect=lambda path: ({'_path': path}, [])))
+    require = AsyncMock(return_value={'status': 'needs_approval'})
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)), patch.object(builds, 'guard_from', lambda c: guard), \
+            patch.object(builds, 'promotion_processing', AsyncMock(return_value=[])), \
+            patch.object(builds, 'build_checks', AsyncMock(return_value=[])), \
+            patch.object(builds, 'consent_from', lambda c: SimpleNamespace(require=require)):
+        async def promote(folder, reviewed=None):
+            return await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                              destinations={'Pipeline': folder}, reviewed=reviewed)
+        up_front = await promote('/Feeds/Acme', reviewed=True)
+        assert up_front['status'] == 'needs_review' and 'true is not one' in up_front['hint'] and not require.await_count
+        # Another layout since (the user moved it): reviewed again, not approved on the first one's id.
+        moved = await promote('/Feeds/Elsewhere', reviewed=up_front['review_id'])
+        assert moved['status'] == 'needs_review' and moved['review_id'] != up_front['review_id']
+        assert 'changed since' in moved['hint'] and not require.await_count
+        assert (await promote('/Feeds/Elsewhere', reviewed=moved['review_id']))['status'] == 'needs_approval'
+
+
+async def test_every_document_without_a_destination_is_named_at_once():
+    # Seen (Delinea SecretServer): the Dashboard's, then the TextConverter's, a failed call each.
+    from tools import builds
+    docs = [{'type': 'Pipeline', 'uuid': 'p', 'name': 'ACME-Events', 'path': 'x', 'working_copy_of': None},
+            {'type': 'Dashboard', 'uuid': 'd', 'name': 'ACME-VERIFY', 'path': 'x', 'working_copy_of': None},
+            {'type': 'TextConverter', 'uuid': 't', 'name': 'ACME wrapper', 'path': 'x', 'working_copy_of': None}]
+    stroom = SimpleNamespace(find_documents=AsyncMock(return_value={'values': []}),
+                             get_doc=AsyncMock(return_value={'dashboardConfig': {}}))
+    with patch.object(builds, '_build_docs', AsyncMock(return_value=docs)), \
+            patch.object(builds, 'guard_from', lambda c: SimpleNamespace()), \
+            patch.object(builds, '_stage_or_none', AsyncMock(return_value='translation')):
+        with pytest.raises(ToolError) as refused:
+            await builds.promote_build(SimpleNamespace(lifespan_context={'stroom': stroom}), 'b',
+                                       destinations={'XSLT': 'Feeds/Acme'})
+    said = str(refused.value)
+    assert "Pipeline 'ACME-Events' (p); Dashboard 'ACME-VERIFY' (d); TextConverter 'ACME wrapper' (t)" in said
+    assert 'by type (Dashboard, Pipeline, TextConverter' in said and "'keep'" in said
 
 
 async def test_schema_validation_is_never_changed_only_the_output():

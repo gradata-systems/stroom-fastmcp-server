@@ -67,8 +67,20 @@ async def test_resolve_folder_finds_what_exists_and_names_what_is_missing():
     assert node['_path'] == 'System/Feeds/Events' and missing == ['Acme', 'V1']
     node, missing = await guard.resolve_folder('System/Feeds')
     assert node['_path'] == 'System/Feeds' and missing == []
-    with pytest.raises(ToolError, match='starting with System/'):
-        await guard.resolve_folder('Feeds/Events')
+    with pytest.raises(ToolError, match='is no folder'):
+        await guard.resolve_folder(' / ')
+
+
+async def test_a_path_without_system_is_under_system_the_explorers_one_root():
+    # Seen (Delinea SecretServer): 'Feeds/Test/...' and '/Feeds/Test/...' refused for want of System/, though Stroom's
+    # own folder tools take '/Feeds/Test' and refuse find_documents' 'System / Feeds / Test'.
+    from security.guard import explorer_path, folder_parts
+    guard = WriteGuard(FakeExplorer('System/Feeds', 'System/Feeds/Test'), 'MCP Workspace')
+    for given in ('Feeds/Test/Delinea', '/Feeds/Test/Delinea', 'System / Feeds / Test / Delinea', '/System/Feeds/Test/Delinea'):
+        node, missing = await guard.resolve_folder(given)
+        assert node['_path'] == 'System/Feeds/Test' and missing == ['Delinea'], given
+    assert folder_parts('/Feeds') == ['System', 'Feeds'] and folder_parts('System') == ['System']
+    assert explorer_path('System / Feeds / Test') == '/Feeds/Test' and explorer_path('System') == '/'
 
 
 async def test_a_folder_already_there_is_used_not_twinned():

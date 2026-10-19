@@ -431,11 +431,20 @@ class WriteGuard:
 
 
 def folder_parts(path: str) -> list[str]:
-    """An explorer path's folder names, starting with System; 'System / Feeds' and 'System/Feeds/' both work."""
-    parts = [p.strip() for p in path.replace(' / ', '/').split('/') if p.strip()]
-    if not parts or parts[0] != 'System':
-        raise ToolError(f"Destination '{path}' must be an explorer path starting with System/")
-    return parts
+    """An explorer path's folder names, starting with System: 'System / Feeds' (find_documents), 'System/Feeds/',
+    '/Feeds' (Stroom's own folder tools) and 'Feeds' all work. The explorer has the one root, System: seen,
+    'Feeds/Test/...' and '/Feeds/Test/...' refused for want of it, and the agent tried again."""
+    parts = [p.strip() for p in path.split('/') if p.strip()]
+    if not parts:
+        raise ToolError(f"Destination '{path}' is no folder: give an explorer path, e.g. /Feeds/Events/Acme")
+    return parts if parts[0] == 'System' else ['System', *parts]
+
+
+def explorer_path(path: Any) -> str:
+    """A folder path as Stroom's own explorer tools take it ('System / Feeds / Events': /Feeds/Events; System: /):
+    seen, its folder_contents refused find_documents' 'System / Feeds / Events' and took '/Feeds/Events'."""
+    parts = [p.strip() for p in str(path or '').split('/') if p.strip()]
+    return '/' + '/'.join(parts[1:] if parts[:1] == ['System'] else parts)
 
 
 def _ref(node: dict[str, Any]) -> dict[str, Any]:

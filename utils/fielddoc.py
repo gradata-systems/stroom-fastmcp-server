@@ -196,18 +196,47 @@ def combined_path(paths: list[str]) -> str:
 # Fields the server describes exactly itself: never asked of the agent.
 _SELF_DESCRIBED = {'@StreamId', '@EventId', 'StreamId', 'EventId'}
 _DESCRIPTIONS = re.compile(r'<!-- stroom-mcp field descriptions\n(.*?)\n-->', re.S)
+_DATA_PATH = re.compile(r"^(.*)/Data\[@Name='([^']*)'\]/@Value$")
+
+
+def data_key(name: str) -> str:
+    """The key one description of a Data name goes under, for every element it is under."""
+    return f"Data[@Name='{name}']"
 
 
 class Descriptions:
     """What each field means for this source, written by the agent from the field's name, where it comes from and its
     sample values (asked for by the user: the schema's generic words, or 'the x value recorded in a Data element of
-    Send', add nothing a reader can't see). With ask, the fields not yet described are collected, to ask for."""
+    Send', add nothing a reader can't see). With ask, the fields not yet described are collected, to ask for (wanted).
+
+    A Data name read from the same source under several elements is asked once, by its name (data_key): seen, 224
+    fields asked of the agent for one feed, most of them its 18 Data names once per action element. A description
+    given by full path still wins for that row."""
 
     def __init__(self, given: dict[str, str] | None = None, ask: bool = False,
                  notes: list[dict[str, Any]] | None = None):
         self.given = {k: v.strip() for k, v in (given or {}).items() if isinstance(v, str) and v.strip()}
-        self.ask, self.wanted = ask, {}
+        self.ask = ask
+        self._wanted: dict[str, dict[str, Any]] = {}
+        self._data: dict[str, dict[str, dict[str, Any]]] = {}     # data_key -> field -> its ask, with what it reads
         self.notes = notes or []      # the vendor documentation's field dictionary (record_source_notes)
+
+    @property
+    def wanted(self) -> dict[str, dict[str, Any]]:
+        """The fields to ask about. A Data name every element reads from the same source: once, by its name, with the
+        elements it is under and their values together; else each by its full path."""
+        out = dict(self._wanted)
+        for key, asks in self._data.items():
+            reads = {a['_reads'] for a in asks.values()}
+            if len(asks) > 1 and len(reads) == 1:
+                values = list(dict.fromkeys(v for a in asks.values() for v in a['values']))
+                said = next((a['schemas_say'] for a in asks.values() if a.get('schemas_say')), None)
+                out[key] = {'field': key, 'under': [_DATA_PATH.match(f).group(1) for f in asks],
+                            'from': '\n'.join(sorted(next(iter(reads)))), 'values': values[:3],
+                            **({'schemas_say': said} if said else {})}
+            else:
+                out.update({f: {k: v for k, v in a.items() if k != '_reads'} for f, a in asks.items()})
+        return out
 
     def vendor(self, names: list[str], path: str) -> str:
         """What the vendor's documentation says of the source fields a field is read from; else of the source field
@@ -223,19 +252,29 @@ class Descriptions:
             n['values'].items())[:8]) + '.' if n.get('values') else '') for n in found if n.get('meaning'))
 
     def of(self, field: str, source: str, values: list[str], says: str | dict[str, str], path: str = '',
-           names: list[str] = ()) -> str:
+           names: list[str] = (), paths: list[str] = (), reads: list[str] | None = None) -> str:
         """The field's description: the agent's, else (the fallback) the first that says anything of it: the
         vendor's documentation of the source fields it is read from (names) or of its element (path), then the
         schemas. says: {schema: its words}, e.g. event-logging for where an index field comes from (what the
         pipeline wrote), then ECS for its name; a string is the event-logging schema's. The agent is shown them all,
-        to build on (asked for by the user)."""
+        to build on (asked for by the user). A row of several event types is asked by its own path
+        (EventDetail/(Authenticate|Process)/Action) and takes a description given by any of theirs (paths). reads:
+        what the row reads (source_text of each), to tell a Data name meaning the same everywhere; source if not
+        given."""
         said = {k: v for k, v in {'vendor documentation': self.vendor([n for n in names if n], path),
                                   **({'event-logging': says} if isinstance(says, str) else says)}.items() if v}
-        if field in self.given:
-            return self.given[field]
-        if self.ask and field not in _SELF_DESCRIBED and field not in self.wanted:
-            self.wanted[field] = {'field': field, 'from': source, 'values': [v[:60] for v in values[:3]],
-                                  **({'schemas_say': said} if said else {})}
+        data = _DATA_PATH.match(field)
+        for key in (field, *paths, *([data_key(data.group(2))] if data else [])):
+            if key in self.given:
+                return self.given[key]
+        if self.ask and field not in _SELF_DESCRIBED:
+            asked = {'field': field, 'from': source, 'values': [v[:60] for v in values[:3]],
+                     **({'schemas_say': said} if said else {})}
+            if data:
+                self._data.setdefault(data_key(data.group(2)), {}).setdefault(
+                    field, {**asked, '_reads': frozenset(reads if reads is not None else [source])})
+            else:
+                self._wanted.setdefault(field, asked)
         return next(iter(said.values()), '')
 
 
@@ -325,9 +364,14 @@ def _by_event_type(mapping: TranslationMapping, schema: EventSchema, rules: list
             values += got
             several = several or more
         values = list(dict.fromkeys(values))
-        cells = [f'`{combined_path([_key_xpath(k) for _, k, _ in members])}`'.replace('\n', '`\n`'),
-                 described.of(_key_xpath(first), source, values, _described(schema, first), _key_xpath(first),
-                              [n for _, _, entry in members for n in _read_from(entry)]), source]
+        paths = [_key_xpath(k) for _, k, _ in members]
+        shown = combined_path(paths)
+        # Asked by the row's own path, not its first type's: seen, Process/Action's values asked as Authenticate/
+        # Action's, and Create's and Delete's Object as View/Object.
+        cells = [f'`{shown}`'.replace('\n', '`\n`'),
+                 described.of(shown.replace('\n', ' | '), source, values, _described(schema, first), _key_xpath(first),
+                              [n for _, _, entry in members for n in _read_from(entry)], list(dict.fromkeys(paths)),
+                              [t for _, t in sources]), source]
         if sampled:
             cells.append((_shown(values) or '(not in the sample)') + ('\n(several per event)' if several else ''))
         return _row(*cells)
