@@ -66,6 +66,8 @@ Every Elasticsearch index the suites build is searched two ways (`dev/searching.
 as people will search, with each hit traced back to its record, and directly in Elasticsearch, as an independent
 check. Both must return the expected count. Lucene (`dev/e2e_lucene_indexing.py`) is searched through Stroom only.
 `dev/e2e_cleanup.py STAMP --apply` removes what a run made: filters, streams (marked deleted), documents and folders.
+It touches only what the server generated; on the local stack, `--fixtures` also removes what a suite made itself
+(a production pipeline it stands in for, an index folder, an AGENTS doc), named with the stamp or in a folder that is.
 
 An evaluation set of samples measures how well an agent builds with the server, whatever runs it: see
 [dev/eval](https://github.com/gradata-systems/stroom-fastmcp-server/tree/master/dev/eval).
