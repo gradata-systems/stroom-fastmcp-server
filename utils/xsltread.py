@@ -537,7 +537,9 @@ class _Idioms:
             source = self.field_of(text)
             if source:
                 key = str(normal(node[1]).value)
-                return self._extraction(source, before + key + after, flags, [key])[0]
+                # A key of several words ('Source IP') is named in snake case, as the generator reads it back.
+                name = key if re.fullmatch(r'\w+', key) else re.sub(r'[^A-Za-z0-9]+', '_', key).strip('_').lower()
+                return self._extraction(source, before + key + after, flags, [name])[0]
         for name in ('group, flags', 'group'):
             m = unify(SHAPES[name], node)
             if m and normal(m.expr(2)).symbol == '(integer)':

@@ -467,6 +467,59 @@ def test_an_action_user_without_the_acting_user_and_unread_extractions_are_warni
     assert not any('EventSource/User' in w or 'nothing reads' in w for w in generate(fine, SCHEMA, '4.1.0')['warnings'])
 
 
+def test_an_xpath_reading_an_extracts_name_as_a_variable_is_a_problem_not_an_unread_name():
+    # Seen: extracts chained with xpath "$kv", saved ok:true with only "extract names ['kv'], which nothing reads",
+    # then every record failed at stepping: "Variable kv has not been declared".
+    chained = mapping(extract=[{'field': 'msg', 'regex': '^(.*)$', 'names': ['kv']},
+                               {'xpath': '$kv', 'regex': 'src=(\\S+)', 'names': ['src']},
+                               {'xpath': 'for $kv in tokenize(., " ") return $kv', 'regex': '(x)', 'names': ['x']}],
+                      events=[{'name': 'logon', 'fields': LOGON[:2] + [{'path': 'EventDetail/Authenticate/Data',
+                                                                        'data_name': n, 'field': n} for n in ('src', 'x')]}])
+    result = generate(chained, SCHEMA, '4.1.0')
+    assert not result['ok']
+    assert [p for p in result['problems'] if 'reads $' in p] == [
+        "xpath '$kv' reads $kv: an extract's names are fields, not variables, and the XSLT declares none by that name, "
+        "so it wouldn't compile. Read one with field: 'kv' (an extraction takes an earlier extraction's name as its "
+        "field too); to change the text first, put the change in the xpath that reads the source itself."]
+    assert not any('nothing reads' in w for w in result['warnings'])
+    from utils.xsltgen import reads_input
+    assert reads_input(chained, 'kv') and not reads_input(chained, 'k')
+
+
+@pytest.mark.parametrize('xpath, rooted', [
+    ("normalize-space(replace(//*:EventData/*:Data, ' \\| ', '; '))", '//*:EventData/*:Data'),
+    ('(//data)[1]/@value', '//data'),
+    ("data[@name = /records/@host]", '/records/@host'),
+    ("string(.) and //x", '//x'),
+    ('.//*:EventData/*:Data', None),
+    ("data[@name='a']//b", None),
+    ("$record//data", None),
+    ("concat('//', data, ' / ')", None),
+    ("count(data) div 2", None),
+])
+def test_paths_from_the_document_root_are_told_from_paths_from_the_record(xpath, rooted):
+    from utils.xsltgen import rooted_path
+    assert rooted_path(xpath) == rooted
+
+
+def test_an_xpath_from_the_document_root_is_refused_as_it_reads_every_records_value_when_processed():
+    # Seen: //*:EventData/*:Data stepped clean, one record a document, then processing stopped on the whole stream:
+    # "A sequence of more than one item is not allowed as the first argument of fn:replace()".
+    rooted = mapping(common=BASE[:5] + [{'path': 'EventSource/User/Id', 'xpath': "upper-case(//data[@name='user']/@value)"}])
+    result = generate(rooted, SCHEMA, '4.1.0')
+    assert not result['ok']
+    said = next(p for p in result['problems'] if 'document root' in p)
+    assert "(//data[@name='user']/@value)" in said and 'processing reads a stream' in said
+    assert "Start from the record: .//data[@name='user']/@value" in said
+    relative = mapping(common=BASE[:5] + [{'path': 'EventSource/User/Id', 'xpath': "upper-case(.//data[@name='user']/@value)"}])
+    assert generate(relative, SCHEMA, '4.1.0')['ok']
+    # A source's own XML document may hold a value outside its records, read from the root: said, not refused.
+    header = TranslationMapping.model_validate({**rooted.model_dump(exclude_none=True), 'input': 'xml', 'root': 'logons',
+                                                'record': 'logon'})
+    result = generate(header, SCHEMA, '4.1.0')
+    assert result['ok'] and any('document root' in w and 'outside the records' in w for w in result['warnings'])
+
+
 SHARED_DEVICE = """<xsl:stylesheet xmlns="event-logging:3" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0">
   <xsl:template name="eventSourceDevice">
     <Device><HostName>from-meta</HostName></Device>

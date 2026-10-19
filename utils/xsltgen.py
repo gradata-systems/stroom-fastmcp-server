@@ -482,7 +482,39 @@ def reads_input(m: 'TranslationMapping', name: str) -> bool:
         return True
     xpaths = [e.xpath for e in entries] + [e.lookup.xpath for e in entries if e.lookup] + [c.xpath for c in conditions] \
         + [x.xpath for x in m.extract] + [m.for_each]
-    return any(x and re.search(rf"""['"]{re.escape(name)}['"]""", x) for x in xpaths)
+    # $name too: not a working read (the generator declares no such variable, see variable_reads), but what was meant;
+    # seen, "extract names ['kv'], which nothing reads" the only word on an xpath of $kv that failed every record.
+    return any(x and re.search(rf"""['"]{re.escape(name)}['"]|\${re.escape(name)}(?![\w.-])""", x) for x in xpaths)
+
+
+def _blanked(expr: str) -> str:
+    """The expression with its string literals' contents made spaces, at the same length."""
+    return re.sub(r"'[^']*'|\"[^\"]*\"", lambda m: m.group(0)[0] + ' ' * (len(m.group(0)) - 2) + m.group(0)[-1], expr)
+
+
+def variable_reads(expr: str, names: set[str]) -> list[str]:
+    """The names an XPath expression reads as variables ($kv) without binding them itself (for, let, some, every)."""
+    code = _blanked(expr)
+    bound = set(re.findall(r'\b(?:for|let|some|every)\s+\$([\w.-]+)', code))
+    return [n for n in dict.fromkeys(re.findall(r'\$([A-Za-z_][\w.-]*)', code)) if n in names and n not in bound]
+
+
+def rooted_path(expr: str) -> str | None:
+    """The first path in an XPath expression that starts at the document root (/x, //x) rather than at the context
+    node, or None. A / after a step (a/b, )/b, .//b) continues a path; at the start, or after an operator, a bracket
+    or a comma, it starts one. String literals are not read."""
+    code = _blanked(expr)
+    for found in re.finditer(r'/', code):
+        before = code[:found.start()].rstrip()
+        if found.start() and code[found.start() - 1] == '/':
+            continue        # the second slash of a //
+        word = re.search(r'([\w.-]+)$', before)
+        if not before or before[-1] in '([,|=<>+!{' or (word and word.group(1) in (
+                'and', 'or', 'return', 'then', 'else', 'in', 'satisfies', 'eq', 'ne', 'lt', 'le', 'gt', 'ge', 'is',
+                'union', 'intersect', 'except', 'to', 'div', 'mod') and before[-len(word.group(1)) - 1:][:1] in ' )'):
+            end = re.match(r'/+(?:[^\s,()\[\]]|\[[^\[\]]*\])*', code[found.start():])
+            return expr[found.start():found.start() + end.end()]
+    return None
 
 
 def style_name(text: str, naming: str) -> str:
@@ -969,6 +1001,29 @@ class _Generator:
         for x in dict.fromkeys(mapping_xpaths(self.m)):
             if refused(x, bound):
                 self._note(self.problems, f"xpath {x!r}: {refused(x, bound)}")
+            read = variable_reads(x, set(self.derived))
+            if read:
+                self._note(self.problems, f"xpath {x!r} reads {', '.join('$' + n for n in read)}: an extract's names are "
+                                          f"fields, not variables, and the XSLT declares none by that name, so it "
+                                          f"wouldn't compile. Read one with field: '{read[0]}' (an extraction takes an "
+                                          f"earlier extraction's name as its field too); to change the text first, put "
+                                          f"the change in the xpath that reads the source itself.")
+            rooted = rooted_path(x)
+            if rooted:
+                # Seen: .//*:EventData/*:Data written //*:EventData/*:Data, clean at stepping, then processing stopped:
+                # "A sequence of more than one item is not allowed as the first argument of fn:replace()".
+                relative = '.' + rooted if rooted.startswith('//') else './/' + (rooted.rstrip('/').split('/')[-1] or '*')
+                said = (f"xpath {x!r} starts at the document root ({rooted}), not at the record. Stepping hands the "
+                        f"XSLT one record at a time, so there it finds that record's value; processing reads a "
+                        f"stream's records as one document, where {rooted} finds every record's: a function taking "
+                        f"one value fails the whole stream (\"A sequence of more than one item is not allowed\"), and "
+                        f"otherwise every event gets the first record's value. Start from the record: {relative} "
+                        f"(anywhere below it), or the path from the record's own children.")
+                if self.m.input == 'xml':
+                    # A value outside the records (the document's header), read from the root: the one use it has.
+                    self._note(self.warnings, said + " Fine only for a value outside the records.")
+                else:
+                    self._note(self.problems, said)
         self._own_functions = self._choose_functions()
         self._keyed, self._keyed_functions = self._choose_keyed()
         # mcp:data writes a Data entry only when its value is present: one line a Data entry instead of an xsl:if
@@ -1024,10 +1079,15 @@ class _Generator:
             if len(ex.names) != 1 or not names or ex.field in self.derived:
                 continue
             key = names[0]
-            found = [m.start() for m in re.finditer(r'(?<![\w\\])' + re.escape(key) + r'(?!\w)', ex.regex)]
+            found = [(m.start(), m.group(0)) for m in re.finditer(r'(?<![\w\\])' + re.escape(key) + r'(?!\w)', ex.regex)]
+            if not found and re.fullmatch(r'[a-z0-9]+(_[a-z0-9]+)*', key):
+                # Or the key as the text writes it, the name its snake case: source_ip from 'Source IP: (...)', as
+                # draft_translation_mapping names a text's keys.
+                words = r'[ _-]'.join(key.split('_'))
+                found = [(m.start(), m.group(0)) for m in re.finditer(rf'(?<![\w\\]){words}(?![\w])', ex.regex, re.I)]
             if not re.fullmatch(r'[A-Za-z0-9_]+', key) or len(found) != 1:
                 continue
-            at = found[0]
+            at, key = found[0]
             shape = (ex.field, ex.xpath, ex.scope, ex.flags, ex.regex[:at], ex.regex[at + len(key):])
             shapes.setdefault(shape, []).append((ex, key))
         keyed: dict[int, tuple[str, str]] = {}

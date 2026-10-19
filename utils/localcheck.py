@@ -17,7 +17,7 @@ from utils.actions import action_rules, described
 from utils.dsgen import SplitterSpec, dry_run
 from utils.profile import _XML_DECL, _flatten, cut_document, xml_fragments
 from utils.timefmt import check_time_format
-from utils.xsltgen import TranslationMapping, reads_input
+from utils.xsltgen import TranslationMapping, mapping_xpaths, reads_input
 
 _STEP = re.compile(r"^(?:@(?P<attr>[\w.-]+)|(?P<name>[\w.-]+|\*)(?:\[@(?P<pattr>[\w.-]+)=(?P<q>['\"])(?P<pval>.*?)(?P=q)\])?)$")
 
@@ -53,6 +53,24 @@ def xml_value(record: etree._Element, path: str) -> str | None:
             return None
     texts = [''.join(n.itertext()).strip() for n in nodes if isinstance(n, etree._Element)]
     return texts[0] if texts else None
+
+
+def xml_flat(record: etree._Element) -> dict[str, str]:
+    """An XML record as path -> value, the paths as xml_value reads them: each leaf element's text and each attribute,
+    a Windows EventData Data by its Name ("EventData/Data[@Name='TargetUserName']"), not the last one standing for all."""
+    flat: dict[str, str] = {}
+    for node in record.iter():
+        if not isinstance(node.tag, str):
+            continue
+        path = '/'.join(_local(a.tag) for a in reversed(list(node.iterancestors()))
+                        if a is not record and a is not record.getparent()) or ''
+        here = f"{path}/{_local(node.tag)}".strip('/') if node is not record else ''
+        for attr, value in node.attrib.items():
+            flat[f"{here + '/' if here else ''}@{attr}"] = value
+        if node is not record and len(node) == 0 and (node.text or '').strip():
+            named = node.get('Name')
+            flat[f"{here}[@Name='{named}']" if named else here] = node.text.strip()
+    return flat
 
 
 def with_json_fields(records: list[Any], json_fields: list[str]) -> list[Any]:
@@ -276,9 +294,14 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
     writes_unknown = {r.name: r for r in mapping.events if unknown_in(mapping, r)}
     caught: dict[str, list[Any]] = {}
     for record in records:
-        name = rule_of(mapping, record)
+        extracted = extracted_values(mapping, record) if mapping.extract else None
+        name = rule_of(mapping, record, extracted)
         if name in writes_unknown:
-            caught.setdefault(name, []).append(record)
+            # An XML record as its paths, and what extract finds in it, so what it holds is shown and its actions
+            # found as a flat record's are.
+            flat = xml_flat(record) if isinstance(record, etree._Element) else record
+            caught.setdefault(name, []).append({**flat, **{k: v for k, v in (extracted or {}).items() if v}}
+                                               if isinstance(flat, dict) and extracted else flat)
     problems, kept = [], []
     common = {f.path.strip('/'): f.field for f in mapping.common if f.field}
     for name, found in caught.items():
@@ -396,10 +419,13 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
     if not records:
         return {'records': 0, 'problems': problems, 'warnings': warnings, 'fields_seen': []}
     seen: list[str] = []
+    xml = not any(isinstance(r, dict) for r in records)
     for record in records:
-        if isinstance(record, dict):
-            seen += [k for k in record if k not in seen]
+        # An XML record's paths too: seen, fields_seen [] and no word on unread fields for a whole XML sample.
+        flat = record if isinstance(record, dict) else xml_flat(record) if isinstance(record, etree._Element) else {}
+        seen += [k for k in flat if k not in seen]
     derived = {n for ex in mapping.extract for n in ex.names if n}
+    not_checked: list[str] = []
     items: list[Any] = [i for r in records for i in _items_of(r, mapping.for_each)] if mapping.for_each else []
     if mapping.for_each and not items:
         warnings.append(f"for_each '{mapping.for_each}' selects no items in any of the {len(records)} sample records")
@@ -428,8 +454,12 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         if ex.field:
             wanted.setdefault((ex.field, ex.scope), []).append('extract')
     suggested: set[str] = set()   # offered as 'did you mean': not said again as unread
+    unread_paths: list[str] = []
     for (name, scope), used in wanted.items():
         if name in derived:
+            continue
+        if xml and not all(_STEP.match(s) for s in name.strip('/').split('/') if s and s != '.'):
+            unread_paths.append(name)     # a path xml_value can't follow (*:Name, a function): not looked up here
             continue
         pool = where(scope)
         values = [v for v in (_value_of(r, name) for r in pool) if v is not None]
@@ -458,7 +488,16 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         if message:
             fitting = len(values) - len([v for v in values if check_time_format(entry.time_format, [v])])
             (problems if fitting == 0 else warnings).append(f"{entry.path}: {message}")
-    unread = [k for k in seen if k not in derived and k not in suggested and not reads_input(mapping, k)]
+    if unread_paths:
+        not_checked.append(f"fields {unread_paths[:5]} were not looked up in the sample (only plain paths are here)")
+    read_words: set[str] = set()
+    if xml:
+        # XML is often read through xpaths (.//*:EventData/*:Data): a path counts as read when the mapping names every
+        # step of it somewhere.
+        texts = [x for x in mapping_xpaths(mapping)] + [n for (n, _) in wanted]
+        read_words = {w for t in texts for w in re.findall(r'[A-Za-z_][\w.-]*', t)}
+    unread = [k for k in seen if k not in derived and k not in suggested and not reads_input(mapping, k)
+              and not (xml and set(re.findall(r'[A-Za-z_][\w.-]*', k)) <= read_words)]
     if unread:
         # A parsed field no output reads is lost from every event: often one the request asked for (a source address).
         warnings.append(f"fields in the sample that nothing reads: {unread[:12]}{' ...' if len(unread) > 12 else ''}: "
@@ -467,5 +506,14 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
     warnings += shared_type_ids(mapping, records)
     unknown_problems, kept = unknown_coverage(mapping, records)
     problems += unknown_problems
+    if not mapping.for_each:
+        untold = sum(1 for r in records if rule_of(mapping, r, extracted_values(mapping, r) if mapping.extract else None)
+                     is None)
+        if untold:
+            # Said, not passed over in silence: seen, a clean check of 1000 XML records whose every rule tested a
+            # field extracted from an xpath, so no record was checked against its rule.
+            not_checked.append(f"the rule {untold} of the {len(records)} sample records fall to can't be told here (a "
+                               f"condition on an xpath, or on a field extracted from one): Unknown and TypeId were not "
+                               f"checked for them; step_sample shows what they become")
     return {'records': len(records), 'problems': problems, 'warnings': warnings, 'fields_seen': seen[:60],
-            **({'kept_unknown': kept} if kept else {})}
+            **({'not_checked': not_checked} if not_checked else {}), **({'kept_unknown': kept} if kept else {})}

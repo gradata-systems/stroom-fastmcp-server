@@ -91,7 +91,17 @@ elements out when their input is empty (or writes `default`), and logs records n
 constants the schema does not allow, alternatives used together and missing required elements come back as
 problems to fix in the mapping. Give it the `sample` too (and the `splitter` spec for text): it then reports
 fields no sample record has, with the nearest names, and time formats the sample's values do not fit, before
-anything is stepped.
+anything is stepped. What the sample check could not tell (a rule whose conditions test an xpath, or a field
+extracted from one) is listed in its `not_checked`: stepping shows those. The XSLT is compiled before it is saved,
+as Stroom compiles it: one that doesn't compile is a problem, and nothing is saved.
+
+An `xpath` reads from the record: `.//*:EventData/*:Data`, or a path from the record's children. One starting at
+the document root (`//*:EventData/*:Data`, `/records/...`) is a problem: stepping hands the XSLT one record at a
+time, so it works there, but processing reads a stream's records as one document, where `//` finds every record's
+value: a function taking one value stops the whole stream ("A sequence of more than one item is not allowed"), and
+otherwise every event gets the first record's value. (For a source's own XML document, a value outside the records
+read from the root is only a warning.) An extract's names are fields, not variables: read one with `field`, never
+`$name` in an xpath (the XSLT declares no such variable).
 
 Each value has one source and optional modifiers:
 
@@ -163,6 +173,13 @@ any input field. An extraction can read a field an earlier one produced. Not `su
                         {"path": "EventDetail/Authenticate/Outcome/Success", "field": "result",
                          "map": {"Successful": "true", "Failed": "false"}}]}]}
 ```
+
+Text of key/value pairs (`Event: [User] Action: [Login] By User: alice (Item Id: 219); Source IP: 10.0.0.1`, or
+`user=alice src="10.0.0.1"`) is drafted by `draft_translation_mapping` as one extraction a key, each named for its
+key in snake case (`source_ip` from `Source IP`) and read like any field: homed, ruled on (a key naming the kind,
+`Event`, gives the rules) and carried as Data. Extractions that differ only in their key are written as one
+function called with the key (`mcp:keyed_value($text, 'Source IP')`). The draft keeps the keys its sample shows
+more than once; add any it lacks the same way.
 
 The generated XSLT holds `analyze-string(message, regex)` in a variable per template, named for the first field it
 extracts (`ts_parts`), and reads each group from it; text two or more extractions read is the field's own variable

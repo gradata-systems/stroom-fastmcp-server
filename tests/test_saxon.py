@@ -226,3 +226,21 @@ def test_a_mapping_may_call_its_shared_xslts_functions_whatever_their_names():
     unbound = generate(translation_mapping(imports=['GeoIP-V1'], common=BASE + [country]), SCHEMA, '4.1.0')
     assert any("no functions entry binds 'geo'" in p for p in unbound['problems'])
     assert not any('calls document()' in p for p in unbound['problems'])
+
+
+def test_an_xslt_is_compiled_with_stroom_and_imported_functions_and_templates_stood_in_for():
+    from utils.saxon import compile_errors
+    sheet = ('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0" xmlns:stroom="stroom" '
+             f'xmlns:geo="{GEO}">{{imports}}<xsl:template match="/"><a>{{body}}</a></xsl:template></xsl:stylesheet>')
+    fine = ("<xsl:value-of select=\"stroom:format-date('x', 'yyyy', 'UTC'), stroom:record-no(), geo:document(.)\"/>"
+            "<xsl:call-template name=\"eventSource\"><xsl:with-param name=\"ip\" select=\"1\"/></xsl:call-template>")
+    imports = '<xsl:import href="GeoIP-V1"/><xsl:import href="Common-Event-V1"/>'
+    assert compile_errors(sheet.format(imports=imports, body=fine)) == ([], [])
+    # The XSLT's own mistakes are not stood in for: a variable nothing declares, a function XPath doesn't have.
+    errors, notes = compile_errors(sheet.format(imports='', body='<xsl:value-of select="$kv"/><xsl:value-of select="nosuch(1)"/>'))
+    assert errors == ['XPST0008 Variable $kv has not been declared (or its declaration is not in scope)',
+                      'XPST0017 Cannot find a 1-argument function named '
+                      'Q{http://www.w3.org/2005/xpath-functions}nosuch()'] and not notes
+    # With imports, the variable may be one of theirs: said, not refused.
+    errors, notes = compile_errors(sheet.format(imports=imports, body='<xsl:value-of select="$kv"/>'))
+    assert not errors and 'fine only if an import (GeoIP-V1, Common-Event-V1) declares it' in notes[0]

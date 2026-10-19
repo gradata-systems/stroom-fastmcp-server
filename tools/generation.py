@@ -497,10 +497,12 @@ async def build_translation_xslt(
     (data_splitter, json or xml), fields every event shares (time, System, Device...), and one rule per
     kind of event with its conditions and fields. Text fields that hold several values (a message string with
     a time, user and action) are parsed by the mapping's extract list, not a function: entries {field, regex,
-    names}, whose regex groups become fields named by names, used then like any input field; no
-    substring-before/after chains. JSON held in a string is read with an xpath using json-to-xml(). Paths are
-    checked against the schema: unknown paths come back with suggestions, constants are checked against
-    allowed values, and elements are written in schema order with empty inputs left out. Fix any problems and call
+    names}, whose regex groups become fields named by names, used then like any input field (by field=, never
+    $name in an xpath); no substring-before/after chains. JSON held in a string is read with an xpath using
+    json-to-xml(). An xpath reads from the record (.//x, not //x: processing reads a stream's records as one
+    document). Paths are checked against the schema: unknown paths come back with suggestions, constants are
+    checked against allowed values, and elements are written in schema order with empty inputs left out; the XSLT
+    is compiled, and one that doesn't compile is not saved. Fix any problems and call
     again with changes= only the rules or entries that change, not the whole mapping. With build and name (or uuid, to replace the XSLT saved before) the XSLT is saved
     with its mapping and the document comes back instead of the code, so step_sample steps it as saved; without
     them nothing is saved and the code comes back. The standing instructions (AGENTS docs) that apply
@@ -584,6 +586,17 @@ async def build_translation_xslt(
     if missing:
         mapping = mapping.model_copy(update={'imports': [*mapping.imports, *missing]})
     result = generate(mapping, schema, version)
+    if result['ok']:
+        # Compiled as Stroom compiles it: seen, an XSLT saved ok:true whose every record failed at stepping with
+        # "Variable kv has not been declared" (an xpath of $kv, an extract's name). One that doesn't compile isn't saved.
+        from utils.saxon import compile_errors
+        errors, compile_notes = compile_errors(result['xslt'])
+        result['warnings'] += [f"compiling: {n}" for n in compile_notes]
+        if errors:
+            result['problems'] += [f"The XSLT doesn't compile, so it would fail every record: {e}. Fix the mapping "
+                                   f"entry it comes from (an xpath reads only the record and the XSLT's functions: a "
+                                   f"field, an extract's name included, is read with field=)" for e in errors]
+            result['ok'], result['xslt'] = False, None
     result['schema_version'] = version
     if schema_version is None and (settled := version_settled(ctx, build, version)):
         result['schema_version_settled'] = settled
@@ -953,7 +966,9 @@ async def draft_translation_mapping(
     pattern, host, client and server addresses and ports, user, event type, message), one rule per kind of
     event the naming field shows (Authenticate for logon and logoff kinds, Unknown with Data for the rest, to
     replace with the right action element: build_translation_xslt refuses a rule with conditions that keeps
-    Unknown, unless it sets allow_unknown), every other field carried as Data, and notes on what is left to
+    Unknown, unless it sets allow_unknown), every other field carried as Data, a text of key/value pairs (Key:
+    value, Key: [value], key=value) read as one extract entry a key, its keys then fields like any other (the kind
+    of event among them), and notes on what is left to
     decide. For text formats the Data Splitter spec comes with it. Then build_translation_xslt with the edited
     mapping, the sample and the splitter. The user chooses the event-logging version it writes (a form, or
     needs_guidance), from those this Stroom holds.

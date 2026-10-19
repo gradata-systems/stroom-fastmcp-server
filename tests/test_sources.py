@@ -106,6 +106,30 @@ def test_the_mapping_is_checked_against_the_sample_before_stepping():
     assert check_mapping(csv_mapping, records)['warnings'] == []   # any_of covers both files' names
 
 
+def test_an_xml_samples_check_lists_its_fields_and_says_what_it_could_not_check():
+    # Seen: 1000 XML records checked clean with fields_seen [], every rule testing a field extracted from an xpath, so
+    # no record was checked against its rule and no field was said to be unread.
+    from tests.test_draft import AUDIT
+    m = TranslationMapping.model_validate({
+        'input': 'xml_fragments', 'record': 'Event', 'xml_namespace': 'http://schemas.microsoft.com/win/2004/08/events/event',
+        'extract': [{'xpath': './/*:EventData/*:Data', 'regex': r'Event: \[([^\]]*)\]', 'names': ['category']}],
+        'common': [{'path': 'EventTime/TimeCreated', 'field': 'System/TimeCreated/@SystemTime'},
+                   {'path': 'EventSource/Device/HostName', 'field': 'System/Computer'}],
+        'events': [{'name': 'user', 'when': [{'field': 'category', 'equals': 'User'}],
+                    'fields': [{'path': 'EventDetail/Authenticate/Action', 'value': 'Logon'}]},
+                   {'name': 'other', 'fields': [{'path': 'EventDetail/Unknown/Data', 'data_name': 'c', 'field': 'category'}],
+                    'allow_unknown': 'for the test'}]})
+    records, _ = sample_records(m, AUDIT)
+    check = check_mapping(m, records)
+    assert {'System/Computer', 'EventData/Data', 'System/EventID'} <= set(check['fields_seen'])
+    # Read through the xpath, EventData/Data is not unread; EventID and the Provider's Name are.
+    unread = next(w for w in check['warnings'] if w.startswith('fields in the sample that nothing reads'))
+    assert "'System/Provider/@Name'" in unread and "'System/EventID'" in unread and 'EventData/Data' not in unread
+    assert check['not_checked'] == ["the rule 5 of the 5 sample records fall to can't be told here (a condition on an "
+                                    "xpath, or on a field extracted from one): Unknown and TypeId were not checked for "
+                                    "them; step_sample shows what they become"]
+
+
 def test_reference_xslt_writes_maps_and_is_read_back_by_find_reference_data():
     mapping = ReferenceMapping.model_validate({'input': 'data_splitter', 'maps': [
         {'name': 'USER_TO_ORG', 'key': 'user', 'values': [{'element': 'org', 'field': 'org'}, {'element': 'name', 'field': 'name'}]},

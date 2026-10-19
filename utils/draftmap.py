@@ -3,7 +3,8 @@
 A model asked to write a mapping from nothing tends to send back the field inventory instead. The draft gives
 it a valid mapping to edit: the input kind from the profile, the obvious event-logging homes for fields by
 name (time, host, addresses, ports, user, event type, message), one rule per kind of event the naming field
-shows, and every other field carried as Data, with notes on what a person or model must still decide: the
+shows, a text field's key/value pairs read through extract as fields of their own, and every other field carried
+as Data, with notes on what a person or model must still decide: the
 action element for each kind of event, the system name and environment, a time zone for naive timestamps.
 The result is checked like any mapping, so a wrong guess shows up as a problem, not as a silent mistake.
 """
@@ -129,7 +130,7 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
             if bad_lines and spec is None:
                 spec = SplitterSpec(kind='regex', pattern='^(.*)$', names=['json'])
         elif fmt in ('xml', 'xml fragments'):
-            from utils.localcheck import _local
+            from utils.localcheck import xml_flat
             from lxml import etree
             if fmt == 'xml fragments':
                 elements = xml_fragments(text) or []
@@ -139,27 +140,81 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
                 except etree.XMLSyntaxError:
                     root = cut_document(text)   # a big document read only to here: its complete records
                 elements = [c for c in root if isinstance(c.tag, str)] if root is not None else []
-            for rec in elements:
-                flat: dict[str, str] = {}
-                for node in rec.iter():
-                    if not isinstance(node.tag, str):
-                        continue
-                    path = '/'.join(_local(a.tag) for a in reversed(list(node.iterancestors())) if a is not rec and a is not rec.getparent()) or ''
-                    here = f"{path}/{_local(node.tag)}".strip('/') if node is not rec else ''
-                    for attr, value in node.attrib.items():
-                        flat[f"{here + '/' if here else ''}@{attr}"] = value
-                    if node is not rec and len(node) == 0 and (node.text or '').strip():
-                        # Windows EventData: <Data Name="TargetUserName">: each Data by its Name, not the last one
-                        # standing for all of them.
-                        named = node.get('Name')
-                        flat[f"{here}[@Name='{named}']" if named else here] = node.text.strip()
-                records.append(flat)
+            records += [xml_flat(rec) for rec in elements]
         else:
             if spec is None:
                 spec, _ = infer_spec(text)
             if spec is not None:
                 records += dry_run(spec, text)['records']
     return info, records, spec
+
+
+# Key/value pairs in a text field, as survey_feed signs them (kv:). A key follows the text's start or a separator (; |
+# ( ) ] or a spaced dash) and is one to four words before ': ' (then its value, or [value]); or one word before '='
+# (value, or "value"). Seen in production: Secret Server's audit text in a Windows event's Data, "... Event: [User]
+# Action: [Login] By User: domain.com\priya.patel (Item Id: 219); Source IP: 192.0.2.45", its pairs parted by ;, | or
+# ' - ' from record to record, the agent writing 33 extractions by hand after the draft carried the text whole.
+_BOUND = r'(?:^|[;|()\]]|\s-)\s*'
+_WORDS = r'[A-Za-z][A-Za-z0-9_-]*(?: [A-Za-z][A-Za-z0-9_-]*){0,3}'
+_COLON_KEY = re.compile(_BOUND + f'({_WORDS}): (\\[)?')
+_EQ_KEY = re.compile(r'(?:^|[\s,;])([A-Za-z_][A-Za-z0-9_.-]*)=(")?')
+# The value runs to the next separator: a dash only where a key or a [ follows it ("Secret: Firewall - Edge Admin;").
+PAIR_REGEX = {
+    'colon': _BOUND + '{key}: (.*?)(?:\\s*[;|()]|\\s+-\\s+(?:\\[|' + _WORDS + ': )|\\s*$)',
+    'bracketed': _BOUND + '{key}: \\[([^\\]]*)\\]',
+    'equals': '(?:^|[\\s,;]){key}=([^\\s,;"]*)',
+    'quoted': '(?:^|[\\s,;]){key}="([^"]*)"',
+}
+
+
+def _pairs_in(text: str) -> list[tuple[str, str]]:
+    """The keys in a text, each with its style (PAIR_REGEX)."""
+    found = [(m.group(1), 'bracketed' if m.group(2) else 'colon') for m in _COLON_KEY.finditer(text)]
+    return found + [(m.group(1), 'quoted' if m.group(2) else 'equals') for m in _EQ_KEY.finditer(text)]
+
+
+def pair_extracts(values: dict[str, list[str]], skip: set[str]) -> dict[str, tuple[list[dict[str, Any]], bool]]:
+    """Fields whose values hold key/value pairs (two or more in at least half of them) -> (an extract entry a key, in
+    order of first appearance, and whether every value had pairs). Keys seen once in five values or more are left out:
+    in free text they are words before a colon, not keys. Each name is the key in snake case, unique among the fields.
+    skip: fields not to read (JSON or XML held in text)."""
+    out: dict[str, tuple[list[dict[str, Any]], bool]] = {}
+    used = set(values)
+    for field, vals in values.items():
+        if field in skip or not vals:
+            continue
+        found = [_pairs_in(v) for v in vals]
+        if sum(1 for f in found if len({k for k, _ in f}) >= 2) * 2 < len(vals):
+            continue
+        styles: dict[str, Counter] = {}
+        for pairs in found:
+            for key, style in dict(pairs).items():      # each key counted once a value
+                styles.setdefault(key, Counter())[style] += 1
+        extracts = []
+        for key, counted in list(styles.items())[:60]:
+            if sum(counted.values()) < 2 and len(vals) >= 5:
+                continue
+            base = re.sub(r'[^A-Za-z0-9]+', '_', key).strip('_').lower()
+            name, n = base, 2
+            while name in used:
+                name, n = f'{base}_{n}', n + 1
+            used.add(name)
+            regex = PAIR_REGEX[counted.most_common(1)[0][0]].replace('{key}', key.replace('.', '\\.'))
+            extracts.append({'field': field, 'regex': regex, 'names': [name]})
+        if extracts:
+            out[field] = (extracts, all(found))
+    return out
+
+
+def with_pairs(records: list[Any], extracts: list[dict[str, Any]]) -> None:
+    """Each record given the values the extracts find in it, as the XSLT's analyze-string does (the first match)."""
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for ex in extracts:
+            found = re.search(ex['regex'], record.get(ex['field']) or '')
+            if found and (found.group(1) or '').strip():
+                record[ex['names'][0]] = found.group(1)
 
 
 SOURCE_SIDE = re.compile(r'^(src|source|client|orig|origin)(_|$)', re.I)
@@ -246,6 +301,22 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
                      f"elements are fields of their own, e.g. {', '.join(repr(n) for n in inside[:4])} (xml_fields; "
                      f"'<field>//<name>' for one anywhere below). The text itself isn't mapped.")
         json_fields = json_fields + xml_fields
+    # Text holding key/value pairs: each key a field of its own, through extract (keys alike are written as one
+    # function, called with the key), and so homed, ruled on and carried as Data like any field. The text itself isn't
+    # mapped when every value had pairs.
+    paired = pair_extracts(values, set(json_fields))
+    for field, (extracts, whole) in paired.items():
+        with_pairs(records, extracts)
+        mapping.setdefault('extract', []).extend(extracts)
+        if whole:
+            json_fields = json_fields + [field]
+        shown = ', '.join(f"'{e['names'][0]}'" for e in extracts[:6]) + (' ...' if len(extracts) > 6 else '')
+        notes.append(f"'{field}' holds key/value pairs: {len(extracts)} keys are fields of their own through extract "
+                     f"({shown}), one regex a key. " + ("The text itself isn't mapped (map it too, to Description say, "
+                                                        "if it's wanted whole). " if whole else '')
+                     + "A key only one record shows is left out: add it the same way if it's wanted.")
+    if paired:
+        names, values, types = survey()
     taken: set[str] = set(json_fields)
     common: list[dict[str, Any]] = []
 
@@ -337,7 +408,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         taken.add(zone_field)
         notes.append(f"'{zone_field}' holds time zone names: kept as EventSource/Device/Location/TimeZoneName; if the "
                      f"times have no zone of their own, read them in it (timezone on EventTime/TimeCreated).")
-    else:
+    if not time_field:
+        # Seen: an else on the zone test above, so a draft that mapped EventTime said no timestamp was recognised.
         notes.append("No timestamp field was recognised: map EventTime/TimeCreated yourself (time_format from the profile).")
     common.append({'path': 'EventSource/System/Name', 'value': system_name or source_name or 'TODO system name'})
     common.append({'path': 'EventSource/System/Environment', 'value': environment or 'TODO e.g. Prod'})
@@ -362,7 +434,13 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
     def names_kinds(n: str) -> bool:
         return bool(NAMING.match(_key(n))) and 1 <= len(set(values[n]) - NIL) <= MAX_RULES
     # Seen: syslog's msgid, always '-', taken over an action field: a field with only nil values names no kind.
-    naming = next((n for n in names if n not in taken and names_kinds(n)), None)
+    # One number, the same in every record, names no kind (a word may: SYSTEM, its actions split in another field). Seen:
+    # a Windows EventID always 1000 taken over the category in the text's pairs (Event: [User], [Secret]...).
+    def one_number(n: str) -> bool:
+        kinds = set(values[n]) - NIL
+        return len(kinds) == 1 and not re.search('[A-Za-z]', next(iter(kinds)))
+    naming = next((n for n in names if n not in taken and names_kinds(n) and not one_number(n)), None) \
+        or next((n for n in names if n not in taken and names_kinds(n)), None)
     namings = covering(naming, names_kinds) if naming else []
     if naming:
         common.append(read_from({'path': 'EventDetail/TypeId', 'field': naming}, namings))

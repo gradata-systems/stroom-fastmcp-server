@@ -259,3 +259,72 @@ def test_the_device_an_event_happened_at_is_drafted_from_the_field_naming_it():
     plain = draft_mapping(['{"time": "2026-10-02T12:00:00Z", "user": "alice"}\n'], 'S', 'S', 'Prod')
     assert any(n.startswith('No host field was recognised: EventSource/Device is the device where the event happened')
                for n in plain['notes'])
+
+
+def test_the_no_timestamp_note_is_said_only_when_no_time_was_mapped():
+    # Seen: the note hung on the time zone test, so a draft that mapped EventTime said no timestamp was recognised.
+    timed = draft_mapping({'fw.jsonl': FW_JSON}, 'FW', 'FW', 'Prod')
+    assert any(e['path'] == 'EventTime/TimeCreated' for e in timed['mapping']['common'])
+    assert not any(n.startswith('No timestamp field was recognised') for n in timed['notes'])
+    untimed = draft_mapping(['{"user": "alice", "action": "login"}\n{"user": "bob", "action": "logout"}\n'], 'S', 'S', 'Prod')
+    assert any(n.startswith('No timestamp field was recognised') for n in untimed['notes'])
+
+
+# Secret Server's audit, as Windows events: the kind and the details in one text, its pairs parted by ;, | or ' - '.
+AUDIT_TEXTS = [
+    r"Sep 27 2026 23:48:10 - User: domain.com\Patel, Priya - [[SecretServer]] Event: [User] Action: [Login] By User: "
+    r"domain.com\priya.patel (Item Id: 219); Source IP: 192.0.2.45; Session Id: 6857; Client: REST API",
+    r"Sep 27 2026 23:49:47 - User: domain.com\Chen, Riley - [[SecretServer]] Event: [User] Action: [Login Failed] By "
+    r"User: domain.com\riley.chen (Item Id: 220) - Source IP: 10.20.4.18 - Client: Browser Extension - Session Id: 6399",
+    r"Sep 27 2026 23:51:24 - User: domain.com\Chen, Riley - [[SecretServer]] Event: [User] Action: [Logout] By User: "
+    r"domain.com\riley.chen (Item Id: 221) - Session Id: 6195 - Source IP: 192.0.2.45",
+    r"Sep 27 2026 23:56:15 - User: domain.com\Chen, Riley - [[SecretServer]] Event: [Secret] Action: [View] By User: "
+    r"domain.com\riley.chen (Item Id: 224); Secret: Firewall - Edge Admin; Secret Id: 10005; Source IP: 10.20.4.18",
+    r"Sep 28 2026 00:26:58 - User: domain.com\Chen, Riley - [[SecretServer]] Event: [Secret] Action: [Edit] By User: "
+    r"domain.com\riley.chen (Item Id: 243) | Secret: Backup Service Account | Secret Id: 10024 | Client: Web UI",
+]
+AUDIT = '\n'.join(
+    '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="SecretServer"/>'
+    f'<EventID>1000</EventID><TimeCreated SystemTime="2026-09-27T23:48:1{n}.000Z"/><Computer>ss01</Computer></System>'
+    f'<EventData><Data>{text}</Data></EventData></Event>' for n, text in enumerate(AUDIT_TEXTS))
+
+
+def test_key_value_pairs_in_a_text_field_are_drafted_as_fields_of_their_own():
+    # Seen: survey_feed found the pairs (kv:Action=Login, Event=User) but the draft carried the text whole as one Data,
+    # and the agent made 22 describe_document calls and 33 extractions by hand.
+    from utils.xpathcheck import check_extractions
+    draft = draft_mapping({'audit.xml': AUDIT}, 'Secret Server', 'Secret Server', 'Prod')
+    m = draft['mapping']
+    extracted = {e['names'][0]: e for e in m['extract']}
+    assert list(extracted) == ['user', 'event', 'action', 'by_user', 'item_id', 'source_ip', 'session_id', 'client',
+                               'secret', 'secret_id']
+    assert all(e['field'] == 'EventData/Data' for e in m['extract'])
+    assert any(n.startswith("'EventData/Data' holds key/value pairs: 10 keys") for n in draft['notes'])
+    # The kinds come from the text's pairs, not from an EventID that is 1000 in every record.
+    common = {e['path']: e for e in m['common']}
+    assert common['EventDetail/TypeId']['field'] == 'event' and draft['kinds'] == ['User', 'Secret']
+    assert common['EventSource/Client/IPAddress']['field'] == 'source_ip'
+    logon = next(r for r in m['events'] if r['name'] == 'user_logon')
+    assert logon['when'] == [{'field': 'event', 'equals': 'User'}, {'field': 'action', 'one_of': ['Login', 'Login Failed']}]
+    data = [f['field'] for f in logon['fields'] if f['path'].endswith('/Data')]
+    assert 'by_user' in data and 'client' in data and 'EventData/Data' not in data
+    # Every regex holds as XPath reads it, and matches the texts that have its key.
+    problems, _ = check_extractions(TranslationMapping.model_validate(m), AUDIT, None, [])
+    assert not problems, problems
+    result = generate(TranslationMapping.model_validate(decided(m)), SCHEMA, '4.1.0')
+    assert result['ok'], result['problems']
+    # The keys alike are one function, called with the key as the text writes it.
+    xslt = result['xslt']
+    assert xslt.count('<xsl:function name="mcp:keyed_value"') == 1 and "mcp:keyed_value($event_data_data, 'Source IP')" in xslt
+    events = transform(xslt.replace('stroom:format-date(', 'string(').replace(", 'yyyy-MM-dd''T''HH:mm:ss.SSSX')", ')'),
+                       f'<Events>{AUDIT}</Events>')
+    assert VALIDATOR.validate(events), [e.message for e in VALIDATOR.error_log]
+    ns = {'e': 'event-logging:3'}
+    first, failed, _, view, _ = events.findall('e:Event', ns)
+    assert first.findtext('e:EventSource/e:Client/e:IPAddress', namespaces=ns) == '192.0.2.45'
+    assert first.findtext('e:EventDetail/e:Authenticate/e:Action', namespaces=ns) == 'Logon'
+    assert failed.findtext('e:EventSource/e:SessionId', namespaces=ns) == '6399'
+    values = {d.get('Name'): d.get('Value') for d in view.iter('{event-logging:3}Data')}
+    # A dash inside a value stays (only one before another key parts them), and a value stops before (Item Id: ...).
+    assert values['secret'] == 'Firewall - Edge Admin' and values['by_user'] == r'domain.com\riley.chen'
+    assert values['item_id'] == '224' and values['action'] == 'View'

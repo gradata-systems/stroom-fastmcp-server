@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastmcp.exceptions import ToolError
 
-from tests.test_xsltgen import SCHEMA, mapping
+from tests.test_xsltgen import BASE, SCHEMA, mapping
 from tools import generation
 from utils.xsltgen import TranslationMapping, generate
 
@@ -82,6 +82,22 @@ async def test_saving_returns_the_document_not_the_code():
         assert not failed['ok'] and 'saved' not in failed and create.await_count == 1   # nothing saved
         with pytest.raises(ToolError, match='give name'):
             await generation.build_translation_xslt(ctx, mapping(), build='acme-v1')
+
+
+async def test_an_xslt_that_does_not_compile_is_not_saved_and_says_why():
+    # Seen: saved ok:true with an xpath of $kv, then every record failed at stepping ("Variable kv has not been
+    # declared"). Compiled here as Stroom compiles it, its stroom: functions stood in for.
+    from tools import translation
+    ctx, (schema, instructions) = ctx_and_patches()
+    undeclared = mapping(common=[*BASE, {'path': 'EventSource/Device/Name', 'xpath': 'upper-case($device_name)'}])
+    saved = {'type': 'XSLT', 'uuid': 'x-1', 'name': 'ACME-Events', 'version': 'v1'}
+    with schema, instructions, patch.object(translation, 'create_xslt', AsyncMock(return_value=saved)) as create:
+        result = await generation.build_translation_xslt(ctx, undeclared, build='acme-v1', name='ACME-Events')
+        assert not result['ok'] and 'saved' not in result and not create.await_count
+        assert any("doesn't compile" in p and 'XPST0008 Variable $device_name has not been declared' in p
+                   for p in result['problems'])
+        # Stroom's own functions (format-date, log, record-no) are no reason to refuse one.
+        assert (await generation.build_translation_xslt(ctx, mapping(), build='acme-v1', name='ACME-Events'))['saved']
 
 
 async def test_save_xslt_generates_an_indexing_xslt_from_its_plan_and_takes_no_mapping():

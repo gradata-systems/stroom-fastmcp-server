@@ -209,3 +209,74 @@ def unsafe_in_xslt(code: str) -> list[tuple[str, str]]:
     return [(what, f"{why}, which reads the environment, files or network, or looks a function up by name: Stroom "
                    f"would run it with its own access, so the server doesn't save it" if what.endswith('()') else why)
             for what, why in found.items()]
+
+
+# Functions XPath and the generator define: one of these missing is the XSLT's own error, never stubbed.
+_OWN_NAMESPACES = (FN, 'http://www.w3.org/2001/XMLSchema', 'http://www.w3.org/2005/xpath-functions/map',
+                   'http://www.w3.org/2005/xpath-functions/array', 'http://www.w3.org/2005/xpath-functions/math',
+                   'stroom-mcp:functions')
+_MISSING_FUNCTION = re.compile(r'Cannot find a (\d+)-argument function named Q\{([^}]*)\}([\w.-]+)\(\)')
+_REPORTED = re.compile(r'^\s+([A-Z]{4}\d{4})\s+(.*)$')
+
+
+def _stubbed(root: etree._Element, functions: set[tuple[str, str, int]]) -> str:
+    """The stylesheet without its imports, with an empty function for each (namespace, name, arity) and an empty
+    named template for each template it calls that it doesn't define (an import's), taking the parameters passed."""
+    for el in root.findall(f'{{{XSL}}}import'):
+        root.remove(el)
+    for namespace, name, arity in sorted(functions):
+        function = etree.SubElement(root, f'{{{XSL}}}function', name=f'Q{{{namespace}}}{name}')
+        for n in range(1, arity + 1):
+            etree.SubElement(function, f'{{{XSL}}}param', name=f'p{n}')
+        etree.SubElement(function, f'{{{XSL}}}sequence', select='()')
+    defined = {t.get('name') for t in root.iter(f'{{{XSL}}}template') if t.get('name')}
+    calls: dict[str, set[str]] = {}
+    for call in root.iter(f'{{{XSL}}}call-template'):
+        if call.get('name') not in defined:
+            calls.setdefault(call.get('name'), set()).update(
+                p.get('name') for p in call.findall(f'{{{XSL}}}with-param') if p.get('tunnel') != 'yes')
+    for name, params in calls.items():
+        template = etree.SubElement(root, f'{{{XSL}}}template', name=name)
+        for param in sorted(params):
+            etree.SubElement(template, f'{{{XSL}}}param', name=param)
+    return etree.tostring(root, encoding='unicode')
+
+
+def compile_errors(xslt: str) -> tuple[list[str], list[str]]:
+    """(errors, notes): what Saxon reports compiling an XSLT, as Stroom compiles it before running it. Stroom's own
+    functions (stroom:format-date and the rest) and the functions and named templates of what it imports (a shared
+    XSLT by name, which this locked-down processor doesn't load) are stubbed, functions by the arity Saxon asks for.
+    With imports, a variable declared nowhere may be an import's global: a note, not an error. Seen: an XSLT saved
+    with "Variable kv has not been declared", which only stepping found."""
+    try:
+        source = etree.fromstring(xslt.encode('utf-8'), etree.XMLParser(resolve_entities=False, no_network=True))
+    except (etree.XMLSyntaxError, ValueError) as e:
+        return [f"not well-formed XML: {e}"], []
+    imports = [el.get('href') for el in source.findall(f'{{{XSL}}}import')]
+    stubs: set[tuple[str, str, int]] = set()
+    message = ''
+    for _ in range(4):
+        try:
+            processor().new_xslt30_processor().compile_stylesheet(
+                stylesheet_text=_stubbed(etree.fromstring(etree.tostring(source)), stubs))
+            return [], []
+        except Exception as e:      # saxonche's PySaxonApiError: every static error, two lines each
+            message = str(e)
+        wanted = {(ns, name, int(arity)) for arity, ns, name in _MISSING_FUNCTION.findall(message)
+                  if ns not in _OWN_NAMESPACES}
+        if wanted <= stubs:
+            break
+        stubs |= wanted
+    errors, notes = [], []
+    for line in message.splitlines():
+        found = _REPORTED.match(line)
+        if not found:
+            continue
+        said = f"{found.group(1)} {found.group(2).strip()}"
+        if found.group(1) == 'XPST0008' and imports:
+            notes.append(f"{said}: fine only if an import ({', '.join(imports)}) declares it")
+        elif said not in errors:
+            errors.append(said)
+    if not errors and not notes:
+        errors.append(message.strip().splitlines()[0][:300] if message.strip() else 'it does not compile')
+    return errors, notes
