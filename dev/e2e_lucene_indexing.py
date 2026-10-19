@@ -42,8 +42,12 @@ async def index_stage(ctx, csv: dict, stamp: str):
     check(not draft['problems'], 'field plan has StreamId, EventId and the time field')
     index = await agreed(indexing.create_index_doc, ctx=ctx, build=csv['build'], backend='lucene', name=index_name,
                          time_field=plan.time_field)
+    # The plan drafted for this index in the session: its fields added with no plan passed again (seen: a 50-field plan
+    # pasted five times).
+    made = (index.get('fields') or {}).get('added') or []
+    check(sorted(made) == sorted(f.name for f in plan.fields), f"index fields added from the session's plan: {made}")
     added = await indexing.set_index_fields(ctx, index['uuid'], plan)
-    check(len(added['added']) == len(plan.fields), f"index fields added: {added['added']}")
+    check(not added['added'], f"set_index_fields again adds nothing: {added['added']}")
     xslt = await translation.create_xslt(ctx, csv['build'], f'{index_name}-XSLT', plan.xslt())
     pipeline = await agreed(indexing.create_indexing_pipeline, ctx=ctx, build=csv['build'], name=f'{index_name} - Indexing',
                             template_uuid=template['uuid'], xslt_uuid=xslt['uuid'], index_uuid=index['uuid'])
