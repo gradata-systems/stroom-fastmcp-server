@@ -340,8 +340,9 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                                      'propose_index_template with the user\'s example'),
         'indexed': (('create_processor_filter', {'pipeline_uuid': ix, 'stream_ids': events,
                                                  **({} if discovery else {'source_pipeline_uuid': source})}),
-                    f"{_APPROVE} (Elasticsearch: once the agreed template is committed, and an index this pipeline "
-                    f"wrote to before dropped); then wait_for_processing expect_events=false, and verify_index"),
+                    f"{_APPROVE} (Elasticsearch: once the agreed template is committed; an index this pipeline wrote "
+                    f"to before is dropped first, from the drop_first reply's button); then wait_for_processing "
+                    f"expect_events=false, and verify_index"),
         'indexed:disabled': (('wait_for_processing', {'pipeline_uuid': ix, 'stream_ids': events, 'expect_events': False}),
                              f"only once the user says they enabled its filter ({_ASK}); then verify_index"),
         'indexed:unstepped': (('step_sample', {'pipeline_uuid': ix, 'stream_ids': events}),

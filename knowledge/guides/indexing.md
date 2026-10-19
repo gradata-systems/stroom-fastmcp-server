@@ -150,9 +150,12 @@ indexing with a batch size of 10, so each rejected document comes back whole in 
 bulk response into one entry per document. `wait_for_processing` restores the template's default once indexing
 completes without errors. Indexing again does not remove the documents already indexed (an amended translation's
 sample processed again leaves the superseded Events' documents in the index). So in a build, an indexing pipeline
-that has already indexed something starts its index fresh when it gets a new sample filter or reprocesses: the
-approval says the cluster admin drops the index first (`DELETE _data_stream/<index>` when the agreed template makes
-a data stream, else `DELETE <index>`); the template stays on the cluster and makes it again as documents arrive.
+that has already indexed something starts its index fresh when it gets a new sample filter or reprocesses: before
+the approval, a `drop_first` reply asks the user to have the cluster admin drop the index, with a button for the
+request (`DELETE _data_stream/<index>` when the agreed template makes a data stream, else `DELETE <index>`), and the
+call is made again with `index_dropped=true` once they say it is done. An existing index or data stream keeps the
+mapping it was made with, so a changed template only applies once it is dropped; the template stays on the cluster
+and makes it again as documents arrive.
 Every document goes, so process all the Events streams the index should hold again (`reprocess_streams` for those
 it indexed before). A build's own Lucene index (no other pipeline of the build writes to it) has its shards deleted
 by the server once the user approves; any other, the user deletes its shards first. A promoted indexing pipeline's

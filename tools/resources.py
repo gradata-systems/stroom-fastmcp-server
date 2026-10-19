@@ -36,8 +36,9 @@ _RULES = """Rules for every run:
 - Document what you build (write_documentation; stream_ids default to the streams its current code last stepped
   clean on) and use the user's source notes for field meanings.
 - A sample's processor filter (create_processor_filter stream_ids=, an events or indexing pipeline) runs once the user
-  approves it in a form: Elasticsearch, only once the agreed index template is committed, and an index the pipeline
-  wrote to before dropped (the form says how). Then wait_for_processing with its filter_id. Any other filter (a whole
+  approves it in a form: Elasticsearch, only once the agreed index template is committed. An index the pipeline
+  wrote to before comes first: a drop_first reply, with a button; once the user says it is dropped, call again with
+  index_dropped=true for the form. Then wait_for_processing with its filter_id. Any other filter (a whole
   feed, a CEF output, reference data) is created disabled, as promotion's are: give the user its pipeline_link, what
   enabling does and anything before_enabling says; ask them to enable it on the pipeline's Processors tab and to tell
   you when they have. Then wait_for_processing with its filter_id: never before.

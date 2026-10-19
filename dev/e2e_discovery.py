@@ -282,15 +282,19 @@ async def data_stream(ctx, stroom: StroomGateway, es: httpx.AsyncClient, stamp: 
         ('host', 'EQUALS', 'web01', 2, {'term': {'host': 'web01'}}),
         ('status', 'GREATER_THAN', '400', 1, {'range': {'status': {'gt': 400}}}),
     ], pipeline_uuid=pipeline['uuid'])
-    # Reprocessing: a data stream keeps what was indexed, so the approval says to drop it first and start fresh (asked
-    # for by the user, in place of deleting by stream); after it, the count is three again, not six.
-    asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw])
-    note = (asked.get('details') or {}).get('already indexed') or ''
-    e2e.check(asked.get('status') == 'needs_approval' and e2e.dropped_by(note) == f'_data_stream/{index}',
-              f'the approval says to drop the data stream first: {note[:160]}')
+    # Reprocessing: a data stream keeps what was indexed, so the user drops it first and it starts fresh (asked for by
+    # the user, in place of deleting by stream), from a button before the approval; after it, three again, not six.
+    first = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw])
+    note = first.get('already_indexed') or ''
+    e2e.check(first.get('status') == 'drop_first' and e2e.dropped_by(note) == f'_data_stream/{index}'
+              and [a.get('request') for a in first.get('user_actions') or []] == [f'DELETE _data_stream/{index}'],
+              f'the data stream is dropped first, from a button: {note[:160]}')
     e2e.check((await es.delete(f'/_data_stream/{index}')).status_code == 200,
               'the cluster admin drops the data stream; the template stays and makes it again')
-    again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], approval_id=asked['approval_id'])
+    asked = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], index_dropped=True)
+    e2e.check(asked.get('status') == 'needs_approval', 'dropped, the approval follows')
+    again = await processing_writes.reprocess_streams(ctx, pipeline['uuid'], [raw], index_dropped=True,
+                                                      approval_id=asked['approval_id'])
     redone = await processing_writes.wait_for_processing(ctx, pipeline['uuid'], [raw], expect_events=False,
                                                          filter_id=again['filter_id'])
     e2e.check(redone.get('gate') == 'pass', 'reprocessed into the data stream with no Error stream')

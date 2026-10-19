@@ -24,7 +24,7 @@ NOT_TOOLS = {'data_splitter', 'record_start', 'record_end', 'xml_fragments', 'js
              'inline_map_max_keys', 'snake_case', 'manual_steps', 'expected_paths', 'raw_stream', 'path_population',
              'sample_check', 'fields_seen', 'converter_type', 'reference_data', 'index_patterns', 'event_types',
              'max_chars_per_stream', 'max_parts_per_stream', 'max_records', 'ignore_warnings', 'index_plan', 'drop_when',
-             'for_each', 'mark_rules', 'reuse_existing_docs', 'accept_parser_mismatch', 'build_status'}
+             'for_each', 'mark_rules', 'reuse_existing_docs', 'accept_parser_mismatch', 'build_status', 'index_dropped'}
 VERBS = ('find', 'get', 'list', 'describe', 'create', 'update', 'copy', 'set', 'build', 'check', 'validate', 'step',
          'compare', 'profile', 'upload', 'record', 'start', 'write', 'promote', 'reprocess', 'wait', 'summarise',
          'survey', 'locate', 'read', 'run', 'propose', 'draft', 'test', 'processing', 'onboard', 'index', 'evaluate',

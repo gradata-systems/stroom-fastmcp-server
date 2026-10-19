@@ -42,6 +42,9 @@ SourcePipeline = Annotated[str | None, Field(
 SourceConfirmation = Annotated[str | None, Field(
     description="From an earlier needs_confirmation reply: the user confirmed indexing Events from a pipeline this "
                 "server did not build.")]
+IndexDropped = Annotated[bool, Field(
+    description="From an earlier drop_first reply: true once the user says the index this pipeline wrote to before "
+                "has been dropped (or its shards deleted).")]
 
 
 def _term(field: str, value: Any, condition: str = 'EQUALS') -> dict[str, Any]:
@@ -138,6 +141,16 @@ async def _sends_to_kafka(stroom: StroomGateway, pipeline_uuid: str) -> bool:
     except Exception:
         return False
     return any(e['type'] == 'StandardKafkaProducer' for e in merged['elements'])
+
+
+async def _writes_output(stroom: StroomGateway, pipeline_uuid: str) -> bool:
+    """Whether processing a stream gives an output stream: a StreamAppender, and no indexing. An indexing pipeline, or
+    one that sends elsewhere (Kafka, say), writes only an Error stream, and only when something went wrong."""
+    try:
+        types = {e['type'] for e in merge_layers(await stroom.pipeline_layers(pipeline_uuid))['elements']}
+    except Exception:
+        return True
+    return 'StreamAppender' in types and not types & INDEXING_ELEMENTS
 
 
 async def _is_indexing(stroom: StroomGateway, pipeline_uuid: str) -> bool:
@@ -787,6 +800,7 @@ async def create_processor_filter(
         priority: Annotated[int, Field(ge=1, le=100)] = 10,
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
+        index_dropped: IndexDropped = False,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -796,8 +810,9 @@ async def create_processor_filter(
     disabled, for the user to enable in Stroom (the pipeline's Processors tab); a feed scope needs a created_after
     bound and is limited to the configured task count. Streams the pipeline already processed are refused: use
     reprocess_streams for those. An indexing pipeline whose earlier Events have since been superseded (the
-    translation processed their raw streams again) still has their documents in its index: the approval says what
-    the cluster admin deletes first (a build's own Lucene index holding only those is emptied, its shards deleted).
+    translation processed their raw streams again) still has their documents in its index: a drop_first reply
+    comes before the approval, with what the cluster admin drops (a build's own Lucene index holding only those is
+    emptied, its shards deleted, with no such step).
     An indexing pipeline reading Events needs source_pipeline_uuid, and its filter only selects Events from
     exactly that events pipeline. For an Elasticsearch indexing pipeline, the index template for its destination
     index must have been agreed with the user (propose_index_template, check_index_template); the user enables the
@@ -884,6 +899,10 @@ async def create_processor_filter(
     if stream_ids and await _reprocess_runs(stroom, pipeline_uuid):
         # The sample, through an events or indexing pipeline: processed once the user approves it (asked for by the
         # user: sample filters made disabled were left for them to enable in Stroom).
+        if 'already indexed' in details and not index_dropped:
+            return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid,
+                                                             'name': pipeline['name']}),
+                                   _drop_first(stroom, pipeline, destination, lucene, details, 'create_processor_filter'))
         summary = (f"Create processor filter and process the sample\nProcess {len(stream_ids)} sample stream(s) with "
                    f"'{pipeline['name']}'.")
         if 'already indexed' in details:
@@ -963,6 +982,21 @@ def _before_actions(stroom: StroomGateway, pipeline: dict[str, Any], destination
     return out
 
 
+def _drop_first(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any] | None,
+                lucene: dict[str, Any] | None, details: dict[str, Any], tool: str) -> dict[str, Any]:
+    """The step before processing into an index this pipeline wrote to: the user drops it, from a button. Asked for by
+    the user: the drop was only a line in the approval form, which carries no button, and an updated indexing pipeline
+    went on into the index it had written to, with that index's earlier documents and mapping."""
+    drop = [a for a in _before_actions(stroom, pipeline, destination, lucene, details) if a and a['id'] != 'commit-template']
+    return {'status': 'drop_first', 'pipeline': pipeline['name'], 'already_indexed': details['already indexed'],
+            **useractions.actions(*drop),
+            'hint': f"Nothing has been processed. Before this pipeline indexes again, the index it wrote to must be "
+                    f"dropped, so it starts fresh with the agreed template's mapping: an existing index (or data "
+                    f"stream) keeps the mapping it was made with. Show the user already_indexed and the button, ask "
+                    f"them to have it dropped and to tell you when it is; then {tool} again with the same arguments "
+                    f"and index_dropped=true, whose approval follows. Don't pass index_dropped before they say so."}
+
+
 async def set_processor_filter_enabled(
         ctx: Context,
         filter_id: Annotated[int, Field(description="Processor filter id, e.g. from processing_status.")],
@@ -1010,6 +1044,7 @@ async def reprocess_streams(
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Streams it already processed, to process again.")],
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
+        index_dropped: IndexDropped = False,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -1018,8 +1053,9 @@ async def reprocess_streams(
     outputs for these streams deleted once the new ones are written; pass the returned filter_id to
     wait_for_processing so only the new outputs count. An events (or records) or indexing pipeline: the user
     approves it in a form, then its filter is created enabled and processing starts (for Elasticsearch indexing
-    the approval also confirms the index template is applied on the cluster; a build's own Lucene index holding
-    only these streams is emptied first, its shards deleted). Any other pipeline (CEF output,
+    the approval also confirms the index template is applied on the cluster; an index the pipeline wrote to
+    before gets a drop_first reply ahead of the approval, the user dropping it, except a build's own Lucene index,
+    emptied once approved, its shards deleted). Any other pipeline (CEF output,
     reference data): the filter is created disabled, for the user to enable.
     Promoted pipelines are refused by the write guard: reprocessing production data is the user's.
     """
@@ -1065,6 +1101,10 @@ async def reprocess_streams(
             'enabled': False, **({'batch_size': _BATCH_NOTE} if small else {}),
             **_for_the_user(stroom, pipeline, created['id'], details,
                             _before_actions(stroom, pipeline, destination, lucene, details))})
+    if 'already indexed' in details and not index_dropped:
+        from tools.plan import next_for
+        return await next_for(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']},
+                              _drop_first(stroom, pipeline, destination, lucene, details, 'reprocess_streams'))
     summary = f"Create processor filter and reprocess streams\nReprocess {len(stream_ids)} stream(s) with '{pipeline['name']}'."
     if 'already indexed' in details:
         summary += " Approve only once the index is dropped, as said below."
@@ -1186,9 +1226,11 @@ async def wait_for_processing(
         pipeline_uuid: Annotated[str, Field(description="The pipeline that is processing.")],
         stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Input streams to wait for.")],
         timeout_seconds: Annotated[int, Field(ge=5, le=900)] = 180,
-        expect_events: Annotated[bool, Field(
-            description="True for translation pipelines (one Events stream per input); False for indexing "
-                        "pipelines, which write to an index and should produce no Error stream.")] = True,
+        expect_events: Annotated[bool | None, Field(
+            description="Whether each input gives an output stream. Left out: from the pipeline: a translation "
+                        "pipeline's StreamAppender writes one per input; an indexing pipeline, or one with no "
+                        "StreamAppender (sending to Kafka, say), writes only an Error stream when something went "
+                        "wrong.")] = None,
         filter_id: Annotated[int | None, Field(
             description="Only count outputs from this processor filter, e.g. the one reprocess_streams made.")] = None,
         output_type: Annotated[str | None, Field(description=(
@@ -1196,9 +1238,10 @@ async def wait_for_processing(
             "writes, from its stream appender."))] = None,
 ) -> dict[str, Any]:
     """
-    Wait until the pipeline's processor tasks finish, then report per input stream the output (Events, or
-    Reference) and Error streams it produced. The gate before the next stage: exactly one output stream per
-    input stream. A missing or duplicate one is flagged with the likely cause.
+    Wait until each input stream's processor task has ended (complete or failed), then report per input stream the
+    output (Events, or Reference) and Error streams it produced. The gate before the next stage: exactly one output
+    stream per input stream, or none for a pipeline that writes none (indexing). A missing or duplicate one is
+    flagged with the likely cause.
     """
     stroom = gateway_from(ctx)
     deadline = time.monotonic() + timeout_seconds
@@ -1207,7 +1250,11 @@ async def wait_for_processing(
     if token_bound:
         deadline = time.monotonic() + max(left, 5)
     from tools.plan import build_of, with_next
-    inferred = output_type is None
+    # A pipeline that writes no output stream has none to wait for, whatever was asked (seen: an Events pipeline that
+    # writes only on error, and an indexing pipeline, each waited out two timeouts with every task complete).
+    expected = expect_events is not False and await _writes_output(stroom, pipeline_uuid)
+    if expected and output_type is None:
+        output_type = await output_stream_type(stroom, pipeline_uuid)
     checked = None
     say = await progress_from(ctx)
     while True:
@@ -1219,8 +1266,9 @@ async def wait_for_processing(
                 'problems': ["This pipeline has no processor filter, so nothing is processing and there is nothing to "
                              "wait for."],
                 'hint': "create_processor_filter first. If it was refused, do what its message says; don't wait."})
-        if inferred and output_type is None:
-            output_type = await output_stream_type(stroom, pipeline_uuid)
+        # Tasks first, outputs after: a task ends once its output is written, so an ended task's output is read.
+        ended = await _tasks_ended(stroom, [filter_id] if filter_id is not None else [f['id'] for f in status['filters']],
+                                   stream_ids)
         outputs = {raw: await _outputs(stroom, raw, pipeline_uuid, filter_id) for raw in stream_ids}
         if checked is None:
             waiting_ids, stopped_ids = await _waiting_on(stroom, pipeline_uuid,
@@ -1251,35 +1299,36 @@ async def wait_for_processing(
                     'pipeline': pipeline_uuid, 'finished': False, 'streams': [], 'gate': 'fail', 'problems': checked,
                     'hint': "Nothing will process these streams, so there is nothing to wait for: "
                             "create_processor_filter with stream_ids= them, then wait."})
-        all_have_output = all(outputs.values()) or not expect_events
-        finished = all(f['finished'] for f in status['filters']) if status['filters'] else False
-        if finished and not expect_events:
-            # No output to show for it, so its own task: seen in e2e, a promoted indexing pipeline's earlier tasks
-            # were all complete before its filter made one for the new stream, and the gate passed with nothing indexed.
-            filter_ids = [filter_id] if filter_id is not None else [f['id'] for f in status['filters']]
-            finished = not set(stream_ids) - await _tasks_ended(stroom, filter_ids, stream_ids)
-        if (all_have_output and finished) or time.monotonic() > deadline:
+        # A stream is done once its own task has ended (seen in e2e: a promoted indexing pipeline's earlier tasks were
+        # all complete before its filter made one for the new stream, and the gate passed with nothing indexed), or
+        # once it has its output, Stroom deleting old tasks.
+        pending = [raw for raw in stream_ids if raw not in ended and not (expected and outputs[raw])]
+        finished = not pending
+        if finished or time.monotonic() > deadline:
             break
         # Where processing is, now and then while waiting (seen: three minutes of silence until the timeout).
         tasks = Counter()
         for f in status['filters']:
             tasks.update(f['tasks'])
         await say.now_and_then(
-            f"Waiting for processing: {sum(1 for metas in outputs.values() if metas)} of {len(stream_ids)} streams "
-            f"have output; tasks: {', '.join(f'{n} {s.lower()}' for s, n in sorted(tasks.items())) or 'none yet'}; "
+            f"Waiting for processing: {len(stream_ids) - len(pending)} of {len(stream_ids)} streams processed"
+            + (f", {sum(1 for metas in outputs.values() if metas)} with output" if expected else '')
+            + f"; tasks: {', '.join(f'{n} {s.lower()}' for s, n in sorted(tasks.items())) or 'none yet'}; "
             f"{max(0, int(deadline - time.monotonic()))} s left")
         await asyncio.sleep(3)
     per_stream, problems = [], []
     for raw, metas in outputs.items():
-        events = [m['id'] for m in metas if m.get('typeName') == output_type]
+        events = [m['id'] for m in metas if m.get('typeName') == output_type] if expected else []
         errors = [m['id'] for m in metas if m.get('typeName') == 'Error']
-        per_stream.append({'input': raw, 'events': events, 'errors': errors, **({'output_type': output_type} if output_type != 'Events' else {})})
-        if not expect_events:
+        per_stream.append({'input': raw, 'events': events, 'errors': errors,
+                           **({'output_type': output_type} if expected and output_type != 'Events' else {})})
+        if not expected or raw in pending:
             if errors:
                 problems.append(f"Stream {raw} produced Error stream(s) {errors}: summarise_streams (kind=errors) {raw}")
         elif len(events) == 0:
-            problems.append(f"Stream {raw} produced no {output_type} stream: check processing_status and summarise_streams (kind=errors) "
-                            f"{raw} (failed task, fatal error, or a filter that missed it)")
+            problems.append(f"Stream {raw} produced no {output_type} stream, and its task has ended, so none is "
+                            f"coming: summarise_streams (kind=errors) {raw} (a failed task, a fatal error, or every "
+                            f"record filtered out)")
         elif len(events) > 1:
             problems.append(f"Stream {raw} has {len(events)} {output_type} streams: it was processed more than once. "
                             "After reprocess_streams, pass its filter_id so only the new output counts; otherwise "
@@ -1292,9 +1341,16 @@ async def wait_for_processing(
         # clean, and the agent went on to document and index its output.
         problems.append("The pipeline's current code has not stepped clean: its output may not be what was checked. "
                         "step_sample over the sample streams until the verdict is clean, then reprocess_streams")
+    # Every task of every filter ended, and none for these streams: waiting again would only run out another timeout.
+    idle = all(f['finished'] for f in status['filters'])
     result = {'pipeline': pipeline_uuid, 'finished': finished, 'streams': per_stream,
+              **({} if expected else {'output': "none expected: the pipeline writes no output stream (indexing, or "
+                                                "no StreamAppender), so only Error streams are reported"}),
               'gate': 'pass' if not problems and finished else 'fail', 'problems': problems,
-              'hint': None if finished else out_of_time("waiting, with tasks still running,") if token_bound
+              'hint': None if finished
+              else f"Every task of the pipeline's filters has ended, but none for stream(s) {pending}: waiting again "
+                   f"won't change that. processing_status shows what each filter's tracker matched." if idle
+              else out_of_time("waiting, with tasks still running,") if token_bound
               else "Tasks were still running at the timeout; call again."}
     try:
         restored = result['gate'] == 'pass' and await development_batch(ctx, pipeline_uuid, False)

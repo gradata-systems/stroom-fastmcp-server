@@ -108,6 +108,10 @@ async def gated_through(ctx, **kwargs) -> tuple[list[dict], dict]:
     gates, ids = [], {}
     while True:
         result = await processing_writes.create_processor_filter(ctx, 'p1', **kwargs, **ids)
+        if result.get('status') == 'drop_first':
+            gates.append(result)
+            ids['index_dropped'] = True
+            continue
         if not str(result.get('status', '')).startswith('needs_'):
             return gates, result
         gates.append(result)
@@ -167,8 +171,8 @@ async def test_elasticsearch_indexing_is_approved_once_the_template_is_committed
     create = mock_stroom(elastic=True)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**ES_GUARD)):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    assert [g['status'] for g in gates] == ['needs_approval'] and 'template is committed' in gates[0]['summary']
-    assert gates[0]['details']['index template'] == ("the agreed index template 'ecs-acme-v2' for Elasticsearch index "
+    assert [g['status'] for g in gates][-1] == 'needs_approval' and 'template is committed' in gates[-1]['summary']
+    assert gates[-1]['details']['index template'] == ("the agreed index template 'ecs-acme-v2' for Elasticsearch index "
                                                      "'ecs-acme-v2' is committed to cluster ES_DEV")
     assert json.loads(create.calls.last.request.content)['enabled'] is True and result['enabled'] is True
 
@@ -184,9 +188,14 @@ async def test_an_index_the_pipeline_wrote_to_is_dropped_first(ctx, agreed, drop
     create = mock_stroom(elastic=True, filtered=[4], streams={6: ('Events', 'ev')}, agreed=agreed)
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**ES_GUARD)):
         gates, result = await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
-    said = gates[0]['details']['already indexed']
+    # Asked for by the user: the drop comes first, as a button, not only as a line in the approval form.
+    assert [g['status'] for g in gates] == ['drop_first', 'needs_approval']
+    [button] = gates[0]['user_actions']
+    assert button['action'] == 'elasticsearch_request' and button['request'] == drop.rstrip('.')
+    assert 'index_dropped=true' in gates[0]['hint'] and gates[0]['already_indexed'] == gates[1]['details']['already indexed']
+    said = gates[1]['details']['already indexed']
     assert f'the cluster admin drops it first, so it starts fresh: {drop}' in said and '_delete_by_query' not in said
-    assert 'once the index is dropped' in gates[0]['summary'] and result['enabled'] is True and create.call_count == 1
+    assert 'once the index is dropped' in gates[1]['summary'] and result['enabled'] is True and create.call_count == 1
 
 
 @respx.mock
@@ -217,6 +226,10 @@ async def reprocessed(ctx, **kwargs):
     gates, ids = [], {}
     while True:
         result = await processing_writes.reprocess_streams(ctx, 'p1', **kwargs, **ids)
+        if result.get('status') == 'drop_first':
+            gates.append(result)
+            ids['index_dropped'] = True
+            continue
         if not str(result.get('status', '')).startswith('needs_'):
             return gates, result
         gates.append(result)
@@ -263,10 +276,11 @@ async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_appr
     create = mock_stroom(elastic=True, filtered=[5])
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
-    assert [g['status'] for g in gates] == ['needs_approval']
-    assert "index 'ecs-acme-v2'" in gates[0]['details']['index template']
-    assert 'drops it first, so it starts fresh: DELETE ecs-acme-v2.' in gates[0]['details']['already indexed']
-    assert 'once the index is dropped' in gates[0]['summary']
+    assert [g['status'] for g in gates] == ['drop_first', 'needs_approval']
+    assert [a['request'] for a in gates[0]['user_actions']] == ['DELETE ecs-acme-v2']
+    assert "index 'ecs-acme-v2'" in gates[1]['details']['index template']
+    assert 'drops it first, so it starts fresh: DELETE ecs-acme-v2.' in gates[1]['details']['already indexed']
+    assert 'once the index is dropped' in gates[1]['summary']
     assert json.loads(create.calls.last.request.content)['enabled'] is True and result['filter_id'] == 9
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression['op'] == 'AND' and expression['children'][1] == PIPELINE_TERM
@@ -294,8 +308,12 @@ async def test_reprocessing_into_the_builds_own_lucene_index_empties_it_first(ct
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'indexing'})), \
             patch.object(processing_writes, 'lucene_index', AsyncMock(return_value=LUCENE)):
         gates, result = await reprocessed(ctx, stream_ids=[5])
-    details = gates[0]['details']
+    details = gates[-1]['details']
     assert result['enabled'] is True and json.loads(create.calls.last.request.content)['enabled'] is True
+    # The server empties only its build's own index; any other is the user's, first, from its doc.
+    assert [g['status'] for g in gates] == ['needs_approval'] if emptied else ['drop_first', 'needs_approval']
+    if not emptied:
+        assert [a['action'] for a in gates[0]['user_actions']] == ['open_document']
     if emptied:
         assert 'deleted first' in details['earlier documents'] and 'already indexed' not in details
         assert delete.call_count == 1 and delete.calls.last.request.url.params['nodeName'] == 'node1a'
@@ -350,6 +368,55 @@ async def test_with_no_events_to_show_the_wait_is_for_the_streams_own_task(ctx):
             patch.object(processing_writes, '_tasks_ended', AsyncMock(return_value=set())):
         result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=0, expect_events=False)
     assert not result['finished'] and result['gate'] == 'fail'
+
+
+def ended_task(elements: list[str], outputs: list[dict] = ()):
+    """A pipeline of these element types, filter 9's task for stream 5 complete, and these outputs."""
+    respx.post(f'{API}/pipeline/v1/fetchPipelineLayers').mock(return_value=httpx.Response(200, json=[
+        {'pipelineData': {'elements': {'add': [{'id': t[0].lower() + t[1:], 'type': t} for t in elements]}}}]))
+    respx.post(f'{API}/processorFilter/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'processorFilter': {'id': 9, 'pipelineUuid': 'p1'}}]}))
+    respx.post(f'{API}/processorTask/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'status': 'COMPLETE', 'metaId': 5}]}))
+    respx.post(f'{API}/meta/v1/find').mock(return_value=httpx.Response(200, json={'values': [
+        {'meta': {'pipelineUuid': 'p1', 'processorFilterId': 9, **m}} for m in outputs]}))
+
+
+@respx.mock
+@pytest.mark.parametrize('elements', [['XSLTFilter', 'StandardKafkaProducer'], ['XSLTFilter', 'ElasticIndexingFilter']])
+async def test_a_pipeline_that_writes_no_stream_is_done_when_its_task_ends(ctx, elements):
+    # Seen in Stroom: an Events pipeline that writes only on error, and an indexing pipeline, each waited out two
+    # timeouts at "0 of 3 streams have output; tasks: 6 complete".
+    ended_task(elements)
+    started = time.monotonic()
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=60, expect_events=True)
+    assert time.monotonic() - started < 5
+    assert result['gate'] == 'pass' and result['finished'] and 'none expected' in result['output']
+    assert result['streams'] == [{'input': 5, 'events': [], 'errors': []}]
+
+
+@respx.mock
+async def test_an_ended_task_with_no_events_fails_at_once_rather_than_waiting(ctx):
+    ended_task(['XSLTFilter', 'StreamAppender'], [{'id': 7, 'typeName': 'Error'}])
+    started = time.monotonic()
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [5], timeout_seconds=60)
+    assert time.monotonic() - started < 5
+    assert result['finished'] and result['gate'] == 'fail' and 'output' not in result
+    assert result['problems'] == ["Stream 5 produced no Events stream, and its task has ended, so none is coming: "
+                                  "summarise_streams (kind=errors) 5 (a failed task, a fatal error, or every record "
+                                  "filtered out)"]
+
+
+@respx.mock
+async def test_with_every_task_ended_and_none_for_the_stream_waiting_again_is_not_suggested(ctx):
+    ended_task(['XSLTFilter', 'StreamAppender'])
+    with patch('tools.processing_writes.guard_from', return_value=IN_BUILD), \
+            patch.object(processing_writes, '_unselected', AsyncMock(return_value=[])):
+        result = await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=5)
+    assert not result['finished'] and result['hint'].startswith(
+        "Every task of the pipeline's filters has ended, but none for stream(s) [6]: waiting again won't change that.")
 
 
 @respx.mock
@@ -679,7 +746,7 @@ async def test_waiting_says_where_processing_is_now_and_then(ctx):
     with patch('tools.processing_writes.guard_from', return_value=IN_BUILD):
         await processing_writes.wait_for_processing(ctx, 'p1', [6], timeout_seconds=5)
     said = [c.args[2] for c in ctx.report_progress.call_args_list]
-    assert len(said) == 1 and said[0].startswith('Waiting for processing: 0 of 1 streams have output; tasks: ')
+    assert len(said) == 1 and said[0].startswith('Waiting for processing: 0 of 1 streams processed, 0 with output; tasks: ')
 
 
 @respx.mock
