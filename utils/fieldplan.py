@@ -20,18 +20,27 @@ from utils.xsltgen import XSL, SharedTemplate, XsltStyle, _comment
 from utils.xsltstyle import parse, part_name, serialize, variables
 
 
+def _wild(source: str) -> bool:
+    return '*' in source or '//' in source
+
+
 def source_matches(source: str, path: str) -> bool:
     """Whether a plan source names this event path: '*' stands for one element, as in the XPath it is
-    (EventDetail/Network/*/Source/Device/IPAddress names the source address of a Permit, a Deny, a Connect...)."""
-    if '*' not in source:
+    (EventDetail/Network/*/Source/Device/IPAddress names the source address of a Permit, a Deny, a Connect...), and
+    '//' for any elements between (EventDetail//Object/Name names View/Object/Name and Export/Source/Object/Name).
+    Seen: an agent's EventDetail//Object/Name taken as matching nothing, its paths reported as not mapped."""
+    if not _wild(source):
         return source == path
-    want, have = source.strip('/').split('/'), path.strip('/').split('/')
-    return len(want) == len(have) and all(w == '*' or w == h for w, h in zip(want, have))
+    if '//' not in source:
+        want, have = source.strip('/').split('/'), path.strip('/').split('/')
+        return len(want) == len(have) and all(w == '*' or w == h for w, h in zip(want, have))
+    pattern = re.escape(source.strip('/')).replace(r'\*', '[^/]+').replace('//', '/(?:[^/]+/)*')
+    return re.fullmatch(('(?:[^/]+/)*' if source.startswith('//') else '') + pattern, path.strip('/')) is not None
 
 
 def population_of(source: str, population: dict[str, float]) -> float | None:
     """How often a source is populated: a wildcard's paths summed (an event has one Network action)."""
-    if '*' not in source:
+    if not _wild(source):
         return population.get(source)
     hits = [v for p, v in population.items() if source_matches(source, p)]
     return min(100.0, sum(hits)) if hits else None
@@ -199,6 +208,10 @@ class FieldPlan(BaseModel):
     convention: str | None = Field(default=None, description=(
         "The naming convention the plan follows (draft_index_mapping's), e.g. 'ecs': its names and types are "
         "checked against it."))
+    custom_namespaces: list[str] = Field(default_factory=list, description=(
+        "ECS: the top-level names the plan's own fields (those ECS has no field for) go under, named after the source "
+        "or organisation, e.g. ['secretserver'] for secretserver.ticket; any other top-level name that isn't ECS's "
+        "is reported."))
     style: XsltStyle = Field(default_factory=XsltStyle, description=(
         "How the indexing XSLT is written, as an Events translation's is (naming, variables, layout): take it from "
         "an XSLT style section in the standing instructions (AGENTS docs); otherwise leave the defaults."))
@@ -214,12 +227,12 @@ class FieldPlan(BaseModel):
         return self
 
     def convention_problems(self) -> list[str]:
-        """Where the plan departs from its convention: for ECS, names in its field sets it doesn't define, and
-        types that don't map to its own (utils/ecs)."""
+        """Where the plan departs from its convention: for ECS, names in its field sets it doesn't define, types
+        that don't map to its own, and top-level names neither ECS's nor the plan's custom namespaces (utils/ecs)."""
         if self.convention != 'ecs':
             return []
         from utils.ecs import problems
-        return problems(self.fields)
+        return problems(self.fields, self.custom_namespaces)
 
     @classmethod
     def for_discovery(cls, index_name: str, discovery: Discovery) -> 'FieldPlan':

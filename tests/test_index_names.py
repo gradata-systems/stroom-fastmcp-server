@@ -75,7 +75,9 @@ async def test_without_an_example_the_profiles_style_names_them():
         flat, _ = await draft(convention='stroom-flat', without_example=True)
         nested, _ = await draft(convention='ecs', without_example=True)
     assert flat['EventDetail/Alert/Type'] == 'AlertType' and flat['EventDetail/Network/*/Source/Port'] == 'SourcePort'
-    assert nested['EventDetail/Alert/Type'] == 'alert.type' and nested['EventDetail/Network/*/Source/Port'] == 'source.port'
+    # ECS: an action's own element under the source's namespace (named after the index), the profile's names as ECS's.
+    assert nested['EventDetail/Alert/Type'] == 'firewall_edge.alert.type'
+    assert nested['EventDetail/Network/*/Source/Port'] == 'source.port'
 
 
 async def test_following_ecs_what_happened_and_data_elements_are_named_as_ecs_names_them():
@@ -97,11 +99,63 @@ async def test_following_ecs_what_happened_and_data_elements_are_named_as_ecs_na
     assert fields['event.action']['source'] == 'EventDetail/*/Action'
     assert fields['event.outcome']['transform'] == 'outcome' and fields['process.command_line']['type'] == 'keyword'
     assert not {'authenticate.action', 'authenticate.outcome.success', 'process.action'} & set(fields)   # not twice
-    # A derived name in an ECS field set that ECS doesn't define is left for the user to name; one outside ECS's
-    # field sets (alert.type) is a custom field, which ECS allows.
-    assert 'process.type' not in fields and any(n.startswith('EventDetail/Process/Type') for n in result['ecs_not_planned'])
-    assert 'alert.type' in fields
+    # An action's own elements go under the source's namespace, as ECS asks: never a top-level group per action
+    # (alert.*), nor a name in an ECS field set that ECS doesn't define (process.type).
+    assert fields['firewall.process.type']['source'] == 'EventDetail/Process/Type' and 'firewall.alert.type' in fields
+    assert not {'process.type', 'alert.type'} & set(fields) and result['plan']['custom_namespaces'] == ['firewall']
     assert fields['user_agent.original']['source'] == "EventDetail/Network/Permit/Data[@Name='user_agent_original']/@Value"
     assert not any('session_id' in f['source'] for f in fields.values())                 # not an ECS field's name
     assert result['ecs_data_elements'] and 'ecs_check' not in result
     assert result['plan']['convention'] == 'ecs' and result['rendered']['body']['composed_of'] == ['ecs@mappings']
+
+
+async def test_an_example_template_declares_its_own_names_not_reported_as_un_ecs():
+    _, result = await draft(example_template=EXAMPLE)
+    assert 'ecs_check' not in result and {'Alert', 'Authenticate', 'User'} <= set(result['plan']['custom_namespaces'])
+
+
+async def test_a_plan_is_amended_with_only_what_changes_and_the_tools_take_it_from_the_session():
+    # Seen in Ask Stroom AI: past the client's step cap the agent had lost its earlier extra_fields and spent eight
+    # calls recovering them, and the 50-field plan went inline to save_xslt, create_index_doc and
+    # propose_index_template, five times in all.
+    from fastmcp.exceptions import ToolError
+    from tools import translation
+    from utils.fieldplan import PlannedField
+    profiles = {p.stem: yaml.safe_load(p.read_text(encoding='utf-8')) for p in CONVENTIONS.glob('*.yaml')}
+    ctx = SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(settings=SimpleNamespace(default_convention=None))})
+    agreed = SimpleNamespace(require=AsyncMock(return_value=None))
+    summary = AsyncMock(return_value={'path_population': POPULATED})
+    with patch.object(indexing, 'summarise_events', summary), patch.object(indexing, '_conventions', lambda c: profiles), \
+            patch.object(indexing, 'consent_from', lambda c: agreed), \
+            patch.object(indexing, '_build_of_stream', AsyncMock(return_value=None)):
+        drafted = await indexing.draft_index_mapping(
+            ctx, 'elasticsearch', 'ecs-firewall-v1', events_stream_ids=[1], convention='ecs', without_example=True,
+            extra_fields=[PlannedField(name='firewall.configuration', type='keyword',
+                                       source='EventDetail//Configuration/Type')])
+        # A // source covers the paths below it: not reported as unmapped.
+        assert not any('Configuration' in p for p in drafted['populated_paths_not_mapped'])
+        summary.reset_mock()
+        amended = await indexing.draft_index_mapping(ctx, 'elasticsearch', 'ecs-firewall-v1', changes={'fields': [
+            {'name': 'firewall.alert.type', 'remove': True},
+            {'name': 'firewall.configuration', 'type': 'keyword', 'source': 'EventDetail/Update/After/Configuration/Type'},
+            {'name': 'acme.ticket', 'type': 'keyword', 'source': "EventDetail/Alert/Data[@Name='Ticket']/@Value"}]})
+        with pytest.raises(ToolError, match=r"No plan for 'ecs-other-v1'.*Drafted in this session: \['ecs-firewall-v1'\]"):
+            await indexing.draft_index_mapping(ctx, 'elasticsearch', 'ecs-other-v1', changes={'drop_when': []})
+    assert amended['changed'] == ["field 'firewall.alert.type' removed", "field 'firewall.configuration' replaced",
+                                  "field 'acme.ticket' added"]
+    assert not summary.await_count and 'populated_paths_not_mapped' not in amended     # no streams given: not read
+    names = [f['name'] for f in amended['plan']['fields']]
+    assert 'firewall.alert.type' not in names and names[-1] == 'acme.ticket'
+    assert len(names) == len(drafted['plan']['fields']) and 'firewall.configuration' in names     # earlier extras kept
+    assert [p.split(' ')[0] for p in amended['ecs_check']] == ['acme.*']
+    # Saved with no code and no plan: the one amended in the session, not pasted again.
+    with patch.object(translation, 'create_xslt', AsyncMock(return_value={'uuid': 'i-1'})) as create:
+        await translation.save_xslt(ctx, 'fw-v1', 'FW-INDEX-XSLT')
+    saved = create.await_args.args[5]
+    assert [f.name for f in saved.fields] == names and create.await_args.args[3] == saved.xslt()
+    # The plan kept with a pipeline's indexing XSLT is what the pipeline writes: it comes first.
+    kept = {'kind': 'index', 'payload': {**amended['plan'], 'drop_when': ['x']}}
+    with patch('tools.builds.kept_mapping', AsyncMock(return_value=kept)):
+        assert (await indexing.plan_given(ctx, None, pipeline_uuid='p1')).drop_when == ['x']
+    assert (await indexing.plan_given(ctx, None, ['ecs-firewall-v1'])).fields[-1].name == 'acme.ticket'
+    assert await indexing.plan_given(ctx, None, ['ecs-elsewhere-v1']) is None

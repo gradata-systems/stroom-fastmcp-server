@@ -67,3 +67,37 @@ def apply_changes(base: dict[str, Any], changes: dict[str, Any]) -> tuple[dict[s
             merged[key] = value
             done.append(f"'{key}' replaced")
     return merged, done
+
+
+def apply_plan_changes(base: dict[str, Any], changes: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """An index field plan with the changes merged in, and what each did: a field replaced whole by name (or added),
+    {"name": ..., "remove": true} removing one, any other key replaced whole. Seen in Ask Stroom AI: a 50-field plan
+    pasted inline to five tools, and drafted again whole to add a field, its earlier extra_fields lost."""
+    if not isinstance(changes, dict) or not changes:
+        raise ToolError("changes is an object holding only what changes, e.g. {\"fields\": [{\"name\": \"acme.ticket\", "
+                        "\"type\": \"keyword\", \"source\": \"...\"}]} or {\"drop_when\": [...]}")
+    merged, done = copy.deepcopy(base), []
+    for key, value in changes.items():
+        if key != 'fields':
+            merged[key] = value
+            done.append(f"'{key}' replaced")
+            continue
+        fields = merged.setdefault('fields', [])
+        for field in value if isinstance(value, list) else [value]:
+            if not isinstance(field, dict) or not field.get('name'):
+                raise ToolError("Each entry in changes.fields needs its name: it replaces the field of that name "
+                                "whole, or is added")
+            at = next((i for i, f in enumerate(fields) if f.get('name') == field['name']), None)
+            if field.get('remove'):
+                if at is None:
+                    raise ToolError(f"changes.fields removes '{field['name']}', which the plan does not have (its "
+                                    f"fields: {[f.get('name') for f in fields]})")
+                fields.pop(at)
+                done.append(f"field '{field['name']}' removed")
+            elif at is None:
+                fields.append(field)
+                done.append(f"field '{field['name']}' added")
+            else:
+                fields[at] = field
+                done.append(f"field '{field['name']}' replaced")
+    return merged, done

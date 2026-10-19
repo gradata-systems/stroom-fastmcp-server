@@ -27,6 +27,18 @@ def test_a_wildcard_source_names_every_network_action():
     assert any_action('EventDetail/Authenticate/Action') == 'EventDetail/Authenticate/Action'
 
 
+def test_a_descendant_source_names_every_path_below_it():
+    # Seen in Ask Stroom AI: EventDetail//Object/Name in the plan, and View/Object/Name, Delete/Object/Name and the
+    # rest reported as populated paths not mapped; the agent went investigating fields it had already mapped.
+    source = 'EventDetail//Object/Name'
+    for path in ('EventDetail/View/Object/Name', 'EventDetail/Export/Source/Object/Name', 'EventDetail/Object/Name'):
+        assert source_matches(source, path), path
+    assert not source_matches(source, 'EventDetail/View/Object/Id')
+    assert not source_matches(source, 'EventSource/Object/Name')
+    assert source_matches('//Object/Name', 'EventDetail/Update/After/Object/Name')
+    assert population_of(source, {'EventDetail/View/Object/Name': 20.0, 'EventDetail/Delete/Object/Name': 5.0}) == 25.0
+
+
 def test_the_plan_takes_network_fields_once_nested_as_the_example_nests():
     # Seen: the plan took IpAddress from the Deny destination only (the first path ending IPAddress), permitted
     # traffic's addresses went unindexed, and the agent added SourceIp.Permit, SourceIp.Deny and the like.

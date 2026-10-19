@@ -11,7 +11,7 @@ from security.guard import guard_from
 from utils.consent import consent_from
 from tools.validation import check_xslt
 from utils.fieldplan import FieldPlan
-from utils.mappingstore import normalise_xslt, with_mapping
+from utils.mappingstore import normalise_xslt, read_mapping, with_mapping
 from utils.saxon import unsafe_in_xslt
 from utils.stroom import gateway_from
 from utils.xsltgen import TranslationMapping
@@ -127,9 +127,22 @@ async def with_fragment_setup(ctx: Context, profiled: dict[str, Any]) -> dict[st
 async def _generated(index_plan: FieldPlan | None) -> str:
     """The indexing XSLT an index plan generates, for a save given no code."""
     if index_plan is None:
-        raise ToolError("Give code (an XSLT written by hand), or index_plan to save the indexing XSLT generated from it. "
-                        "A translation from a mapping is saved by build_translation_xslt (build and name, or uuid).")
+        raise ToolError("Give code (an XSLT written by hand), or index_plan to save the indexing XSLT generated from it "
+                        "(none is kept for this session to take: draft_index_mapping drafted several, or none). A "
+                        "translation from a mapping is saved by build_translation_xslt (build and name, or uuid).")
     return index_plan.xslt()
+
+
+async def _plan_to_save(ctx: Context, uuid: str | None) -> FieldPlan | None:
+    """With no code and no index_plan: the plan draft_index_mapping drafted or amended in this session, for the index
+    the XSLT's kept plan names (else that kept plan, regenerated), or with no XSLT yet, the only one drafted."""
+    from tools.indexing import drafted_plans, plan_given
+    if not uuid:
+        return await plan_given(ctx, None)
+    kept = read_mapping((await gateway_from(ctx).get_doc('XSLT', uuid)).get('description'))
+    if not kept or kept[0] != 'index':
+        return None
+    return drafted_plans(ctx).get(kept[1].get('index_name')) or FieldPlan.model_validate(kept[1])
 
 
 async def _checked(ctx: Context, xslt: str, build: str | None = None, previous: str | None = None) -> None:
@@ -243,7 +256,8 @@ Mapping = Annotated[TranslationMapping | None, Field(
                 "mapping; build_status reports an XSLT edited by hand since.")]
 IndexPlan = Annotated[FieldPlan | None, Field(
     description="For an indexing XSLT: the field plan draft_index_mapping drafted it from, kept with the XSLT for the "
-                "documentation.")]
+                "documentation. Omitted with no code: the plan drafted (or amended) in this session, for the index "
+                "the XSLT's kept plan names, or the only one drafted.")]
 
 
 LOST = ("{type} '{name}' was saved by stroom-mcp with the {what} it is generated from, kept in its Documentation tab "
@@ -598,8 +612,8 @@ async def save_xslt(
         build: Build,
         name: Annotated[str, Field(description="Document name, following the environment's naming (new documents).")],
         code: Annotated[str | None, Field(
-            description="The complete XSLT, for one written by hand. Omit it with index_plan to save the indexing XSLT "
-                        "generated from the plan, without it passing through you.")] = None,
+            description="The complete XSLT, for one written by hand. Omit it to save the indexing XSLT generated from "
+                        "the plan (index_plan, or the one kept for the session), without it passing through you.")] = None,
         index_plan: IndexPlan = None,
         uuid: Uuid = None,
         version: Version = None,
@@ -619,6 +633,8 @@ async def save_xslt(
     that undoes it is refused, saying what it changed, to carry into the plan; where the plan changes a field the
     edit changed too, the user is asked whether to keep their edit or use the proposed field.
     """
+    if code is None and index_plan is None:
+        index_plan = await _plan_to_save(ctx, uuid)
     said = change or (('Saved again' if uuid else 'Created') + (' from its index plan' if index_plan and code is None
                                                                 else ' by hand' if code else ''))
     if code is None and index_plan is not None and (build or uuid):

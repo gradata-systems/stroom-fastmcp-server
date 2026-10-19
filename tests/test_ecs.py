@@ -57,6 +57,30 @@ def test_a_plan_is_checked_against_ecs_field_by_field():
     assert plan.convention_problems() and not plan.model_copy(update={'convention': None}).convention_problems()
 
 
+def test_every_top_level_name_neither_ecs_nor_a_declared_namespace_is_reported():
+    # Seen: an ECS plan drafted authenticate.*, authorise.*, copy.* and create.*, the check passed them as custom
+    # fields, and the agent told the user only its own secret.* and secretserver.* fields weren't ECS.
+    fields = [PlannedField(name='message', type='text', source='EventDetail/Description')] + [
+        PlannedField(name=n, type='keyword', source='EventDetail/TypeId') for n in (
+            'StreamId', 'EventId', 'tags', 'labels.team', 'user.name', 'authenticate.user.id',
+        'authenticate.user.domain', 'copy.source.object.id', 'secretserver.ticket', 'secret.name')]
+    plan = FieldPlan(backend='elasticsearch', index_name='stroom-ecs-secretserver-v1', time_field='@timestamp',
+                     convention='ecs', fields=fields, custom_namespaces=['secretserver'])
+    said = plan.convention_problems()
+    assert [p.split(' ')[0] for p in said] == ['authenticate.*', 'copy.*', 'secret.*']
+    assert said[0].startswith('authenticate.* (authenticate.user.id, authenticate.user.domain): authenticate is '
+                              "neither an ECS") and '(secretserver.authenticate.user.id)' in said[0]
+    declared = plan.model_copy(update={'custom_namespaces': ['secretserver', 'secret', 'authenticate', 'copy']})
+    assert declared.convention_problems() == []
+
+
+@pytest.mark.parametrize('index_name, namespace', [
+    ('stroom-ecs-secretserver-v1', 'secretserver'), ('ecs-keycloak-v1', 'keycloak'),
+    ('ecs-microsoft-windows{_suffix}v1', 'microsoft_windows'), ('ecs-host-v2', 'host_custom'), ('ecs-v1', 'custom')])
+def test_a_sources_namespace_is_named_after_the_index(index_name, namespace):
+    assert ecs.source_namespace(index_name) == namespace
+
+
 @pytest.mark.parametrize('data_name, expected', [
     ('source_ip', 'source.ip'), ('SourceIp', 'source.ip'), ('Source-IP', 'source.ip'), ('user_full_name', 'user.full_name'),
     ('http_request_method', 'http.request.method'), ('UserAgentOriginal', 'user_agent.original'),

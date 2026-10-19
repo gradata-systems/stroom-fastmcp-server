@@ -484,7 +484,8 @@ async def draft_index_mapping(
                                                                   "discovery index: its raw streams, to find the fields "
                                                                   "holding times.")] = [],
         extra_fields: Annotated[list[PlannedField] | str, ONE_OR_MORE, Field(
-            description="Fields the user asked for beyond the convention's map.")] = [],
+            description="Fields the user asked for beyond the convention's map (ECS: one of the source's own under its "
+                        "custom namespace). To add one to a plan already drafted: changes=, not a new draft.")] = [],
         drop_when: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
                         "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
@@ -516,6 +517,20 @@ async def draft_index_mapping(
             "or its pipeline's. The reply lists the fields the old index wrote that this draft doesn't (replaced: "
             "with their sources and how often the sample populates them), to ask the user about; no need to read "
             "the old XSLT."))] = None,
+        custom_namespaces: Annotated[list[str] | str, ONE_OR_MORE, Field(description=(
+            "ECS: the namespace(s) for the source's own fields, those ECS has no field for, named after the source or "
+            "organisation, e.g. 'secretserver'. Fields of an event's action element (Authenticate/User/Id) are drafted "
+            "under the first; defaults to one named after the index. Other top-level names that aren't ECS's are "
+            "reported (ecs_check)."))] = [],
+        changes: Annotated[dict[str, Any] | str | None, Field(description=(
+            "Instead of drafting again, to amend the plan already drafted for index_name in this session (or, with "
+            "pipeline_uuid, the one kept with that pipeline's indexing XSLT): only what changes. fields: each replaces "
+            "the field of that name whole, or is added; {\"name\": ..., \"remove\": true} removes one; any other key "
+            "(drop_when, custom_namespaces...) replaces it. events_stream_ids, if given, re-checks unmapped paths."
+            ))] = None,
+        pipeline_uuid: Annotated[str | None, Field(description=(
+            "With changes: the indexing pipeline whose kept plan to amend, when it wasn't drafted in this "
+            "session."))] = None,
 ) -> dict[str, Any]:
     """
     Draft the index for the build: a field plan (name, type and source path per field) from the chosen
@@ -525,8 +540,11 @@ async def draft_index_mapping(
     rendered for the backend (Lucene field list or Elasticsearch index template) and a draft indexing XSLT in
     the output form that backend's indexing filter reads, leaving out events drop_when names. With discovery,
     a discovery index instead: nothing is read; raw JSON records are copied as they are and Elasticsearch maps
-    their fields dynamically. Nothing is saved.
+    their fields dynamically. Nothing is saved. The plan is kept for the session: amend it with changes= (only
+    what changes), and save_xslt, create_index_doc and propose_index_template take it from there when not given.
     """
+    if changes is not None:
+        return await _amend_plan(ctx, index_name, changes, events_stream_ids, pipeline_uuid)
     if discovery:
         timed = await _discovery_time(ctx, index_name, discovery, events_stream_ids)
         if not isinstance(timed, Discovery):
@@ -609,7 +627,7 @@ async def draft_index_mapping(
     populated = events['path_population']
     fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
               PlannedField(name='EventId', type='id', source='@EventId')]
-    unused, mapped, ecs_unplaced = [], [], []
+    unused, mapped = [], []
     for path, spec in (profile.get('field_map') or {}).items():
         if example_template and path.startswith('EventDetail/*/'):
             # Any action's Action or Outcome as one field (ECS's event.action): ECS's way, not the example's, which
@@ -629,6 +647,18 @@ async def draft_index_mapping(
     # Process, Update), planned by default: a user asked for these each time. Network's are the profile's.
     from utils.templatecheck import _derive, field_group, nested_name
     nested = profile.get('structure') == 'nested'
+    namespaces = [custom_namespaces] if isinstance(custom_namespaces, str) else list(custom_namespaces)
+    own = None
+    if convention == 'ecs' and not example_template:
+        from utils import ecs
+        clash = [n for n in namespaces if n in ecs.top_level()]
+        if clash:
+            raise ToolError(f"custom_namespaces {clash}: ECS's own top-level names, so not a namespace of the source's: "
+                            f"name it after the source or organisation (e.g. {ecs.source_namespace(index_name)})")
+        # ECS has no place for an action's own elements (Authenticate/User/Id): they go under the source's namespace,
+        # as ECS asks, not a top-level group per action (seen: authenticate.*, authorise.*, copy.* in an ECS plan).
+        namespaces = namespaces or [ecs.source_namespace(index_name)]
+        own = namespaces[0]
     added = 0
     for path in sorted(populated):
         if (added >= 20 or not populated[path] or not path.startswith('EventDetail/') or 'Data' in path.split('/')
@@ -638,17 +668,10 @@ async def draft_index_mapping(
             continue
         taken = {f.name for f in fields}
         name = nested_name(path, 'ecs') if nested else _derive(path, 'pascal', False, taken)
+        name = f'{own}.{name}' if name and own else name
         if not name or name in taken:
             continue
         type_ = 'boolean' if path.endswith('/Success') else 'long' if path.endswith('/Port') else 'keyword'
-        if convention == 'ecs' and not example_template:
-            from utils.ecs import check as ecs_check
-            if ecs_check(name, type_):
-                # A name in an ECS field set that ECS doesn't define (process.type): not drafted, for the user to
-                # name, as ECS asks, outside its field sets.
-                ecs_unplaced.append(f"{path}: {name} would be in an ECS field set without being an ECS field; not "
-                                    f"planned (name it outside ECS's field sets if the user wants it)")
-                continue
         fields.append(PlannedField(name=name, source=path, type=type_))
         added += 1
     # ECS: a Data element whose name is an ECS field's, written another way (source_ip, SourceIp as source.ip), under
@@ -713,8 +736,13 @@ async def draft_index_mapping(
                                            source=f'shared:{use.template}'))
         example_notes.append(f"{sorted(values)}: written by the shared template {use.template} ({use.href})"
                              + ('' if found else '; not found as an XSLT document, so typed as a keyword'))
+    if convention == 'ecs' and example_template:
+        # The user's example names the fields: its top-level names are theirs, declared, not reported as un-ECS.
+        from utils import ecs
+        namespaces += sorted({f.name.split('.')[0] for f in fields} - ecs.top_level() - set(namespaces) - {'StreamId', 'EventId'})
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
-                     subobjects=subobjects, shared=list(shared), convention=convention)
+                     subobjects=subobjects, shared=list(shared), convention=convention,
+                     custom_namespaces=namespaces if convention == 'ecs' else [])
     if pasted and backend == 'elasticsearch':
         build = await _build_of_stream(ctx, events_stream_ids[0])
         if build:
@@ -725,23 +753,105 @@ async def draft_index_mapping(
                                      f"propose_index_template follows it even if it isn't given again")
             except Exception as e:   # keeping it is a convenience; the plan stands without it
                 logger.warning("Couldn't keep the example index template in build %s: %s", build, e)
-    rendered = plan.lucene_fields() if backend == 'lucene' else plan.elastic_template(index_name)
-    # Network paths once, whichever action: one field for a source address, not one per Permit and Deny.
-    unmapped = sorted(dict.fromkeys(any_action(p) for p in populated
-                                    if populated[p] and not any(source_matches(f.source, p) for f in fields)))
     replaced = await _replaced(ctx, replaces, plan, populated) if replaces else None
+    reply = _plan_reply(ctx, plan, populated)
     # No XSLT here: save_xslt index_plan= generates it, and half the reply was code the agent never reads.
     return {**({'replaced': replaced} if replaced else {}),
-            'plan': plan.model_dump(), 'problems': plan.required(), 'rendered': rendered,
-            'convention_paths_not_in_sample': unused, 'populated_paths_not_mapped': unmapped[:40],
-            'field_mapping': index_field_mapping_markdown(plan, populated),
+            **{k: reply.pop(k) for k in ('plan', 'problems', 'rendered')}, 'convention_paths_not_in_sample': unused,
+            **reply,
             **({'from_example': example_notes} if example_template or shared else {}),
-            **({'ecs_data_elements': ecs_data} if ecs_data else {}),
-            **({'ecs_not_planned': ecs_unplaced} if ecs_unplaced else {}),
-            **({'ecs_check': plan.convention_problems()} if plan.convention_problems() else {}),
-            'hint': "Review unmapped paths with the user; add any they want as extra_fields and draft again. Save the "
-                    "XSLT with save_xslt index_plan=plan and no code (it is generated from the plan), so "
-                    "write_documentation generates the Field mapping section."}
+            **({'ecs_data_elements': ecs_data} if ecs_data else {})}
+
+
+_PLANS = 'index_plans_drafted'
+PLAN_HINT = ("Review unmapped paths with the user; add any they want with changes={\"fields\": [...]} (only what "
+             "changes: the plan is kept for the session). Save the XSLT with save_xslt and no code: it is generated "
+             "from the plan kept for the session (or index_plan=), so write_documentation generates the Field mapping "
+             "section.")
+
+
+def _plan_reply(ctx: Context, plan: FieldPlan, populated: dict[str, float] | None) -> dict[str, Any]:
+    """What a drafted or amended plan comes back as; the plan kept for the session, for changes= and the tools that
+    take a plan. Seen in Ask Stroom AI: after the client's step cap the agent had lost its earlier extra_fields and
+    spent eight calls recovering them, and pasted the 50-field plan inline five times over."""
+    from tools.plan import _user
+    try:
+        ctx.lifespan_context.setdefault(_PLANS, {})[(_user(ctx), plan.index_name)] = plan.model_dump()
+    except Exception:   # kept for convenience; the plan is in the reply all the same
+        pass
+    reply: dict[str, Any] = {'plan': plan.model_dump(), 'problems': plan.required(),
+                             'rendered': plan.lucene_fields() if plan.backend == 'lucene' else
+                             plan.elastic_template(plan.index_name)}
+    if populated is not None:
+        # Network paths once, whichever action: one field for a source address, not one per Permit and Deny.
+        unmapped = sorted(dict.fromkeys(any_action(p) for p in populated
+                                        if populated[p] and not any(source_matches(f.source, p) for f in plan.fields)))
+        reply.update({'populated_paths_not_mapped': unmapped[:40],
+                      'field_mapping': index_field_mapping_markdown(plan, populated)})
+    if plan.convention_problems():
+        reply['ecs_check'] = plan.convention_problems()
+    return {**reply, 'hint': PLAN_HINT}
+
+
+def drafted_plans(ctx: Context) -> dict[str, FieldPlan]:
+    """The plans draft_index_mapping drafted or amended in this session, by index name."""
+    from tools.plan import _user
+    try:
+        user = _user(ctx)
+        return {index: FieldPlan.model_validate(plan) for (who, index), plan in
+                (ctx.lifespan_context.get(_PLANS) or {}).items() if who == user}
+    except Exception:
+        return {}
+
+
+async def plan_given(ctx: Context, plan: FieldPlan | None, index_names: list[str | None] = (),
+                     pipeline_uuid: str | None = None) -> FieldPlan | None:
+    """The plan a tool was given, else the one kept with the pipeline's indexing XSLT (what it writes), else the one
+    drafted in this session for one of the index names (or the only one drafted, with no name to go by)."""
+    if plan is not None:
+        return plan
+    if pipeline_uuid:
+        from tools.builds import kept_mapping
+        try:
+            kept = await kept_mapping(ctx, pipeline_uuid)
+        except ToolError:
+            kept = None
+        if kept and kept['kind'] == 'index':
+            return FieldPlan.model_validate(kept['payload'])
+    drafted = drafted_plans(ctx)
+    named = [drafted[n] for n in index_names if n in drafted]
+    if named:
+        return named[0]
+    return next(iter(drafted.values())) if len(drafted) == 1 and not any(index_names) else None
+
+
+async def _amend_plan(ctx: Context, index_name: str, changes: dict[str, Any] | str, events_stream_ids: Any,
+                      pipeline_uuid: str | None) -> dict[str, Any]:
+    """draft_index_mapping changes=: the kept plan with only what changes merged in."""
+    from utils.mappingchanges import apply_plan_changes
+    if isinstance(changes, str):
+        try:
+            changes = json.loads(changes)
+        except json.JSONDecodeError as e:
+            raise ToolError(f"changes is text that is not JSON ({e.msg} at character {e.pos}): pass it as an object")
+    base = drafted_plans(ctx).get(index_name)
+    if base is None and pipeline_uuid:
+        base = await plan_given(ctx, None, pipeline_uuid=pipeline_uuid)
+    if base is None:
+        raise ToolError(f"No plan for '{index_name}' to amend: none was drafted for it in this session"
+                        + ("" if pipeline_uuid else " (give pipeline_uuid= the indexing pipeline whose saved XSLT keeps "
+                                                    "one)")
+                        + f". Drafted in this session: {sorted(drafted_plans(ctx)) or 'none'}. Else draft it whole.")
+    merged, done = apply_plan_changes(base.model_dump(), changes)
+    try:
+        plan = FieldPlan.model_validate(merged)
+    except ValueError as e:
+        raise ToolError(f"The amended plan isn't valid: {e}") from e
+    populated = None
+    if events_stream_ids:
+        await require_events(gateway_from(ctx), events_stream_ids)
+        populated = (await summarise_events(ctx, events_stream_ids, 200))['path_population']
+    return {'changed': done, **_plan_reply(ctx, plan, populated)}
 
 
 async def _replaced(ctx: Context, replaces: str, plan: FieldPlan, populated: dict[str, float]) -> dict[str, Any]:
@@ -900,7 +1010,8 @@ async def create_index_doc(
         volume_group: Annotated[str, Field(description="Lucene: the index volume group.")] = 'Default Volume Group',
         plan: Annotated[FieldPlan | None, Field(description="Lucene: the field plan from draft_index_mapping; its fields "
                                                            "are added to the index doc (keywords as TEXT with the KEYWORD "
-                                                           "analyzer). Elasticsearch fields come from the index template.")] = None,
+                                                           "analyzer). Elasticsearch fields come from the index template. "
+                                                           "Omitted: the one drafted for this index in the session.")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -909,6 +1020,10 @@ async def create_index_doc(
     cluster. The user confirms the backend, name and target.
     """
     stroom = gateway_from(ctx)
+    if plan is None:
+        # The plan drafted for this index in the session: not pasted again (seen: a 50-field plan, five times).
+        plan = await plan_given(ctx, None, [index_name, name])
+        plan = plan if plan is not None and plan.backend == backend else None
     if backend == 'elasticsearch':
         # Seen in VS Code: refused for want of both, though the plan names the index and every Elastic Index doc in
         # the environment used the same cluster. Both are shown in the user's form.
@@ -1699,10 +1814,42 @@ class SearchCheck(BaseModel):
     expected: int | None = Field(None, description="Rows it must return; none: at least one; 0: none (e.g. another case).")
 
 
+def _same_value(shown: str, written: str) -> bool | None:
+    """Whether a value a dashboard shows is one a document was written with: as times, as numbers, else as text
+    (either holding the other: a text field shows its words). None when they can't be compared (one a time, the
+    other not): a dashboard formats some values its own way."""
+    from datetime import datetime
+
+    def when(v: str) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(v.strip().replace('Z', '+00:00'))
+            return t if t.tzinfo else None
+        except ValueError:
+            return None
+
+    def number(v: str) -> float | None:
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    times, numbers = (when(shown), when(written)), (number(shown), number(written))
+    if all(times):
+        return times[0] == times[1]
+    if all(n is not None for n in numbers):
+        return numbers[0] == numbers[1]
+    if any(times) or any(n is not None for n in numbers):
+        return None
+    return shown.lower() in written.lower() or written.lower() in shown.lower()
+
+
 async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
-    """A hit back to its record: step the indexing pipeline at the hit's StreamId and EventId (the record number,
-    from 1) and read the document it writes there. The hit is traced when that document has the same EventId and
-    holds the value searched for."""
+    """A hit back to its record: step the indexing pipeline at the hit's StreamId and EventId (the record's number
+    in its stream, from 1: record index EventId - 1) and read the document it writes there. The hit is traced when
+    that document holds the value searched for, and is the hit's: its EventId the hit's, or, when stepping numbers
+    it otherwise, the only document the record gives, holding what the hit's other columns show.
+    Stepping one record may not number it as processing did: Stroom's IdEnrichmentFilter counts the Events it reads,
+    and seen on the live Stroom (verify_index), every record stepped alone was numbered 1 (EventId 1 traced, every
+    other hit failed, and the agent told the user the tracer was off by one)."""
     from tools.pipelines import translation_docs
     from utils.fielddoc import index_documents
     stroom = gateway_from(ctx)
@@ -1714,18 +1861,44 @@ async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: 
                     if e['doc'].get('type') == 'XSLT' and not e['inherited_from_template']), None)
     from tools.stepping import step_pipeline
     stepped = await step_pipeline(ctx, pipeline_uuid, stream, event - 1)
+    at = f"record index {event - 1} of stream {stream} (the hit's EventId {event}, counted from 1)"
+    out = {'stream': stream, 'event': event}
+    if stepped.get('record') not in (None, event - 1):
+        return {'traced': False, **out, 'why': f"asked to step {at}, Stroom stepped record index {stepped['record']}"}
     output = ((stepped.get('elements') or {}).get(element) or {}).get('output') or ''
     documents = index_documents([output]) if output else []
-    document = next((d for d in documents if str(event) in [v.split('.')[0] for v in d.get('EventId', [])]), None)
+    ids = lambda d: [v.split('.')[0] for v in d.get('EventId', [])]
+    document = next((d for d in documents if str(event) in ids(d)), None)
+    if document is None and len(documents) == 1:
+        document = documents[0]
+        out['stepped_event_id'] = (ids(document) or [None])[0]
+        # Matched on what the hit shows instead: each column the document also has, compared as the values are.
+        agreed = []
+        for column, shown in row.items():
+            if column in ('StreamId', 'EventId') or shown in (None, '') or not document.get(column):
+                continue
+            same = [_same_value(str(shown), v) for v in document[column]]
+            if all(s is False for s in same):
+                return {'traced': False, **out, 'why': (
+                    f"stepping {at} gives one document, numbered EventId {out['stepped_event_id']} by stepping, and "
+                    f"it isn't the hit's: its {column} is {document[column]}, where the hit has {shown}")}
+            agreed += [column] if True in same else []
+        if not agreed:
+            return {'traced': False, **out, 'why': (
+                f"stepping {at} gives one document, numbered EventId {out['stepped_event_id']} by stepping, and none "
+                f"of the hit's columns ({sorted(set(row) - {'StreamId', 'EventId'})}) has a value to match it on")}
+        out['matched_on'] = agreed
     if document is None:
-        return {'traced': False, 'stream': stream, 'event': event,
-                'why': f'stepping record {event} of stream {stream} gives no document with EventId {event}'}
+        return {'traced': False, **out, 'why': (
+            f"stepping {at} with element {element} gives " + (
+                f"{len(documents)} documents, EventIds {[i for d in documents for i in ids(d)]}, none {event}"
+                if documents else "no document"))}
     field, value = check.get('field'), check.get('value')
     # A pattern (wildcard, or a CIDR range on an ip field) only needs the hit's record; a plain value must be there.
     holds = (check.get('condition', 'EQUALS') != 'EQUALS' or any(c in (value or '') for c in '*?/') or field not in document
              or any((value or '').lower() in v.lower() for v in document.get(field, [])))   # text fields match words
-    return {'traced': holds, 'stream': stream, 'event': event,
-            **({} if holds else {'why': f"record {event}'s document has {field} = {document.get(field)}, not {value}"})}
+    return {'traced': holds, **out, **({} if holds else {
+        'why': f"the document stepping {at} gives has {field} = {document.get(field)}, not {value}"})}
 
 
 FULL_COUNT = 10_000     # a stream's documents counted one by one; past this, its first and last ENDS events are
@@ -2072,8 +2245,11 @@ def _ecs_base(plan: FieldPlan) -> bool:
 async def propose_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
-        plan: Annotated[FieldPlan, Field(description="The field plan from draft_index_mapping (backend elasticsearch).")],
-        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to check the template against.")],
+        plan: Annotated[FieldPlan | None, Field(description=(
+            "The field plan from draft_index_mapping (backend elasticsearch). Omitted: the one kept with the "
+            "pipeline's indexing XSLT (what it writes), else the one drafted in this session."))] = None,
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(
+            description="Events streams to check the template against (required).")] = [],
         example_template: Annotated[str | None, Field(
             description="The user's example: the Elasticsearch index template a sibling source's index uses (GET "
                         "_index_template/<name>, or a Dev Tools request), or an existing index's mapping (GET "
@@ -2111,6 +2287,12 @@ async def propose_index_template(
     agreed template is kept with the pipeline. The user then has the cluster admin commit it, and
     create_processor_filter starts indexing once they confirm that.
     """
+    if not events_stream_ids:
+        raise ToolError("Give events_stream_ids: the Events streams to check the template against")
+    plan = await plan_given(ctx, plan, pipeline_uuid=pipeline_uuid)
+    if plan is None:
+        raise ToolError("Give plan= the field plan: the pipeline's indexing XSLT keeps none, and draft_index_mapping "
+                        "drafted none (or several) in this session")
     if plan.backend != 'elasticsearch':
         raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with create_index_doc (plan=...)")
     destination = await _destination(ctx, pipeline_uuid)
@@ -2431,7 +2613,8 @@ async def verify_index(
                         "nothing (expected 0). Use values from stepped documents.")] = [],
         pipeline_uuid: Annotated[str | None, Field(
             description="The indexing pipeline: each check's first hit is traced back to its record by stepping it "
-                        "at the hit's StreamId and EventId.")] = None,
+                        "at the hit's StreamId and EventId (record index EventId - 1); a trace that fails says what "
+                        "it compared (trace.why).")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
 ) -> dict[str, Any]:
     """

@@ -11,19 +11,28 @@ comes from the chosen indexing template (`find_pipeline_templates stage=indexing
 | Fields | On the index doc (`create_index_doc` with the plan) | An Elasticsearch index template, built by `propose_index_template` from the user's example (an index template or an index's mapping, with its component templates) and applied to the cluster by its admin |
 
 Following ECS (the `ecs` profile, no example): the server has the full schema. The plan's names are checked against
-it (`ecs_check`: a name in an ECS field set that ECS doesn't define, or a known field of another type), the template
+it (`ecs_check`: a name in an ECS field set that ECS doesn't define, a known field of another type, or a top-level
+name that is neither ECS's nor one of the plan's `custom_namespaces`), the template
 composes Elastic's `ecs@mappings` and leaves the standard ECS fields to it (mapping only the rest, with dynamic
 mapping on, which the component needs; `message` and other fields it maps as `match_only_text` are mapped as `text`,
 as Stroom can't list or search a `match_only_text`, `flattened`, `geo_point` or `search_as_you_type` field), and `get_field_conventions name=ecs ecs_fields=<set>` lists a field set's fields to
 name one ECS's way. A template built from an earlier one (a new version of an index) leaves the ECS fields that
 template maps just as `ecs@mappings` does to the component too: only overrides are mapped explicitly. To drop
-explicit mappings, never remove `ecs@mappings` from `composed_of`: it is what maps those fields. A field of the user's own goes outside ECS's field sets.
+explicit mappings, never remove `ecs@mappings` from `composed_of`: it is what maps those fields. A field of the
+user's own goes under the source's namespace, as ECS asks (`custom_namespaces`, by default named after the index:
+`secretserver` for `stroom-ecs-secretserver-v1`): the draft puts an event's action elements there
+(`secretserver.authenticate.user.id`), never a top-level group per action. Tell the user every name `ecs_check` lists
+as not ECS, not only the ones you added.
 With an example too, an ECS plan's template is composed of `ecs@mappings` (first in `composed_of`), with dynamic
 mapping on, whatever the example composes or its `dynamic` says (an index's `_mapping` never shows `composed_of`);
 the notes say so. Only an AGENTS doc's exclusion of `ecs@mappings` leaves it out.
 
-The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again (`save_xslt
-index_plan=... uuid=`). The XSLT is written as an Events translation is, in the plan's `style` (from an XSLT style
+The plan is kept for the session as drafted: change it with `draft_index_mapping changes={"fields": [...]}` (only
+what changes: a field replaces the one of its name, or is added; `{"name": ..., "remove": true}` removes one), never by
+drafting again whole, which loses earlier `extra_fields`. `save_xslt` with no code, `create_index_doc` and
+`propose_index_template` take the plan from there (or the one kept with the pipeline's indexing XSLT) when not given:
+don't paste it. The plan is kept with the indexing XSLT, and later changes are made to the plan and saved again
+(`save_xslt uuid=`; with `changes=` and `pipeline_uuid=` when it wasn't drafted in this session). The XSLT is written as an Events translation is, in the plan's `style` (from an XSLT style
 section in the standing instructions): a template a top-level object, each with a comment, inputs read often in
 variables. An edit the user made by hand in Stroom since (another field written, one taken out, a source
 changed) is kept: a save that would undo it is refused, saying what it changed. Carry it into the plan (a field it
@@ -168,6 +177,10 @@ Verify through Stroom, not by querying the backend: `verify_index` makes the das
 searches: the sample stream ids, an exact match on each key field, and a time range. With `pipeline_uuid` it also
 checks that every field the pipeline writes for those Events is in the index (Stroom lists it for the index doc);
 one that isn't fails verification: tell the user, who reindexes or has you check again in a minute.
+Each check's first hit is traced too: the pipeline is stepped at record index EventId - 1 of the hit's stream, and its
+document must be the hit's and hold the value searched for. Stepping one record may number it otherwise than
+processing did (`stepped_event_id`); the document is then matched on the hit's other columns. A failed trace's `why`
+says what was compared: report that, not a guess at the cause.
 
 The dashboard is for the people who will search the index. Suggest its columns (the time field and the key fields:
 user, host, address, event type, outcome) and confirm them with the user; `verify_index` asks before making it.

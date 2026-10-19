@@ -109,9 +109,39 @@ def check(name: str, type_: str) -> str | None:
     return None
 
 
-def problems(fields: list[Any]) -> list[str]:
-    """Each planned field's departure from ECS (fields with name and type)."""
-    return [p for f in fields if (p := check(f.name, f.type))]
+def top_level() -> set[str]:
+    """ECS's own top-level names: its field sets, and its base fields (@timestamp, message, tags, labels)."""
+    return set(schema()['field_sets']) | {n.split('.')[0] for n in schema()['fields']}
+
+
+def source_namespace(index_name: str) -> str:
+    """A namespace for a source's own fields, as ECS asks, named after the source as the index name says it
+    (secretserver from stroom-ecs-secretserver-v1): the index name less Stroom's, the convention's and version
+    words, and any XSLT variable in it."""
+    words = [w for w in re.split(r'[^a-z0-9]+', re.sub(r'\{[^}]*\}', '-', index_name.lower()))
+             if w and w not in ('stroom', 'ecs') and not re.fullmatch(r'v?\d+', w)]
+    name = '_'.join(words) or 'custom'
+    return name if name not in top_level() else f'{name}_custom'
+
+
+def problems(fields: list[Any], namespaces: list[str] | tuple = ()) -> list[str]:
+    """Each planned field's departure from ECS (fields with name and type), and each top-level name that is neither
+    ECS's nor a custom namespace the plan declares. Seen: an ECS plan drafted authenticate.*, authorise.*, copy.*
+    and create.* (one group per event-logging action), the check passed them as fields outside ECS's field sets,
+    and the agent told the user only its own secret.* fields weren't ECS."""
+    found = [p for f in fields if (p := check(f.name, f.type))]
+    outside: dict[str, list[str]] = {}
+    for f in fields:
+        top = f.name.split('.')[0]
+        if f.name not in _STROOM and top not in top_level() and top not in namespaces:
+            outside.setdefault(top, []).append(f.name)
+    for top, names in outside.items():
+        found.append(f"{top}.* ({', '.join(names[:3])}{', ...' if len(names) > 3 else ''}): {top} is neither an "
+                     f"ECS {version()} field set nor a custom namespace the plan declares ({list(namespaces)}). ECS "
+                     f"puts a source's own fields under one namespace named after it: move them there"
+                     + (f" ({namespaces[0]}.{names[0]})" if namespaces else '')
+                     + f", or add {top} to the plan's custom_namespaces if the user wants it as it is")
+    return found
 
 
 def for_data_name(data_name: str) -> str | None:

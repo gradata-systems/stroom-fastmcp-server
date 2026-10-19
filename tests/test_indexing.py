@@ -396,11 +396,42 @@ async def test_a_hit_is_traced_to_its_record_and_a_mismatch_fails():
                                     {'field': 'user.name', 'condition': 'EQUALS', 'value': 'bob'})
         wrong_value = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '2'},
                                              {'field': 'user.name', 'condition': 'EQUALS', 'value': 'alice'})
-        wrong_record = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '5'}, {})
+        wrong_record = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '5', 'user.name': 'carol'}, {})
+        stepped.return_value = {'record': 7, 'elements': {'xsltFilter': {'output': step_output}}}
+        elsewhere = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '2'}, {})
     assert ok == {'traced': True, 'stream': 9, 'event': 2}
     assert stepped.await_args_list[0].args[1:] == ('ix', 9, 1)       # EventId 2 is the second record, index 1
     assert not wrong_value['traced'] and "user.name = ['bob'], not alice" in wrong_value['why']
-    assert not wrong_record['traced'] and 'no document with EventId 5' in wrong_record['why']
+    # What was compared is said: the record stepped, its document's EventId, and the column that differs.
+    assert not wrong_record['traced'] and wrong_record['why'] == (
+        "stepping record index 4 of stream 9 (the hit's EventId 5, counted from 1) gives one document, numbered "
+        "EventId 2 by stepping, and it isn't the hit's: its user.name is ['bob'], where the hit has carol")
+    assert not elsewhere['traced'] and 'Stroom stepped record index 7' in elsewhere['why']
+
+
+async def test_a_hit_traces_when_stepping_one_record_numbers_it_1():
+    # Seen on the live Stroom: verify_index failed every check but the one whose hit was EventId 1, as each record
+    # stepped alone came out as EventId 1; the agent then told the user the tracer was off by one.
+    def output(event_id: int) -> str:
+        return ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">9</number>'
+                f'<number key="EventId">{event_id}</number><string key="@timestamp">2026-09-28T22:01:55Z</string>'
+                '<map key="user"><string key="name">joe.bloggs</string></map></map></array>')
+    layers = [{'sourcePipeline': {'type': 'Pipeline', 'uuid': 'ix', 'name': 'ix'}, 'pipelineData': {
+        'elements': {'add': [{'id': 'xsltFilter', 'type': 'XSLTFilter'}]},
+        'properties': {'add': [{'element': 'xsltFilter', 'name': 'xslt',
+                                'value': {'entity': {'type': 'XSLT', 'uuid': 'x', 'name': 'x'}}}]}}}]
+    stroom = SimpleNamespace(pipeline_layers=AsyncMock(return_value=layers))
+    stepped = AsyncMock(return_value={'record': 825, 'elements': {'xsltFilter': {'output': output(1)}}})
+    hit = {'@timestamp': '2026-09-28T22:01:55.000Z', 'user.name': 'joe.bloggs', 'source.ip': None,
+           'StreamId': '9', 'EventId': '826'}
+    with patch('tools.indexing.gateway_from', return_value=stroom), patch('tools.stepping.step_pipeline', stepped):
+        traced = await indexing._traced(None, 'ix', hit, {'field': 'user.name', 'value': 'joe.bloggs'})
+        stepped.return_value = {'record': 825, 'elements': {'xsltFilter': {'output': output(826)}}}
+        numbered = await indexing._traced(None, 'ix', hit, {'field': 'user.name', 'value': 'joe.bloggs'})
+    assert stepped.await_args_list[0].args[1:] == ('ix', 9, 825)
+    assert traced == {'traced': True, 'stream': 9, 'event': 826, 'stepped_event_id': '1',
+                      'matched_on': ['@timestamp', 'user.name']}
+    assert numbered == {'traced': True, 'stream': 9, 'event': 826}
 
 
 def test_a_delimited_discovery_plan_indexes_each_column_by_its_header():
