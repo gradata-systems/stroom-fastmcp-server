@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 _PROFILE_LABELS = {'ecs': 'ECS (Elastic Common Schema)', 'stroom-flat': 'Stroom flat'}
 EXAMPLE_SUFFIX = ' example index template'
 PASTED = 'as the user pasted it'
+FIELDS_ONLY = 'its fields and their Elasticsearch types'
 _EXAMPLE_BLOCK = re.compile(r'<!-- stroom-mcp example\n(.*?)\n-->', re.S)
 
 
@@ -145,23 +146,77 @@ def _given_components(ctx: Context, given: Any, names: list[str]) -> dict[str, d
     return {**{n: kept[n]['body'] for n in names if n in kept}, **parsed}
 
 
-async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[str, Any]]:
-    """An existing Elastic Index doc's fields as an example index template, a note for the draft, and what was read
-    (for the user's confirmation). The doc's own field list holds Elasticsearch's types (nativeType: keyword, ip,
-    date...); Stroom's findFields, the fallback, only its own (KEYWORD, LONG...). Neither gives the index template
-    itself: its settings, component templates, keyword sub-fields or ignore_above."""
+async def _index_doc(ctx: Context, index: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(ref, doc): an Elastic Index doc by uuid, else by its exact name."""
     stroom = gateway_from(ctx)
-    ref = None
     try:
         doc = await stroom.get_doc('ElasticIndex', index)
-        ref = {'type': 'ElasticIndex', 'uuid': index, 'name': doc.get('name')}
+        return {'type': 'ElasticIndex', 'uuid': index, 'name': doc.get('name')}, doc
     except ToolError:
         found = [v['docRef'] for v in (await stroom.find_documents(index, ['ElasticIndex'], 20)).get('values') or []
                  if v['docRef'].get('name') == index]
         if len(found) != 1:
             raise ToolError(f"No single Elastic Index doc named '{index}': give its uuid (get_field_conventions "
                             f"backend=elasticsearch lists them)")
-        ref, doc = found[0], await stroom.get_doc('ElasticIndex', found[0]['uuid'])
+        return found[0], await stroom.get_doc('ElasticIndex', found[0]['uuid'])
+
+
+TEMPLATES_READ = '/elasticIndex/v1/templates'
+
+
+async def _template_from_index(ctx: Context, index: str) -> dict[str, Any] | None:
+    """The index template an Elastic Index doc's indices take, and its component templates, read by Stroom through
+    the doc's cluster (dev/stroom-requests/elastic-index-templates.md): asked for by the user, as getting them from
+    Kibana to paste was cumbersome. {'doc', 'index', 'name', 'template' (a Dev Tools request), 'components' (one each),
+    'composed_of', 'missing' (named, but not on the cluster), 'unread' {name: why}} when the template was read;
+    {'doc', 'why'} when it wasn't (most often the cluster's credentials lack the Elasticsearch privileges, as the user
+    warned); None on a Stroom that can't read templates, or where the doc can't be found (_example_from_index then says
+    so)."""
+    try:
+        ref, doc = await _index_doc(ctx, index)
+    except Exception:
+        return None
+    try:
+        found = await gateway_from(ctx).post(TEMPLATES_READ, {'indexDocRef': ref})
+    except ToolError as e:
+        if re.search(r'\((404|405)\)', str(e)):
+            return None         # a Stroom without the endpoint
+        return {'doc': ref['name'], 'why': f"Stroom couldn't read its index template: {refused_reason(e)[:160]}"}
+    except Exception:           # the endpoint is a convenience: the doc's fields still serve
+        return None
+    template = found.get('indexTemplate') or {}
+    if template.get('status') != 'OK' or not template.get('body'):
+        why = {'NOT_FOUND': 'no index template on the cluster matches its index',
+               'FORBIDDEN': "the cluster's credentials in Stroom may not read index templates"}.get(template.get('status'), '')
+        message = (template.get('message') or '')[:160]
+        return {'doc': ref['name'], 'why': f"Stroom couldn't read its index template ({why or template.get('status')}"
+                                           + (f": {message}" if message else '') + ')'}
+    from utils import ecs
+    components, missing, unread = [], [], {}
+    for c in found.get('componentTemplates') or []:
+        if c.get('name') == ecs.COMPONENT:
+            continue        # built in (Elasticsearch 8.13 and later), and what it maps is known here
+        if c.get('status') == 'OK' and c.get('body') is not None:
+            components.append(f"PUT _component_template/{c['name']}\n{json.dumps(c['body'])}")
+        elif c.get('status') == 'NOT_FOUND':
+            missing.append(c['name'])
+        else:
+            unread[c['name']] = (c.get('message') or c.get('status') or '')[:160]
+    body = template['body']
+    return {'doc': ref['name'], 'index': doc.get('indexName'), 'name': template.get('name'),
+            'template': f"PUT _index_template/{template.get('name')}\n{json.dumps(body)}",
+            'components': components, 'composed_of': list(body.get('composed_of') or []), 'missing': missing,
+            'unread': unread}
+
+
+async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[str, Any]]:
+    """An existing Elastic Index doc's fields as an example index template, a note for the draft, and what was read
+    (for the user's confirmation): where Stroom can't read the index template itself (_template_from_index). The
+    doc's own field list holds Elasticsearch's types (nativeType: keyword, ip, date...); Stroom's findFields, the
+    fallback, only its own (KEYWORD, LONG...). Neither gives the template's settings, component templates, keyword
+    sub-fields or ignore_above."""
+    stroom = gateway_from(ctx)
+    ref, doc = await _index_doc(ctx, index)
     typed = [(f.get('fldName'), (f.get('nativeType') or '').lower()) for f in doc.get('fields') or []
              if f.get('fldName') and f.get('nativeType')]
     source = "the index doc's field list, with Elasticsearch's own types"
@@ -293,9 +348,10 @@ async def get_field_conventions(
                     "propose_index_template. The only choice that follows the template's settings and components."},
             {'choice': 'Follow an existing index in Stroom', 'option': 'follow an existing index in Stroom',
              'how': "The user picks one of existing_indexes (a similar source's): draft_index_mapping like_index=<its "
-                    "uuid> reads its field names and Elasticsearch types through Stroom, with nothing to paste, and "
-                    "the user confirms. Its index template itself (settings, component templates, keyword sub-fields) "
-                    "is not readable through Stroom: for those, the template is pasted (the first choice).",
+                    "uuid>, with nothing to paste. Stroom reads the index template its indices take and its component "
+                    "templates where the cluster's credentials allow, else its field names and Elasticsearch types "
+                    "only (then the template's settings and components are pasted, the first choice, if wanted). The "
+                    "user confirms what was read in a form.",
              'existing_indexes': existing}]
         for profile_name, profile in profiles.items():
             options.append({'choice': f"{_PROFILE_LABELS.get(profile_name, profile_name)} convention",
@@ -518,8 +574,9 @@ async def draft_index_mapping(
             description="XPath tests on an Event for events the user wants kept out of the index, e.g. "
                         "\"EventDetail/TypeId = 'Heartbeat'\"; any that holds drops the event.")] = [],
         like_index: Annotated[str | None, Field(
-            description="Elasticsearch: an existing Elastic Index doc (uuid or exact name) whose field names and types "
-                        "to follow, read through Stroom, when the user has no index template to paste.")] = None,
+            description="Elasticsearch: an existing Elastic Index doc (uuid or exact name) to follow, when the user "
+                        "has no index template to paste. Stroom reads the index template its indices take and its "
+                        "component templates (else its field names and types), and they serve as the example.")] = None,
         example_template: Annotated[str | None, Field(
             description="Elasticsearch: the user's example index template or index mapping (as for "
                         "propose_index_template); field names then follow it.")] = None,
@@ -623,23 +680,52 @@ async def draft_index_mapping(
     profiles = _conventions(ctx)
     pasted = example_template
     like_note = None
+    followed: dict[str, Any] | None = None
     if like_index and not example_template:
-        # Following another source's index is the user's choice, as the example is: its fields are read through
-        # Stroom first, so the user confirms what they'd get, and what only the template itself would give.
-        example_template, like_note, read = await _example_from_index(ctx, like_index)
+        # Following another source's index is the user's choice, as the example is. Its index template and component
+        # templates, read by Stroom where it can (asked for by the user: pasting them was cumbersome); else its fields,
+        # read through Stroom. Either way the user confirms what they'd get first.
+        fetched = await _template_from_index(ctx, like_index)
+        if fetched and fetched.get('template'):
+            followed = fetched
+            example_template = fetched['template']
+            given = [component_templates] if isinstance(component_templates, str) else list(component_templates)
+            component_templates = [*fetched['components'], *given]
+            without_components = [*([without_components] if isinstance(without_components, str)
+                                    else list(without_components)), *fetched['missing']]
+            parts = [n for n in fetched['composed_of'] if n not in fetched['missing']]
+            details = {'follow': f"Elastic Index doc '{fetched['doc']}'"
+                                 + (f" (index {fetched['index']})" if fetched['index'] else ''),
+                       'read through Stroom': f"its index template {fetched['name']}"
+                                              + (f", composed of {', '.join(parts)}" if parts else '')}
+            if fetched['unread']:
+                details['not readable through Stroom'] = (f"component templates {', '.join(sorted(fetched['unread']))}: "
+                                                          f"you'll be asked to paste them")
+            like_note = (f"followed Elastic Index doc '{fetched['doc']}': its index template {fetched['name']}"
+                         + (f" and component templates {sorted(n for n in parts if n not in fetched['unread'])}" if parts
+                            else '') + ", read through Stroom")
+            read = {'doc': fetched['doc']}
+        else:
+            example_template, like_note, read = await _example_from_index(ctx, like_index)
+            details = {'follow': f"Elastic Index doc '{read['doc']}'" + (f" (index {read['index']})" if read['index'] else ''),
+                       'read through Stroom': f"{read['fields']} fields and their types, e.g. {', '.join(read['examples'][:3])}",
+                       'not readable through Stroom': "its settings, component templates, sub-fields and ignore_above: "
+                                                      "Elasticsearch defaults, unless you paste its index template"}
+            if fetched and fetched.get('why'):
+                details['its index template'] = fetched['why']
+                like_note += f". {fetched['why']}"
         # Picked in get_field_conventions' form: the user isn't asked again (what can't be read through Stroom is
         # said in the result, for the agent to tell them).
         gate = None if chosen.get('like_index') == like_index else await consent_from(ctx).require(
             ctx, 'confirmation', 'draft_index_mapping',
-            f"Name the fields of index '{index_name}' after an existing index in Stroom", {
-                'follow': f"Elastic Index doc '{read['doc']}'" + (f" (index {read['index']})" if read['index'] else ''),
-                'read through Stroom': f"{read['fields']} fields and their types, e.g. {', '.join(read['examples'][:3])}",
-                'not readable through Stroom': "its settings, component templates, sub-fields and ignore_above: "
-                                               "Elasticsearch defaults, unless you paste its index template"},
-            confirmation_id)
+            f"Name the fields of index '{index_name}' after an existing index in Stroom", details, confirmation_id)
         if gate:
             return gate
-        if chosen.get('like_index') == like_index:
+        if followed:
+            # Agreed: not asked again when the draft is called again with a component Stroom couldn't read.
+            _remember_naming(ctx, like_index=like_index)
+            chosen = _naming_chosen(ctx)
+        if chosen.get('like_index') == like_index and not followed:
             like_note = ((like_note + ' ') if like_note else '') + (
                 "Not readable through Stroom, so tell the user: its index template itself (settings, component "
                 "templates, keyword sub-fields, ignore_above), Elasticsearch defaults for those unless they paste it.")
@@ -722,6 +808,10 @@ async def draft_index_mapping(
             raise ToolError(str(e)) from e
         wanted = components_wanted(example, components, without_components)
         if wanted:
+            if followed and followed['unread']:
+                wanted['hint'] = (f"Stroom read the index template of '{followed['doc']}' but not the component templates "
+                                  f"{sorted(followed['unread'])} (Elasticsearch: {next(iter(followed['unread'].values()))}). "
+                                  + wanted['hint'])
             return wanted
         composed, _ = compose(example, components)
         known: dict[str, set[str]] = {}
@@ -775,10 +865,14 @@ async def draft_index_mapping(
         build = await _build_of_stream(ctx, events_stream_ids[0])
         if build:
             try:
-                await _keep_example(ctx, build, index_name, pasted or example_template, [] if not pasted else (
+                await _keep_example(ctx, build, index_name, pasted or example_template,
+                                    [] if not (pasted or followed) else (
                     [component_templates] if isinstance(component_templates, str) else list(component_templates)),
-                    PASTED if pasted else f"read through Stroom from Elastic Index doc '{read['doc']}', which the user "
-                                          f"chose to follow: its fields and their Elasticsearch types")
+                    PASTED if pasted else
+                    f"read through Stroom from Elastic Index doc '{read['doc']}', which the user chose to follow: its "
+                    f"index template and component templates" if followed else
+                    f"read through Stroom from Elastic Index doc '{read['doc']}', which the user chose to follow: "
+                    f"{FIELDS_ONLY}")
                 example_notes.append(f"the example is kept in build {build} ('{index_name}{EXAMPLE_SUFFIX}'): "
                                      f"propose_index_template follows it even if it isn't given again")
             except Exception as e:   # keeping it is a convenience; the plan stands without it
@@ -2623,7 +2717,7 @@ async def propose_index_template(
         if kept:
             example_template, component_templates, how = kept
             kept_note = (f"the example index template {how}, kept in the build when the plan was drafted"
-                         + ("" if how == PASTED else ": its settings, component templates, keyword sub-fields and "
+                         + ("" if not how.endswith(FIELDS_ONLY) else ": its settings, component templates, keyword sub-fields and "
                                                      "ignore_above aren't readable through Stroom, so Elasticsearch's "
                                                      "defaults; the user may paste its index template for them")
                          + ("; what was given as example_template is not an index template" if example_template else ""))

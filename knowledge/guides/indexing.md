@@ -92,10 +92,13 @@ picker (From an index template, Follow an existing index in Stroom, then a conve
 (`status: chosen`) gives the next call; call it without asking first. The user isn't asked again: the draft
 with the convention (or index) they picked goes ahead. Where the client has no forms, it returns the
 choices (`needs_guidance`): offer exactly those, in order, recommending none. An example is pasted into the chat, as a choice form can't carry it, so ask for it there
-and wait for it before drafting. Following an existing index in Stroom (`like_index`) reads its field names and
-Elasticsearch types through Stroom, with nothing to paste, and the user confirms it in a form that says what was
-read; its template's settings and component templates aren't readable that way, so they paste the template for
-those. Going without an example (`without_example`) is confirmed in a form too. Without an example, `propose_index_template` builds nothing for the cluster. A template put on
+and wait for it before drafting. Following an existing index in Stroom (`like_index`) needs nothing pasted: Stroom
+reads the index template that index's indices take, and its component templates, through the cluster's connection,
+and they serve as the example exactly as pasted ones would. Reading them takes Elasticsearch privileges the cluster's
+credentials may lack: a component template Stroom wasn't allowed to read is asked for alone (`needs_components`, one
+`GET` to paste); a template it couldn't read (or a Stroom without the templates endpoint) leaves the doc's field names
+and Elasticsearch types, the form saying why, and the user may still paste the template for its settings and
+components. Either way the user confirms in a form what was read. Going without an example (`without_example`) is confirmed in a form too. Without an example, `propose_index_template` builds nothing for the cluster. A template put on
 the cluster without being agreed through it doesn't count, unless the user says so: if they've committed one of
 their own and want to go on without agreeing one here, `create_processor_filter` (or `reprocess_streams`)
 `template_committed_by_user=true`, which they confirm in a form; it is kept with the pipeline. Stepping clean is not

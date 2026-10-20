@@ -27,7 +27,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | Template pipeline for the translation | Creating the events pipeline | Template pipelines and how existing pipelines use them |
 | How the index's fields are named: an example index template, an existing index to follow, or a convention | The start of indexing, in a form of its own | Where similar sources index, conventions, existing indexes |
 | Index backend, index doc name, index name or volume group, Elastic cluster and time field | Creating the index doc, once the agent has proposed them in the chat | The field plan, your naming convention, the clusters Stroom has |
-| The index template (Elasticsearch) | Once it fits what the pipeline writes | Built from an example template the user gives |
+| The index template (Elasticsearch) | Once it fits what the pipeline writes | Built from an example template: the one you paste, or the one an existing index's indices take, which Stroom reads for you |
 | A new version, or a change in place, with its names | Updating an events pipeline | Your versioning convention, e.g. V1.2 to V1.3 |
 | Columns of the verification dashboard | Verifying an index | The time field and the key fields |
 | Errors accepted as benign, with the reason | Writing documentation | Errors the agent couldn't fix |
@@ -42,7 +42,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 
 | Action | What the approval says |
 | --- | --- |
-| Processing the sample streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams. For Elasticsearch: that the agreed index template has been committed to the cluster. For an index the pipeline already wrote to, what makes it start fresh, as for reprocessing |
+| Processing the sample streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams. For Elasticsearch: that the agreed index template has been committed to the cluster (or, when you say one of your own is committed instead, that you go on without agreeing one, in a form first). For an index the pipeline already wrote to, what makes it start fresh, as for reprocessing |
 | Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the request for the cluster admin to drop the index first (`DELETE _data_stream/<index>` or `DELETE <index>`), as documents already indexed stay; the template makes it again, and all the Events streams it should hold are processed again. For Lucene: that the build's own index is emptied first (its shards deleted), or else to delete its shards first |
 | Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 

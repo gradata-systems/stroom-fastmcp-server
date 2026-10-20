@@ -269,6 +269,24 @@ async def elasticsearch(ctx, src: dict, events: list[int], stamp: str) -> None:
     refused = await refused_on(ctx, 'acme.secret', **common)
     check('no search through Stroom finds it' in refused, f"a check on the field not indexed is refused, saying why: {refused[:240]}")
 
+    print('\n### a new index following this one in Stroom (like_index)')
+    # Asked for by the user: Stroom reads the index template (and its components) the followed doc's indices take,
+    # where it has the templates endpoint (dev/stroom-requests/elastic-index-templates.md); else the doc's fields.
+    asked = await indexing.draft_index_mapping(ctx, 'elasticsearch', f'e2e-types-{stamp}-v2', events_stream_ids=events,
+                                               like_index=index_doc['uuid'], extra_fields=extra)
+    read = (asked.get('details') or {}).get('read through Stroom', '')
+    print(f"    read through Stroom: {read}")
+    if read.startswith('its index template'):
+        check(read.startswith(f'its index template {index}'), f"the index template this index takes, read by Stroom: {read}")
+        drafted = await agreed(indexing.draft_index_mapping, ctx=ctx, backend='elasticsearch',
+                               index_name=f'e2e-types-{stamp}-v2', events_stream_ids=events,
+                               like_index=index_doc['uuid'], extra_fields=extra)
+        check(any('index template' in n and 'read through Stroom' in n for n in drafted.get('from_example') or []),
+              'drafted from it, as if the user had pasted it')
+    else:
+        check(asked.get('status') == 'needs_confirmation' and 'fields and their types' in read,
+              f"this Stroom can't read index templates: the doc's fields and types instead, said so: {read}")
+
 
 async def main():
     local = e2e.env(ROOT / 'dev' / 'stroom' / '.env')

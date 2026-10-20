@@ -5,6 +5,9 @@
 **Processing the sample streams through an events (or records) or indexing pipeline in a build**, or
 **reprocessing** one after a fix: you approve it in a form, and the server creates the filter enabled so it runs
 straight away. For Elasticsearch, the approval also confirms the agreed index template is committed to the cluster.
+If you committed an index template of your own instead of agreeing one with the agent, say so: you confirm that in a
+form of its own (the server doesn't check your template against what the pipeline writes), and it is recorded with
+the pipeline in place of an agreed one, so you aren't asked again.
 
 Every other processor filter is created **disabled**: a whole-feed scope, any other pipeline in a build (a CEF
 output, which sends to Kafka, or reference data), and a promoted pipeline's filter. Enabling one, and so starting

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from config import Settings
 from tools import indexing
@@ -375,31 +376,54 @@ def test_large_components_survive_the_shapes_an_agent_resends_them_in():
     assert parse_component_templates([json.dumps(responses)]) == pasted
 
 
-# 12. Following an existing index in Stroom (like_index): nothing pasted, the index doc's fields read through Stroom.
-async def test_following_an_existing_index_in_stroom(monkeypatch):
+SIBLING = {'name': 'ecs-sibling-v1', 'indexName': 'ecs-sibling-v1', 'fields': [
+    {'fldName': n, 'nativeType': ELASTIC[ecs.plan_type(n)]} for n in ECS_FIELDS] + [
+    {'fldName': n, 'nativeType': t} for n, t in (('StreamId', 'long'), ('EventId', 'long'), ('@timestamp', 'date'))]}
+SIBLING_EVENTS = {'path_population': {'EventTime/TimeCreated': 100.0, 'EventDetail/Data': 100.0},
+                  'data_names': {'EventDetail/Data': {n.replace('.', '_'): 100.0 for n in ECS_FIELDS}}}
+
+
+def read_by_stroom(example: dict, components: dict[str, dict], refused: dict[str, str] = None) -> dict:
+    """Stroom's reply to POST elasticIndex/v1/templates (dev/stroom-requests/elastic-index-templates.md)."""
+    refused = refused or {}
+    return {'indexName': 'ecs-sibling-v1', 'resolvedName': 'ecs-sibling-v1-000002',
+            'indexTemplate': {'status': 'OK', 'name': 'ecs-sibling-v1', 'body': example, 'overlapping': []},
+            'componentTemplates': [
+                {'name': n, 'status': 'FORBIDDEN', 'message': refused[n]} if n in refused else
+                {'name': n, 'status': 'OK', 'body': components[n]} if n in components else
+                {'name': n, 'status': 'NOT_FOUND'} for n in example.get('composed_of') or []]}
+
+
+async def _follow(monkeypatch, read, then=None):
+    """draft_index_mapping like_index=, confirmed in its form, and the template proposed with nothing pasted, as the
+    agent calls them; read: Stroom's answer to the templates request, or the error it raises. (asked, drafted, body,
+    notes, posted), body None when the draft stopped for components (then: the call to make before proposing)."""
     from tests.test_kept_example import Store
     store = Store()
-    doc = {'name': 'ecs-sibling-v1', 'indexName': 'ecs-sibling-v1', 'fields': [
-        {'fldName': n, 'nativeType': ELASTIC[ecs.plan_type(n)]} for n in ECS_FIELDS] + [
-        {'fldName': n, 'nativeType': t} for n, t in (('StreamId', 'long'), ('EventId', 'long'), ('@timestamp', 'date'))]}
-    events = {'path_population': {'EventTime/TimeCreated': 100.0, 'EventDetail/Data': 100.0},
-              'data_names': {'EventDetail/Data': {n.replace('.', '_'): 100.0 for n in ECS_FIELDS}}}
     kept_example = indexing._kept_example
+    posted = []
     with harness(monkeypatch, []) as (context, saved):
         stroom = context.lifespan_context['stroom']
 
         async def get_doc(doc_type, uuid):
-            return doc if doc_type == 'ElasticIndex' else await store.get_doc(doc_type, uuid) \
+            return SIBLING if doc_type == 'ElasticIndex' else await store.get_doc(doc_type, uuid) \
                 if doc_type == 'Documentation' else dict(saved)
         stroom.get_doc = AsyncMock(side_effect=get_doc)
 
         async def put_doc(d):
             return await store.put_doc(d) if d.get('uuid', '').startswith('d') else saved.update(d) or d
         stroom.put_doc = put_doc
+
+        async def post(path, body):
+            posted.append((path, body))
+            if isinstance(read, Exception):
+                raise read
+            return read
+        stroom.post = post
         guard = SimpleNamespace(check_managed=AsyncMock(), folder_contents=store.folder_contents,
                                 create_filled=store.create_filled)
         with patch('tools.indexing.require_events', AsyncMock()), \
-                patch('tools.indexing.summarise_events', AsyncMock(return_value=events)), \
+                patch('tools.indexing.summarise_events', AsyncMock(return_value=SIBLING_EVENTS)), \
                 patch('tools.indexing._build_of_stream', AsyncMock(return_value='b1')), \
                 patch('tools.plan.build_of', AsyncMock(return_value='b1')), \
                 patch('tools.indexing.guard_from', return_value=guard), \
@@ -407,17 +431,73 @@ async def test_following_an_existing_index_in_stroom(monkeypatch):
                 patch('tools.indexing._kept_example', kept_example):
             asked = await indexing.draft_index_mapping(context, 'elasticsearch', INDEX, like_index='u1',
                                                        events_stream_ids=[8])
-            # The user confirms what was read through Stroom, and what wasn't, in a form.
-            assert asked['status'] == 'needs_confirmation' and '50 fields' in asked['details']['read through Stroom']
+            assert asked['status'] == 'needs_confirmation', asked
+            # The user confirms what was read through Stroom, and what wasn't, in a short form.
             assert len(form_message(asked['summary'], asked['details'])) <= 600
             drafted = await indexing.draft_index_mapping(context, 'elasticsearch', INDEX, like_index='u1',
                                                          events_stream_ids=[8], confirmation_id=asked['confirmation_id'])
+            if drafted.get('status') == 'needs_components':
+                if then is None:
+                    return asked, drafted, None, [], posted
+                drafted = await indexing.draft_index_mapping(context, 'elasticsearch', INDEX, like_index='u1',
+                                                             events_stream_ids=[8], **then)
             plan = FieldPlan.model_validate(drafted['plan'])
             assert {f.name for f in plan.fields} >= set(ECS_FIELDS)
             with patch('tools.indexing._documents', AsyncMock(return_value=_plan_docs(plan))):
                 # Proposed with nothing pasted (seen in testing: the user was asked to paste a template anyway).
                 body, notes = await _agreed(context, saved, plan)
+    return asked, drafted, body, notes, posted
+
+
+# 12. Following an existing index in Stroom (like_index), on a Stroom that can't read templates: its fields.
+async def test_following_an_existing_index_in_stroom(monkeypatch):
+    asked, _, body, notes, posted = await _follow(monkeypatch, ToolError('Stroom rejected the request (404): Not Found'))
+    assert posted[0] == ('/elasticIndex/v1/templates', {'indexDocRef': {'type': 'ElasticIndex', 'uuid': 'u1',
+                                                                        'name': 'ecs-sibling-v1'}})
+    assert '50 fields' in asked['details']['read through Stroom']
     # Following an index isn't opting for ECS field mapping: its fields and types, mapped here.
     assert 'composed_of' not in body and set(ECS_FIELDS) <= set(_properties(body)) and 'priority' not in body
     assert any("read through Stroom from Elastic Index doc 'ecs-sibling-v1'" in n and "aren't readable" in n
                for n in notes)
+
+
+# 13. The same, where Stroom reads the index template its indices take and its component templates (asked for by the
+# user: getting them from Kibana to paste was cumbersome).
+async def test_following_an_index_whose_template_stroom_reads(monkeypatch):
+    example = legacy_example(ecs_base=True)
+    asked, drafted, body, notes, _ = await _follow(monkeypatch, read_by_stroom(example, _components()))
+    assert asked['details']['read through Stroom'] == ('its index template ecs-sibling-v1, composed of '
+                                                       'ecs@mappings, org-ecs-base, org-users, org-ilm, org-dynamic')
+    # As if the user had pasted them: the example's composition (ecs@mappings, as it references it), settings and
+    # overrides, and nothing asked for or sent again.
+    assert body['composed_of'] == ['ecs@mappings', *COMPONENTS] and body['priority'] == 300
+    assert body['template']['mappings']['dynamic'] is True and ecs_duplicates(body) == []
+    assert _properties(body)['host.name'] == {'type': 'keyword', 'ignore_above': 256}
+    assert body['template']['settings']['index']['number_of_shards'] == 2
+    assert any('index template and component templates' in n for n in notes)
+
+
+async def test_a_component_stroom_isnt_allowed_to_read_is_asked_for_alone(monkeypatch):
+    # The user warned: reading templates takes Elasticsearch privileges the cluster's credentials may lack.
+    refused = {'org-users': 'action [cluster:monitor/component_template/get] is unauthorized for user [stroom]'}
+    example = legacy_example(ecs_base=True)
+    asked, drafted, body, _, _ = await _follow(monkeypatch, read_by_stroom(example, _components(), refused))
+    assert 'org-users' in asked['details']['not readable through Stroom']
+    assert drafted['status'] == 'needs_components' and drafted['missing'] == ['org-users']
+    assert drafted['request'] == 'GET _component_template/org-users' and 'is unauthorized' in drafted['hint']
+    # Pasted, alone: the others aren't asked again, and the template is agreed as the example has it.
+    pasted = kibana({'org-users': _components()['org-users']})
+    _, _, body, _, _ = await _follow(monkeypatch, read_by_stroom(example, _components(), refused),
+                                     then={'component_templates': pasted})
+    assert body['composed_of'] == ['ecs@mappings', *COMPONENTS]
+
+
+async def test_a_template_stroom_isnt_allowed_to_read_falls_back_to_the_index_fields(monkeypatch):
+    read = {'indexName': 'ecs-sibling-v1', 'resolvedName': None,
+            'indexTemplate': {'status': 'FORBIDDEN', 'message': 'action [indices:admin/index_template/get] is '
+                                                                 'unauthorized for user [stroom]'},
+            'componentTemplates': []}
+    asked, _, body, notes, _ = await _follow(monkeypatch, read)
+    assert '50 fields' in asked['details']['read through Stroom']
+    assert "may not read index templates" in asked['details']['its index template']
+    assert 'composed_of' not in body and set(ECS_FIELDS) <= set(_properties(body))
