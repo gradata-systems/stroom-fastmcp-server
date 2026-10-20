@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from security.guard import guard_from
 from tools.explorer import _redact
@@ -31,6 +31,7 @@ from utils.params import ONE_OR_MORE
 from utils.progress import progress_from
 from utils.stroom import doc_link, gateway_from, refused_reason, set_body_text
 from utils.sharedxslt import json_values
+from utils.templatecheck import dev_tools as render_dev_tools
 from utils.templatecheck import (compare, compose, composition, from_example, json_xml_documents, names_from_example,
                                  parse_component_templates, read_mapping_fields,
                                  parse_template, with_components)
@@ -51,6 +52,7 @@ def _conventions(ctx: Context) -> dict[str, dict[str, Any]]:
 logger = logging.getLogger(__name__)
 _PROFILE_LABELS = {'ecs': 'ECS (Elastic Common Schema)', 'stroom-flat': 'Stroom flat'}
 EXAMPLE_SUFFIX = ' example index template'
+PASTED = 'as the user pasted it'
 _EXAMPLE_BLOCK = re.compile(r'<!-- stroom-mcp example\n(.*?)\n-->', re.S)
 
 
@@ -67,14 +69,17 @@ async def _build_of_stream(ctx: Context, stream_id: int) -> str | None:
         return None
 
 
-async def _keep_example(ctx: Context, build: str, index_name: str, example: str, components: list[str]) -> None:
+async def _keep_example(ctx: Context, build: str, index_name: str, example: str, components: list[str],
+                        how: str = PASTED) -> None:
     """Keep the example index template the user pasted (and its components) in the build, verbatim: a summarised
-    conversation lost it, and the agent proposed a template of its own as the user's example."""
+    conversation lost it, and the agent proposed a template of its own as the user's example. how: where it came
+    from, when not pasted (an existing index the user chose to follow, read through Stroom)."""
     stroom, guard = gateway_from(ctx), guard_from(ctx)
-    text = (f"# Example index template for {index_name}\n\nAs the user pasted it, kept so the index template follows "
-            f"it even if the conversation no longer holds it.\n\n```\n{example.strip()}\n```\n"
+    text = (f"# Example index template for {index_name}\n\n{how[0].upper()}{how[1:]}, kept so the index template "
+            f"follows it even if the conversation no longer holds it.\n\n```\n{example.strip()}\n```\n"
             + ''.join(f"\n```\n{c.strip()}\n```\n" for c in components)
-            + f"\n<!-- stroom-mcp example\n{json.dumps({'example': example, 'components': components})}\n-->\n")
+            + f"\n<!-- stroom-mcp example\n{json.dumps({'example': example, 'components': components, 'how': how})}"
+              f"\n-->\n")
     name = f"{index_name}{EXAMPLE_SUFFIX}"
 
     async def write(ref: dict[str, Any]) -> dict[str, Any]:
@@ -88,8 +93,10 @@ async def _keep_example(ctx: Context, build: str, index_name: str, example: str,
         await guard.create_filled('Documentation', name, build, write, role='Indexing')
 
 
-async def _kept_example(ctx: Context, pipeline_uuid: str, index_names: list[str]) -> tuple[str, list[str]] | None:
-    """The example kept in the indexing pipeline's build when the plan was drafted: (template, components)."""
+async def _kept_example(ctx: Context, pipeline_uuid: str,
+                        index_names: list[str]) -> tuple[str, list[str], str] | None:
+    """The example kept in the indexing pipeline's build when the plan was drafted: (template, components, where it
+    came from)."""
     from tools.plan import build_of
     try:
         build = await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': None})
@@ -102,7 +109,7 @@ async def _kept_example(ctx: Context, pipeline_uuid: str, index_names: list[str]
             return None
         found = _EXAMPLE_BLOCK.search((await gateway_from(ctx).get_doc('Documentation', doc['uuid'])).get('data') or '')
         kept = json.loads(found.group(1)) if found else None
-        return (kept['example'], list(kept.get('components') or [])) if kept else None
+        return (kept['example'], list(kept.get('components') or []), kept.get('how') or PASTED) if kept else None
     except Exception:
         return None
 
@@ -115,6 +122,27 @@ def _is_template(text: str) -> bool:
         return False
 _STROOM_TO_ES = {'keyword': 'keyword', 'text': 'text', 'long': 'long', 'integer': 'integer', 'id': 'long',
                   'float': 'float', 'double': 'double', 'date': 'date', 'ipv4_address': 'ip', 'boolean': 'boolean'}
+
+
+_COMPONENTS = 'component_templates_given'
+
+
+def _given_components(ctx: Context, given: Any, names: list[str]) -> dict[str, dict[str, Any]]:
+    """The component templates given now, by name, with those of names given earlier in the session: kept so the agent
+    needn't send them again. Seen in testing: re-sent call after call, the bodies came back corrupted (a GET response
+    nested in another, an escaped string), and the user's template could never be agreed. Raises ValueError for one
+    that can't be read."""
+    from tools.plan import _user
+    parsed = parse_component_templates([given] if isinstance(given, (str, dict)) else list(given or []))
+    try:
+        kept = ctx.lifespan_context.setdefault(_COMPONENTS, {}).setdefault(_user(ctx), {})
+    except Exception:   # no session store: only what was given
+        return parsed
+    now = time.time()
+    for name in [n for n, v in kept.items() if now - v['at'] > _NAMING_TTL]:
+        del kept[name]
+    kept.update({n: {'body': b, 'at': now} for n, b in parsed.items()})
+    return {**{n: kept[n]['body'] for n in names if n in kept}, **parsed}
 
 
 async def _example_from_index(ctx: Context, index: str) -> tuple[str, str, dict[str, Any]]:
@@ -495,9 +523,10 @@ async def draft_index_mapping(
         example_template: Annotated[str | None, Field(
             description="Elasticsearch: the user's example index template or index mapping (as for "
                         "propose_index_template); field names then follow it.")] = None,
-        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+        component_templates: Annotated[list[str | dict[str, Any]] | str | dict[str, Any], ONE_OR_MORE, Field(
             description="Only if the example lists any in composed_of: those component templates, as the user gave "
-                        "them.")] = [],
+                        "them. Kept for the session once given: leave out those "
+                        "given before, never send them again.")] = [],
         without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only when the user can't give some of the example's component templates: their names. The "
                         "template is then built without their fields, which it may repeat or contradict.")] = [],
@@ -604,11 +633,9 @@ async def draft_index_mapping(
             ctx, 'confirmation', 'draft_index_mapping',
             f"Name the fields of index '{index_name}' after an existing index in Stroom", {
                 'follow': f"Elastic Index doc '{read['doc']}'" + (f" (index {read['index']})" if read['index'] else ''),
-                'read through Stroom': f"{read['fields']} fields from {read['source']}, e.g. {', '.join(read['examples'])}",
-                'not readable through Stroom': "its index template itself: settings (shards, refresh), component "
-                                               "templates, keyword sub-fields and ignore_above. Elasticsearch defaults "
-                                               "for those, unless you paste the template",
-                'or': "paste its index template (with any component templates) into the chat to follow it whole"},
+                'read through Stroom': f"{read['fields']} fields and their types, e.g. {', '.join(read['examples'][:3])}",
+                'not readable through Stroom': "its settings, component templates, sub-fields and ignore_above: "
+                                               "Elasticsearch defaults, unless you paste its index template"},
             confirmation_id)
         if gate:
             return gate
@@ -690,8 +717,7 @@ async def draft_index_mapping(
     if example_template:
         try:
             _, example = parse_template(example_template)
-            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
-                                                   else list(component_templates))
+            components = _given_components(ctx, component_templates, example.get('composed_of') or [])
         except ValueError as e:
             raise ToolError(str(e)) from e
         wanted = components_wanted(example, components, without_components)
@@ -743,16 +769,21 @@ async def draft_index_mapping(
     plan = FieldPlan(backend=backend, index_name=index_name, time_field=time_field, fields=fields, drop_when=drop_when,
                      subobjects=subobjects, shared=list(shared), convention=convention,
                      custom_namespaces=namespaces if convention == 'ecs' else [])
-    if pasted and backend == 'elasticsearch':
+    if (pasted or like_index) and backend == 'elasticsearch':
+        # Followed from an existing index too: seen in testing, the user chose to follow one (nothing to paste), and
+        # propose_index_template, given no example, asked them to paste one.
         build = await _build_of_stream(ctx, events_stream_ids[0])
         if build:
             try:
-                await _keep_example(ctx, build, index_name, pasted, [component_templates] if isinstance(
-                    component_templates, str) else list(component_templates))
+                await _keep_example(ctx, build, index_name, pasted or example_template, [] if not pasted else (
+                    [component_templates] if isinstance(component_templates, str) else list(component_templates)),
+                    PASTED if pasted else f"read through Stroom from Elastic Index doc '{read['doc']}', which the user "
+                                          f"chose to follow: its fields and their Elasticsearch types")
                 example_notes.append(f"the example is kept in build {build} ('{index_name}{EXAMPLE_SUFFIX}'): "
                                      f"propose_index_template follows it even if it isn't given again")
             except Exception as e:   # keeping it is a convenience; the plan stands without it
                 logger.warning("Couldn't keep the example index template in build %s: %s", build, e)
+    plan = await with_cardinality(ctx, plan)
     replaced = await _replaced(ctx, replaces, plan, populated) if replaces else None
     reply = _plan_reply(ctx, plan, populated)
     # No XSLT here: save_xslt index_plan= generates it, and half the reply was code the agent never reads.
@@ -761,6 +792,24 @@ async def draft_index_mapping(
             **reply,
             **({'from_example': example_notes} if example_template or shared else {}),
             **({'ecs_data_elements': ecs_data} if ecs_data else {})}
+
+
+async def with_cardinality(ctx: Context, plan: FieldPlan, build: str | None = None) -> FieldPlan:
+    """The plan with each field whose source can hold several values in one event (a repeatable element on its path,
+    by the event-logging schema: Data, say) marked multiple, so the indexing XSLT writes them all. Seen (asked about by
+    the user): written with value-of, two ports were indexed as the one number "80 443", two tags as "a b". Unmarked
+    when the schema can't be read: the fields are then written as single values, as before."""
+    if plan.discovery is not None:
+        return plan
+    try:
+        from tools.generation import chosen_or_latest, event_schema
+        schema = await event_schema(ctx, await chosen_or_latest(ctx, build))
+    except Exception as e:      # a Stroom without the schema: nothing marked
+        logger.info("Fields not checked for several values: %s", e)
+        return plan
+    fields = [f.model_copy(update={'multiple': True}) if not f.multiple and not f.source.startswith(('@', 'shared:'))
+              and schema.can_repeat(f.source) else f for f in plan.fields]
+    return plan.model_copy(update={'fields': fields})
 
 
 _PLANS = 'index_plans_drafted'
@@ -851,7 +900,7 @@ async def _amend_plan(ctx: Context, index_name: str, changes: dict[str, Any] | s
     if events_stream_ids:
         await require_events(gateway_from(ctx), events_stream_ids)
         populated = (await summarise_events(ctx, events_stream_ids, 200))['path_population']
-    return {'changed': done, **_plan_reply(ctx, plan, populated)}
+    return {'changed': done, **_plan_reply(ctx, await with_cardinality(ctx, plan), populated)}
 
 
 async def _replaced(ctx: Context, replaces: str, plan: FieldPlan, populated: dict[str, float]) -> dict[str, Any]:
@@ -1388,10 +1437,40 @@ async def _index_fields(stroom, doc_type: str, ref: dict[str, Any]) -> list[dict
     if doc_type == 'Index':
         found = await stroom.post('/index/v2/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})
         return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower(),
-                 **({'stored': False} if f.get('stored') is False else {})}
+                 **({'stored': False} if f.get('stored') is False else {}),
+                 **({'searchable': False} if f.get('indexed') is False else {})}
                 for f in found.get('values') or [] if f.get('fldName')]
     found = await stroom.post('/dataSource/v1/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 2000}})
-    return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower()} for f in found.get('values') or [] if f.get('fldName')]
+    return [{'name': f['fldName'], 'type': (f.get('fldType') or '').lower(),
+             **({'searchable': False} if f.get('queryable') is False else {})}
+            for f in found.get('values') or [] if f.get('fldName')]
+
+
+async def _unsearchable(ctx: Context, doc_type: str, ref: dict[str, Any], names: list[str],
+                        pipeline_uuid: str | None) -> dict[str, str]:
+    """Of these fields, those no search finds, with why: a Lucene field not indexed, one Stroom lists as not
+    queryable, or one the template agreed with the pipeline doesn't index (index: false, or under an object with
+    enabled: false). Asked about by the user: a check on such a field finds nothing, as if documents were missing."""
+    stroom, out = gateway_from(ctx), {}
+    try:
+        for f in await _index_fields(stroom, doc_type, ref):
+            if f['name'] in names and f.get('searchable') is False:
+                out[f['name']] = ("the index doc's field isn't indexed" if doc_type == 'Index'
+                                  else "Stroom lists it as not searchable")
+    except Exception:    # a check on the searches, not a reason for verification to fail
+        pass
+    if pipeline_uuid and doc_type == 'ElasticIndex':
+        from utils.mappingstore import read_agreed_template
+        from utils.templatecheck import unsearchable
+        try:
+            agreed = read_agreed_template((await stroom.get_doc('Pipeline', pipeline_uuid)).get('description')) or {}
+            mappings = ((parse_template(agreed['dev_tools'])[1].get('template') or {}).get('mappings') or {}
+                        if agreed.get('dev_tools') else {})
+        except Exception:
+            mappings = {}
+        for name in unsearchable(mappings, [n for n in names if n not in out]):
+            out[name] = "the index template agreed for it doesn't index it (index: false, or an object with enabled: false)"
+    return out
 
 
 _FIELD_WAITS = (5, 5)   # seconds between looks at the index's fields, for a field Stroom hasn't listed yet
@@ -1812,6 +1891,26 @@ class SearchCheck(BaseModel):
     condition: Condition = 'EQUALS'
     value: str = Field('', description="BETWEEN: 'from,to'; IN: values separated by commas; EQUALS takes * wildcards.")
     expected: int | None = Field(None, description="Rows it must return; none: at least one; 0: none (e.g. another case).")
+    _searched_as: str | None = PrivateAttr(None)
+
+
+def _as_searched(backend: str, searches: list[SearchCheck]) -> list[SearchCheck]:
+    """IS_NOT_NULL and IS_NULL on Elasticsearch searched as EQUALS '*' and NOT_EQUALS '*', which is what they mean
+    there: Stroom matches every document with either on Elasticsearch. Seen: refused with that advice, the agent sent
+    IS_NOT_NULL again and again."""
+    out = []
+    for s in searches:
+        if backend == 'elasticsearch' and s.condition in _NULL_AS:
+            condition, said = _NULL_AS[s.condition]
+            asked = s.condition
+            s = s.model_copy(update={'condition': condition, 'value': '*'})
+            s._searched_as = (f"{s.field} {condition} '*' ({said}), for {asked}: Stroom matches every document with "
+                              f"{asked} on Elasticsearch")
+        out.append(s)
+    return out
+
+
+_NULL_AS = {'IS_NOT_NULL': ('EQUALS', 'any value'), 'IS_NULL': ('NOT_EQUALS', 'no value')}
 
 
 def _same_value(shown: str, written: str) -> bool | None:
@@ -1832,37 +1931,69 @@ def _same_value(shown: str, written: str) -> bool | None:
             return float(v)
         except ValueError:
             return None
-    times, numbers = (when(shown), when(written)), (number(shown), number(written))
-    if all(times):
-        return times[0] == times[1]
-    if all(n is not None for n in numbers):
-        return numbers[0] == numbers[1]
-    if any(times) or any(n is not None for n in numbers):
+    def whole(shown: str) -> bool | None:
+        times, numbers = (when(shown), when(written)), (number(shown), number(written))
+        if all(times):
+            return times[0] == times[1]
+        if all(n is not None for n in numbers):
+            return numbers[0] == numbers[1]
+        if any(times) or any(n is not None for n in numbers):
+            return None
+        return shown.lower() in written.lower() or written.lower() in shown.lower()
+    same = whole(shown)
+    # A field of several values, which a dashboard shows separated by commas ("80, 443"): the written value is the
+    # hit's when it is one of them (asked about by the user; as a whole, numbers and times couldn't be compared).
+    parts = [p.strip(' []') for p in shown.split(',') if p.strip(' []')]
+    if same is not True and len(parts) > 1:
+        each = [whole(p) for p in parts]
+        if True in each:
+            return True
+        if same is None and all(e is False for e in each):
+            return False
+    return same
+
+
+def _own_xslt_element(pipeline_uuid: str, layers: list[dict[str, Any]]) -> str | None:
+    """The element running the pipeline's own XSLT: where its documents are written."""
+    from tools.pipelines import translation_docs
+    return next((e['element'] for e in translation_docs(pipeline_uuid, layers)
+                 if e['doc'].get('type') == 'XSLT' and not e['inherited_from_template']), None)
+
+
+def _hit_ids(row: dict[str, Any] | None) -> tuple[int, int] | None:
+    try:
+        return int(float(row['StreamId'])), int(float(row['EventId']))
+    except (KeyError, TypeError, ValueError):
         return None
-    return shown.lower() in written.lower() or written.lower() in shown.lower()
 
 
-async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
+async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: dict[str, Any],
+                  step: Any = None, element: str | None = None) -> dict[str, Any]:
     """A hit back to its record: step the indexing pipeline at the hit's StreamId and EventId (the record's number
     in its stream, from 1: record index EventId - 1) and read the document it writes there. The hit is traced when
     that document holds the value searched for, and is the hit's: its EventId the hit's, or, when stepping numbers
     it otherwise, the only document the record gives, holding what the hit's other columns show.
     Stepping one record may not number it as processing did: Stroom's IdEnrichmentFilter counts the Events it reads,
     and seen on the live Stroom (verify_index), every record stepped alone was numbered 1 (EventId 1 traced, every
-    other hit failed, and the agent told the user the tracer was off by one)."""
-    from tools.pipelines import translation_docs
+    other hit failed, and the agent told the user the tracer was off by one).
+    step(stream, record index): the record already stepped (run_test_searches steps every hit of a stream in one
+    session); by default, step_pipeline."""
     from utils.fielddoc import index_documents
-    stroom = gateway_from(ctx)
-    try:
-        stream, event = int(float(row['StreamId'])), int(float(row['EventId']))
-    except (KeyError, TypeError, ValueError):
+    ids = _hit_ids(row)
+    if ids is None:
         return {'traced': False, 'why': 'the hit has no StreamId and EventId to go back with'}
-    element = next((e['element'] for e in translation_docs(pipeline_uuid, await stroom.pipeline_layers(pipeline_uuid))
-                    if e['doc'].get('type') == 'XSLT' and not e['inherited_from_template']), None)
-    from tools.stepping import step_pipeline
-    stepped = await step_pipeline(ctx, pipeline_uuid, stream, event - 1)
+    stream, event = ids
+    if element is None:
+        element = _own_xslt_element(pipeline_uuid, await gateway_from(ctx).pipeline_layers(pipeline_uuid))
+    if step is None:
+        from tools.stepping import step_pipeline
+        stepped = await step_pipeline(ctx, pipeline_uuid, stream, event - 1)
+    else:
+        stepped = await step(stream, event - 1)
     at = f"record index {event - 1} of stream {stream} (the hit's EventId {event}, counted from 1)"
     out = {'stream': stream, 'event': event}
+    if stepped is None:
+        return {'traced': False, **out, 'why': f"Stroom found no record at {at}"}
     if stepped.get('record') not in (None, event - 1):
         return {'traced': False, **out, 'why': f"asked to step {at}, Stroom stepped record index {stepped['record']}"}
     output = ((stepped.get('elements') or {}).get(element) or {}).get('output') or ''
@@ -1899,6 +2030,93 @@ async def _traced(ctx: Context, pipeline_uuid: str, row: dict[str, Any], check: 
              or any((value or '').lower() in v.lower() for v in document.get(field, [])))   # text fields match words
     return {'traced': holds, **out, **({} if holds else {
         'why': f"the document stepping {at} gives has {field} = {document.get(field)}, not {value}"})}
+
+
+async def _trace_checks(ctx: Context, pipeline_uuid: str, checks: list[dict[str, Any]], say: Any,
+                        out_of_time: Any) -> list[str]:
+    """Each check's hit traced back to its record (_traced), every hit of a stream stepped in one stepping session;
+    the checks left untraced when time ran out, by key. Stroom's stepping captures the whole stream in a session, and
+    each hit stepped in a session of its own captured it again (seen: verifying a long stream took over five minutes,
+    'Tracing the first hit' said check after check, and outlasted the user's token). The hit with the lowest EventId
+    is the one traced: the record nearest the start of its stream."""
+    from tools.stepping import _step
+    stroom = gateway_from(ctx)
+    chosen = []
+    for check in checks:
+        rows = [r for r in check.get('_rows') or [] if _hit_ids(r)]
+        if rows:
+            chosen.append((check, min(rows, key=lambda r: _hit_ids(r)[1])))
+    if not chosen:
+        return []
+    pipeline = await _Pipeline.load(stroom, pipeline_uuid)
+    pipeline.refuse_mistyped()
+    element = _own_xslt_element(pipeline_uuid, pipeline.layers)
+    wanted: dict[int, set[int]] = {}
+    for _, row in chosen:
+        stream, event = _hit_ids(row)
+        wanted.setdefault(stream, set()).add(event - 1)
+    stepped: dict[tuple[int, int], Any] = {}
+    total, n = sum(len(r) for r in wanted.values()), 0
+    for stream, records in wanted.items():
+        async with stroom.stepping() as session:
+            for record in sorted(records):
+                if out_of_time():
+                    break
+                n += 1
+                await say(f"Tracing hits back to their records: record {record} of stream {stream} ({n} of {total})")
+                try:
+                    result = await _step(session, pipeline, stream, 'REFRESH',
+                                         {'metaId': stream, 'partIndex': 0, 'recordIndex': record}, None)
+                except ToolError as e:
+                    stepped[(stream, record)] = e
+                    continue
+                elements = (result.get('stepData') or {}).get('elementMap') or {}
+                stepped[(stream, record)] = {
+                    'record': (result.get('foundLocation') or {}).get('recordIndex'),
+                    'elements': {e: {'output': (d or {}).get('output') or ''} for e, d in elements.items()},
+                } if result.get('foundRecord') else None
+
+    async def step(stream: int, record: int) -> Any:
+        return stepped[(stream, record)]
+    untraced = []
+    for check, row in chosen:
+        stream, event = _hit_ids(row)
+        done = stepped.get((stream, event - 1), ...)
+        if done is ...:
+            check['trace'] = {'traced': None, 'stream': stream, 'event': event, 'why': 'not traced: no time left'}
+            check['pass'] = False
+            untraced.append(check.get('_key') or check.get('check'))
+        elif isinstance(done, ToolError):
+            check['trace'] = {'traced': False, 'stream': stream, 'event': event,
+                              'why': f"stepping record index {event - 1} of stream {stream} failed: {done}"}
+            check['pass'] = False
+        else:
+            check['trace'] = await _traced(ctx, pipeline_uuid, row, check.get('_spec') or {}, step=step, element=element)
+            check['pass'] = check['pass'] and check['trace']['traced']
+    return untraced
+
+
+_PASSED = 'verify_checks_passed'
+_PASSED_TTL = 3600
+
+
+async def _passed_checks(ctx: Context, index_uuid: str | None, stream_ids: list[int], expected: int,
+                         pipeline_uuid: str | None) -> dict[str, dict[str, Any]]:
+    """The checks that passed earlier in the session, by key, for these streams in this index as the indexing
+    pipeline's current code wrote them: a store the run adds its own passes to. Empty, and kept nowhere, when there is
+    no session store or no code to go by."""
+    from tools.plan import _user
+    try:
+        code = await indexing_xslt_digest(gateway_from(ctx), pipeline_uuid) if pipeline_uuid else ''
+        store = ctx.lifespan_context.setdefault(_PASSED, {})
+        user = _user(ctx)
+    except Exception:   # kept for convenience: without it, every check runs
+        return {}
+    now = time.time()
+    for key in [k for k, v in store.items() if now - v['at'] > _PASSED_TTL]:
+        del store[key]
+    entry = store.setdefault((user, index_uuid, tuple(sorted(stream_ids)), expected, code), {'at': now, 'checks': {}})
+    return entry['checks']
 
 
 FULL_COUNT = 10_000     # a stream's documents counted one by one; past this, its first and last ENDS events are
@@ -2005,44 +2223,81 @@ async def run_test_searches(
     rows it returned. With the indexing pipeline, each check's first hit is traced back to its record. A
     failure points at the mapping or the indexing XSLT.
     """
-    dashboard = dashboard_doc or await gateway_from(ctx).get_doc('Dashboard', dashboard_uuid)
+    stroom = gateway_from(ctx)
+    dashboard = dashboard_doc or await stroom.get_doc('Dashboard', dashboard_uuid)
     term = lambda f, c, v: {'type': 'term', 'field': f, 'condition': c, 'value': str(v)}
     by_stream = {'type': 'operator', 'op': 'OR', 'children': [term('StreamId', 'EQUALS', i) for i in stream_ids]}
     # What each search is, told to the client as it runs (asked for by the user), by the index the dashboard queries.
     say = await progress_from(ctx)
-    label = next((((c.get('settings') or {}).get('dataSource') or {}).get('name') for c in
-                  dashboard['dashboardConfig']['components'] if c.get('type') == 'query'), None) or dashboard.get('name')
+    query = next((c for c in dashboard['dashboardConfig']['components'] if c.get('type') == 'query'), {})
+    source = (query.get('settings') or {}).get('dataSource') or {}
+    label = source.get('name') or dashboard.get('name')
     # Every check is of the sample's streams, and unsorted. The index may hold millions of other documents: a check
     # of the whole index answered for them (a time range counted everyone's documents in it, an exact match passed on
     # any stream's), and the dashboard's table, sorted newest first, made Stroom read every match to sort it. The
     # user's dashboard stays sorted.
     dashboard = _unsorted(dashboard)
     scoped = lambda *terms: {'type': 'operator', 'op': 'AND', 'children': [by_stream, *terms]}
-    sizes = await _stream_events(ctx, stream_ids)
-    for attempt in range(retries + 1):
-        complete = await _completeness(ctx, dashboard, stream_ids, sizes, expected_documents, label)
-        if complete['pass'] or attempt == retries:
-            break
-        await say(f"Waiting for {label} to catch up: {complete['progress']} (try {attempt + 1} of {retries + 1})")
-        await asyncio.sleep(5)
-    found = await _search(ctx, dashboard, by_stream, doing=f"Reading the documents of streams {stream_ids} in {label}")
-    complete.pop('progress')
-    checks = [{**complete, 'errors': complete['errors'] + found['errors'], 'sample': found['rows'][:3]}]
-    for item in exact:
+    # Checks that passed earlier in the session, of these streams in this index as the same code wrote them, aren't
+    # run again: seen on a long stream, a call outlasted the user's token, and the next one started from the start.
+    passed = await _passed_checks(ctx, source.get('uuid'), stream_ids, expected_documents, pipeline_uuid)
+    unfinished: list[str] = []
+
+    def out_of_time() -> bool:
+        left = stroom.token_seconds_left()
+        return left is not None and left <= 0
+
+    async def run(key: str, check: Any) -> dict[str, Any] | None:
+        """The check's result: from earlier in the session if it passed then, None when there is no time left."""
+        if key in passed:
+            return {**passed[key], 'checked': 'earlier in this session'}
+        if out_of_time():
+            unfinished.append(key)
+            return None
+        return {**await check(), '_key': key}
+
+    async def documents() -> dict[str, Any]:
+        sizes = await _stream_events(ctx, stream_ids)
+        last = None
+        for attempt in range(retries + 1):
+            complete = await _completeness(ctx, dashboard, stream_ids, sizes, expected_documents, label)
+            # Waited for only while the index catches up: not when Stroom couldn't finish counting (waiting doesn't
+            # make it count faster), nor once two counts in a row found the same.
+            unproven = 'unproven' in complete or any('unproven' in p for p in complete.get('parts') or [])
+            if complete['pass'] or attempt == retries or unproven or complete['progress'] == last or out_of_time():
+                break
+            last = complete['progress']
+            await say(f"Waiting for {label} to catch up: {complete['progress']} (try {attempt + 1} of {retries + 1})")
+            await asyncio.sleep(5)
+        found = await _search(ctx, dashboard, by_stream, doing=f"Reading the documents of streams {stream_ids} in {label}")
+        complete.pop('progress')
+        return {**complete, 'errors': complete['errors'] + found['errors'], 'sample': found['rows'][:3],
+                '_rows': found['rows'], '_spec': {}}
+
+    async def exact_match(item: dict[str, str]) -> dict[str, Any]:
         res = await _search(ctx, dashboard, scoped(term(item['field'], 'EQUALS', item['value'])),
                             doing=f"Searching {label}: {item['field']} = {item['value']}")
-        checks.append({'check': f"{item['field']} = {item['value']}", 'returned': len(res['rows']),
-                       'pass': len(res['rows']) >= 1, 'errors': res['errors'], 'sample': res['rows'][:2]})
-    if time_range:
+        # A value as a dashboard shows a field of several values ("retry, timeout"): the index holds each value on
+        # its own, so EQUALS finds nothing (asked about by the user).
+        several = not res['rows'] and len([p for p in str(item['value']).split(',') if p.strip()]) > 1
+        return {'check': f"{item['field']} = {item['value']}", 'returned': len(res['rows']),
+                'pass': len(res['rows']) >= 1, 'errors': res['errors'], 'sample': res['rows'][:2],
+                **({'why': f"if {item['field']} holds several values (a dashboard shows them separated by commas), "
+                           f"the index holds each on its own: search one of them, e.g. "
+                           f"'{str(item['value']).split(',')[0].strip(' []')}'"} if several else {}),
+                '_rows': res['rows'], '_spec': {'field': item['field'], 'condition': 'EQUALS', 'value': item['value']}}
+
+    async def in_time_range() -> dict[str, Any]:
         between = scoped(term(time_range['field'], 'BETWEEN', f"{time_range['from']},{time_range['to']}"))
         doing = f"Searching {label}: {time_range['field']} between {time_range['from']} and {time_range['to']}"
         n, errors, counted_all = await _counted(ctx, dashboard, between, doing=doing)
         n = n if n is not None else len((await _search(ctx, dashboard, between, doing=doing))['rows'])
-        checks.append({'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
-                       'expected': time_range.get('expected'), 'returned': n,
-                       'pass': counted_all and n == time_range.get('expected', n), 'errors': errors,
-                       **({} if counted_all else {'unproven': _cut_off(n)})})
-    for search in searches or []:
+        return {'check': f"{time_range['field']} between {time_range['from']} and {time_range['to']}",
+                'expected': time_range.get('expected'), 'returned': n,
+                'pass': counted_all and n == time_range.get('expected', n), 'errors': errors,
+                **({} if counted_all else {'unproven': _cut_off(n)})}
+
+    async def other(search: SearchCheck) -> dict[str, Any]:
         expression = scoped(term(search.field, search.condition, search.value))
         doing = f"Searching {label}: {search.field} {search.condition} {search.value}".rstrip()
         res = await _search(ctx, dashboard, expression, doing=doing)
@@ -2051,27 +2306,37 @@ async def run_test_searches(
             # A page is full: the number is counted, not the rows of the first page.
             counted, _, counted_all = await _counted(ctx, dashboard, expression, doing=doing)
             n = n if counted is None else counted
-        checks.append({'check': f"{search.field} {search.condition} {search.value}".rstrip(), 'expected': search.expected,
-                       'returned': n, 'pass': (n >= 1 if search.expected is None else n == search.expected)
-                       and counted_all and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],
-                       **({} if counted_all else {'unproven': _cut_off(n)}),
-                       '_first': res['rows'][0] if res['rows'] else None,
-                       '_spec': {'field': search.field, 'condition': search.condition, 'value': search.value}})
+        return {'check': f"{search.field} {search.condition} {search.value}".rstrip(), 'expected': search.expected,
+                'returned': n, 'pass': (n >= 1 if search.expected is None else n == search.expected)
+                and counted_all and not res['errors'], 'errors': res['errors'], 'sample': res['rows'][:2],
+                **({} if counted_all else {'unproven': _cut_off(n)}),
+                **({'searched_as': search._searched_as} if search._searched_as else {}),
+                '_rows': res['rows'], '_spec': {'field': search.field, 'condition': search.condition,
+                                                'value': search.value}}
+
+    planned: list[tuple[str, Any]] = [('documents', documents)]
+    planned += [(f"exact {item['field']}={item['value']}", lambda item=item: exact_match(item)) for item in exact]
+    if time_range:
+        planned.append((f"time {json.dumps(time_range, sort_keys=True)}", in_time_range))
+    planned += [(f"search {s.field} {s.condition} {s.value} {s.expected}", lambda s=s: other(s))
+                for s in searches or []]
+    checks = [c for key, check in planned if (c := await run(key, check)) is not None]
     if pipeline_uuid:
-        for check, item in zip(checks[1:1 + len(exact)], exact):
-            check['_first'] = check.get('sample', [None])[0] if check.get('sample') else None
-            check['_spec'] = {'field': item['field'], 'condition': 'EQUALS', 'value': item['value']}
-        first = found['rows'][0] if found['rows'] else None
-        checks[0]['_first'], checks[0]['_spec'] = first, {}
-        for check in checks:
-            if check.get('_first'):
-                await say(f"Tracing the first hit of '{check['check']}' back to its record")
-                check['trace'] = await _traced(ctx, pipeline_uuid, check['_first'], check['_spec'])
-                check['pass'] = check['pass'] and check['trace']['traced']
+        unfinished += await _trace_checks(ctx, pipeline_uuid, [c for c in checks if '_key' in c], say, out_of_time)
     for check in checks:
-        check.pop('_first', None)
+        check.pop('_rows', None)
         check.pop('_spec', None)
-    return {'passed': all(c['pass'] for c in checks), 'checks': checks}
+        key = check.pop('_key', None)
+        if key and check['pass']:
+            passed[key] = dict(check)
+    result = {'passed': all(c['pass'] for c in checks) and not unfinished, 'checks': checks}
+    if unfinished:
+        result['unfinished'] = unfinished
+        result['next'] = (f"Stopped before your sign-in (access token) ran out, with {len(unfinished)} check(s) still "
+                          f"to run: call verify_index again with the same arguments. The checks that passed are kept "
+                          f"for this session, so only the rest run; your client sends a fresh token with every call, "
+                          f"so there is nothing for the user to do.")
+    return result
 
 
 async def _destination(ctx: Context, pipeline_uuid: str) -> dict[str, Any]:
@@ -2130,12 +2395,16 @@ def components_wanted(example: dict[str, Any], components: dict[str, Any],
     missing = [n for n in composed_of if n not in components and n != ecs.COMPONENT and n not in without]
     if not missing:
         return None
+    # One request per name: GET _component_template takes a single name or wildcard, not a list (seen in testing: a
+    # comma-separated list found nothing).
+    requests = '\n'.join(f"GET _component_template/{n}" for n in missing)
     return {'status': 'needs_components', 'ok': False, 'composed_of': composed_of, 'given': sorted(components),
-            'missing': missing, 'request': f"GET _component_template/{','.join(missing)}",
+            'missing': missing, 'request': requests,
             'hint': ("The example is composed of component templates whose fields can't be seen here without them: the "
                      "fields it maps are those of the index template and all of its components together. Ask the user "
-                     "to run the request in Kibana Dev Tools and paste the whole response, then call again with "
-                     "component_templates= every component given so far and this one. If the request says "
+                     f"to run {'the request' if len(missing) == 1 else 'these requests (select them all and run: Dev Tools answers each)'} "
+                     "in Kibana Dev Tools and paste the whole response, exactly as shown, then call again with "
+                     "component_templates= that response alone: those given before are kept for the session. If a request says "
                      "resource_not_found, the cluster has no such component: it can't be composed, so leave it out. "
                      "If the user can't get one that exists, call again with without_components= its name: the "
                      "template is then built without its fields, which it may repeat or contradict.")}
@@ -2147,33 +2416,48 @@ def _component_notes(missing: list[str]) -> list[str]:
             f"(GET _component_template/<name>) and check again with component_templates."] if missing else []
 
 
-def _template_summary(name: str, body: dict[str, Any], components: dict[str, Any], notes: list[str]) -> dict[str, Any]:
-    """The template in lines a confirmation form shows readably: the user reviews the whole request in the chat
-    first (seen in VS Code: the form showed it as one long unformatted line, and an invalid template was agreed)."""
-    template = body.get('template') or {}
-    mappings = template.get('mappings') or {}
-    fields = [(path, spec.get('type')) for path, spec in read_mapping_fields(body).items()
-              if spec.get('type') not in (None, 'object')]
-    settings = template.get('settings') or {}
-    settings = settings.get('index', settings) if isinstance(settings, dict) else {}
-
-    def flat(node: Any, prefix: str = '') -> list[str]:
-        if isinstance(node, dict):
-            return [line for k, v in node.items() for line in flat(v, f'{prefix}{k}.')]
-        return [f"{prefix[:-1]} {node}"]
+def _template_summary(name: str, body: dict[str, Any], shown: str) -> dict[str, Any]:
+    """The template in a few short lines, for the confirmation form: the user reviews the whole request, with its
+    notes, in the chat first (seen in VS Code: the form showed it as one long unformatted line, and an invalid
+    template was agreed). Seen in testing: with every field, note and component template in it, the form ran to 2,000
+    characters and the client declined it as too long. Bound to exactly what was shown by its review id."""
+    mappings = (body.get('template') or {}).get('mappings') or {}
+    fields = [p for p, spec in read_mapping_fields(body).items() if spec.get('type') not in (None, 'object')]
     patterns = body.get('index_patterns') or []
-    return {'index template': f"{name}: the Dev Tools request shown in the chat",
-            'applies to': f"{', '.join(patterns if isinstance(patterns, list) else [patterns])} (priority "
-                          f"{body.get('priority')})" + (', as a data stream' if 'data_stream' in body else ''),
-            **({'composed of': body['composed_of']} if body.get('composed_of') else {}),
-            **({'settings': ', '.join(flat(settings))} if settings else {}),
-            'fields': f"{len(fields)}: " + ', '.join(f"{p} ({t})" for p, t in fields[:30])
-                      + (f" (+{len(fields) - 30})" if len(fields) > 30 else ''),
+    return {'index template': f"{name}, exactly as shown in the chat (review id {review_id(shown)})",
+            'applies to': ', '.join(patterns if isinstance(patterns, list) else [patterns])
+                          + (f" (priority {body['priority']})" if body.get('priority') is not None else '')
+                          + (', as a data stream' if 'data_stream' in body else ''),
+            **({'composed of': ', '.join(body['composed_of'])} if body.get('composed_of') else {}),
+            'fields mapped here': len(fields),
             'unmapped fields': {'false': 'kept in _source, not searchable', 'strict': 'refused',
                                 'runtime': 'runtime fields'}.get(str(mappings.get('dynamic')).lower(),
-                                                                'added by Elasticsearch (dynamic mapping)'),
-            **({'component templates': sorted(components)} if components else {}),
-            **({'notes': notes} if notes else {})}
+                                                                'mapped by Elasticsearch as documents bring them')}
+
+
+_SHOWN = 'templates_shown'
+
+
+def _remember_shown(ctx: Context, dev_tools: str) -> None:
+    """The template a needs_review reply shows, by its review id, so the call after the review needn't send it again
+    (seen in testing: retyped by the agent, the template and its components came back corrupted)."""
+    from tools.plan import _user
+    try:
+        shown = ctx.lifespan_context.setdefault(_SHOWN, {})
+        now = time.time()
+        for key in [k for k, v in shown.items() if now - v['at'] > _NAMING_TTL]:
+            del shown[key]
+        shown[(_user(ctx), review_id(dev_tools))] = {'text': dev_tools, 'at': now}
+    except Exception:   # kept for convenience: the template can still be given
+        pass
+
+
+def _shown_template(ctx: Context, reviewed: Any) -> str | None:
+    from tools.plan import _user
+    try:
+        return ctx.lifespan_context.get(_SHOWN, {}).get((_user(ctx), str(reviewed).strip().lower()), {}).get('text')
+    except Exception:
+        return None
 
 
 async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dict[str, Any], name: str,
@@ -2185,7 +2469,7 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
     await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
-    dev_tools = f"PUT _index_template/{name}\n{json.dumps(body, indent=2)}"
+    dev_tools = render_dev_tools(name, body)
     from utils.mappingstore import read_agreed_template
     kept = read_agreed_template(doc.get('description')) or {}
     try:
@@ -2199,21 +2483,26 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
         # Already agreed, as it is: seen in Ask Stroom AI, the template the user had agreed was checked again once
         # committed, and they were asked to review and confirm it a second time.
         return None
+    _remember_shown(ctx, dev_tools)
     if not was_reviewed(reviewed, dev_tools):
         # Passed on only with this template's id, as promote_build's layout (seen there: reviewed=true from the start).
         return {'status': 'needs_review', 'dev_tools': dev_tools, 'review_id': review_id(dev_tools),
-                'hint': f"Show the user this index template before anything else: dev_tools in the chat as a json code "
-                        f"block, exactly as it is (a form can't show it readably), with the notes on what came from "
-                        f"where, and say it is not to go on the cluster until they've confirmed it. Then, in the same "
-                        f"turn, without waiting for a reply, call {action} again with the same arguments (example_template "
-                        f"and component_templates included) plus reviewed='{review_id(dev_tools)}' (this template's "
-                        f"review_id): the form that opens is where they confirm it or say what to change. Seen: an "
-                        f"agent ended its turn after showing it, and the user committed the template before it was "
-                        f"agreed." + review_note(reviewed)}
+                'hint': f"Show the user this index template before anything else, in your reply (not in your "
+                        f"thinking, which they may not see): dev_tools as a json code block, exactly as it is (a form "
+                        f"can't show it readably), with the notes on what came from where, and say it is not to go on "
+                        f"the cluster until they've confirmed it. Then, in the same turn, without waiting for a reply, "
+                        f"call {action} again with the same arguments plus reviewed='{review_id(dev_tools)}' (this "
+                        f"template's review_id); "
+                        + ("the template itself may be left out, and component templates given before are kept: don't "
+                           "retype them" if action == 'check_index_template' else
+                           "component templates given before are kept: don't send them again")
+                        + ". The form that opens is where they confirm it or say what to change. Seen: an agent ended "
+                          "its turn after showing it, and the user committed the template before it was agreed."
+                        + review_note(reviewed)}
     gate = await consent_from(ctx).require(
         ctx, 'confirmation', action, f"Use Elasticsearch index template '{name}' for index "
         f"'{destination['index name']}' (cluster {destination['cluster']}), as shown in the chat",
-        _template_summary(name, body, components, notes), confirmation_id)
+        _template_summary(name, body, dev_tools), confirmation_id)
     if gate:
         return gate
     doc['description'] = with_agreed_template(doc.get('description'), {
@@ -2228,19 +2517,42 @@ def _asking(gate: Any, result: dict[str, Any]) -> Any:
     """The confirmation to return, with what the agent shows alongside it (a form result goes back unchanged)."""
     if not isinstance(gate, dict):
         return gate
-    return {**gate, **{k: result[k] for k in ('compatible', 'blocking', 'pipeline_changes', 'template_name', 'index',
-                                             'cluster', 'self_check', 'from_example', 'notes', 'component_templates')
-                       if k in result},
+    # What to do first, the template after: seen in testing, the review reply ran to 10,000 characters, the client
+    # showed it cut short, and the template was never put to the user. The fields written are in the template.
+    shown = {k: result[k] for k in ('compatible', 'blocking', 'pipeline_changes', 'template_name', 'index', 'cluster',
+                                    'self_check', 'from_example', 'notes', 'component_templates') if k in result}
+    if isinstance(shown.get('self_check'), dict):
+        shown['self_check'] = {k: v for k, v in shown['self_check'].items() if k != 'fields_written'}
+    return {'status': gate.get('status'),
             'hint': gate['hint'] + " If the user corrects the template instead, check_index_template with their "
-                                   "version (and the component templates): it is confirmed there."}
+                                   "version: it is confirmed there (component templates given before are kept).",
+            **{k: v for k, v in gate.items() if k not in ('status', 'hint')}, **shown}
 
 
 
-def _ecs_base(plan: FieldPlan) -> bool:
-    """Whether the template is composed of ecs@mappings whatever the example composes: an ECS plan with fields it
-    maps as ECS says (one named in the example's own style, User.Id, has none for it to map)."""
+async def _with_convention(ctx: Context, plan: FieldPlan, pipeline_uuid: str) -> FieldPlan:
+    """The plan with the convention it was drafted under, when the agent's copy left it out (it decides whether the
+    template composes ecs@mappings): taken from the plan kept with the pipeline, or drafted this session for the
+    index."""
+    if plan.convention:
+        return plan
+    try:
+        kept = await plan_given(ctx, None, [plan.index_name], pipeline_uuid=pipeline_uuid)
+    except Exception:   # nothing kept to go by: the plan as given
+        return plan
+    if kept is not None and kept.convention and {f.name for f in kept.fields} & {f.name for f in plan.fields}:
+        return plan.model_copy(update={'convention': kept.convention,
+                                       'custom_namespaces': plan.custom_namespaces or kept.custom_namespaces})
+    return plan
+
+
+def _ecs_base(example: dict[str, Any]) -> bool:
+    """Whether a template built from the user's example leaves the ECS fields to ecs@mappings, with dynamic mapping on
+    so it maps them: when the example references it (asked for by the user: ecs@mappings only when the user opts for
+    ECS field mapping, by the ECS convention or an example that composes it). Seen in testing: a PascalCase example
+    (User.Id), drafted with the ECS profile picking its paths, got ecs@mappings and dynamic mapping for @timestamp."""
     from utils import ecs
-    return plan.convention == 'ecs' and any(ecs.left_to_component(f.name, f.type) for f in plan.fields)
+    return ecs.COMPONENT in (example.get('composed_of') or [])
 
 async def propose_index_template(
         ctx: Context,
@@ -2254,9 +2566,10 @@ async def propose_index_template(
             description="The user's example: the Elasticsearch index template a sibling source's index uses (GET "
                         "_index_template/<name>, or a Dev Tools request), or an existing index's mapping (GET "
                         "<index>/_mapping). Ask the user for it: the final template follows it.")] = None,
-        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+        component_templates: Annotated[list[str | dict[str, Any]] | str | dict[str, Any], ONE_OR_MORE, Field(
             description="Only if the example lists any in composed_of: those component templates, as the user gave them (GET "
-                        "_component_template/<name>, or PUT _component_template/<name> {...}).")] = [],
+                        "_component_template/<name>, or PUT _component_template/<name> {...}). Kept for the session once given: leave out those "
+                        "given before, never send them again.")] = [],
         without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only when the user can't give some of the example's component templates: their names. The "
                         "template is then built without their fields, which it may repeat or contradict.")] = [],
@@ -2265,7 +2578,9 @@ async def propose_index_template(
                         "without one), by name: referenced whatever they map, their fields left to them. Give their "
                         "content in component_templates too (but ecs@mappings, known here).")] = [],
         template_name: Annotated[str | None, Field(description="Template name; defaults to the index name.")] = None,
-        priority: Annotated[int, Field(ge=0)] = 200,
+        priority: Annotated[int | None, Field(ge=0, description=(
+            "Only when the user asks for one. None by default: with an example, the example's; without one, "
+            "none (Elasticsearch's 0)."))] = None,
         without_example: Annotated[bool, Field(
             description="Only when the user has said they have no example: the template is built from the field plan "
                         "alone, and they confirm it as shown.")] = False,
@@ -2295,6 +2610,7 @@ async def propose_index_template(
                         "drafted none (or several) in this session")
     if plan.backend != 'elasticsearch':
         raise ToolError("Index templates are for Elasticsearch; Lucene fields are set with create_index_doc (plan=...)")
+    plan = await _with_convention(ctx, plan, pipeline_uuid)
     destination = await _destination(ctx, pipeline_uuid)
     index = destination['index name']
     name = template_name or index
@@ -2305,14 +2621,17 @@ async def propose_index_template(
     if not without_example and (not example_template or not _is_template(example_template)):
         kept = await _kept_example(ctx, pipeline_uuid, [index, plan.index_name])
         if kept:
-            kept_note = ("the example index template the user pasted, kept in the build when the plan was drafted"
+            example_template, component_templates, how = kept
+            kept_note = (f"the example index template {how}, kept in the build when the plan was drafted"
+                         + ("" if how == PASTED else ": its settings, component templates, keyword sub-fields and "
+                                                     "ignore_above aren't readable through Stroom, so Elasticsearch's "
+                                                     "defaults; the user may paste its index template for them")
                          + ("; what was given as example_template is not an index template" if example_template else ""))
-            example_template, component_templates = kept
     if example_template:
         try:
             _, example = parse_template(example_template)
-            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
-                                                   else list(component_templates))
+            components = _given_components(ctx, component_templates, composition(
+                example.get('composed_of') or [], include, exclude))
         except ValueError as e:
             raise ToolError(str(e)) from e
         wanted = components_wanted({'composed_of': composition(example.get('composed_of') or [], include, exclude)},
@@ -2322,7 +2641,7 @@ async def propose_index_template(
         # Every planned field: the example says what it is composed of, and so which fields are left to that.
         full = plan.model_copy(update={'index_name': index}).elastic_template(name, priority, leave_to_component=False)
         body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None,
-                                   include=include, exclude=exclude, ecs_base=_ecs_base(plan))
+                                   include=include, exclude=exclude, ecs_base=_ecs_base(example))
         notes = ruled + notes
         if kept_note:
             notes.insert(0, kept_note)
@@ -2340,8 +2659,7 @@ async def propose_index_template(
     plan_notes = []
     if not example_template and (include or exclude):
         try:
-            components = parse_component_templates([component_templates] if isinstance(component_templates, str)
-                                                   else list(component_templates))
+            components = _given_components(ctx, component_templates, include)
         except ValueError as e:
             raise ToolError(str(e)) from e
         wanted = components_wanted({'composed_of': include}, components, without_components)
@@ -2358,13 +2676,12 @@ async def propose_index_template(
         body, time_note = discovery_data_stream(body, docs, plan.discovery.timestamp_field)
     composed, _ = compose(body, components)
     check = compare(composed, docs, index)
-    text = json.dumps(body, indent=2)
     if not example_template:
         notes = ["built from the field plan alone: the user has no example index template"] + (
             [time_note] if time_note else []) + plan_notes
     result = {'template_name': name, 'index': index, 'cluster': destination['cluster'], 'template': body,
-              'dev_tools': f"PUT _index_template/{name}\n{text}", 'self_check': check,
-              **({'from_example': notes} if example_template else {}),
+              'dev_tools': render_dev_tools(name, body), 'self_check': check,
+              **({'from_example': notes} if example_template else {'notes': notes}),
               **({'data_stream': time_note} if time_note else {}),
               'pipeline_link': doc_link(stroom.settings, 'Pipeline', pipeline_uuid)}
     if not check['compatible']:
@@ -2385,14 +2702,17 @@ async def propose_index_template(
 async def check_index_template(
         ctx: Context,
         pipeline_uuid: Annotated[str, Field(description="The candidate Elasticsearch indexing pipeline.")],
-        template: Annotated[str, Field(description="The Elasticsearch index template as the user gave it: a Dev Tools "
-                                                   "request (PUT _index_template/name {...}), the JSON body, or GET "
-                                                   "_index_template output; or an existing index's mapping (GET "
-                                                   "<index>/_mapping) as the example.")],
-        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")],
-        component_templates: Annotated[list[str] | str, ONE_OR_MORE, Field(
+        template: Annotated[str | None, Field(description="The Elasticsearch index template as the user gave it: a Dev "
+                                                          "Tools request (PUT _index_template/name {...}), the JSON body, "
+                                                          "or GET _index_template output; or an existing index's mapping "
+                                                          "(GET <index>/_mapping) as the example. Left out with reviewed=: "
+                                                          "the template that review showed, kept for the session (never "
+                                                          "retype it).")] = None,
+        events_stream_ids: Annotated[list[int] | int | str, ONE_OR_MORE, Field(description="Events streams to step the pipeline over.")] = [],
+        component_templates: Annotated[list[str | dict[str, Any]] | str | dict[str, Any], ONE_OR_MORE, Field(
             description="Only if the index template lists any in composed_of: those component templates, as the user gave them: each a Dev "
-                        "Tools request (PUT _component_template/name {...}) or GET _component_template output.")] = [],
+                        "Tools request (PUT _component_template/name {...}) or GET _component_template output. Kept for the session once given: leave out those "
+                        "given before, never send them again.")] = [],
         without_components: Annotated[list[str] | str, ONE_OR_MORE, Field(
             description="Only when the user can't give some of the example's component templates: their names. The "
                         "template is then built without their fields, which it may repeat or contradict.")] = [],
@@ -2412,10 +2732,15 @@ async def check_index_template(
     flag to the user before anything is changed. A compatible index template (with index_patterns) is shown to
     the user to confirm, and kept with the pipeline as the agreed one.
     """
+    if not events_stream_ids:
+        raise ToolError("Give events_stream_ids: the Events streams to step the pipeline over")
+    template = template or _shown_template(ctx, reviewed)
+    if not template:
+        raise ToolError("Give template: the index template as the user gave it (or reviewed= the review_id of one "
+                        "shown in this session)")
     try:
         name, body = parse_template(template)
-        components = parse_component_templates([component_templates] if isinstance(component_templates, str)
-                                               else list(component_templates))
+        components = _given_components(ctx, component_templates, body.get('composed_of') or [])
     except ValueError as e:
         raise ToolError(str(e)) from e
     wanted = components_wanted(body, components, without_components)
@@ -2426,6 +2751,14 @@ async def check_index_template(
              if n not in (body.get('composed_of') or [])] + \
             [f"composed_of has '{n}', which standing instructions exclude" for n in exclude
              if n in (body.get('composed_of') or [])]
+    from utils.templatecheck import ecs_duplicates
+    doubled = ecs_duplicates(body)
+    if doubled:
+        # Seen in testing: asked to use ecs@mappings, the agent composed it and still mapped every ECS field itself.
+        ruled.append(f"mapped explicitly just as ecs@mappings (which this template composes) maps them, so mapped "
+                     f"twice: {doubled[:30]}" + (f" (+{len(doubled) - 30})" if len(doubled) > 30 else '')
+                     + ". Leave them out of properties, with dynamic mapping on: the component maps them as documents "
+                       "bring them (propose_index_template builds it that way)")
     body, missing = compose(body, components)
     destination = await _destination(ctx, pipeline_uuid)
     await _require_input(ctx, pipeline_uuid, events_stream_ids)
@@ -2490,12 +2823,13 @@ def _unlisted(field: str) -> str:
 
 def _searchable(backend: str, searches: list[SearchCheck], ip_fields: set[str] = frozenset(),
                 exact: list[dict[str, str]] = (), lucene_text: dict[str, str] | None = None,
-                listed: set[str] | None = None) -> None:
+                listed: set[str] | None = None, unindexed: dict[str, str] | None = None) -> None:
     """Searches whose answer would mislead: on Elasticsearch, Stroom (7.13) finds nothing for STARTS_WITH and
     CONTAINS, nor for a wildcard on an ip field, and matches every document for IS_NULL and IS_NOT_NULL, without an
     error; on Lucene it finds nothing for STARTS_WITH and ENDS_WITH, for CONTAINS on a keyword field, nor for a range
     on a text field (lucene_text: the index's TEXT fields and their analyzers); IN takes values separated by commas."""
-    problems = []
+    problems = [f"{name}: {why}, so no search through Stroom finds it (it is kept, and a dashboard column still shows it): "
+                f"leave it out of the checks" for name, why in (unindexed or {}).items()]
     if backend == 'elasticsearch' and listed:
         # Seen in production: message, mapped as match_only_text by ecs@mappings, isn't listed by Stroom; every
         # search on it found nothing, and after three tries the agent dropped the check.
@@ -2616,6 +2950,10 @@ async def verify_index(
                         "at the hit's StreamId and EventId (record index EventId - 1); a trace that fails says what "
                         "it compared (trace.why).")] = None,
         confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+        checks: Annotated[bool, Field(description=(
+            "False only when the user asks to skip verification: the build's -VERIFY dashboard is made (or its columns "
+            "changed) as the user confirms, and its link returned, with no test searches. Nothing is marked verified, "
+            "so promotion still waits for a verification that passes."))] = True,
 ) -> dict[str, Any]:
     """
     Verify indexed events through Stroom, not by querying the backend: a workspace dashboard on the index doc,
@@ -2627,9 +2965,10 @@ async def verify_index(
     confirms its columns) has a query on the time field from the sample's earliest event (rounded back to a 30-day
     boundary) through the end of today, a table of the user's fields newest first, and a text pane on the selected row's record
     with stepping. An index from elsewhere is searched without saving a dashboard, unless pipeline_uuid is the build's
-    own pipeline writing to it: the dashboard is then the build's, promoted with that pipeline.
+    own pipeline writing to it: the dashboard is then the build's, promoted with that pipeline. checks=false, when
+    the user asks to skip verification, makes the dashboard and gives its link, with no searches.
     """
-    searches = [SearchCheck.model_validate(s) if isinstance(s, dict) else s for s in searches]
+    searches = _as_searched(backend, [SearchCheck.model_validate(s) if isinstance(s, dict) else s for s in searches])
     _searchable(backend, searches)
     stroom = gateway_from(ctx)
     index = await stroom.get_doc(INDEX_TYPE[backend], index_uuid)
@@ -2653,6 +2992,12 @@ async def verify_index(
         except Exception:    # a check on the searches, not a reason for verification to fail
             text = {}
         _searchable(backend, searches, lucene_text=text)
+    searched = [s.field for s in searches] + [e.get('field') for e in exact if isinstance(e, dict) and e.get('field')] \
+        + ([time_range['field']] if time_range and time_range.get('field') else [])
+    ref = {'type': INDEX_TYPE[backend], 'uuid': index_uuid, 'name': index.get('name')}
+    unindexed = await _unsearchable(ctx, INDEX_TYPE[backend], ref, list(dict.fromkeys(searched)), pipeline_uuid)
+    if unindexed:
+        _searchable(backend, [], unindexed=unindexed)
     name = dashboard_name or f"{index.get('name')}-VERIFY"
     fields = [f for f in fields if f not in _IDS]
     time_field = index.get('timeField') or index.get('timeFieldName')
@@ -2705,6 +3050,16 @@ async def verify_index(
         made = await create_verification_dashboard(ctx, build, name, index_uuid, backend, fields, time_field, window)
         doc = await stroom.get_doc('Dashboard', made['uuid'])
         dashboard = {'uuid': made['uuid'], 'name': name, 'saved': True}
+    if not checks:
+        # Seen in testing: told to skip verification and give the dashboard, the agent went through making a dashboard
+        # of its own (asking the user which kind), and the -VERIFY one was never finished.
+        if not dashboard.get('saved'):
+            raise ToolError(f"Index '{index.get('name')}' isn't the build's, nor written by its pipeline (pipeline_uuid), "
+                            f"so no dashboard is saved for it: there is nothing to give without the checks")
+        return {'dashboard': {**dashboard, 'link': doc_link(stroom.settings, 'Dashboard', dashboard['uuid']), **design},
+                'checks_skipped': 'as the user asked',
+                'hint': "Give the user the dashboard's link. Verification was skipped at their request: nothing is "
+                        "marked verified, so promotion waits for verify_index with the checks to pass."}
     searched = await run_test_searches(ctx, dashboard['uuid'], stream_ids, expected_documents, exact, time_range, retries,
                                        searches=list(searches), pipeline_uuid=pipeline_uuid, dashboard_doc=doc)
     if pipeline_uuid:
@@ -2819,7 +3174,11 @@ async def find_events(
         from utils.stroom import not_found
         raise ToolError(not_found(stroom.settings, f"No Elastic Index or Lucene Index doc with UUID {index_uuid}"))
     ref = {'type': doc_type, 'uuid': index_uuid, 'name': index.get('name')}
-    listed = {f['name']: f['type'] for f in await _index_fields(stroom, doc_type, ref)}
+    info = await _index_fields(stroom, doc_type, ref)
+    listed = {f['name']: f['type'] for f in info}
+    unindexed = {f['name']: "the index doc's field isn't indexed" if doc_type == 'Index' else
+                 "Stroom lists it as not searchable" for f in info
+                 if f.get('searchable') is False and f['name'] in {t.field for t in terms}}
     backend = 'elasticsearch' if doc_type == 'ElasticIndex' else 'lucene'
     unknown = [n for n in [t.field for t in terms] + list(fields) if n not in listed]
     if unknown:
@@ -2828,8 +3187,13 @@ async def find_events(
         raise ToolError(f"Not fields of index '{ref['name']}': " + '; '.join(
             f"{n} (like {', '.join(m)})" if m else n for n, m in near.items())
             + f". Its fields: {', '.join(sorted(listed)[:60])}")
+    if backend == 'elasticsearch':
+        # Any value or none, which IS_NOT_NULL and IS_NULL mean: Stroom matches every document with them on
+        # Elasticsearch.
+        terms = [t.model_copy(update={'condition': _NULL_AS[t.condition][0], 'value': '*'})
+                 if t.condition in _NULL_AS else t for t in terms]
     _searchable(backend, [SearchCheck(field=t.field, condition=t.condition, value=t.value) for t in terms],
-                {n for n, t in listed.items() if t in ('ip', 'ipv4_address')})
+                {n for n, t in listed.items() if t in ('ip', 'ipv4_address')}, unindexed=unindexed)
     time_field = index.get('timeField') or index.get('timeFieldName')
     children = [{'type': 'term', 'field': t.field, 'condition': t.condition, 'value': t.value} for t in terms]
     if time_from or time_to:

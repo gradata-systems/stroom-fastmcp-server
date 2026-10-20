@@ -483,6 +483,9 @@ def _agreed_line(pipeline: dict[str, Any]) -> str:
     if not agreed:
         return ''
     parts = agreed.get('component_templates') or []
+    if agreed.get('by_user'):
+        return (f"\nElasticsearch index template: the user's own, committed to the cluster (confirmed by them "
+                f"{agreed['agreed'][:10]}, not agreed here).\n")
     return (f"\nElasticsearch index template `{agreed['name']}`, agreed with the user {agreed['agreed'][:10]}"
             + (f", composed of {', '.join(f'`{c}`' for c in parts)}" if parts else '') + ".\n")
 

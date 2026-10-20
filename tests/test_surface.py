@@ -27,8 +27,11 @@ def test_the_surface_is_smaller_and_every_core_tool_names_its_plan_step():
 async def test_merged_read_tools_combine_their_parts():
     with patch.object(explorer, 'get_document', AsyncMock(side_effect=lambda *a: {'data': '<x/>', 'name': 'T'})), \
             patch('tools.pipelines.describe_pipeline', AsyncMock(return_value={'chain': ['a']})), \
-            patch('tools.validation.describe_translation', AsyncMock(return_value={'mappings': []})):
-        assert (await explorer.describe_document(None, 'Pipeline', 'p'))['pipeline'] == {'chain': ['a']}
+            patch('tools.validation.describe_translation', AsyncMock(return_value={'mappings': []})), \
+            patch.object(explorer, 'gateway_from'), \
+            patch('tools.processing.pipeline_feeds', AsyncMock(return_value={'feeds': ['ACME']})):
+        described = await explorer.describe_document(None, 'Pipeline', 'p')
+        assert described['pipeline'] == {'chain': ['a']} and described['processing'] == {'feeds': ['ACME']}
         assert (await explorer.describe_document(None, 'XSLT', 'x'))['translation'] == {'mappings': []}
         assert 'pipeline' not in await explorer.describe_document(None, 'Feed', 'f')
     with patch.object(streams, 'get_stream_children', AsyncMock(return_value={'children': [1], 'by_type': {'Events': 1}})), \
@@ -129,6 +132,31 @@ async def test_verify_index_asks_before_creating_reuses_its_own_and_saves_nothin
     elsewhere, create, searched = await run([])
     assert elsewhere['dashboard']['saved'] is False and 'link' not in elsewhere['dashboard'] and create.await_count == 0
     assert searched.await_args.kwargs['dashboard_doc']['dashboardConfig']['components'][0]['settings']['dataSource']['uuid'] == 'i'
+
+
+async def test_skipping_verification_still_gives_the_verify_dashboard():
+    # Seen in testing: told to skip verification and give the dashboard, the agent set about a dashboard of its own,
+    # asking the user which kind, and the -VERIFY one was never finished.
+    from utils.consent import ConsentStore
+    index = {'name': 'IDX', 'timeField': '@timestamp'}
+    rows = {'rows': [{'@timestamp': '2026-10-01T09:00:00.000Z', 'StreamId': '1', 'EventId': '1'}], 'errors': []}
+    docs = {'i': index, 'new': {'dashboardConfig': {}}}
+    stroom = SimpleNamespace(get_doc=AsyncMock(side_effect=lambda t, u: docs[u]), put_doc=AsyncMock(),
+                             settings=SimpleNamespace(stroom_url='https://stroom.example', stroom_ui_url=None))
+    consent = ConsentStore(False)
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': consent})
+    guard = SimpleNamespace(folder_contents=AsyncMock(return_value=[{'type': 'ElasticIndex', 'uuid': 'i', 'name': 'IDX'}]))
+    with patch.object(indexing, 'guard_from', lambda c: guard), \
+            patch.object(indexing, '_search', AsyncMock(return_value=rows)), \
+            patch.object(indexing, 'create_verification_dashboard', AsyncMock(return_value={'uuid': 'new'})) as create, \
+            patch.object(indexing, 'run_test_searches', AsyncMock()) as searched:
+        asked = await indexing.verify_index(ctx, 'b', 'i', 'elasticsearch', [1], 1, ['@timestamp'], checks=False)
+        made = await indexing.verify_index(ctx, 'b', 'i', 'elasticsearch', [1], 1, ['@timestamp'], checks=False,
+                                           confirmation_id=asked['confirmation_id'])
+    # The columns confirmed as always; then the dashboard made and its link given, with no searches run.
+    assert asked['status'] == 'needs_confirmation' and create.await_count == 1 and searched.await_count == 0
+    assert made['dashboard']['link'].endswith('docType=Dashboard&docUuid=new') and made['checks_skipped']
+    assert 'verified' not in made
 
 
 async def test_verify_index_refuses_a_column_the_index_lacks_naming_the_field_the_plan_indexed_its_path_as():
@@ -323,3 +351,30 @@ async def test_a_delimited_streams_header_comes_back_with_its_records():
         out = await streams._split_raw(None, None, 1, 0, 5, 10_000)
     assert out['header'] == 'time,user,host' and out['records'][0] == '2026-09-28T10:00:00,alice,ws01'
     assert 'is header' in out['records_are']
+
+
+async def test_a_pipelines_feeds_are_read_from_its_filters_dictionaries_and_upstream_pipeline():
+    # Seen in testing: asked which feeds a pipeline acts on, the agent found its filters unreadable (a dictionary of
+    # feeds), and fell back on a keyword search for documents.
+    from tools.processing import pipeline_feeds
+    term = lambda f, c, **k: {'type': 'term', 'field': f, 'condition': c, **k}
+    filters = {
+        'events': [{'id': 1, 'enabled': True, 'queryData': {'expression': {'type': 'operator', 'children': [
+            term('Feed', 'IN_DICTIONARY', docRef={'type': 'Dictionary', 'uuid': 'd1', 'name': 'Firewall feeds'}),
+            term('Type', 'EQUALS', value='Raw Events')]}}},
+                   {'id': 2, 'enabled': False, 'queryData': {'expression': {'type': 'operator', 'children': [
+                       term('Feed', 'IS_DOC_REF', docRef={'type': 'Feed', 'uuid': 'f9', 'name': 'ACME-VPN-V1.0'})]}}}],
+        'index': [{'id': 3, 'enabled': True, 'queryData': {'expression': {'type': 'operator', 'children': [
+            term('Type', 'EQUALS', value='Events'),
+            term('Pipeline', 'IS_DOC_REF', docRef={'type': 'Pipeline', 'uuid': 'events', 'name': 'FW-Events'})]}}}]}
+    stroom = SimpleNamespace(processor_filters=AsyncMock(side_effect=lambda uuid: filters[uuid]),
+                             get_doc=AsyncMock(return_value={'data': 'FORTIGATE-V1\nPaloAlto-V2\n', 'imports': []}))
+    read = await pipeline_feeds(stroom, 'index')
+    assert read['feeds'] == ['ACME-VPN-V1.0', 'FORTIGATE-V1', 'PaloAlto-V2'] and read['reads_output_of'] == ['FW-Events']
+    assert read['filters'][0]['output_of'][0]['its_feeds'] == ['ACME-VPN-V1.0', 'FORTIGATE-V1', 'PaloAlto-V2']
+    events = await pipeline_feeds(stroom, 'events')
+    assert events['filters'][0]['feeds_from_dictionaries'] == ['Firewall feeds']
+    assert events['filters'][0]['stream_types'] == ['Raw Events'] and events['filters'][1]['feeds'] == ['ACME-VPN-V1.0']
+    # Not allowed to list them: said, not a failure of the whole description.
+    refused = SimpleNamespace(processor_filters=AsyncMock(side_effect=ToolError('Stroom rejected the request (403): no')))
+    assert 'refused' in (await pipeline_feeds(refused, 'p'))['filters_unreadable']

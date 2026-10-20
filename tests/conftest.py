@@ -24,3 +24,14 @@ def _schema_locations_unjudged(monkeypatch):
     async def none(self, root):
         return []
     monkeypatch.setattr('utils.schemas.SchemaCache.location_problems', none)
+
+
+@pytest.fixture(autouse=True)
+def _forms_fit(request, caplog):
+    # Every confirmation form a tool asks fits, uncut (asked for by the user: a 2,000-character form was declined by
+    # the client as too long; fixed at the source, in each tool's details, not by cutting).
+    yield
+    if request.node.get_closest_marker('long_form'):
+        return
+    cut = [r.getMessage() for r in caplog.records if r.name == 'utils.consent' and ' cut: ' in r.getMessage()]
+    assert not cut, f"A form's details are too long for it: {cut}"

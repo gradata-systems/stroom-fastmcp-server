@@ -48,6 +48,7 @@ class _Pipeline:
 
     def __init__(self, doc: dict[str, Any], layers: list[dict[str, Any]]):
         self.doc = doc
+        self.layers = layers
         merged = merge_layers(layers)
         self.merged = merged
         self.mistyped: list[str] = []

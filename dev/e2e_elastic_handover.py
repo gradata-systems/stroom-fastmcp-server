@@ -189,8 +189,8 @@ async def component_choices(ctx, stroom: StroomGateway, build: str, pipeline: di
                                                       include_components=['org-users'])
         # Shown for review: the template is its Dev Tools request.
         body = json.loads(shown['dev_tools'].split('\n', 1)[1]) if shown.get('dev_tools') else {}
-        e2e.check(body.get('composed_of') == ['ecs@mappings', 'ecs-base', 'org-users', 'org-ilm'],
-                  f"composes ecs@mappings (an ECS plan), ecs-base (used), org-users (nominated) and org-ilm "
+        e2e.check(body.get('composed_of') == ['ecs-base', 'org-users', 'org-ilm'],
+                  f"composes ecs-base (used), org-users (nominated) and org-ilm "
                   f"(instructed); not ecs-unused (unused) or legacy-base (excluded): {body.get('composed_of')}")
         props = ((body.get('template') or {}).get('mappings') or {}).get('properties') or {}
         e2e.check('user' not in props and '@timestamp' not in props,
@@ -337,17 +337,14 @@ async def main():
         e2e.check(alone.get('status') == 'needs_review' and built['priority'] == 120
                  and not alone.get('component_templates'),
                  'built with no component templates of the example, none asked for')
-        # The plan follows ECS (asked for by the user, a regression seen in testing): composed of ecs@mappings whatever
-        # the example composes, with dynamic mapping on for it, though the example's is strict.
-        e2e.check(built.get('composed_of') == ['ecs@mappings'] and built['template']['mappings']['dynamic'] is True
-                  and any('composed of ecs@mappings' in n for n in notes),
-                  'composed of ecs@mappings with dynamic mapping on, though the example composes nothing and is strict')
-        # @timestamp the example maps just as ecs@mappings does: left to it too.
-        e2e.check(props['StreamId'] == {'type': 'long'} and '@timestamp' not in props
+        # ecs@mappings only when the user opts for ECS field mapping (asked for by the user): this example doesn't
+        # reference it, so the template follows the example, strict as it is, and maps every field itself.
+        e2e.check('composed_of' not in built and built['template']['mappings']['dynamic'] == 'strict',
+                  'composed of nothing and strict, as the example is: no ecs@mappings the user did not opt for')
+        e2e.check(props['StreamId'] == {'type': 'long'} and props['@timestamp'] == {'type': 'date'}
                  and props['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 128}
-                 and 'name' not in (props.get('host') or {}).get('properties', {}),
-                 "the example's own fields as it maps them (unless as ecs@mappings does); an ECS field new to it left "
-                 f"to ecs@mappings: {sorted(props)}")
+                 and 'name' in (props.get('host') or {}).get('properties', {}),
+                 f"the example's own fields as it maps them, and the plan's other fields mapped here: {sorted(props)}")
 
         print("\n### the template from the user's example, confirmed by the user")
         example = ('PUT _index_template/ecs-sibling-v1\n' + json.dumps({
@@ -366,11 +363,11 @@ async def main():
                                 events_stream_ids=events, example_template=example, component_templates=[base])
         body = final['template']
         print('    ' + '; '.join(final['from_example']))
-        e2e.check(body['index_patterns'] == [f'{index}*'] and body['composed_of'] == ['ecs@mappings', 'ecs-base']
+        e2e.check(body['index_patterns'] == [f'{index}*'] and body['composed_of'] == ['ecs-base']
                  and body['template']['settings']['index']['number_of_shards'] == 2 and 'aliases' not in body['template'],
                  "the new index's pattern, with the example's components and settings, without its aliases")
-        e2e.check(body['template']['mappings']['dynamic'] is True and '@timestamp' not in body['template']['mappings']['properties'],
-                 "dynamic on for ecs@mappings (the example's strict would stop it), and fields its components map left to them")
+        e2e.check(body['template']['mappings']['dynamic'] == 'strict' and '@timestamp' not in body['template']['mappings']['properties'],
+                 "the example's strict kept (no ecs@mappings it doesn't reference), and fields its components map left to them")
         e2e.check(final['self_check']['compatible'], f"the final template fits the documents: {final['self_check']['blocking']}")
         kept = read_agreed_template((await stroom.get_doc('Pipeline', pipeline['uuid'])).get('description'))
         e2e.check(final.get('agreed') and kept and kept['dev_tools'] == final['dev_tools'], 'agreed, and kept with the pipeline')

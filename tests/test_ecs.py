@@ -283,3 +283,49 @@ def test_an_earlier_templates_ecs_fields_mapped_as_the_component_does_are_left_t
     assert 'source' not in properties and 'host' not in properties                 # as ecs@mappings maps them
     assert properties['user']['properties']['name'] == {'type': 'keyword', 'ignore_above': 256}    # an override
     assert body['composed_of'] == ['ecs@mappings']
+
+
+def test_ecs_mappings_nominated_leaves_the_ecs_fields_to_it():
+    # A regression seen in testing: an ECS index template didn't compose ecs@mappings; asked to, the agent's next one
+    # composed it but still mapped every ECS field explicitly, with dynamic false, so the component mapped nothing.
+    from utils.templatecheck import ecs_duplicates, from_example, with_components
+    plan = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp',
+                     fields=[PlannedField(name='StreamId', type='id', source='@StreamId'),
+                             PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress'),
+                             PlannedField(name='host.name', type='keyword', source='EventSource/Device/HostName'),
+                             PlannedField(name='acme.ticket', type='keyword', source='EventDetail/TypeId')])
+    planned = plan.elastic_template('ecs-acme-v2', leave_to_component=False)['body']
+    # From an example mapping everything, dynamic false, with ecs@mappings nominated (no ECS convention on the plan).
+    example = {'index_patterns': ['ecs-acme-v1*'], 'composed_of': ['org-base'], 'template': {'mappings': {
+        'dynamic': False, 'properties': {'StreamId': {'type': 'long'}, 'source': {'properties': {'ip': {'type': 'ip'}}},
+                                         'host': {'properties': {'name': {'type': 'keyword'}}}}}}}
+    body, notes = from_example(planned, example, {'org-base': {'template': {'settings': {'number_of_shards': 1}}}},
+                               include=['ecs@mappings'])
+    mappings = body['template']['mappings']
+    assert body['composed_of'] == ['ecs@mappings', 'org-base'] and mappings['dynamic'] is True
+    assert set(mappings['properties']) == {'StreamId', 'acme'} and ecs_duplicates(body) == []
+    # From the plan alone, ecs@mappings nominated: the same.
+    alone, notes = with_components(planned, {}, ['ecs@mappings'])
+    mappings = alone['template']['mappings']
+    assert alone['composed_of'] == ['ecs@mappings'] and mappings['dynamic'] is True
+    assert set(mappings['properties']) == {'StreamId', 'acme'}
+    assert any("['host.name', 'source.ip']" in n for n in notes)
+    # A template that composes it and maps them anyway is said to map them twice.
+    assert ecs_duplicates({**planned, 'composed_of': ['ecs@mappings']}) == ['host.name', 'source.ip']
+
+
+async def test_a_plan_given_without_its_convention_still_composes_ecs_mappings(monkeypatch):
+    # The agent's copy of the plan left out convention='ecs': the template was built as if it followed none.
+    from tools import indexing
+    fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
+              PlannedField(name='source.ip', type='ip', source='EventSource/Client/IPAddress')]
+    drafted = FieldPlan(backend='elasticsearch', index_name='ecs-acme-v2', time_field='@timestamp', fields=fields,
+                        convention='ecs', custom_namespaces=['acme'])
+    given = drafted.model_copy(update={'convention': None, 'custom_namespaces': []})
+
+    async def kept(ctx, plan, names=(), pipeline_uuid=None):
+        return drafted
+    monkeypatch.setattr(indexing, 'plan_given', kept)
+    plan = await indexing._with_convention(None, given, 'p1')
+    assert plan.convention == 'ecs' and plan.custom_namespaces == ['acme']
+    assert plan.elastic_template('x')['body']['composed_of'] == ['ecs@mappings']

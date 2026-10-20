@@ -73,6 +73,10 @@ class PlannedField(BaseModel):
     description: str = ''
     transform: Literal['outcome'] | None = Field(None, description=(
         "outcome: an Outcome/Success (true/false) as ECS's event.outcome (success/failure); left out with no Outcome."))
+    multiple: bool = Field(False, description=(
+        "Set by the server: the source can hold several values in one event (a repeatable element on its path, by "
+        "the event-logging schema, e.g. Data), so they are written as an array (Elasticsearch) or each as a value "
+        "(Lucene)."))
 
     def value(self, at: str | None = None) -> str:
         """The XPath for the value written, from the source (or at, the source relative to a template's element)."""
@@ -282,12 +286,13 @@ class FieldPlan(BaseModel):
         return [{'fldName': f.name, 'fldType': LUCENE[f.type][0], 'analyzerType': LUCENE[f.type][1],
                  'indexed': True, 'stored': True, 'caseSensitive': False} for f in self.fields]
 
-    def elastic_template(self, template_name: str, priority: int = 200,
+    def elastic_template(self, template_name: str, priority: int | None = None,
                          leave_to_component: bool = True) -> dict[str, Any]:
         """The index template for the plan. Following ECS, it is composed of Elastic's ecs@mappings, and the ECS
         fields that maps as ECS says are left to it: only the rest are mapped here (asked for by the user), with
         dynamic mapping on, as the component's mapping is dynamic. leave_to_component=False maps every field (for
-        a template built from the user's example, which says itself what it is composed of)."""
+        a template built from the user's example, which says itself what it is composed of). No priority unless
+        given: the user's to set (asked for by the user), Elasticsearch's 0 otherwise."""
         if self.discovery:
             return {'name': template_name, 'body': self._discovery_template(priority)}
         from utils import ecs
@@ -308,7 +313,8 @@ class FieldPlan(BaseModel):
         # With it off, as before, the component mapped nothing, and every field had to be mapped here.
         mappings: dict[str, Any] = {'dynamic': component, **({} if self.subobjects else {'subobjects': False}),
                                     'properties': properties}
-        body: dict[str, Any] = {'index_patterns': [f'{self.index_name}*'], 'priority': priority}
+        body: dict[str, Any] = {'index_patterns': [f'{self.index_name}*'],
+                                **({'priority': priority} if priority is not None else {})}
         if self.convention == 'ecs':
             # Elastic's recommended base for an ECS index template: its built-in component template, mapping ECS
             # fields by name. A field mapped here (not ECS's, or typed otherwise) overrides it.
@@ -321,11 +327,12 @@ class FieldPlan(BaseModel):
         body['data_stream'] = {}
         return {'name': template_name, 'body': {**body, 'template': {'mappings': mappings}}}
 
-    def _discovery_template(self, priority: int) -> dict[str, Any]:
+    def _discovery_template(self, priority: int | None) -> dict[str, Any]:
         """Permissive: dynamic mapping, strings as keywords, guardrails; explicit types only for the fields Stroom
         needs (StreamId and EventId to find each record again, @timestamp for time)."""
         d = self.discovery
-        return {'index_patterns': [f'{self.index_name}*'], 'priority': priority, 'template': {
+        return {'index_patterns': [f'{self.index_name}*'], **({'priority': priority} if priority is not None else {}),
+                'template': {
             'settings': {'index': {'mapping': {'total_fields': {'limit': d.total_fields_limit},
                                                'ignore_malformed': True}}},
             # Text formats hold every value as text: numbers are recognised (a stray "n/a" is ignored, not fatal).
@@ -462,8 +469,14 @@ class FieldPlan(BaseModel):
                 return _call(f, indent)
             element = _ES_JSON_ELEMENT.get(f.type, 'string')
             at = source or f.source
-            return (f'{indent}<xsl:if test="{_q(at)}"><{element} key="{key}"><xsl:value-of select="{_q(f.value(at))}" />'
-                    f'</{element}></xsl:if>')
+            single = (f'<{element} key="{key}"><xsl:value-of select="{_q(f.value(at))}" /></{element}>')
+            if not f.multiple:
+                return f'{indent}<xsl:if test="{_q(at)}">{single}</xsl:if>'
+            # Several values (repeated Data elements, say) as an array of them. Seen (asked about by the user): with
+            # value-of over them all, two ports came out as the one number "80 443", two tags as the string "a b".
+            return (f'{indent}<xsl:choose><xsl:when test="count({_q(at)}) gt 1"><array key="{key}"><xsl:for-each '
+                    f'select="{_q(at)}"><{element}><xsl:value-of select="{_q(f.value("."))}" /></{element}>'
+                    f'</xsl:for-each></array></xsl:when><xsl:when test="{_q(at)}">{single}</xsl:when></xsl:choose>')
         # A field a shared template writes is not written here: the template is called in its place.
         items: list[Any] = [f for f in self.fields if not self.written_by(f.name)] + list(self.shared)
 
@@ -599,8 +612,12 @@ class FieldPlan(BaseModel):
             for f in self.fields:
                 if not self.written_by(f.name):
                     first = _steps(f.source)[0] if _steps(f.source) else ''
+                    # One data element per value: a field of several (repeated Data elements, say) is multi-valued in
+                    # Lucene, not one value of them joined by spaces (seen: two ports indexed as "80 443").
                     groups.setdefault('' if first.startswith('@') else first, []).append(
-                        f'      <data name="{f.name}" value="{{{_q(f.value())}}}" />')
+                        f'      <data name="{f.name}" value="{{{_q(f.value())}}}" />' if not f.multiple else
+                        f'      <xsl:for-each select="{_q(f.source)}"><data name="{f.name}" '
+                        f'value="{{{_q(f.value("."))}}}" /></xsl:for-each>')
             parts = [(key, bool(key), lines) for key, lines in groups.items()]
             parts.append(('', False, [_call(u, '      ') for u in self.shared]))
             head, record, close, shapes = ('xmlns="records:2"', '<records xsi:schemaLocation="records:2 '

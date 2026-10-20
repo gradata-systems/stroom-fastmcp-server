@@ -51,7 +51,7 @@ A `## Component templates` section says which Elasticsearch component templates 
 (`- include: logs-ilm-90d, org-base`, `- exclude: legacy-base`). The server applies it: `propose_index_template`
 references the included ones (asking for their content) and leaves the excluded out, and `check_index_template`
 notes a template that breaks it. A user's own `include_components` wins over an exclusion. Excluding `ecs@mappings`
-is the only way an ECS index template goes without it.
+is the only way a template following the ECS convention goes without it.
 
 A `## Documentation` section says how `write_documentation` lays out a pipeline's Field mapping (`- field mapping:
 compact`, or `by event type`, the default; `one table` and `single table` mean compact). The most specific doc that

@@ -290,9 +290,9 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
         asked = await indexing.propose_index_template(ctx, 'p1', plan, [7], without_example=True,
                                                       reviewed=shown['review_id'])
     assert asked['status'] == 'needs_confirmation' and asked['template_name'] == 'stroom-discovery-acme-v1'
-    assert asked['details']['notes'][0] == 'built from the field plan alone: the user has no example index template'
+    assert asked['notes'][0] == 'built from the field plan alone: the user has no example index template'
     # Every sample record has its time: a data stream, as the user's indices are (asked for by the user).
-    assert asked['details']['notes'][1].startswith('a data stream:')
+    assert asked['notes'][1].startswith('a data stream:')
 
 
 
@@ -380,6 +380,11 @@ def test_a_search_on_a_field_stroom_doesnt_list_says_why():
     indexing._searchable('elasticsearch', [S(field='event.code', condition='EQUALS', value='TrafficDeny')],
                          listed=listed)
 
+
+
+def _no_expiry() -> SimpleNamespace:
+    """A call whose caller's token has no expiry to keep to (an API key)."""
+    return SimpleNamespace(lifespan_context={'stroom': SimpleNamespace(token_seconds_left=lambda: None)})
 
 
 async def test_a_hit_is_traced_to_its_record_and_a_mismatch_fails():
@@ -580,11 +585,11 @@ async def test_following_an_existing_index_is_the_users_choice_confirmed_in_a_fo
     assert gate['status'] == 'needs_confirmation' and read.called and not summarise.called
     assert gate['summary'] == "Name the fields of index 'fortinet-firewall-v1' after an existing index in Stroom"
     assert gate['details']['follow'] == "Elastic Index doc 'FortiOS-V1' (index ecs-fortios-v1)"
-    assert gate['details']['read through Stroom'].startswith('2 fields from the index doc') and 'source.ip (ip)' in \
+    assert gate['details']['read through Stroom'].startswith('2 fields and their types') and 'source.ip (ip)' in \
         gate['details']['read through Stroom']
     # What Stroom can't give: the template itself, which the user may still paste.
     assert 'component templates' in gate['details']['not readable through Stroom']
-    assert 'paste its index template' in gate['details']['or']
+    assert 'paste its index template' in gate['details']['not readable through Stroom']
 
 async def test_without_a_backend_the_only_indexing_backend_is_taken():
     # Seen: asked without the backend, the agent got the profiles, looked the backend up and asked again.
@@ -661,7 +666,7 @@ async def test_documents_are_counted_not_the_rows_of_one_page():
             return {'rows': [{'All': 'all', 'Count': '32000'}], 'errors': []}
         return {'rows': [{'StreamId': '706', 'EventId': str(n)} for n in range(1, 101)], 'errors': []}
     with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={706: None, 707: None})):
-        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [706, 707], 32000, retries=0,
+        result = await indexing.run_test_searches(_no_expiry(), 'd', [706, 707], 32000, retries=0,
                                                   dashboard_doc=dashboard)
     assert result['passed'] and result['checks'][0]['returned'] == 32000 and len(result['checks'][0]['sample']) == 3
 
@@ -695,7 +700,7 @@ async def test_verification_checks_only_the_sample_unsorted_and_a_large_stream_b
             return {'rows': [{'All': 'all', 'Count': str(n)}], 'errors': [], 'complete': True}
         return {'rows': [{'StreamId': '6', 'EventId': '1', 'user.name': 'alice'}], 'errors': [], 'complete': True}
     with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 100_000, 8: 7})):
-        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [6, 8], 100_007, retries=0,
+        result = await indexing.run_test_searches(_no_expiry(), 'd', [6, 8], 100_007, retries=0,
                                                   exact=[{'field': 'user.name', 'value': 'alice'}],
                                                   dashboard_doc=VERIFY_DASHBOARD)
     assert result['passed'], result
@@ -723,7 +728,7 @@ async def test_a_count_stroom_had_not_finished_is_unproven_not_missing_documents
             return {'rows': [{'All': 'all', 'Count': '4000'}], 'errors': [], 'complete': False}
         return {'rows': [], 'errors': [], 'complete': True}
     with patch.object(indexing, '_search', search),             patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 9000})):
-        result = await indexing.run_test_searches(SimpleNamespace(), 'd', [6], 9000, retries=0,
+        result = await indexing.run_test_searches(_no_expiry(), 'd', [6], 9000, retries=0,
                                                   dashboard_doc=VERIFY_DASHBOARD)
     check = result['checks'][0]
     assert not result['passed'] and check['returned'] == 4000 and 'not missing documents' in check['unproven']
@@ -861,3 +866,224 @@ async def test_one_time_field_as_proposed_is_not_asked_about():
         result = await indexing.draft_index_mapping(_discovery_ctx(), 'elasticsearch', 'stroom-discovery-acme-v1',
                                                     discovery=Discovery(timestamp_field='ts'), events_stream_ids=[7])
     assert not asked.called and result['plan']['discovery']['timestamp_field'] == 'ts'
+
+
+class _Stepping:
+    """A stepping session per stream, counted: each REFRESH answers the record asked for, as the pipeline writes it."""
+    opened = 0
+
+    settings = SimpleNamespace(stroom_stepping_wait_ms=1000)
+
+    def __init__(self, steps: list):
+        self.steps = steps
+
+    async def __aenter__(self):
+        _Stepping.opened += 1
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def step(self, request):
+        record = request['stepLocation']['recordIndex']
+        self.steps.append((request['stepLocation']['metaId'], record))
+        output = ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">6</number>'
+                  f'<number key="EventId">{record + 1}</number><string key="user.name">alice</string></map></array>')
+        return {'foundRecord': True, 'foundLocation': {'recordIndex': record},
+                'stepData': {'elementMap': {'xsltFilter': {'output': output}}}}
+
+
+async def test_hits_of_a_long_stream_are_traced_in_one_stepping_session():
+    # Seen in testing: verifying a long stream took over five minutes, 'Tracing the first hit' check after check: each
+    # trace stepped in a session of its own, and Stroom captures the whole stream for every session.
+    steps: list = []
+    settings = SimpleNamespace(stroom_stepping_wait_ms=1000)
+    stroom = SimpleNamespace(settings=settings, stepping=lambda: _Stepping(steps), token_seconds_left=lambda: None)
+    layers = [{'sourcePipeline': {'type': 'Pipeline', 'uuid': 'ix', 'name': 'ix'}, 'pipelineData': {
+        'elements': {'add': [{'id': 'xsltFilter', 'type': 'XSLTFilter'}]},
+        'properties': {'add': [{'element': 'xsltFilter', 'name': 'xslt',
+                                'value': {'entity': {'type': 'XSLT', 'uuid': 'x', 'name': 'x'}}}]}}}]
+    from tools.stepping import _Pipeline
+    pipeline = _Pipeline({'uuid': 'ix', 'name': 'ix'}, layers)
+    checks = [{'check': 'a', 'pass': True, '_spec': {}, '_rows': [{'StreamId': '6', 'EventId': '9000'},
+                                                                  {'StreamId': '6', 'EventId': '40'}]},
+              {'check': 'b', 'pass': True, '_spec': {'field': 'user.name', 'condition': 'EQUALS', 'value': 'alice'},
+               '_rows': [{'StreamId': '6', 'EventId': '40'}]},
+              {'check': 'c', 'pass': True, '_spec': {}, '_rows': [{'StreamId': '6', 'EventId': '7'}]}]
+    said = []
+
+    async def say(text):
+        said.append(text)
+    _Stepping.opened = 0
+    with patch('tools.indexing.gateway_from', return_value=stroom), \
+            patch('tools.indexing._Pipeline.load', AsyncMock(return_value=pipeline)):
+        untraced = await indexing._trace_checks(None, 'ix', checks, say, lambda: False)
+    # One session for the stream; each record once (the lowest EventId of each check's hits), in order.
+    assert _Stepping.opened == 1 and steps == [(6, 6), (6, 39)] and untraced == []
+    assert all(c['pass'] and c['trace']['traced'] for c in checks), checks
+    assert said[-1] == 'Tracing hits back to their records: record 39 of stream 6 (2 of 2)'
+    # Out of time: nothing more stepped, the check left untraced and said so.
+    steps.clear()
+    for c in checks:
+        c.pop('trace')
+    with patch('tools.indexing.gateway_from', return_value=stroom), \
+            patch('tools.indexing._Pipeline.load', AsyncMock(return_value=pipeline)):
+        untraced = await indexing._trace_checks(None, 'ix', checks[:1], say, lambda: True)
+    assert steps == [] and untraced == ['a'] and checks[0]['trace']['traced'] is None and not checks[0]['pass']
+
+
+def test_is_not_null_is_searched_as_any_value_on_elasticsearch():
+    # Seen in testing: refused with the advice to use EQUALS '*', the agent sent IS_NOT_NULL again and again.
+    S = indexing.SearchCheck
+    searched = indexing._as_searched('elasticsearch', [S(field='tags', condition='IS_NOT_NULL'),
+                                                       S(field='user.name', value='bob')])
+    assert (searched[0].condition, searched[0].value) == ('EQUALS', '*') and 'IS_NOT_NULL' in searched[0]._searched_as
+    assert searched[1].condition == 'EQUALS' and searched[1]._searched_as is None
+    indexing._searchable('elasticsearch', searched)            # nothing left to refuse
+    [none] = indexing._as_searched('elasticsearch', [S(field='tags', condition='IS_NULL', expected=0)])
+    assert (none.condition, none.value, none.expected) == ('NOT_EQUALS', '*', 0) and 'IS_NULL' in none._searched_as
+    assert indexing._as_searched('lucene', [S(field='tags', condition='IS_NOT_NULL')])[0].condition == 'IS_NOT_NULL'
+
+
+async def test_verification_out_of_time_says_what_is_left_and_the_next_call_runs_only_that(monkeypatch):
+    # Seen in testing: on a long stream verification outlasted the user's token, and the call failed part way.
+    left = {'seconds': 100}
+    stroom = SimpleNamespace(token_seconds_left=lambda: left['seconds'])
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    monkeypatch.setattr('tools.plan._user', lambda ctx: 'alice')
+    searched = []
+
+    async def search(ctx, dash, expression, length=100, doing=None):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            return {'rows': [{'All': 'all', 'Count': '3'}], 'errors': [], 'complete': True}
+        searched.append(doing)
+        if doing and 'user.name' in doing:
+            left['seconds'] = 0         # the token runs out during this search
+        return {'rows': [{'StreamId': '6', 'EventId': '1', 'user.name': 'alice'}], 'errors': [], 'complete': True}
+    exact = [{'field': 'user.name', 'value': 'alice'}, {'field': 'host.name', 'value': 'ws01'}]
+    with patch.object(indexing, '_search', search), \
+            patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 3})):
+        first = await indexing.run_test_searches(ctx, 'd', [6], 3, exact=exact, retries=0, dashboard_doc=VERIFY_DASHBOARD)
+        assert not first['passed'] and first['unfinished'] == ['exact host.name=ws01']
+        assert 'call verify_index again with the same arguments' in first['next']
+        left['seconds'] = 100
+        searched.clear()
+        second = await indexing.run_test_searches(ctx, 'd', [6], 3, exact=exact, retries=0,
+                                                  dashboard_doc=VERIFY_DASHBOARD)
+    assert second['passed'] and 'unfinished' not in second
+    # Only host.name searched again: the documents and user.name checks passed in the first call.
+    assert [d for d in searched if 'Searching' in d] == ['Searching web-v1: host.name = ws01']
+    assert [c.get('checked') for c in second['checks']] == ['earlier in this session', 'earlier in this session', None]
+
+
+async def test_waiting_for_the_index_stops_when_the_count_stops_moving():
+    counts = iter(['2', '2', '2', '2'])
+
+    async def search(ctx, dash, expression, length=100, doing=None):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            return {'rows': [{'All': 'all', 'Count': next(counts)}], 'errors': [], 'complete': True}
+        return {'rows': [], 'errors': [], 'complete': True}
+    with patch.object(indexing, '_search', search), \
+            patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 3})), \
+            patch('tools.indexing.asyncio.sleep', AsyncMock()) as slept:
+        result = await indexing.run_test_searches(_no_expiry(), 'd', [6], 3, retries=6, dashboard_doc=VERIFY_DASHBOARD)
+    # Counted twice (2, then 2 again), not seven times.
+    assert not result['passed'] and slept.await_count == 1 and next(counts) == '2'
+
+
+def test_a_field_of_several_values_is_compared_by_each_value():
+    # Asked about by the user: a dashboard shows a field of several values separated by commas. Text was compared by
+    # containment already; numbers and times as a whole couldn't be, so a hit matched only on them couldn't trace.
+    same = indexing._same_value
+    assert same('80, 443', '443') is True and same('80,443', '80') is True and same('[80, 443]', '443') is True
+    assert same('80, 443', '8080') is False
+    assert same('2026-10-20T08:00:00.000Z, 2026-10-20T09:00:00Z', '2026-10-20T09:00:00.000Z') is True
+    assert same('retry, timeout', 'timeout') is True and same('Smith, John', 'Smith, John') is True
+
+
+async def test_a_hit_matched_on_a_field_of_several_numbers_is_traced():
+    output = ('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><number key="StreamId">9</number>'
+              '<number key="EventId">1</number><array key="ports"><number>80</number><number>443</number></array>'
+              '</map></array>')
+    layers = [{'sourcePipeline': {'type': 'Pipeline', 'uuid': 'ix', 'name': 'ix'}, 'pipelineData': {
+        'elements': {'add': [{'id': 'xsltFilter', 'type': 'XSLTFilter'}]},
+        'properties': {'add': [{'element': 'xsltFilter', 'name': 'xslt',
+                                'value': {'entity': {'type': 'XSLT', 'uuid': 'x', 'name': 'x'}}}]}}}]
+    stroom = SimpleNamespace(pipeline_layers=AsyncMock(return_value=layers))
+    stepped = AsyncMock(return_value={'record': 6, 'elements': {'xsltFilter': {'output': output}}})
+    with patch('tools.indexing.gateway_from', return_value=stroom), patch('tools.stepping.step_pipeline', stepped):
+        traced = await indexing._traced(None, 'ix', {'StreamId': '9', 'EventId': '7', 'ports': '80, 443'},
+                                        {'field': 'ports', 'condition': 'EQUALS', 'value': '443'})
+    assert traced['traced'] and traced['matched_on'] == ['ports']
+
+
+async def test_an_exact_value_of_several_values_says_to_search_one():
+    async def search(ctx, dash, expression, length=100, doing=None):
+        table = next(c for c in dash['dashboardConfig']['components'] if c['type'] == 'table')
+        if [f['name'] for f in table['settings']['fields']] == ['All', 'Count']:
+            return {'rows': [{'All': 'all', 'Count': '3'}], 'errors': [], 'complete': True}
+        return {'rows': [] if 'tags' in (doing or '') else [{'StreamId': '6', 'EventId': '1'}], 'errors': [],
+                'complete': True}
+    with patch.object(indexing, '_search', search), \
+            patch.object(indexing, '_stream_events', AsyncMock(return_value={6: 3})):
+        result = await indexing.run_test_searches(_no_expiry(), 'd', [6], 3, retries=0, dashboard_doc=VERIFY_DASHBOARD,
+                                                  exact=[{'field': 'tags', 'value': 'retry, timeout'}])
+    check = result['checks'][1]
+    assert not check['pass'] and "search one of them, e.g. 'retry'" in check['why']
+
+
+REPEATED = """<Events xmlns="event-logging:3"><Event StreamId="7" EventId="1">
+<EventTime><TimeCreated>2026-10-20T08:00:00.000Z</TimeCreated></EventTime><EventSource><User><Id>alice</Id></User></EventSource>
+<EventDetail><Authenticate><Outcome><Success>false</Success></Outcome><Data Name="port" Value="80"/><Data Name="port" Value="443"/>
+<Data Name="tag" Value="a"/></Authenticate></EventDetail></Event></Events>"""
+
+
+def test_a_field_of_several_values_is_written_whole_on_either_backend():
+    # Asked about by the user: written with value-of, two ports were indexed as the one number "80 443" (an invalid
+    # number for Elasticsearch), two tags as "a b". A field the schema lets repeat writes each value.
+    from pathlib import Path
+    from utils.eventschema import EventSchema
+    schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
+    assert schema.can_repeat("EventDetail/Authenticate/Data[@Name='port']/@Value")
+    assert not schema.can_repeat('EventSource/User/Id') and not schema.can_repeat('@StreamId')
+    assert not schema.can_repeat('EventTime/TimeCreated') and not schema.can_repeat('concat(a, b)')
+    data = lambda n, t: PlannedField(name=f'acme.{n}', type=t, source=f"EventDetail/Authenticate/Data[@Name='{n}']/@Value",
+                                     multiple=True)
+    fields = [PlannedField(name='StreamId', type='id', source='@StreamId'),
+              PlannedField(name='@timestamp', type='date', source='EventTime/TimeCreated'),
+              PlannedField(name='user.name', type='keyword', source='EventSource/User/Id'),
+              data('port', 'long'), data('tag', 'keyword'), data('none', 'keyword')]
+    es = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=fields, convention='ecs',
+                   custom_namespaces=['acme'])
+    with PySaxonProcessor(license=False) as proc:
+        def out(plan):
+            return proc.new_xslt30_processor().compile_stylesheet(stylesheet_text=plan.xslt()).transform_to_string(
+                xdm_node=proc.parse_xml(xml_text=REPEATED))
+        written = out(es)
+        lucene = out(es.model_copy(update={'backend': 'lucene'}))
+    assert '<array key="port"><number>80</number><number>443</number></array>' in written
+    assert '<string key="tag">a</string>' in written and 'none' not in written       # one value; none, nothing
+    assert '<string key="name">alice</string>' in written
+    assert '<data name="acme.port" value="80"/><data name="acme.port" value="443"/>' in lucene
+    assert '<data name="acme.tag" value="a"/>' in lucene and 'acme.none' not in lucene
+    # A field the schema doesn't let repeat is written as before.
+    assert '<xsl:for-each' not in FieldPlan(backend='lucene', index_name='x', time_field='@timestamp',
+                                             fields=fields[:3]).xslt()
+
+
+async def test_a_plan_is_marked_from_the_schema(monkeypatch):
+    from pathlib import Path
+    from utils.eventschema import EventSchema
+    schema = EventSchema.parse((Path(__file__).parent / 'fixtures' / 'event-logging-v4.1.0.xsd').read_bytes())
+    monkeypatch.setattr('tools.generation.chosen_or_latest', AsyncMock(return_value='4.1.0'))
+    monkeypatch.setattr('tools.generation.event_schema', AsyncMock(return_value=schema))
+    plan = FieldPlan(backend='elasticsearch', index_name='x', time_field='@timestamp', fields=[
+        PlannedField(name='StreamId', type='id', source='@StreamId'),
+        PlannedField(name='user.name', type='keyword', source='EventSource/User/Id'),
+        PlannedField(name='acme.port', type='long', source="EventDetail/Authenticate/Data[@Name='port']/@Value")])
+    marked = await indexing.with_cardinality(None, plan)
+    assert [f.multiple for f in marked.fields] == [False, False, True]
+    monkeypatch.setattr('tools.generation.event_schema', AsyncMock(side_effect=RuntimeError('no schema')))
+    assert await indexing.with_cardinality(None, plan) == plan          # unread: as before

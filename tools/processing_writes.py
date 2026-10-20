@@ -26,7 +26,7 @@ from tools.streams import feed_created_ms, own_streams, refuse_older_than_feed
 from tools.stepping import stepped_clean
 from utils.consent import consent_from
 from utils import useractions
-from utils.mappingstore import digest, normalise_xslt, read_agreed_template
+from utils.mappingstore import digest, normalise_xslt, read_agreed_template, with_agreed_template
 from utils.params import ONE_OR_MORE
 from utils.progress import progress_from
 from utils.stroom import StroomGateway, doc_link, gateway_from, out_of_time
@@ -42,6 +42,12 @@ SourcePipeline = Annotated[str | None, Field(
 SourceConfirmation = Annotated[str | None, Field(
     description="From an earlier needs_confirmation reply: the user confirmed indexing Events from a pipeline this "
                 "server did not build.")]
+TemplateCommitted = Annotated[bool, Field(
+    description="Elasticsearch: true only when the user says an index template of their own is already committed to "
+                "the cluster for this index, and wants to go on without agreeing one here. They confirm it in a form; "
+                "it is then kept with the pipeline in place of an agreed one.")]
+TemplateConfirmation = Annotated[str | None, Field(
+    description="From an earlier needs_confirmation reply for template_committed_by_user.")]
 IndexDropped = Annotated[bool, Field(
     description="From an earlier drop_first reply: true once the user says the index this pipeline wrote to before "
                 "has been dropped (or its shards deleted).")]
@@ -704,27 +710,55 @@ async def agreement_problem(stroom: StroomGateway, pipeline: dict[str, Any], des
                 f"example index template (or index mapping) the user gave, exactly as they pasted it, with any component "
                 f"templates it is composed of; the user confirms the result in a form. If you showed them a template "
                 f"for review (needs_review) and they've replied, that is the same call with reviewed=<its review_id>, nothing "
-                f"left out: the form is still to come. Without an example, ask the user for one first. A template put "
-                f"on the cluster without that agreement does not count (if they've committed it already, it needs "
-                f"agreeing all the same, and recommitting only if they change it). Until it is "
-                f"agreed, committed and the sample indexed and verified, the build is not ready for promotion.")
+                f"left out: the form is still to come. Without an example, ask the user for one first. If the user says "
+                f"they've committed a template of their own and want to go on without agreeing one here, call again "
+                f"with template_committed_by_user=true: they confirm that in a form (your word for it isn't theirs). "
+                f"Until a template is agreed (or so confirmed), committed and the sample indexed and verified, the "
+                f"build is not ready for promotion.")
     if agreed.get('xslt') != await indexing_xslt_digest(stroom, pipeline['uuid']):
         return (f"The indexing XSLT changed since index template '{agreed['name']}' was agreed: "
                 f"check_index_template with it (and its component templates {agreed.get('component_templates') or []}) "
                 f"over the Events streams, so the user confirms it again for the documents the pipeline now "
-                f"writes. The agreed template:\n{(agreed.get('dev_tools') or '')[:4000]}")
+                f"writes (or, if the user says the template on the cluster is theirs and fits, call again with "
+                f"template_committed_by_user=true, which they confirm in a form). The agreed template:\n"
+                f"{(agreed.get('dev_tools') or '')[:4000]}")
     return None
 
 
-async def _committed(stroom: StroomGateway, pipeline: dict[str, Any], destination: dict[str, Any]) -> str:
+async def _committed(ctx: Context, pipeline: dict[str, Any], destination: dict[str, Any], action: str,
+                     own_template: bool = False, confirmation_id: str | None = None) -> Any:
     """Elasticsearch: the index template has to be on the cluster before documents arrive, or the index is created
     with dynamic mappings that the template can no longer change. Only a template the user agreed (kept with the
     pipeline by propose_index_template or check_index_template) is asked about, and the user confirms it is
-    committed to the cluster in the approval."""
+    committed to the cluster in the approval: the approval's detail, as text. With own_template, the user says one
+    of their own is committed: they confirm going on without agreeing one here, in a form (the confirmation to
+    return, until they have), and it is kept with the pipeline in place of an agreed one. Seen in testing: the user
+    had committed their template, and the agreement still stopped indexing, however they said so."""
+    stroom = gateway_from(ctx)
     problem = await agreement_problem(stroom, pipeline, destination)
-    if problem:
+    if problem and not own_template:
         raise ToolError(problem)
+    if problem:
+        gate = await consent_from(ctx).require(
+            ctx, 'confirmation', action, f"Index into Elasticsearch index '{destination['index name']}' with your own "
+            f"index template, not one agreed here", {
+                'index': f"{destination['index name']} (cluster {destination['cluster']})",
+                'you say': 'an index template of yours for it is already committed to the cluster',
+                'not checked': "that template against the documents the pipeline writes: a field it maps otherwise "
+                               "is rejected or mis-mapped"}, confirmation_id)
+        if gate:
+            return gate
+        doc = await stroom.get_doc('Pipeline', pipeline['uuid'])
+        doc['description'] = with_agreed_template(doc.get('description'), {
+            'name': "the user's own", 'index': destination['index name'], 'cluster': destination['cluster'],
+            'component_templates': [], 'xslt': await indexing_xslt_digest(stroom, pipeline['uuid']),
+            'agreed': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'dev_tools': '', 'by_user': True})
+        await stroom.put_doc(doc)
+        pipeline['description'] = doc['description']
     agreed = read_agreed_template(pipeline.get('description'))
+    if agreed.get('by_user'):
+        return (f"the user's own index template for Elasticsearch index '{destination['index name']}' is committed to "
+                f"cluster {destination['cluster']} (confirmed by the user, not checked here)")
     return (f"the agreed index template '{agreed['name']}' for Elasticsearch index '{destination['index name']}' is "
             f"committed to cluster {destination['cluster']}")
 
@@ -801,6 +835,8 @@ async def create_processor_filter(
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
         index_dropped: IndexDropped = False,
+        template_committed_by_user: TemplateCommitted = False,
+        template_confirmation_id: TemplateConfirmation = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -885,7 +921,11 @@ async def create_processor_filter(
 
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
-        details['index template'] = await _committed(stroom, pipeline, destination)
+        committed = await _committed(ctx, pipeline, destination, 'create_processor_filter', template_committed_by_user,
+                                     template_confirmation_id)
+        if not isinstance(committed, str):
+            return committed
+        details['index template'] = committed
     # A sample indexed into an index this pipeline already wrote to: the index starts fresh, dropped first (asked for
     # by the user). Not a feed's filter beside an earlier one (a backfill, then new data): those add to the index.
     lucene = await lucene_index(stroom, pipeline_uuid)
@@ -1045,6 +1085,8 @@ async def reprocess_streams(
         source_pipeline_uuid: SourcePipeline = None,
         source_confirmation_id: SourceConfirmation = None,
         index_dropped: IndexDropped = False,
+        template_committed_by_user: TemplateCommitted = False,
+        template_confirmation_id: TemplateConfirmation = None,
         approval_id: Annotated[str | None, Field(description="From an earlier needs_approval reply.")] = None,
 ) -> dict[str, Any]:
     """
@@ -1082,7 +1124,11 @@ async def reprocess_streams(
         expression = {'type': 'operator', 'op': 'AND', 'children': [expression, _pipeline_term(source)]}
     destination = await elastic_destination(stroom, pipeline_uuid)
     if destination:
-        details['index template'] = await _committed(stroom, pipeline, destination)
+        committed = await _committed(ctx, pipeline, destination, 'reprocess_streams', template_committed_by_user,
+                                     template_confirmation_id)
+        if not isinstance(committed, str):
+            return committed
+        details['index template'] = committed
     # Stroom's purgeOnReprocess does not apply to a second filter on the same streams, nor does it remove a Lucene
     # index's documents (seen: an eval build's index held each event twice after its indexing XSLT was fixed and the
     # stream reprocessed), and this server has no Elasticsearch access: the index is dropped first and starts fresh.

@@ -379,9 +379,13 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
         assert asked['summary'] == ("Use Elasticsearch index template 'ecs-acme-v2' for index 'ecs-acme-v2' (cluster "
                                     "ES_DEV), as shown in the chat")
         details = asked['details']
-        assert details['index template'] == 'ecs-acme-v2: the Dev Tools request shown in the chat'
-        assert details['applies to'].startswith('ecs-acme-v2* (priority ') and details['fields'].split(':')[0].isdigit()
-        assert '{' not in json.dumps({k: v for k, v in details.items() if k != 'notes'}).replace('{"', '').replace('"}', '')
+        assert details['index template'] == f"ecs-acme-v2, exactly as shown in the chat (review id {shown['review_id']})"
+        assert details['applies to'].startswith('ecs-acme-v2* (priority ') and details['fields mapped here'] > 0
+        # Short (seen in testing: every field, note and component made it 2,000 characters, and the client declined
+        # it as too long): the notes are beside it in the reply, for the chat.
+        from utils.consent import FORM_MESSAGE_LIMIT, form_message
+        assert len(form_message(asked['summary'], details)) < 400 and 'notes' not in details and asked['from_example']
+        assert FORM_MESSAGE_LIMIT <= 600
         assert 'check_index_template with their version' in asked['hint']
         agreed = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,
                                                        component_templates=COMPONENTS, reviewed=shown['review_id'],
@@ -551,7 +555,8 @@ def test_every_component_but_the_built_in_ecs_one_is_asked_for():
     example = {'composed_of': ['ecs@mappings', 'ecs-base', 'ecs-source', 'logs@settings']}
     asked = components_wanted(example, {'ecs-base': {}})
     assert asked['missing'] == ['ecs-source', 'logs@settings']
-    assert asked['request'] == 'GET _component_template/ecs-source,logs@settings'
+    # One request per name: the API takes a single name or wildcard, not a list (seen in testing).
+    assert asked['request'] == 'GET _component_template/ecs-source\nGET _component_template/logs@settings'
     assert components_wanted(example, {'ecs-base': {}}, ['ecs-source', 'logs@settings']) is None
     assert components_wanted({'index_patterns': ['x*']}, {}) is None          # composed of nothing
 
@@ -685,3 +690,77 @@ def test_a_dev_tools_request_on_one_line_is_read():
                  f'PUT /_index_template/stroom-twitter-onboard-test?pretty\n{body}'):
         assert parse_template(text) == ('stroom-twitter-onboard-test', json.loads(body))
     assert parse_component_templates(['PUT _component_template/acme {"template": {}}']) == {'acme': {'template': {}}}
+
+
+def test_component_templates_are_read_however_the_agent_sends_them():
+    # Seen in testing: re-sent call after call, the components came back as a GET response inside a GET response,
+    # and as an escaped JSON string; and a user pastes Kibana's answers to several requests at once.
+    from utils.templatecheck import parse_component_templates
+    base = {'template': {'mappings': {'properties': {'host': {'properties': {'name': {'type': 'keyword'}}}}}}}
+    got = {'component_templates': [{'name': 'ecs-base', 'component_template': base}]}
+    kibana = ('# GET _component_template/ecs-base 200 OK\n' + json.dumps(got) +
+              '\n# GET _component_template/org-ilm 200 OK\n' + json.dumps(
+                  {'component_templates': [{'name': 'org-ilm', 'component_template': {'template': {'settings': {}}}}]}))
+    assert sorted(parse_component_templates([kibana])) == ['ecs-base', 'org-ilm']
+    assert parse_component_templates([{'component_templates': [got]}]) == {'ecs-base': base}
+    assert parse_component_templates([json.dumps('PUT _component_template/ecs-base\n' + json.dumps(base))]) == {
+        'ecs-base': base}
+    assert parse_component_templates([got, 'PUT _component_template/b {}\nPUT _component_template/c {}']) == {
+        'ecs-base': base, 'b': {}, 'c': {}}
+
+
+async def test_component_templates_given_once_are_kept_for_the_session(monkeypatch):
+    from tools import indexing
+    monkeypatch.setattr('tools.plan._user', lambda ctx: 'alice')
+    ctx = SimpleNamespace(lifespan_context={})
+    first = indexing._given_components(ctx, ['PUT _component_template/ecs-base {"template": {}}'], ['ecs-base'])
+    again = indexing._given_components(ctx, [], ['ecs-base', 'other'])
+    assert first == again == {'ecs-base': {'template': {}}}
+    assert indexing._given_components(ctx, [], ['other']) == {}         # only those the template composes
+
+
+def test_a_template_shown_for_review_needn_t_be_sent_again(monkeypatch):
+    # Seen in testing: the agent retyped the template (and its components) for the call after the review, and they
+    # came back corrupted.
+    from tools import indexing
+    from utils.consent import review_id
+    monkeypatch.setattr('tools.plan._user', lambda ctx: 'alice')
+    ctx = SimpleNamespace(lifespan_context={})
+    shown = 'PUT _index_template/ecs-acme-v2\n{"index_patterns": ["ecs-acme-v2*"]}'
+    indexing._remember_shown(ctx, shown)
+    assert indexing._shown_template(ctx, review_id(shown).upper()) == shown
+    assert indexing._shown_template(ctx, 'abc') is None
+    monkeypatch.setattr('tools.plan._user', lambda ctx: 'bob')       # another user's review isn't theirs
+    assert indexing._shown_template(ctx, review_id(shown)) is None
+
+
+def test_fields_the_template_doesnt_index_are_said_to_be_unsearchable():
+    # Asked about by the user: a field mapped not to be indexed is kept but no search finds it.
+    from utils.templatecheck import compare, not_indexed, unsearchable
+    mappings = {'dynamic': True, 'properties': {
+        'secret': {'type': 'keyword', 'index': False},
+        'raw': {'type': 'object', 'enabled': False},
+        'user': {'properties': {'name': {'type': 'keyword'}, 'token': {'type': 'keyword', 'index': 'false'}}}}}
+    assert not_indexed(mappings) == ({'secret', 'user.token'}, {'raw'})
+    assert unsearchable(mappings, ['secret', 'raw.blob', 'user.name', 'user.token']) == ['raw.blob', 'secret', 'user.token']
+    docs = json_xml_documents('<array xmlns="http://www.w3.org/2005/xpath-functions"><map><string key="secret">s'
+                              '</string><map key="raw"><string key="blob">b</string></map><map key="user"><string '
+                              'key="name">alice</string></map></map></array>')
+    said = compare({'index_patterns': ['x*'], 'template': {'mappings': mappings}}, docs, 'x')
+    assert said['compatible'] and any("['raw.blob', 'secret']" in n and 'not searchable' in n for n in said['notes'])
+
+
+async def test_a_check_on_a_field_no_search_finds_is_refused_saying_why():
+    from utils.mappingstore import with_agreed_template
+    agreed = with_agreed_template('', {'name': 'x', 'dev_tools': 'PUT _index_template/x\n' + json.dumps(
+        {'index_patterns': ['x*'], 'template': {'mappings': {'properties': {'secret': {'type': 'keyword', 'index': False}}}}})})
+    stroom = SimpleNamespace(post=AsyncMock(return_value={'values': [{'fldName': 'secret', 'fldType': 'KEYWORD'},
+                                                                     {'fldName': 'hidden', 'queryable': False}]}),
+                             get_doc=AsyncMock(return_value={'description': agreed}))
+    with patch('tools.indexing.gateway_from', return_value=stroom):
+        said = await indexing._unsearchable(None, 'ElasticIndex', {'type': 'ElasticIndex', 'uuid': 'i'},
+                                            ['secret', 'hidden', 'user.name'], 'p1')
+    assert said == {'hidden': 'Stroom lists it as not searchable', 'secret': (
+        "the index template agreed for it doesn't index it (index: false, or an object with enabled: false)")}
+    with pytest.raises(ToolError, match=r"secret: the index template agreed .* so no search through Stroom finds it"):
+        indexing._searchable('elasticsearch', [], unindexed=said)

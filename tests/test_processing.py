@@ -1074,3 +1074,33 @@ async def test_an_index_reading_a_pipeline_promoted_with_it_is_enabled_after_tha
     assert [a['id'] for a in made[0]['user_actions']] == ['enable-31']
     assert made[1]['user_actions'][-1]['after'] == [
         'drop-ecs-acme-v2', 'enable-31', "filter 31 has processed what the build processed again"]
+
+
+async def test_the_user_can_go_on_with_an_index_template_of_their_own(monkeypatch):
+    # Seen in testing: the user had committed their template, and the agreement still stopped indexing, however they
+    # said so. They confirm it in a form (the agent's word for it isn't theirs), and it is kept with the pipeline.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastmcp.exceptions import ToolError
+    from tools import processing_writes
+    from utils.consent import ConsentStore
+    from utils.mappingstore import read_agreed_template
+    saved = {}
+    doc = {'uuid': 'p1', 'name': 'IX', 'description': 'Indexes Acme.'}
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value=dict(doc)),
+                             put_doc=AsyncMock(side_effect=lambda d: saved.update(d)))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom, 'consent': ConsentStore(False)})
+    monkeypatch.setattr(processing_writes, 'indexing_xslt_digest', AsyncMock(return_value='abc'))
+    destination = {'index name': 'ecs-acme-v1', 'cluster': 'ES_PROD'}
+    with pytest.raises(ToolError, match='template_committed_by_user=true'):
+        await processing_writes._committed(ctx, dict(doc), destination, 'create_processor_filter')
+    asked = await processing_writes._committed(ctx, dict(doc), destination, 'create_processor_filter', True)
+    assert asked['status'] == 'needs_confirmation' and 'not checked' in asked['details'] and not saved
+    pipeline = dict(doc)
+    said = await processing_writes._committed(ctx, pipeline, destination, 'create_processor_filter', True,
+                                              asked['confirmation_id'])
+    kept = read_agreed_template(saved['description'])
+    assert kept['by_user'] and kept['index'] == 'ecs-acme-v1' and kept['xslt'] == 'abc'
+    assert "the user's own index template" in said and saved['description'].startswith('Indexes Acme.')
+    # Kept: the approval that follows, and later calls, aren't stopped again.
+    assert "the user's own" in await processing_writes._committed(ctx, pipeline, destination, 'reprocess_streams')

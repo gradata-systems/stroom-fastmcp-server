@@ -42,7 +42,7 @@ async def test_the_pasted_example_is_kept_once_and_read_back_whole():
         await indexing._keep_example(ctx, 'b1', 'firewall-edge-v1', EXAMPLE, ['PUT _component_template/base {}'])
         assert [d['name'] for d in store.docs.values()] == ['firewall-edge-v1 example index template']   # updated
         kept = await indexing._kept_example(ctx, 'pipeline-1', ['firewall-edge-v1'])
-    assert kept == (EXAMPLE, ['PUT _component_template/base {}'])
+    assert kept == (EXAMPLE, ['PUT _component_template/base {}'], 'as the user pasted it')
     assert '```\nPUT _index_template/stroom_twitter' in next(iter(store.docs.values()))['data']   # readable in Stroom
 
 

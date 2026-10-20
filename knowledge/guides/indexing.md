@@ -23,9 +23,14 @@ user's own goes under the source's namespace, as ECS asks (`custom_namespaces`, 
 `secretserver` for `stroom-ecs-secretserver-v1`): the draft puts an event's action elements there
 (`secretserver.authenticate.user.id`), never a top-level group per action. Tell the user every name `ecs_check` lists
 as not ECS, not only the ones you added.
-With an example too, an ECS plan's template is composed of `ecs@mappings` (first in `composed_of`), with dynamic
-mapping on, whatever the example composes or its `dynamic` says (an index's `_mapping` never shows `composed_of`);
-the notes say so. Only an AGENTS doc's exclusion of `ecs@mappings` leaves it out.
+That is when the user opts for ECS field mapping: the ECS convention, with no example. A template built from an
+example composes `ecs@mappings` only when the example references it (then first, with dynamic mapping on, the ECS
+fields it maps left to it, whatever the example's `dynamic` says), or when the user asks for it; otherwise the
+template follows the example, which maps its fields itself. An index's `_mapping` never shows `composed_of`: if the
+sibling index composed it, the user asks for it. An AGENTS doc's exclusion of `ecs@mappings` leaves it out. Nominated
+(`include_components=['ecs@mappings']`) it does the same: first, dynamic on, and the ECS fields it maps left to it.
+Never hand-write a template that composes it and maps those fields again: `check_index_template` notes each field
+mapped twice.
 
 The plan is kept for the session as drafted: change it with `draft_index_mapping changes={"fields": [...]}` (only
 what changes: a field replaces the one of its name, or is added; `{"name": ..., "remove": true}` removes one), never by
@@ -51,8 +56,10 @@ about those. There's no need to read the old XSLT; `describe_document` gives an 
 For Elasticsearch, ask the user for an example first: the index template a sibling source's index uses (or an
 index's mapping) and the component templates it is composed of. The fields a template maps are its own and all of
 its components' together, and the server can't read Elasticsearch, so an example whose `composed_of` names
-components not given gets a `needs_components` reply: ask the user to run the request it gives (`GET
-_component_template/<names>`) and paste the whole response, then call again with `component_templates`. Elastic's
+components not given gets a `needs_components` reply: ask the user to run the requests it gives (one
+`GET _component_template/<name>` per component: the API takes one name or a wildcard, not a list) and paste the
+whole response, then call again with `component_templates` that response alone. Components given once are kept for
+the session: never send them again (re-sent, they come back corrupted). Elastic's
 `ecs@mappings` is known to the server, and is Elasticsearch's only ECS component template: any other `ecs@` name
 (`ecs@settings`, say) is refused unless its content is given. If the request says `resource_not_found`, the cluster
 has no such component: leave it out. Only if the user can't get one that exists, pass its name in
@@ -71,8 +78,11 @@ template then follows its field types (`ignore_above`, sub-fields, date formats)
 object-level `dynamic`) and its settings. The example's own fields this source doesn't write are listed, not copied.
 Before they confirm it, the user sees it whole: the template first comes back as `needs_review`, its Dev Tools
 request to show in the chat as a code block, with a `review_id`; called again with `reviewed=<review_id>` (not
-`true`: a template that changes gets a new id, to show again), the form is a short summary (name, pattern and
-priority, settings, fields and types). They confirm it, or correct it (`check_index_template`); once
+`true`: a template that changes gets a new id, to show again), the form is a short summary (name, pattern,
+composed of, how many fields): the notes are in the reply, for the chat. The template has the example's priority, or
+none: pass `priority` only when the user asks for one. Show the template in your answer,
+not in your thinking. `check_index_template` after a review needs only `reviewed=`: the template shown is kept, so
+don't retype it. They confirm it, or correct it (`check_index_template`); once
 they say the cluster admin has committed it, `create_processor_filter` starts indexing once the user approves it
 (the approval confirms the template is committed). An alias in the example
 becomes a field when the pipeline writes that field (documents can't write to an alias), typed as its target.
@@ -86,7 +96,9 @@ and wait for it before drafting. Following an existing index in Stroom (`like_in
 Elasticsearch types through Stroom, with nothing to paste, and the user confirms it in a form that says what was
 read; its template's settings and component templates aren't readable that way, so they paste the template for
 those. Going without an example (`without_example`) is confirmed in a form too. Without an example, `propose_index_template` builds nothing for the cluster. A template put on
-the cluster without being agreed through it doesn't count, so indexing stays refused. Stepping clean is not
+the cluster without being agreed through it doesn't count, unless the user says so: if they've committed one of
+their own and want to go on without agreeing one here, `create_processor_filter` (or `reprocess_streams`)
+`template_committed_by_user=true`, which they confirm in a form; it is kept with the pipeline. Stepping clean is not
 indexing: the build's `indexed` step is done only once `verify_index` passes.
 
 Index or data stream: a template built from the plan alone (with `without_example`) makes a data stream
@@ -177,8 +189,18 @@ Verify through Stroom, not by querying the backend: `verify_index` makes the das
 searches: the sample stream ids, an exact match on each key field, and a time range. With `pipeline_uuid` it also
 checks that every field the pipeline writes for those Events is in the index (Stroom lists it for the index doc);
 one that isn't fails verification: tell the user, who reindexes or has you check again in a minute.
-Each check's first hit is traced too: the pipeline is stepped at record index EventId - 1 of the hit's stream, and its
-document must be the hit's and hold the value searched for. Stepping one record may number it otherwise than
+Each check's hit with the lowest EventId is traced too: the pipeline is stepped at record index EventId - 1 of the
+hit's stream (every hit of a stream in one stepping session, as Stroom captures the whole stream per session), and its
+document must be the hit's and hold the value searched for. A call that would outlast the user's sign-in stops first
+and lists what is `unfinished`: call again with the same arguments; checks that passed are kept for the session and
+not run again. If the user asks to skip verification and just have the dashboard, `verify_index checks=false`
+makes the build's -VERIFY dashboard (columns confirmed as usual) and gives its link; never make a dashboard any other
+way, and nothing is marked verified. A field whose source the event-logging schema lets repeat (a `Data` element,
+say) is marked `multiple` in the plan and written as an array (Elasticsearch) or one value each (Lucene); a dashboard
+shows its values separated by commas, so search it by one of them (`tags = vpn`), never by the list as shown. A field
+the index doesn't index (Lucene `indexed: false`, Elasticsearch `index: false`, or under an object with
+`enabled: false`) is kept and can be a column, but Stroom can't search it: `verify_index` refuses a check on one,
+saying why. Stepping one record may number it otherwise than
 processing did (`stepped_event_id`); the document is then matched on the hit's other columns. A failed trace's `why`
 says what was compared: report that, not a guess at the cause.
 
@@ -198,7 +220,8 @@ Dashboard conditions behave as Elasticsearch would for: EQUALS (case-sensitive o
 dates (GREATER_THAN, LESS_THAN, BETWEEN `from,to`), booleans (`true`), EQUALS `*` for any value, array values (a document whose
 `tags` hold `retry` matches `tags = retry`), and fields inside objects (`user.name`, `message_json.error.code`).
 Found against Stroom 7.13 and Elasticsearch 9, and not to be relied on: STARTS_WITH and CONTAINS find nothing (use
-EQUALS with wildcards), IS_NULL and IS_NOT_NULL match every document (use EQUALS `*` and compare counts), and IN
+EQUALS with wildcards), IS_NULL and IS_NOT_NULL match every document (use EQUALS `*` and compare counts; `verify_index` and
+`find_events` search IS_NOT_NULL as EQUALS `*` and IS_NULL as NOT_EQUALS `*` themselves, and say so), and IN
 with spaces
 between the values finds nothing. `verify_index` refuses those searches.
 

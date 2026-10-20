@@ -63,23 +63,69 @@ def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
     return name, body
 
 
-def parse_component_templates(texts: list[str]) -> dict[str, dict[str, Any]]:
+def dev_tools(name: str | None, body: dict[str, Any]) -> str:
+    """The index template as a Dev Tools request, laid out to read: an object of plain values (a field's mapping, a
+    setting) on one line, others indented. Indented throughout, a 50-field template ran to 150 lines and 10,000
+    characters, and the reply that showed it to the user for review was too long for the client to show."""
+    def render(node: Any, depth: int) -> str:
+        flat = json.dumps(node)
+        if not isinstance(node, (dict, list)) or len(flat) <= 90:
+            return flat
+        pad, inner = '  ' * depth, '  ' * (depth + 1)
+        items = ([f"{inner}{json.dumps(k)}: {render(v, depth + 1)}" for k, v in node.items()] if isinstance(node, dict)
+                 else [f"{inner}{render(v, depth + 1)}" for v in node])
+        ends = '{}' if isinstance(node, dict) else '[]'
+        return ends[0] + '\n' + ',\n'.join(items) + '\n' + pad + ends[1]
+    return f"PUT _index_template/{name}\n{render(body, 0)}"
+
+
+_COMPONENT_REQUEST = re.compile(r'(PUT|POST|GET)\s+/?_component_template/?([^\s?{]*)[^\n{]*', re.I)
+
+
+def parse_component_templates(texts: list[Any]) -> dict[str, dict[str, Any]]:
     """Component templates as the user pastes them, by name: Dev Tools 'PUT _component_template/name {...}', or GET
-    _component_template output (one or several). Each needs its name, to be matched to composed_of."""
+    _component_template output; several in one text (Kibana's responses to several requests, each after its '#'
+    line), or already JSON. Each needs its name, to be matched to composed_of. Seen in testing: re-sent by the agent,
+    the bodies came back as a GET response inside a GET response, and as an escaped JSON string."""
     found: dict[str, dict[str, Any]] = {}
-    for text in texts:
-        text = text.strip()
-        match = re.match(r'^(PUT|POST)\s+/?_component_template/([^\s?{]+)[^\n{]*', text, re.I)
-        body = _json(text[match.end():] if match else text, 'component template')
-        if isinstance(body, dict) and 'component_templates' in body:
+
+    def add(body: Any, name: str | None) -> None:
+        if isinstance(body, str):
+            read(body)
+        elif isinstance(body, list):
+            for item in body:
+                add(item, None)
+        elif isinstance(body, dict) and 'component_templates' in body:
             for entry in body['component_templates'] or []:
-                found[entry.get('name')] = entry.get('component_template') or {}
-        elif match and isinstance(body, dict):
-            found[match.group(2)] = body
+                add(entry, None)
+        elif isinstance(body, dict) and 'component_template' in body and body.get('name'):
+            found[body['name']] = body['component_template'] or {}
+        elif isinstance(body, dict) and name:
+            found[name] = body
         else:
             raise ValueError("Give each component template with its name, as a Dev Tools request "
                              "(PUT _component_template/<name> {...}) or GET _component_template/<name> output, so it can "
                              "be matched to the index template's composed_of")
+
+    def read(text: str) -> None:
+        text, at, name = text.strip(), 0, None
+        decoder = json.JSONDecoder()
+        while at < len(text):
+            if text[at].isspace():
+                at += 1
+            elif text[at] == '#':                   # Kibana's line before each response: '# GET ... 200 OK'
+                at = text.find('\n', at) + 1 or len(text)
+            elif match := _COMPONENT_REQUEST.match(text, at):
+                name, at = (match.group(2) or None) if match.group(1).upper() != 'GET' else None, match.end()
+            else:
+                try:
+                    body, at = decoder.raw_decode(text, at)
+                except ValueError as e:
+                    raise ValueError(f"The component template is not valid JSON: {e}") from e
+                add(body, name)
+                name = None
+    for item in texts:
+        add(item, None)
     return found
 
 
@@ -87,6 +133,7 @@ def with_components(body: dict[str, Any], components: dict[str, dict[str, Any]],
                     exclude: list[str] = ()) -> tuple[dict[str, Any], list[str]]:
     """A template built from the field plan alone, composing the nominated components (and not the excluded): the
     fields they map are left to them, not mapped here again."""
+    from utils import ecs
     body = copy.deepcopy(body)
     composed_of = composition(list(body.get('composed_of') or []), include, exclude)
     notes = []
@@ -98,6 +145,12 @@ def with_components(body: dict[str, Any], components: dict[str, dict[str, Any]],
             if spec.get('type') != 'object' and _drop(mappings.get('properties') or {}, path,
                                                       flat=mappings.get('subobjects') is False):
                 left.append(path)
+    if ecs.COMPONENT in composed_of and ecs.COMPONENT in include:
+        # Seen in testing: asked to use ecs@mappings, the template composed it but still mapped every ECS field, with
+        # dynamic false, so the component mapped nothing. Built in, it has no content given: what it maps is known.
+        mappings, dropped = leave_to_ecs_component(mappings)
+        body.setdefault('template', {})['mappings'] = mappings
+        left += dropped
     if composed_of:
         body['composed_of'] = composed_of
     else:
@@ -125,6 +178,55 @@ def _drop(properties: dict[str, Any], path: str, flat: bool = False) -> bool:
     if dropped and not inner:
         del properties[head]
     return dropped
+
+
+def leave_to_ecs_component(mappings: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """(mappings, left): a template's mappings with the ECS fields it maps just as ecs@mappings does taken out, left to
+    the component, and dynamic mapping on, without which the component's dynamic templates map nothing."""
+    from utils import ecs
+    mappings = copy.deepcopy(mappings)
+    flat = mappings.get('subobjects') is False
+    left = [path for path, spec in read_mapping(mappings).fields.items()
+            if spec.get('type') != 'object' and ecs.mapped_as_component(path, spec)]
+    for path in left:
+        _drop(mappings.setdefault('properties', {}), path, flat=flat)
+    mappings['dynamic'] = True
+    return mappings, sorted(left)
+
+
+def not_indexed(mappings: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """(fields, objects): the fields a mapping keeps but doesn't index ("index": false), and the objects it doesn't
+    parse at all ("enabled": false, everything below kept in _source only). Stroom searches neither (it lists them as
+    not queryable; Elasticsearch itself may still search a keyword by its doc values): asked about by the user, a
+    verification search on one finds nothing, as if the documents were missing."""
+    fields, objects = set(), set()
+
+    def walk(properties: dict[str, Any], prefix: str) -> None:
+        for name, spec in (properties or {}).items():
+            path = f'{prefix}.{name}' if prefix else name
+            if str(spec.get('enabled', True)).lower() == 'false':
+                objects.add(path)
+            elif str(spec.get('index', True)).lower() == 'false':
+                fields.add(path)
+            if 'properties' in spec:
+                walk(spec['properties'], path)
+    walk(mappings.get('properties') or {}, '')
+    return fields, objects
+
+
+def unsearchable(mappings: dict[str, Any], paths: Any) -> list[str]:
+    """Of these field paths, those the mapping doesn't index or keeps under an object it doesn't parse."""
+    fields, objects = not_indexed(mappings)
+    return sorted(p for p in paths if p in fields or any(p == o or p.startswith(o + '.') for o in objects))
+
+
+def ecs_duplicates(body: dict[str, Any]) -> list[str]:
+    """The fields a template composing ecs@mappings maps explicitly just as the component does: mapped twice."""
+    from utils import ecs
+    if ecs.COMPONENT not in (body.get('composed_of') or []):
+        return []
+    fields = read_mapping((body.get('template') or {}).get('mappings') or {}).fields
+    return sorted(p for p, spec in fields.items() if spec.get('type') != 'object' and ecs.mapped_as_component(p, spec))
 
 
 def _merge(into: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
@@ -529,7 +631,10 @@ def composition(example_composed_of: list[str], include: list[str] = (), exclude
     """The components a new template may compose: the example's, less those excluded, then those nominated (by the
     user, or their standing instructions) that the example doesn't already compose, in the order given."""
     names = [n for n in example_composed_of if n not in exclude]
-    return names + [n for n in dict.fromkeys(include) if n not in names]
+    added = [n for n in dict.fromkeys(include) if n not in names]
+    # Elastic's ECS base first, nominated or not: the other components and the template's own mappings override it.
+    first = [n for n in added if n == 'ecs@mappings']
+    return first + names + [n for n in added if n not in first]
 
 
 def from_example(planned: dict[str, Any], example: dict[str, Any], components: dict[str, dict[str, Any]],
@@ -575,7 +680,9 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
     # The example composes Elastic's ECS component, mapping as documents bring them: the ECS fields it maps as ECS
     # says are left to it, as an ECS plan's own template leaves them (asked for by the user).
     dynamic_on = str(own.get('dynamic', True)).lower() == 'true'
-    by_component = ecs.COMPONENT in composed_of and (dynamic_on or ecs_base)
+    # Nominated too (seen in testing: asked to use ecs@mappings, the template composed it, kept the example's dynamic
+    # false and mapped every field explicitly, so the component mapped nothing).
+    by_component = ecs.COMPONENT in composed_of and (dynamic_on or ecs_base or ecs.COMPONENT in include)
     final, left, kept, new, styled, aliased, to_ecs = {}, [], [], [], [], [], []
     for path, spec in leaves.items():
         if path in from_components or (by_component and path not in in_example
@@ -634,8 +741,10 @@ def from_example(planned: dict[str, Any], example: dict[str, Any], components: d
         # The plan's own settings (a discovery index's guardrails) over the example's.
         merged = _merge(copy.deepcopy(settings or {}), (planned.get('template') or {}).get('settings') or {})
         template = {'settings': merged, **template}
+    # The example's priority, or the one the user asked for: none otherwise (asked for by the user).
+    priority = example.get('priority', planned.get('priority'))
     body: dict[str, Any] = {'index_patterns': planned['index_patterns'],
-                            'priority': example.get('priority', planned.get('priority', 200))}
+                            **({'priority': priority} if priority is not None else {})}
     used, unused, unsure = components_used(composed_of, components, leaves, to_ecs, discovery,
                                            [*include, *([ecs.COMPONENT] if ecs_base else [])])
     if used:
@@ -809,8 +918,11 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                         'change': "write @timestamp from EventTime/TimeCreated in the indexing XSLT"})
 
     unmapped = []
+    _, disabled = not_indexed((body.get('template') or {}).get('mappings') or {})
     for path in sorted(emitted):
         values = emitted[path]
+        if any(path.startswith(o + '.') for o in disabled):
+            continue        # under an object the template doesn't parse: kept in _source as it is, nothing to map
         spec = mapping.fields.get(path)
         if spec is not None and spec.get('type') == 'alias':
             blocking.append(f"{path}: written by the pipeline, but mapped as an alias (of '{spec.get('path')}'), and "
@@ -879,6 +991,13 @@ def compare(body: dict[str, Any], docs: list[dict[str, Any]], index_name: str | 
                          f"_source but not searchable")
         else:
             notes.append(f"{path}: not mapped; Elasticsearch will add it with a guessed type (dynamic mapping)")
+    hidden = unsearchable((body.get('template') or {}).get('mappings') or {},
+                          [p for p, values in emitted.items() if any(kind != 'object' for kind, _ in values)])
+    if hidden:
+        notes.append(f"{hidden[:20]}" + (f" (+{len(hidden) - 20})" if len(hidden) > 20 else '')
+                     + ": written by the pipeline, but not indexed by the template (index: false, or under an object "
+                       "with enabled: false): kept in _source, but Stroom lists such a field as not searchable, so they "
+                       "can't be verification checks. Say so to the user")
     for path in expected:
         changes.append({'field': path, 'problem': 'in the template but the pipeline never writes it',
                         'change': f"add '{path}' to the indexing XSLT (from the right event-logging path), or drop "

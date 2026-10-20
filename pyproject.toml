@@ -27,4 +27,5 @@ docs = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-markers = ["no_step_recorded: processing test that keeps the step gate active"]
+markers = ["no_step_recorded: processing test that keeps the step gate active",
+           "long_form: a test of the cut a form too long gets (every other form must fit)"]

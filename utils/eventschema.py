@@ -213,6 +213,27 @@ class EventSchema:
             decl, walked = child.decl, f'{walked}/{segment}'
         return chain
 
+    def can_repeat(self, path: str) -> bool:
+        """Whether a path below Event can select several values in one event: an element on it the schema lets repeat
+        (Data, say), under a wildcard step any of the elements it stands for. A path the schema doesn't know, or an
+        expression rather than a path, counts as one value."""
+        steps = [s for s in re.sub(r"\[[^\]]*\]", '', path.split(' ! ')[0]).strip('/').split('/') if s]
+        if not steps or any(not re.fullmatch(r'[\w.-]+|\*|@[\w.-]+', s) for s in steps):
+            return False
+        decls = [self.event]
+        for step in steps:
+            if step == 'Event' and decls == [self.event]:
+                continue
+            if step.startswith('@'):
+                break
+            children = [c for d in decls for c in self.children(d) if step == '*' or c.name == step]
+            if not children:
+                return False
+            if any(c.repeatable for c in children):
+                return True
+            decls = [c.decl for c in children]
+        return False
+
     def paths_named(self, name: str, depth: int = 6) -> list[str]:
         """Paths below Event whose last element is `name` (shortest first)."""
         self._index(depth)

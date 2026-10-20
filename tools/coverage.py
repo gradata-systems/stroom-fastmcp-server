@@ -181,12 +181,14 @@ def filter_terms(expression: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-async def filter_feeds(stroom: StroomGateway, terms: list[dict[str, Any]], known: dict[Any, Any]) -> set[str]:
+async def filter_feeds(stroom: StroomGateway, terms: list[dict[str, Any]], known: dict[Any, Any],
+                       lower: bool = True) -> set[str]:
     """The feeds a processor filter reads, lower-cased: Feed EQUALS (one, or several between commas), IS_DOC_REF (the
     feed doc: its name is in the reference, with no value), IN_DICTIONARY (the feeds a Dictionary lists, and its
     imports'), or with no Feed term, the feed of the first stream its Id terms pick (the server's filters on sample
     streams). Seen on a production Stroom: 34 filters named their feed by IS_DOC_REF and 6 by a dictionary, which
-    reading the value alone missed. known caches dictionaries and streams across one walk of the filters."""
+    reading the value alone missed. known caches dictionaries and streams across one walk of the filters. lower=False
+    keeps the names as written, to show."""
     feeds: set[str] = set()
     for t in terms:
         if t.get('field') != 'Feed':
@@ -194,11 +196,11 @@ async def filter_feeds(stroom: StroomGateway, terms: list[dict[str, Any]], known
         ref = t.get('docRef') or {}
         if t.get('condition') == 'IS_DOC_REF':
             name = ref.get('name') or t.get('value')
-            feeds |= {str(name).lower()} if name else set()
+            feeds |= {str(name).lower() if lower else str(name)} if name else set()
         elif t.get('condition') == 'IN_DICTIONARY' and ref.get('uuid'):
-            feeds |= await _dictionary_lines(stroom, ref['uuid'], known)
+            feeds |= await _dictionary_lines(stroom, ref['uuid'], known, lower=lower)
         else:
-            feeds |= {v.strip().lower() for v in str(t.get('value') or '').split(',') if v.strip()}
+            feeds |= {v.strip().lower() if lower else v.strip() for v in str(t.get('value') or '').split(',') if v.strip()}
     ids = [t.get('value') for t in terms if t.get('field') == 'Id' and t.get('condition') == 'EQUALS' and t.get('value')]
     if not feeds and ids:
         key = ('stream', str(ids[0]))
@@ -208,23 +210,25 @@ async def filter_feeds(stroom: StroomGateway, terms: list[dict[str, Any]], known
                 known[key] = (await _meta(stroom, int(ids[0]))).get('feedName')
             except (ToolError, ValueError):
                 known[key] = None
-        feeds |= {known[key].lower()} if known[key] else set()
+        feeds |= {known[key].lower() if lower else known[key]} if known[key] else set()
     return feeds
 
 
-async def _dictionary_lines(stroom: StroomGateway, uuid: str, known: dict[Any, Any], depth: int = 0) -> set[str]:
-    """A Dictionary's lines, lower-cased, with those of the dictionaries it imports."""
-    key = ('dictionary', uuid)
+async def _dictionary_lines(stroom: StroomGateway, uuid: str, known: dict[Any, Any], depth: int = 0,
+                            lower: bool = True) -> set[str]:
+    """A Dictionary's lines, lower-cased (or as written), with those of the dictionaries it imports."""
+    key = ('dictionary' if lower else 'dictionary as written', uuid)
     if key not in known:
         known[key] = set()      # a dictionary importing itself, or one another imports, read once
         try:
             doc = await stroom.get_doc('Dictionary', uuid)
         except ToolError:
             return set()
-        lines = {line.strip().lower() for line in (doc.get('data') or '').splitlines() if line.strip()}
+        lines = {line.strip().lower() if lower else line.strip() for line in (doc.get('data') or '').splitlines()
+                 if line.strip()}
         for imported in (doc.get('imports') or []) if depth < 5 else []:
             if imported.get('uuid'):
-                lines |= await _dictionary_lines(stroom, imported['uuid'], known, depth + 1)
+                lines |= await _dictionary_lines(stroom, imported['uuid'], known, depth + 1, lower)
         known[key] = lines
     return known[key]
 

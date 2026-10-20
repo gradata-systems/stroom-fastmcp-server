@@ -104,7 +104,8 @@ async def describe_document(
     A document's full content by type and UUID (XSLT, TextConverter and Documentation content verbatim in
     'data'; cluster credentials redacted), with what the server can say about it: for a Pipeline, how Stroom
     runs it (template chain, effective elements and properties and which layer set each, reference data,
-    what it removes from its template); for an XSLT, what the translation does (each output element's
+    what it removes from its template) and what it processes (processing: its processor filters and the feeds
+    they read, through dictionaries, stream ids and other pipelines' output too); for an XSLT, what the translation does (each output element's
     source, the input fields read, imports, dictionaries and lookups); for an Elastic Index or Lucene Index doc, a
     survey of what the index holds, read through Stroom: its fields, a sample of up to 100 documents, recent ones
     where there are any (how often each field is populated, sample values) and the pipelines that feed it; not the
@@ -130,7 +131,10 @@ async def describe_document(
     if type == 'Documentation':
         return _passages(doc, find, context_lines)
     if type == 'Pipeline':
+        from tools.processing import pipeline_feeds
         doc['pipeline'] = await describe_pipeline(uuid, ctx)
+        # Which feeds it acts on: asked of a pipeline, an agent found its filters unreadable and searched by keyword.
+        doc['processing'] = await pipeline_feeds(gateway_from(ctx), uuid)
     elif type == 'XSLT':
         doc['translation'] = await describe_translation(ctx, xslt=doc.get('data') or '')
         _kept_summary(doc, uuid, mapping)

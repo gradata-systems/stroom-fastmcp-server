@@ -106,7 +106,9 @@ Without such a tool, ask in your answer: one numbered question per decision, eac
 way, where a result gives the options, their order or labels, or says to recommend none, keep to it. Ask only what
 you can't decide from the result, the standing instructions or what the user has said, and not what a form from this
 server will ask; then carry on with their answers. A request to paste something (an index template, a sample) is
-not such a question: ask for it in your answer and end your turn.
+not such a question: ask for it in your answer and end your turn. Whatever is for the user (a question, a template
+to review, a choice) goes in your answer, never only in your thinking: clients collapse thinking, and the user
+doesn't see it (seen: a question asked only there went unanswered).
 
 Existing feed: when the user asks to onboard data a feed already holds, work from that feed (onboard_existing_feed):
 start_build feeds=[it], then survey_feed. No feed is created and nothing uploaded, whatever sample files the

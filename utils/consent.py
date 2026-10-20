@@ -182,7 +182,7 @@ class ConsentStore:
             try:
                 asked = time.perf_counter()
                 try:
-                    answer = await ctx.elicit(f"{summary}\n\n{_format(details)}",
+                    answer = await ctx.elicit(form_message(summary, details),
                                               _answer_type(kind, editable, summary))
                 finally:
                     spent_waiting_for_user(round((time.perf_counter() - asked) * 1000))
@@ -327,7 +327,7 @@ class ConsentStore:
         state['asked'] = bound
         audit(kind, action=action, details=details, outcome='requested', via='form')
         form = mcp_types.ElicitRequest(params=mcp_types.ElicitRequestFormParams(
-            message=f"{summary}\n\n{_format(details)}",
+            message=form_message(summary, details),
             # With a value to edit, the form is just that field, prefilled: accepting it confirms (clients step
             # through fields one at a time, so a yes/no beside it would be a second prompt).
             requested_schema=({'type': 'object', 'properties': {
@@ -505,8 +505,28 @@ def _answer_type(kind: str, editable: dict[str, tuple[str, str]], summary: str =
                                      for key, (title, proposed) in editable.items()])
 
 
-def _format(details: dict[str, Any]) -> str:
-    return '\n'.join(f"- {k}: {v}" for k, v in details.items())
+FORM_MESSAGE_LIMIT = 600    # characters a form's message may hold
+_DETAIL_LIMIT = 160         # characters of one detail's value
+
+
+def form_message(summary: str, details: dict[str, Any]) -> str:
+    """What a form shows: the summary and its details, short. A form is a question, not a document: what the user
+    reviews at length (a template, a layout) is shown in the chat first. Seen in testing: an index template's
+    confirmation ran to 2,000 characters (every field, every note, the component templates), the client declined the
+    form as too long, and the user could never agree the template. Each detail is cut to _DETAIL_LIMIT, and details
+    past FORM_MESSAGE_LIMIT are left to the chat; a form cut so is logged, as its caller's details should be shorter."""
+    def short(value: Any) -> str:
+        text = ' '.join((', '.join(map(str, value)) if isinstance(value, (list, tuple)) else str(value)).split())
+        return text if len(text) <= _DETAIL_LIMIT else text[:_DETAIL_LIMIT].rsplit(' ', 1)[0].rstrip(',;:') + '…'
+    summary = summary.strip()
+    message = summary if len(summary) <= 300 else heading(summary, 300)
+    lines = [f"- {k}: {short(v)}" for k, v in details.items()]
+    for n, line in enumerate(lines):
+        if len(message) + len(line) + 30 > FORM_MESSAGE_LIMIT:
+            logger.warning("Form for '%s' cut: %d of its %d details shown", heading(summary, 80), n, len(lines))
+            return message + '\n- … (the rest is in the chat)'
+        message += ('\n\n' if n == 0 else '\n') + line
+    return message
 
 
 def consent_from(ctx: Any) -> ConsentStore:

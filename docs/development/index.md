@@ -36,6 +36,7 @@ The end-to-end suites drive the real tools against that stack. Run them one at a
 | `dev/e2e_plan_walk.py` | The plan followed as an agent would: from `start_onboarding`, every call is the one `next` names, with only its placeholders filled, to promotion, on Lucene and on Elasticsearch (with the user's example template agreed and committed). Following `next` is never refused; wrong moves on the way are refused with the right call named, and leave `next` where it was |
 | `dev/e2e_translation.py` | CSV, JSON, XML and syslog samples to valid Events; a field fix and reprocessing; promotion and a working copy written back |
 | `dev/e2e_lucene_indexing.py` | Indexing on the Lucene backend: field plan, index doc, indexing pipeline, verification searches, a v2 copy |
+| `dev/e2e_field_types.py` | Every field type (keyword, text, long, double, boolean, ip, date, id), single and multi-valued, indexed into Lucene and Elasticsearch 9 (`--profile elastic`) and verified through Stroom, each hit traced; a field not to be indexed (Lucene `indexed: false`, Elasticsearch `index: false`) refused as a check, saying why |
 | `dev/e2e_existing_feed.py` | Building a pipeline from a feed that already holds data: surveys, stepping in place, kinds left untranslated |
 | `dev/e2e_generator.py` | Translations generated from field mappings, stepped and validated |
 | `dev/e2e_instructions.py` | Standing instructions (AGENTS docs) by folder |

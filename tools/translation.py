@@ -645,6 +645,10 @@ async def save_xslt(
                     if r['href'] not in {*index_plan.imports, *(u.href for u in index_plan.shared)}]
         if required:
             index_plan = index_plan.model_copy(update={'imports': [*index_plan.imports, *required]})
+    if code is None and index_plan is not None:
+        # Fields that can hold several values in an event, by the schema: a plan kept before they were marked too.
+        from tools.indexing import with_cardinality
+        index_plan = await with_cardinality(ctx, index_plan, build)
     if code is None:
         code = await _generated(index_plan)
     if uuid:

@@ -275,3 +275,15 @@ async def test_a_token_that_runs_out_later_in_the_call_says_to_call_again_not_to
         await gateway.close()
     assert 'Call the same tool again now with the same arguments' in str(e.value)
     assert 'sends a fresh token with every new call' in str(e.value) and 'sign in again' in str(e.value)
+
+
+@pytest.mark.long_form
+def test_a_form_message_is_short_whatever_its_details():
+    # Seen in testing: a 2,000-character confirmation, which the client declined as too long.
+    import logging
+    from utils.consent import FORM_MESSAGE_LIMIT, form_message
+    details = {f'detail {n}': 'x ' * 400 for n in range(20)}
+    message = form_message('Use the index template\nAs shown in the chat.', details)
+    assert len(message) <= FORM_MESSAGE_LIMIT and message.startswith('Use the index template\nAs shown in the chat.')
+    assert message.endswith('(the rest is in the chat)') and '…' in message
+    assert form_message('Create feed X', {'name': 'X'}) == 'Create feed X\n\n- name: X'

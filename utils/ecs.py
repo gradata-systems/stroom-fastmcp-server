@@ -72,6 +72,15 @@ def left_to_component(name: str, plan_type: str) -> bool:
             and plan_type in _PLAN_TYPES and check(name, plan_type) is None)
 
 
+def mapped_as_component(name: str, spec: dict[str, Any]) -> bool:
+    """Whether a template's explicit mapping of a field is just what ecs@mappings would give it (its type, and for a
+    keyword at most ignore_above 1024, the component's own), so the template can leave it to the component."""
+    kind = spec.get('type')
+    plan = next((t for t, kinds in _PLAN_TYPES.items() if kind in kinds), None)
+    return (bool(kind) and component_type(name) == kind and set(spec) <= {'type', 'ignore_above'}
+            and spec.get('ignore_above', 1024) == 1024 and plan is not None and left_to_component(name, plan))
+
+
 def plan_type(name: str) -> str | None:
     """The index plan type for an ECS field (None for an object, nested or geo field)."""
     spec = field(name)

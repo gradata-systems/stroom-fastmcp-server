@@ -39,8 +39,9 @@ An `AGENTS` doc can also say which Elasticsearch component templates new index t
 
 Included components are referenced in every index template the server proposes there, whatever fields they map,
 and the fields they map are left to them. Excluded ones are left out, even when the user's example composes them,
-unless the user asks for one themselves. A template the user brings is checked against the section too. An ECS
-index template always composes `ecs@mappings`, even when the example doesn't, unless a section here excludes it.
+unless the user asks for one themselves. A template the user brings is checked against the section too. An index
+template composes `ecs@mappings` when the user opts for ECS field mapping (the ECS convention, or an example that
+references it) or asks for it, unless a section here excludes it.
 
 ## Documentation
 
