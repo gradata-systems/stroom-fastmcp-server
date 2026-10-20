@@ -201,7 +201,8 @@ index's mappings and settings on the cluster (propose_index_template, check_inde
    where it returns the choices instead (needs_guidance: a client without forms), offer them exactly as labelled, in
    order, and recommend none of them:
    - From an index template: the user pastes GET _index_template/<name> (or an index's GET <index>/_mapping) and, only
-     if it lists any in composed_of, those component templates (GET _component_template/<name>). Ask them to paste it
+     if it lists any in composed_of, those component templates (GET _component_template/<name>); or Stroom's
+     elastic_index_templates output, which holds both (pass it whole as example_template). Ask them to paste it
      and end your turn (a choice form can't carry it); draft nothing until it arrives.
    - Follow an existing index in Stroom (its existing_indexes): draft_index_mapping like_index= reads its field names
      and types through Stroom; nothing to paste.

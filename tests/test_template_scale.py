@@ -366,6 +366,113 @@ async def test_a_hand_written_template_mapping_ecs_fields_twice_is_said_so(monke
     assert 'destination.ip' in twice and agreed == body      # the user's own, said, not changed
 
 
+# 11b. GET output pasted (Kibana's, or Stroom's own tool's): what Elasticsearch sets itself never reaches the PUT.
+def _dated(body: dict) -> dict:
+    """A template as GET returns it: with the dates Elasticsearch sets itself (9.5)."""
+    return {**body, 'created_date_millis': 1792526762556, 'modified_date_millis': 1792526762556}
+
+
+def _as_got(body: dict) -> dict:
+    """A template as GET ?human&include_defaults returns it (as Elasticsearch 9.5 does)."""
+    got = {**_dated(body), 'created_date': '2026-10-20T20:06:02.556Z', 'modified_date': '2026-10-20T20:06:02.556Z'}
+    got['template'] = {**got.get('template', {}), 'lifecycle': {'enabled': True, 'data_retention': '30d', 'rollover': {
+        'min_docs': 1, 'max_age': '1d [automatic]'}}}
+    return got
+
+
+_SET_BY_ELASTICSEARCH = ('created_date', 'modified_date', 'rollover')
+
+
+@pytest.mark.parametrize('tool', ['propose', 'check'])
+async def test_get_output_pasted_leaves_out_what_elasticsearch_sets(monkeypatch, tool):
+    plan = ecs_plan()
+    components = {n: _as_got(c) for n, c in _components().items()}
+    pasted = '\n'.join(f"# GET _component_template/{n} 200 OK\n" + json.dumps(
+        {'component_templates': [{'name': n, 'component_template': c}]}) for n, c in components.items())
+    if tool == 'propose':
+        example = json.dumps({'index_templates': [{'name': 'ecs-acme-v1', 'index_template': _as_got(legacy_example())}]})
+        given = {'example_template': example}
+    else:
+        own = plan.elastic_template(INDEX, leave_to_component=False)['body']
+        own.update(composed_of=list(COMPONENTS), version=3, _meta={'owner': 'acme'})
+        example = json.dumps({'index_templates': [{'name': INDEX, 'index_template': _as_got(own)}]})
+        given = {'template': example}
+    with harness(monkeypatch, _plan_docs(plan)) as (context, saved):
+        shown = await (indexing.propose_index_template(context, 'p1', plan, [8], component_templates=pasted, **given)
+                       if tool == 'propose' else
+                       indexing.check_index_template(context, 'p1', events_stream_ids=[8], component_templates=pasted,
+                                                     **given))
+        assert shown['status'] == 'needs_review', shown
+        kept = indexing._given_components(context, [], list(COMPONENTS))
+    assert not any(word in shown['dev_tools'] for word in _SET_BY_ELASTICSEARCH), shown['dev_tools']
+    assert not any(word in json.dumps(kept) for word in _SET_BY_ELASTICSEARCH)
+    assert all(c['template']['lifecycle'] == {'enabled': True, 'data_retention': '30d'} for c in kept.values())
+    if tool == 'check':
+        # The user's own: all a PUT takes kept, their lifecycle too.
+        _, body = parse_template(shown['dev_tools'])
+        assert body['version'] == 3 and body['_meta'] == {'owner': 'acme'}
+        assert body['template']['lifecycle'] == {'enabled': True, 'data_retention': '30d'}
+
+
+# 11c. Stroom's elastic_index_templates output pasted whole: the template and its components in one paste.
+def stroom_tool(name: str, body: dict, components: dict[str, dict], refused: dict[str, str] = None) -> str:
+    """The output of Stroom's elastic_index_templates tool (ElasticIndexTemplatesTool.describe, Stroom gh-5848)."""
+    refused = refused or {}
+    lines = ["Elastic Index [ecs-sibling-v1](https://stroom.example/stroom/ui?doc=x)", "Index name: `ecs-sibling-v1`",
+             "Resolves to: `ecs-sibling-v1-000002` (the newest index or data stream the index name stands for)", "",
+             f"Index template that applies: `{name}`",
+             "Overlapping templates (they match the index too, but have a lower priority, so they don't apply):",
+             "- `ecs-default` (index patterns: `ecs-*`; priority 100)", "",
+             "Nothing has been changed in Elasticsearch. Each body below is exactly as Elasticsearch returns it. Show "
+             "each template to the user verbatim, with its name just above its code block: don't add, remove or "
+             "change anything in it, and don't say whether or how it can be applied to Elasticsearch.", "",
+             f"### Index template `{name}`", "```json", json.dumps(_dated(body), indent=2), "```"]
+    for n in body.get('composed_of') or []:
+        lines += ['', f"### Component template `{n}`"]
+        lines += ([f"This component template couldn't be read (FORBIDDEN): the cluster connection's credentials "
+                   f"lack the privilege Elasticsearch names: {refused[n]}"] if n in refused else
+                  ["```json", json.dumps(_dated(components[n]), indent=2), "```"])
+    return '\n'.join(lines)
+
+
+async def test_stroom_tool_output_pasted_as_the_example(monkeypatch):
+    plan = ecs_plan()
+    refused = {'org-ilm': 'action [cluster:admin/component_template/get] is unauthorized for user [stroom]'}
+    pasted = stroom_tool('ecs-acme-v1', legacy_example(), _components(), refused)
+    with harness(monkeypatch, _plan_docs(plan)) as (context, saved):
+        # Its components come with it: only the one Stroom couldn't read is asked for.
+        asked = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=pasted)
+        assert asked['status'] == 'needs_components', asked
+        assert asked['request'].splitlines() == ['GET _component_template/org-ilm']
+        body, notes = await _agreed(context, saved, plan, example_template=pasted,
+                                    component_templates=kibana({'org-ilm': _components()['org-ilm']}))
+    assert body['composed_of'] == list(COMPONENTS) and body['priority'] == 300
+    assert not any(p.startswith(('source.', 'destination.', 'user.')) for p in _properties(body))
+    assert 'created_date' not in json.dumps(body)
+
+
+async def test_stroom_tool_output_pasted_as_the_users_own_template(monkeypatch):
+    plan = ecs_plan()
+    own = plan.elastic_template(INDEX, leave_to_component=False)['body']
+    own.update(composed_of=list(COMPONENTS), version=3)
+    with harness(monkeypatch, _plan_docs(plan)) as (context, saved):
+        agreed, _ = await _agreed(context, saved, plan, tool='check', template=stroom_tool(INDEX, own, _components()))
+    assert agreed == own        # the user's own, less what Elasticsearch set
+
+
+def test_stroom_tool_output_refused_template_and_other_text():
+    from utils.templatecheck import stroom_tool_templates
+    refused = stroom_tool('ecs-acme-v1', legacy_example(), _components()).split('### Index template')[0] + \
+        "Index template: couldn't be read (FORBIDDEN): the cluster connection's credentials lack the privilege"
+    assert stroom_tool_templates(refused) == []
+    with pytest.raises(ValueError, match='not valid JSON'):
+        parse_template(refused)
+    unread = "### Index template `ecs-acme-v1`\nThis index template couldn't be read (ERROR): timed out"
+    with pytest.raises(ValueError, match='GET _index_template/ecs-acme-v1'):
+        parse_template(unread)
+    assert stroom_tool_templates(request(legacy_example())) == [] and stroom_tool_templates(kibana(_components())) == []
+
+
 def test_large_components_survive_the_shapes_an_agent_resends_them_in():
     pasted = parse_component_templates([kibana(_components())])
     assert sorted(pasted) == sorted(COMPONENTS)
@@ -387,11 +494,12 @@ def read_by_stroom(example: dict, components: dict[str, dict], refused: dict[str
     """Stroom's reply to POST elasticIndex/v1/templates (dev/stroom-requests/elastic-index-templates.md)."""
     refused = refused or {}
     return {'indexName': 'ecs-sibling-v1', 'resolvedName': 'ecs-sibling-v1-000002',
-            'indexTemplate': {'status': 'OK', 'name': 'ecs-sibling-v1', 'body': example, 'overlapping': []},
+            'indexTemplate': {'status': 'OK', 'name': 'ecs-sibling-v1', 'body': _dated(example), 'overlapping': []},
             'componentTemplates': [
                 {'name': n, 'status': 'FORBIDDEN', 'message': refused[n]} if n in refused else
-                {'name': n, 'status': 'OK', 'body': components[n]} if n in components else
-                {'name': n, 'status': 'NOT_FOUND'} for n in example.get('composed_of') or []]}
+                {'name': n, 'status': 'OK', 'body': _dated(components[n])} if n in components else
+                {'name': n, 'status': 'NOT_FOUND', 'message': f"Component template '{n}' was not found"}
+                for n in example.get('composed_of') or []]}
 
 
 async def _follow(monkeypatch, read, then=None):

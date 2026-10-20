@@ -59,7 +59,12 @@ its components' together, and the server can't read Elasticsearch, so an example
 components not given gets a `needs_components` reply: ask the user to run the requests it gives (one
 `GET _component_template/<name>` per component: the API takes one name or a wildcard, not a list) and paste the
 whole response, then call again with `component_templates` that response alone. Components given once are kept for
-the session: never send them again (re-sent, they come back corrupted). Elastic's
+the session: never send them again (re-sent, they come back corrupted). GET output is taken as it is (Kibana's, or
+Stroom's own tool's): what Elasticsearch sets itself (`created_date_millis`, `modified_date_millis`, a lifecycle's
+`rollover`) is left out of every `PUT` the server writes, as Elasticsearch refuses it there, so don't edit it out
+first. The output of Stroom's `elastic_index_templates` tool holds the index template and its component templates
+together: pass it whole as `example_template` (or `template`), nothing as `component_templates`; only a component
+it couldn't read is asked for. Elastic's
 `ecs@mappings` is known to the server, and is Elasticsearch's only ECS component template: any other `ecs@` name
 (`ecs@settings`, say) is refused unless its content is given. If the request says `resource_not_found`, the cluster
 has no such component: leave it out. Only if the user can't get one that exists, pass its name in

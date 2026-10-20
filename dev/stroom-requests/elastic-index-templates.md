@@ -5,6 +5,12 @@ and component templates to use as an example is cumbersome (Kibana Dev Tools, on
 chat, and agents corrupted the bodies when they re-sent them). The user should be able to point at an Elastic Index
 doc instead, and have Stroom fetch them. Pasting stays, for an example no Elastic Index doc covers.
 
+**Done** on the user's Stroom branch `gh-5848` (p-kimberley/stroom, 8d3dce37), checked against this request on
+21 October 2026: the request, response and statuses are as below, a component's `NOT_FOUND` carries a message too,
+and a doc of another type, or without an index name or cluster, answers 400 (the server then uses the doc's
+fields, saying why). The same branch adds a chat tool, `elastic_index_templates`, giving the same templates as
+Markdown (each name in a heading, its body in a `json` code block); the server reads that when pasted.
+
 The MCP server never connects to Elasticsearch itself: Stroom already holds each cluster's connection and
 credentials, and applies the user's permissions on the doc. So Stroom reads the templates and returns them.
 

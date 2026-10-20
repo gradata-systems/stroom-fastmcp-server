@@ -35,10 +35,56 @@ def _json(text: str, what: str) -> Any:
         raise ValueError(f"The {what} is not valid JSON: {e}") from e
 
 
+# What a PUT takes (checked on Elasticsearch 9.5). A GET also returns what Elasticsearch sets itself, which a PUT
+# refuses: created_date_millis and modified_date_millis ("a template property which is managed by the system"),
+# created_date and modified_date with ?human, and the lifecycle's rollover with ?include_defaults.
+INDEX_TEMPLATE_FIELDS = ('index_patterns', 'composed_of', 'template', 'priority', 'version', '_meta', 'data_stream',
+                         'allow_auto_create', 'ignore_missing_component_templates', 'deprecated')
+COMPONENT_TEMPLATE_FIELDS = ('template', 'version', '_meta', 'deprecated')
+_TEMPLATE_FIELDS = ('settings', 'mappings', 'aliases', 'lifecycle', 'data_stream_options')
+
+
+def as_put(body: Any, fields: tuple[str, ...] = INDEX_TEMPLATE_FIELDS) -> Any:
+    """A template as a GET returns it, kept to what a PUT takes. Asked for in testing: the user pasted GET output,
+    and the request to commit carried created_date_millis, which Elasticsearch refuses."""
+    if not isinstance(body, dict):
+        return body
+    body = {k: v for k, v in body.items() if k in fields}
+    if isinstance(body.get('template'), dict):
+        template = {k: v for k, v in body['template'].items() if k in _TEMPLATE_FIELDS}
+        if isinstance(template.get('lifecycle'), dict):
+            # Only rollover: a lifecycle's own settings grow from version to version.
+            template['lifecycle'] = {k: v for k, v in template['lifecycle'].items() if k != 'rollover'}
+        body['template'] = template
+    return body
+
+
+# Stroom's elastic_index_templates tool: each template's body as Elasticsearch returns it, in a json code block below
+# a heading naming it, among lines of prose. A part Stroom couldn't read has a line saying why instead of a block.
+_STROOM_HEADING = re.compile(r'^#{1,6}[ \t]*(Index|Component) template[ \t]+`([^`]+)`[ \t]*$', re.M | re.I)
+_FENCED = re.compile(r'^```[a-z]*[ \t]*\n(.*?)^```', re.M | re.S)
+
+
+def stroom_tool_templates(text: Any) -> list[tuple[str, str, Any]]:
+    """[(kind: 'index' or 'component', name, body or None if not read)] from the output of Stroom's
+    elastic_index_templates tool, pasted (asked for by the Stroom agent); [] for anything else."""
+    if not isinstance(text, str):
+        return []
+    headings = list(_STROOM_HEADING.finditer(text))
+    found = []
+    for n, heading in enumerate(headings):
+        section = text[heading.end():headings[n + 1].start() if n + 1 < len(headings) else len(text)]
+        block = _FENCED.search(section)
+        found.append((heading.group(1).lower(), heading.group(2),
+                      _json(block.group(1), f"{heading.group(1).lower()} template '{heading.group(2)}'") if block
+                      else None))
+    return found
+
+
 def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
-    """An Elasticsearch index template as the user pastes it: Dev Tools 'PUT _index_template/name {...}', the body, or
-    GET _index_template output; or an existing index's mapping (GET <index>/_mapping, or {mappings: ...}), which has
-    no index_patterns, so which indices it covers is not checked."""
+    """An Elasticsearch index template as the user pastes it: Dev Tools 'PUT _index_template/name {...}', the body,
+    GET _index_template output, or Stroom's elastic_index_templates output; or an existing index's mapping (GET
+    <index>/_mapping, or {mappings: ...}), which has no index_patterns, so which indices it covers is not checked."""
     text = text.strip()
     name = None
     # The request line, then the body on the next line or the same one (seen in Ask Stroom AI: an agent gave the
@@ -46,7 +92,13 @@ def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
     match = re.match(r'^(PUT|POST)\s+/?_index_template/([^\s?{]+)[^\n{]*', text, re.I)
     if match:
         name, text = match.group(2), text[match.end():]
-    body = _json(text, 'index template')
+    if from_stroom := [(n, b) for kind, n, b in stroom_tool_templates(text) if kind == 'index']:
+        name, body = from_stroom[0]
+        if body is None:
+            raise ValueError(f"Stroom didn't read index template '{name}' (its output says why): paste "
+                             f"GET _index_template/{name} instead")
+    else:
+        body = _json(text, 'index template')
     if isinstance(body, dict) and 'index_templates' in body:
         entry = (body['index_templates'] or [{}])[0]
         name, body = entry.get('name', name), entry.get('index_template', {})
@@ -60,7 +112,7 @@ def parse_template(text: str) -> tuple[str | None, dict[str, Any]]:
     if not isinstance(body, dict) or 'index_patterns' not in body:
         raise ValueError("Expected an Elasticsearch index template (index_patterns and template.mappings), or an "
                          "index's mapping (GET <index>/_mapping)")
-    return name, body
+    return name, as_put(body)
 
 
 def dev_tools(name: str | None, body: dict[str, Any]) -> str:
@@ -85,7 +137,7 @@ _COMPONENT_REQUEST = re.compile(r'(PUT|POST|GET)\s+/?_component_template/?([^\s?
 def parse_component_templates(texts: list[Any]) -> dict[str, dict[str, Any]]:
     """Component templates as the user pastes them, by name: Dev Tools 'PUT _component_template/name {...}', or GET
     _component_template output; several in one text (Kibana's responses to several requests, each after its '#'
-    line), or already JSON. Each needs its name, to be matched to composed_of. Seen in testing: re-sent by the agent,
+    line), Stroom's elastic_index_templates output, or already JSON. Each needs its name, to be matched to composed_of. Seen in testing: re-sent by the agent,
     the bodies came back as a GET response inside a GET response, and as an escaped JSON string."""
     found: dict[str, dict[str, Any]] = {}
 
@@ -99,15 +151,21 @@ def parse_component_templates(texts: list[Any]) -> dict[str, dict[str, Any]]:
             for entry in body['component_templates'] or []:
                 add(entry, None)
         elif isinstance(body, dict) and 'component_template' in body and body.get('name'):
-            found[body['name']] = body['component_template'] or {}
+            found[body['name']] = as_put(body['component_template'] or {}, COMPONENT_TEMPLATE_FIELDS)
         elif isinstance(body, dict) and name:
-            found[name] = body
+            found[name] = as_put(body, COMPONENT_TEMPLATE_FIELDS)
         else:
             raise ValueError("Give each component template with its name, as a Dev Tools request "
                              "(PUT _component_template/<name> {...}) or GET _component_template/<name> output, so it can "
                              "be matched to the index template's composed_of")
 
     def read(text: str) -> None:
+        if from_stroom := stroom_tool_templates(text):
+            # A component Stroom didn't read isn't given: asked for alone, as for any other.
+            for kind, name, body in from_stroom:
+                if kind == 'component' and body is not None:
+                    add(body, name)
+            return
         text, at, name = text.strip(), 0, None
         decoder = json.JSONDecoder()
         while at < len(text):

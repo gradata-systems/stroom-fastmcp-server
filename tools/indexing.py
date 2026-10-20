@@ -128,13 +128,16 @@ _STROOM_TO_ES = {'keyword': 'keyword', 'text': 'text', 'long': 'long', 'integer'
 _COMPONENTS = 'component_templates_given'
 
 
-def _given_components(ctx: Context, given: Any, names: list[str]) -> dict[str, dict[str, Any]]:
+def _given_components(ctx: Context, given: Any, names: list[str], example: Any = None) -> dict[str, dict[str, Any]]:
     """The component templates given now, by name, with those of names given earlier in the session: kept so the agent
     needn't send them again. Seen in testing: re-sent call after call, the bodies came back corrupted (a GET response
-    nested in another, an escaped string), and the user's template could never be agreed. Raises ValueError for one
-    that can't be read."""
+    nested in another, an escaped string), and the user's template could never be agreed. The example (or template)
+    pasted from Stroom's elastic_index_templates tool holds its component templates too: one paste. Raises
+    ValueError for one that can't be read."""
     from tools.plan import _user
-    parsed = parse_component_templates([given] if isinstance(given, (str, dict)) else list(given or []))
+    from utils.templatecheck import stroom_tool_templates
+    texts = [given] if isinstance(given, (str, dict)) else list(given or [])
+    parsed = parse_component_templates(texts + ([example] if stroom_tool_templates(example) else []))
     try:
         kept = ctx.lifespan_context.setdefault(_COMPONENTS, {}).setdefault(_user(ctx), {})
     except Exception:   # no session store: only what was given
@@ -803,7 +806,8 @@ async def draft_index_mapping(
     if example_template:
         try:
             _, example = parse_template(example_template)
-            components = _given_components(ctx, component_templates, example.get('composed_of') or [])
+            components = _given_components(ctx, component_templates, example.get('composed_of') or [],
+                                           example_template)
         except ValueError as e:
             raise ToolError(str(e)) from e
         wanted = components_wanted(example, components, without_components)
@@ -2725,7 +2729,7 @@ async def propose_index_template(
         try:
             _, example = parse_template(example_template)
             components = _given_components(ctx, component_templates, composition(
-                example.get('composed_of') or [], include, exclude))
+                example.get('composed_of') or [], include, exclude), example_template)
         except ValueError as e:
             raise ToolError(str(e)) from e
         wanted = components_wanted({'composed_of': composition(example.get('composed_of') or [], include, exclude)},
@@ -2834,7 +2838,7 @@ async def check_index_template(
                         "shown in this session)")
     try:
         name, body = parse_template(template)
-        components = _given_components(ctx, component_templates, body.get('composed_of') or [])
+        components = _given_components(ctx, component_templates, body.get('composed_of') or [], template)
     except ValueError as e:
         raise ToolError(str(e)) from e
     wanted = components_wanted(body, components, without_components)
