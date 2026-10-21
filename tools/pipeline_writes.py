@@ -663,15 +663,20 @@ async def set_pipeline_property(
         pipeline_uuid: Annotated[str, Field(description="A pipeline this server created.")],
         prop: Annotated[PropertyValue, Field(description="The property to set.")],
 ) -> dict[str, Any]:
-    """Set one element property on a pipeline this server created, e.g. schemaFilter.schemaGroup."""
+    """Set one element property on a pipeline this server created, in its build, e.g. schemaFilter.schemaGroup."""
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
-    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
+    build = await guard_from(ctx).check_in_build({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
     types = {e['id']: e['type'] for e in merge_layers(await stroom.pipeline_layers(pipeline_uuid))['elements']}
     elements = set(types)
     if prop.element not in elements:
         raise ToolError(f"No element '{prop.element}' in this pipeline; elements are {sorted(elements)}")
     _keep_validation(types, [prop])
+    if types[prop.element] == 'ElasticIndexingFilter' and prop.name == 'indexName' and isinstance(prop.value, str):
+        from tools.indexing import other_index
+        other = await other_index(ctx, build, prop.value, pipeline_uuid)
+        if other:
+            raise ToolError(f"{other} rename_index changes the index name in both, and the index template follows.")
     keys = await typed_properties(stroom, types, [prop])
     data = doc.get('pipelineData') or {}
     _set_property(data, prop.element, prop.name, await _value(stroom, prop, keys.get((prop.element, prop.name))))
@@ -692,7 +697,7 @@ async def set_pipeline_references(
     """
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
-    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
+    await guard_from(ctx).check_in_build({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
     merged = merge_layers(await stroom.pipeline_layers(pipeline_uuid))
     new = await reference_entries(stroom, merged, references)
     data = doc.get('pipelineData') or {}

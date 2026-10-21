@@ -26,7 +26,8 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 | Feed name and encoding | Creating the feed | Your naming convention, the sample's profile |
 | Template pipeline for the translation | Creating the events pipeline | Template pipelines and how existing pipelines use them |
 | How the index's fields are named: an example index template, an existing index to follow, or a convention | The start of indexing, in a form of its own | Where similar sources index, conventions, existing indexes |
-| Index backend, index doc name, index name or volume group, Elastic cluster and time field | Creating the index doc, once the agent has proposed them in the chat | The field plan, your naming convention, the clusters Stroom has |
+| Index backend, index doc name, index name or volume group, Elastic cluster and time field | Creating the index doc, once the agent has proposed them in the chat (an index name you change goes to the build's indexing pipelines too) | The field plan, your naming convention, the clusters Stroom has |
+| Another Elasticsearch index name | When you ask for one: the Elastic Index doc and the build's indexing pipelines change together, and the index template is proposed again | The doc's name now, the pipelines writing to it, and what the old name left on the cluster (its template, an index the build wrote to) for the admin to remove |
 | The index template (Elasticsearch) | Once it fits what the pipeline writes | Built from an example template: the one you paste, or the one an existing index's indices take, which Stroom reads for you |
 | A new version, or a change in place, with its names | Updating an events pipeline | Your versioning convention, e.g. V1.2 to V1.3 |
 | Columns of the verification dashboard | Verifying an index | The time field and the key fields |
@@ -42,7 +43,7 @@ Every request, answer and refusal is in the [audit log](audit.md), with how it w
 
 | Action | What the approval says |
 | --- | --- |
-| Processing the sample streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams. For Elasticsearch: that the agreed index template has been committed to the cluster (or, when you say one of your own is committed instead, that you go on without agreeing one, in a form first). For an index the pipeline already wrote to, what makes it start fresh, as for reprocessing |
+| Processing the sample streams, or a feed's streams, with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams. For Elasticsearch: that the agreed index template has been committed to the cluster (or, when you say one of your own is committed instead, that you go on without agreeing one, in a form first). For an index the pipeline already wrote to, what makes it start fresh, as for reprocessing |
 | Reprocessing streams with an events or indexing pipeline in a build (its filter is created enabled once you approve) | Which streams, at most 10 a call. For Elasticsearch: that the agreed index template has been applied to the cluster, and the request for the cluster admin to drop the index first (`DELETE _data_stream/<index>` or `DELETE <index>`), as documents already indexed stay; the template makes it again, and all the Events streams it should hold are processed again. For Lucene: that the build's own index is emptied first (its shards deleted), or else to delete its shards first |
 | Promoting a build | Every document and where it goes, with anything the checks found still missing, and the processor filters it creates (disabled, with no minimum creation time) |
 

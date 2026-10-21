@@ -415,6 +415,19 @@ class WriteGuard:
                             "promote_build writes it back after approval.")
         return tags
 
+    async def check_in_build(self, ref: dict[str, Any]) -> str:
+        """A doc this server created that sits in one of the workspace's build folders: that build. Index docs and
+        pipelines are changed only there (asked for by the user), whatever their tags say: a doc moved out of its
+        build in Stroom keeps them."""
+        await self.check_managed(ref)
+        build = await self.build_of(ref)
+        if not build:
+            audit('access_denied', reason='not_in_build', doc={k: ref.get(k) for k in ('type', 'uuid', 'name')})
+            raise ToolError(f"{ref.get('type')} '{ref.get('name') or ref.get('uuid')}' is not in a build folder: it is "
+                            f"changed only in a build. Make a working copy in one (copy_pipeline), or move it back "
+                            f"into its build folder in Stroom.")
+        return build
+
     async def check_built(self, ref: dict[str, Any]) -> list[str]:
         """A doc this server generated, whether still in the workspace or promoted."""
         tags = await self.tags(ref)

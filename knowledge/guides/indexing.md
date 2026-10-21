@@ -185,11 +185,22 @@ the approval, a `drop_first` reply asks the user to have the cluster admin drop 
 request (`DELETE _data_stream/<index>` when the agreed template makes a data stream, else `DELETE <index>`), and the
 call is made again with `index_dropped=true` once they say it is done. An existing index or data stream keeps the
 mapping it was made with, so a changed template only applies once it is dropped; the template stays on the cluster
-and makes it again as documents arrive.
+and makes it again as documents arrive, if the cluster connection's account may create it (the index privilege
+`auto_configure` or `create_index`): if it can't, the admin creates it again after the drop. An index Elasticsearch
+refused every earlier write to (403, or an index it won't make) holds nothing of the pipeline's, so it isn't dropped:
+fix what refused it first. A 403 is the account's privileges, or the wrong index: check the index name first.
 Every document goes, so process all the Events streams the index should hold again (`reprocess_streams` for those
 it indexed before). A build's own Lucene index (no other pipeline of the build writes to it) has its shards deleted
 by the server once the user approves; any other, the user deletes its shards first. A promoted indexing pipeline's
 filter carries `before_enabling`, the same thing to do before the user enables it.
+
+One index name throughout: the Elastic Index doc names it, the indexing pipeline writes to it, and the index
+template is named after it and matches it (a name built from values, `{_suffix}`, has them as wildcards in the
+pattern). `create_indexing_pipeline` refuses an `index_name` the doc doesn't name, and the template tools refuse an
+index other than that of a doc no other pipeline of the build writes to, or the example's own template name. When the user wants another name, `rename_index`
+sets it on the doc and every indexing pipeline of the build writing to it together, and the template is proposed
+again for it; its reply gives what the old name left on the cluster for the admin to remove. A name the user changes
+in the index doc's form goes to the build's pipelines too. Index docs and pipelines change only in their build folder.
 
 ## Verifying
 

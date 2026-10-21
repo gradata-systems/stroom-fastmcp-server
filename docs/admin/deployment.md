@@ -195,7 +195,8 @@ brackets.
 | `SAMPLE_MAX_TASKS` | `1` | Task limit on sample filters [`processing.sampleMaxTasks`] |
 | `MAX_FEED_FILTER_TASKS` | `2` | Task limit on feed filters made at promotion [`processing.maxFeedFilterTasks`] |
 | `MAX_RESPONSE_CHARS` | `100000` | Cap on a tool's reply [`limits.maxResponseChars`] |
-| `MAX_STREAM_CHARS` | `20000` | Cap on stream text returned [`limits.maxStreamChars`] |
+| `MAX_STREAM_CHARS` | `20000` | Cap on stepping and diagnosis text returned [`limits.maxStreamChars`] |
+| `READ_STREAM_CHARS` | `60000` | Record data `read_stream` returns a call; the agent may ask for up to 200,000 when the user does [`limits.readStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
 | `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([Audit log](../operate/audit.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet, or with `audit.file.persistence.existingClaim` one claim every replica shares, each pod's file named after it |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |

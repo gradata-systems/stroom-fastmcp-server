@@ -58,8 +58,10 @@ def _term(field: str, value: Any, condition: str = 'EQUALS') -> dict[str, Any]:
 
 
 async def _managed_pipeline(ctx: Context, uuid: str) -> dict[str, Any]:
+    """A pipeline this server created, in its build: processing it may set its batch size, and keeps its agreed
+    template."""
     doc = await gateway_from(ctx).get_doc('Pipeline', uuid)
-    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': uuid, 'name': doc.get('name')})
+    await guard_from(ctx).check_in_build({'type': 'Pipeline', 'uuid': uuid, 'name': doc.get('name')})
     return doc
 
 
@@ -436,6 +438,35 @@ async def _own_index(ctx: Context, pipeline_uuid: str, index: dict[str, Any]) ->
     return True
 
 
+# What Elasticsearch says when it refuses the writes themselves: the account, or an index it won't make.
+_REFUSED = re.compile(r'security_exception|is unauthorized for|index_not_found_exception|no such index', re.I)
+
+
+async def _writes_refused(stroom: StroomGateway, pipeline_uuid: str) -> str | None:
+    """Elasticsearch's reason, when it refused every stream this pipeline's filters processed (each has an Error stream
+    saying so, and nothing else came of it): what it was sent is not in the index. None otherwise, or when unsure."""
+    processed = set()
+    for f in await stroom.processor_filters(pipeline_uuid):
+        processed |= _selected_ids((f.get('queryData') or {}).get('expression'))
+    if not processed:
+        return None
+    reason = None
+    for stream_id in sorted(processed)[:10]:
+        errors = [m for m in await _outputs(stroom, stream_id, pipeline_uuid) if m.get('typeName') == 'Error']
+        if not errors:
+            return None     # processed without an error: its documents are in the index
+        try:
+            body = await stroom.fetch_data(errors[0]['id'], 0, 100, 'MARKER')
+        except ToolError:
+            return None
+        said = [m.get('message') or '' for m in body.get('markers') or [] if m.get('type') == 'storedError']
+        hit = next((s for s in said if _REFUSED.search(s)), None)
+        if not hit:
+            return None
+        reason = reason or _REFUSED.search(hit).group(0)
+    return reason
+
+
 def drop_request(pipeline: dict[str, Any], index_name: str) -> str:
     """The Dev Tools request dropping an Elasticsearch index: its data stream, as the agreed template makes it, or the
     index."""
@@ -456,11 +487,21 @@ async def _fresh_index(ctx: Context, pipeline: dict[str, Any], destination: dict
     may have aged off anyway)."""
     every = ("every document goes with it, so this processes all the Events streams the index should hold "
              "(reprocess_streams takes those this pipeline indexed before)")
+    refused = await _writes_refused(gateway_from(ctx), pipeline['uuid']) if destination else None
+    if refused:
+        # Nothing to drop: Elasticsearch refused every run's writes (seen in testing: a 403, the index dropped anyway,
+        # and the next run's auto-create refused again for an account that can't create it).
+        return {'earlier runs': (f"Elasticsearch refused what this pipeline sent '{destination['index name']}' before "
+                                 f"({refused}), so it holds nothing of this pipeline's: nothing is dropped. Approve only "
+                                 f"once what refused it is fixed, or it is refused again")}, False
     if destination:
         return {'already indexed': (f"'{destination['index name']}' holds what this pipeline indexed before: the "
                                     f"cluster admin drops it first, so it starts fresh: "
                                     f"{drop_request(pipeline, destination['index name'])}. The agreed template stays "
-                                    f"on the cluster and makes the index again as documents arrive; {every}")}, False
+                                    f"on the cluster and makes the index again as documents arrive, if the cluster "
+                                    f"connection's account may create it (the index privilege auto_configure or "
+                                    f"create_index); if it can't, the admin creates it again after the drop; "
+                                    f"{every}")}, False
     if lucene and await _own_index(ctx, pipeline['uuid'], lucene):
         return {'earlier documents': (f"deleted first: '{lucene.get('name')}' is this build's index, emptied so it starts "
                                       f"fresh (its shards are deleted); {every}")}, True
@@ -841,9 +882,9 @@ async def create_processor_filter(
 ) -> dict[str, Any]:
     """
     Create a processor filter for Stroom to process streams through the pipeline. Scope it to the sample stream
-    ids: for an events (or records) or indexing pipeline the user approves it in a form, then it is created enabled
-    and processing starts. A whole-feed scope, or any other pipeline (CEF output, reference data), is created
-    disabled, for the user to enable in Stroom (the pipeline's Processors tab); a feed scope needs a created_after
+    ids, or to a feed's streams: for an events (or records) or indexing pipeline the user approves it in a form, then
+    it is created enabled and processing starts. Any other pipeline (CEF output, reference data) is created
+    disabled, for the user to enable in Stroom (the pipeline's Processors tab). A feed scope needs a created_after
     bound and is limited to the configured task count. Streams the pipeline already processed are refused: use
     reprocess_streams for those. An indexing pipeline whose earlier Events have since been superseded (the
     translation processed their raw streams again) still has their documents in its index: a drop_first reply
@@ -936,15 +977,17 @@ async def create_processor_filter(
     from tools.plan import build_of, with_next
     common = {'pipeline': pipeline['name'], 'scope': scope, **({'events_from_pipeline': source['name']} if source else {}),
               **({'output_feed': output['name'], 'output_note': _output_note(output)} if output else {})}
-    if stream_ids and await _reprocess_runs(stroom, pipeline_uuid):
-        # The sample, through an events or indexing pipeline: processed once the user approves it (asked for by the
-        # user: sample filters made disabled were left for them to enable in Stroom).
+    if await _reprocess_runs(stroom, pipeline_uuid):
+        # The build's sample, or a feed's streams, through an events or indexing pipeline: processed once the user
+        # approves it (asked for by the user: filters made disabled were left for them to enable in Stroom, and in a
+        # build the agent asked them to, between its steps). Every such pipeline is in a build (_managed_pipeline).
         if 'already indexed' in details and not index_dropped:
             return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid,
                                                              'name': pipeline['name']}),
                                    _drop_first(stroom, pipeline, destination, lucene, details, 'create_processor_filter'))
         summary = (f"Create processor filter and process the sample\nProcess {len(stream_ids)} sample stream(s) with "
-                   f"'{pipeline['name']}'.")
+                   f"'{pipeline['name']}'." if stream_ids else
+                   f"Create processor filter and process the feed\nProcess {scope} with '{pipeline['name']}'.")
         if 'already indexed' in details:
             summary += " Approve only once the index is dropped, as said below."
         if 'index template' in details:
@@ -960,8 +1003,8 @@ async def create_processor_filter(
         result = {'filter_id': created['id'], **common, **({'batch_size': _BATCH_NOTE} if small else {}), 'enabled': True,
                   'hint': f"Processing has started: wait_for_processing with filter_id={created['id']}."}
         return await with_next(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': pipeline['name']}), result)
-    # A feed's streams, or a pipeline that sends elsewhere (CEF to Kafka) or loads reference data: disabled (asked for
-    # by the user), so there is no approval form: enabling it in Stroom is the user's approval.
+    # A pipeline that sends elsewhere (CEF to Kafka) or loads reference data: disabled (asked for by the user), so there
+    # is no approval form: enabling it in Stroom is the user's approval.
     small = bool(destination) and await development_batch(ctx, pipeline_uuid, True)
     created = await _create_filter(stroom, pipeline, expression, priority, max_tasks, min_ms, enabled=False)
     consent_from(ctx).discard(source_confirmation_id)

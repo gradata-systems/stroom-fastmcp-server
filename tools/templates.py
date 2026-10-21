@@ -78,6 +78,17 @@ def _unloadable(ctx: Context) -> dict[str, tuple[float, str]]:
     return store
 
 
+# The access policy's stage markers, set at startup (use_markers): every pipeline's stage is read by them, not only the
+# template search's. Seen: a translation pipeline found by the policy's markers, then classed 'other' when its sample
+# was processed, its filter made disabled for the user to enable.
+_POLICY_MARKERS: dict[str, StageMarkers] | None = None
+
+
+def use_markers(markers: dict[str, StageMarkers] | None) -> None:
+    global _POLICY_MARKERS
+    _POLICY_MARKERS = markers
+
+
 def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
               markers: dict[str, StageMarkers] | None = None) -> tuple[str, str | None]:
     indexers = [t for t in elements.values() if t in _INDEXING]
@@ -92,7 +103,7 @@ def _classify(elements: dict[str, str], properties: dict[tuple[str, str], Any],
         return 'forwarding', 'kafka'
     groups = {v for (e, n), v in properties.items() if n == 'schemaGroup'}
     types = {v for (e, n), v in properties.items() if n == 'streamType'}
-    for stage, marker in (markers or DEFAULT_MARKERS).items():
+    for stage, marker in (markers or _POLICY_MARKERS or DEFAULT_MARKERS).items():
         if groups & set(marker.schema_groups) or types & set(marker.stream_types):
             return stage, None
     return 'other', None

@@ -42,6 +42,7 @@ async def test_start_onboarding_profiles_every_file_and_returns_the_plan():
     assert result['profile']['format'] == 'key=value' and result['parser'] == 'DSParser'
     assert result['template'].startswith('Acme text v2 (its parser, DSParser') and result['text_converter'].startswith('needed: build_data_splitter')
     assert result['next']['step'] == 'feed' and len(result['plan']) == 15
+    assert result['task_list'] == plan.TASK_LIST and 'next.progress' in result['task_list']
     assert result['next']['call'] == {'tool': 'create_feed', 'arguments': {
         'build': 'onboard-fortios-firewall', 'name': '<the feed name the user confirmed>'}}
     with pytest.raises(ToolError, match='Give the sample files'):

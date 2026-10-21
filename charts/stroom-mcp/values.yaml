@@ -98,6 +98,7 @@ processing:
 limits:
   maxResponseChars: 100000
   maxStreamChars: 20000
+  readStreamChars: 60000
   maxSampleRecords: 500
 
 # Replaces the image's access_policy.yaml (where template pipelines are looked for) when set, e.g.

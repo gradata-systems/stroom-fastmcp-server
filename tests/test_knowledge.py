@@ -17,7 +17,7 @@ NOT_TOOLS = {'data_splitter', 'record_start', 'record_end', 'xml_fragments', 'js
              'strip_domain', 'event_logging_path', 'type_id', 'event_detail', 'stream_type', 'stream_ids',
              'loader_pipeline', 'replace_parser', 'output_type', 'source_pipeline_uuid', 'draft_code', 'pipeline_uuid',
              'index_uuid', 'index_itself', 'records_per_stream', 'skip_stream_ids', 'known_signatures', 'expect_events', 'filter_id',
-             'events_stream_ids',
+             'events_stream_ids', 'create_index',     # an Elasticsearch privilege
              'source_confirmation_id', 'confirmation_id', 'approval_id', 'field_mapping', 'pipeline_link', 'extra_fields',
              'index_name', 'timestamp_field', 'source_docs', 'sample_size', 'input_fields', 'working_copy', 'set_properties',
              'dev_tools', 'set_properties_note', 'xslt_input', 'text_converter', 'parser_properties', 'variable_min_reads',
@@ -91,6 +91,13 @@ def test_the_evaluation_readme_lists_every_case_and_workflow():
     cases = [p.stem for p in (ROOT / 'dev' / 'eval' / 'cases').glob('*.yaml')]
     assert not [c for c in cases if f'`{c}`' not in readme], 'evaluation cases the README lacks'
     assert not [w for w in workflows.WORKFLOWS if f'`{w}`' not in readme], 'workflows the README lacks'
+
+
+def test_the_instructions_keep_a_task_list_and_go_on_between_stages():
+    # Seen in testing: Stroom AI's agent kept no task list and stopped at the end of each stage to report.
+    text = ' '.join(resources.SERVER_INSTRUCTIONS.split())
+    assert "With a task-list tool (Stroom AI: task_list), write the plan's steps into it" in text
+    assert "A stage's end is no place to stop: don't end your turn to report it, go on to `next`" in text
 
 
 def test_the_instructions_send_the_users_decisions_to_the_clients_question_tool():

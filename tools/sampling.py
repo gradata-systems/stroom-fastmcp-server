@@ -214,7 +214,9 @@ async def survey_feed(
             ge=1000, le=5_000_000, description="Read at most this many characters from the start of each part; "
                                                "big streams are only sampled at their head. Default 250,000, or "
                                                "2,000,000 for stream_ids and a feed's last streams (read whole).")] = None,
-        max_parts_per_stream: Annotated[int, Field(ge=1, le=20)] = 3,
+        max_parts_per_stream: Annotated[int, Field(ge=1, le=20, description=(
+            "Parts of a stream to read (a stream of several files received at once has one each), not records: "
+            "max_records_per_stream counts records."))] = 3,
         max_records_per_stream: Annotated[int | None, Field(
             ge=10, le=10_000, description="Default 1,000, or 10,000 for stream_ids and a feed's last streams.")] = None,
         examples_per_shape: Annotated[int, Field(ge=1, le=10)] = 2,

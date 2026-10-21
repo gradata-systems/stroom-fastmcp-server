@@ -123,7 +123,7 @@ async def test_the_index_doc_reply_names_the_index_as_the_user_corrected_it():
                              get_doc=AsyncMock(side_effect=lambda t, u: {'name': 'ES_DEV'} if t == 'ElasticCluster'
                                                else {'uuid': 'i', 'name': 'TWITTER-ECS'}),
                              put_doc=AsyncMock(side_effect=lambda d: d), post=AsyncMock(return_value={'ok': True}))
-    guard = SimpleNamespace(create=AsyncMock(return_value={'uuid': 'i'}))
+    guard = SimpleNamespace(create=AsyncMock(return_value={'uuid': 'i'}), folder_contents=AsyncMock(return_value=[]))
     consent = SimpleNamespace(require=AsyncMock(return_value=None))
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     with patch.object(indexing, 'consent_from', lambda c: consent), patch.object(indexing, 'guard_from', lambda c: guard), \
@@ -278,7 +278,7 @@ async def test_a_discovery_template_waits_for_the_users_example_like_any_other()
     with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'stroom-discovery-acme-v1',
                                                                        'cluster': 'ES'})), \
             patch('tools.indexing._documents', AsyncMock(return_value=documents)), \
-            patch('tools.indexing.guard_from', lambda c: SimpleNamespace(check_managed=AsyncMock())):
+            patch('tools.indexing.guard_from', lambda c: SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'))):
         result = await indexing.propose_index_template(ctx, 'p1', plan, [7])
         # Without an example there is no template to commit: one applied to the cluster unagreed would still be
         # refused at indexing (seen in VS Code: the user committed it, and indexing was refused again).

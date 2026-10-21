@@ -140,7 +140,7 @@ def harness(monkeypatch, documents: list[dict], ruled: dict | None = None):
             patch('tools.indexing._documents', AsyncMock(return_value=documents)), \
             patch('tools.indexing._require_input', AsyncMock()), \
             patch('tools.indexing.indexing_xslt_digest', AsyncMock(return_value='abc')), \
-            patch('tools.indexing.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())), \
+            patch('tools.indexing.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'))), \
             patch('tools.indexing._kept_example', AsyncMock(return_value=None)), \
             patch('tools.builds.kept_mapping', AsyncMock(return_value=None)), \
             patch('tools.instructions.components_ruled',
@@ -528,7 +528,7 @@ async def _follow(monkeypatch, read, then=None):
                 raise read
             return read
         stroom.post = post
-        guard = SimpleNamespace(check_managed=AsyncMock(), folder_contents=store.folder_contents,
+        guard = SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), folder_contents=store.folder_contents,
                                 create_filled=store.create_filled)
         with patch('tools.indexing.require_events', AsyncMock()), \
                 patch('tools.indexing.summarise_events', AsyncMock(return_value=SIBLING_EVENTS)), \
@@ -609,3 +609,25 @@ async def test_a_template_stroom_isnt_allowed_to_read_falls_back_to_the_index_fi
     assert '50 fields' in asked['details']['read through Stroom']
     assert "may not read index templates" in asked['details']['its index template']
     assert 'composed_of' not in body and set(ECS_FIELDS) <= set(_properties(body))
+
+
+async def test_an_index_name_built_from_values_gets_a_template_matching_the_indices_it_makes(monkeypatch):
+    # Seen: 'ecs-acme-{_suffix}-v2*' as the pattern, which matches no index, its self-check passing it, and no commit
+    # button for the braces.
+    plan = ecs_plan()
+    built = {'index name': 'ecs-acme-{_suffix}-v2', 'cluster': 'ES_PROD'}
+    with harness(monkeypatch, _plan_docs(plan)) as (context, saved), \
+            patch('tools.indexing._destination', AsyncMock(return_value=built)):
+        body, _ = await _agreed(context, saved, plan, without_example=True)
+    assert body['index_patterns'] == ['ecs-acme-*-v2*']
+    agreed = read_agreed_template(saved['description'])
+    assert agreed['name'] == 'ecs-acme-v2' and agreed['dev_tools'].startswith('PUT _index_template/ecs-acme-v2\n')
+
+
+async def test_a_template_named_as_its_example_is_refused(monkeypatch):
+    plan = ecs_plan()
+    with harness(monkeypatch, _plan_docs(plan)) as (context, saved):
+        with pytest.raises(ToolError, match="the example index template's own name"):
+            await indexing.propose_index_template(context, 'p1', plan, [8], example_template=request(legacy_example()),
+                                                  component_templates=kibana(_components()),
+                                                  template_name='ecs-acme-v1')

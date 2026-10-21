@@ -1070,7 +1070,7 @@ async def set_index_fields(
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Index', index_uuid)
     ref = {'type': 'Index', 'uuid': index_uuid, 'name': doc.get('name')}
-    await guard_from(ctx).check_managed(ref)
+    await guard_from(ctx).check_in_build(ref)
     existing = await stroom.post('/dataSource/v1/findFields', {'dataSourceRef': ref, 'pageRequest': {'offset': 0, 'length': 500}})
     have = {f['fldName'] for f in existing.get('values') or []}
     added = []
@@ -1198,6 +1198,16 @@ async def create_index_doc(
                                 f"that, or another from find_elastic_clusters.") from e
             raise ToolError(f"No Elastic Cluster doc {cluster_uuid}: find_elastic_clusters lists them.") from e
         target = {'cluster': f"{cluster.get('name')}{why}", 'index name': index_name}
+        # Refused for a name none of the build's indexing pipelines writes to while one writes to no doc yet: that
+        # pipeline's doc is the one meant (seen in testing: the doc named one way, the pipeline another).
+        writing = await _build_destinations(ctx, build)
+        docs = list((await _build_index_docs(ctx, build)).values()) if writing else []
+        waiting = [p for p in writing if not any(_writes(p['index name'], n) for n in docs)]
+        if waiting and not any(_writes(p['index name'], index_name) for p in writing):
+            raise ToolError(f"The build's indexing pipeline '{waiting[0]['name']}' writes to "
+                            f"'{waiting[0]['index name']}', and no index doc names it yet: give "
+                            f"index_name='{waiting[0]['index name']}'. For another name the user wants, create the doc "
+                            f"with that one and then rename_index: it changes both.")
     else:
         target = {'volume group': volume_group}
     details = {'build': build, 'backend': backend, 'index doc': name, 'time field': time_field, **target}
@@ -1210,7 +1220,13 @@ async def create_index_doc(
         return gate
     # The user may have corrected the names in the form.
     name = edited(ctx, 'name', name)
+    proposed = index_name
     index_name = edited(ctx, 'index_name', index_name) if index_name else index_name
+    # The user gave another name in the form: the build's indexing pipelines writing to the one proposed take it too
+    # (asked for by the user: a name the user changes is changed everywhere it is used).
+    follow = [p for p in await _build_destinations(ctx, build) if _writes(p['index name'], proposed)] \
+        if backend == 'elasticsearch' and index_name != proposed else []
+    _literal_names(follow)
     if backend == 'elasticsearch':
         # The reply says what was made: seen in Ask Stroom AI, it kept the index name from before the user's edit,
         # and the agent offered that back to them as what the doc held.
@@ -1233,6 +1249,11 @@ async def create_index_doc(
                            "create_indexing_pipeline adds them from the plan kept with the indexing XSLT (save_xslt "
                            "index_plan=...).")
     elif backend == 'elasticsearch':
+        for p in follow:
+            await _set_index_name(ctx, p, index_name)
+        if follow:
+            extra['pipelines_renamed'] = (f"{[p['name'] for p in follow]} now write to '{index_name}' too (they wrote to "
+                                          f"'{proposed}'): its index template is agreed for '{index_name}'")
         try:
             extra['test'] = await test_elastic_index(ctx, doc['uuid'])
         except ToolError as e:
@@ -1382,7 +1403,15 @@ async def create_indexing_pipeline(
             except ToolError as e:
                 raise ToolError(f"index_uuid {index_uuid} is not an Elastic Index doc this template can index into: "
                                 f"give index_name (and cluster_uuid)") from e
-            index_name = index_name or elastic.get('indexName')
+            named = elastic.get('indexName')
+            if index_name and named and not _writes(index_name, named):
+                # Seen in testing: the index doc named as the user said, the pipeline the plan's name, and the index
+                # template made for the pipeline's, so for an index Stroom doesn't search.
+                raise ToolError(f"Elastic Index doc '{elastic.get('name')}' names index '{named}', and index_name "
+                                f"'{index_name}' doesn't write to it: leave index_name out (the doc's is used). If the "
+                                f"user wants '{index_name}', rename_index index_uuid={index_uuid} "
+                                f"index_name='{index_name}' first.")
+            index_name = index_name or named
             cluster_uuid = cluster_uuid or (elastic.get('clusterRef') or {}).get('uuid')
         if not index_name:
             raise ToolError("This template indexes into Elasticsearch: give index_name, or index_uuid (the Elastic "
@@ -1528,6 +1557,154 @@ def writes_to(properties: dict[tuple[str, str], Any], doc_type: str, uuid: str, 
                     or fnmatch.fnmatchcase(written.replace('*', ''), index_name):
                 return True
     return False
+
+
+def _writes(written: str, index_name: str) -> bool:
+    """Whether a pipeline's indexName writes to the index an Elastic Index doc names."""
+    return writes_to({('', 'indexName'): written}, 'ElasticIndex', '', index_name)
+
+
+def template_target(index: str) -> tuple[str, str]:
+    """(the index template's name, the index name its pattern is made from) for a pipeline's indexName: values it is
+    built from ({_suffix}) are wildcards in the pattern and left out of the name. Seen: a literal pattern
+    'ecs-windows{_suffix}v1*' that matched no index, the self-check passing it, the commit button dropped."""
+    if '{' not in index:
+        return index, index
+    name = re.sub(r'([-_.])[-_.]+', r'\1', re.sub(r'\{[^}]*\}', '', index)).strip('-_.')
+    return name or 'index', re.sub(r'\{[^}]*\}', '*', index)
+
+
+async def _build_destinations(ctx: Context, build: str) -> list[dict[str, Any]]:
+    """The build's Elasticsearch indexing pipelines with an index name: name, uuid, index name, element."""
+    stroom, out = gateway_from(ctx), []
+    for d in await guard_from(ctx).folder_contents(build):
+        if d['type'] != 'Pipeline':
+            continue
+        try:
+            merged = merge_layers(await stroom.pipeline_layers(d['uuid']))
+        except ToolError:   # one Stroom can't load: it writes nowhere yet
+            continue
+        element = next((e['id'] for e in merged['elements'] if e['type'] == 'ElasticIndexingFilter'), None)
+        written = next((p['value'] for p in merged['properties'] if p['element'] == element
+                        and p['name'] == 'indexName'), None) if element else None
+        if isinstance(written, str) and written:
+            out.append({'name': d['name'], 'uuid': d['uuid'], 'index name': written, 'element': element})
+    return out
+
+
+async def _build_index_docs(ctx: Context, build: str) -> dict[str, str]:
+    """The build's Elastic Index docs and the index name each names."""
+    stroom, named = gateway_from(ctx), {}
+    for d in await guard_from(ctx).folder_contents(build):
+        if d['type'] == 'ElasticIndex':
+            try:
+                named[d['name']] = (await stroom.get_doc('ElasticIndex', d['uuid'])).get('indexName')
+            except ToolError:   # gone since the build was listed
+                continue
+    return {doc: n for doc, n in named.items() if n}
+
+
+async def other_index(ctx: Context, build: str | None, written: str, pipeline_uuid: str | None = None) -> str | None:
+    """Why a pipeline's index name isn't the one meant: the build has an Elastic Index doc no other indexing pipeline of
+    the build writes to, and this name writes to no doc. None otherwise: a build may index into several indices, and an
+    index's doc may come after its pipeline (a discovery index, a second index for comparison)."""
+    if not build:
+        return None
+    names = await _build_index_docs(ctx, build)
+    if not names or any(_writes(written, n) for n in names.values()):
+        return None
+    others = [p for p in await _build_destinations(ctx, build) if p['uuid'] != pipeline_uuid]
+    waiting = {doc: n for doc, n in names.items() if not any(_writes(p['index name'], n) for p in others)}
+    if not waiting:
+        return None
+    shown = ', '.join(f"'{doc}' names '{n}'" for doc, n in waiting.items())
+    return (f"The indexing pipeline writes to '{written}', and the build's Elastic Index doc ({shown}), which no other "
+            f"pipeline of the build writes to, doesn't: an index template for '{written}' would be for an index Stroom "
+            f"doesn't search.")
+
+
+def _literal_names(pipelines: list[dict[str, Any]]) -> None:
+    """Refuse renaming a pipeline whose index name is built from values: the new name would lose them."""
+    built = [p for p in pipelines if '{' in p['index name']]
+    if built:
+        raise ToolError(f"Pipeline '{built[0]['name']}' builds its index name from values ('{built[0]['index name']}'): "
+                        f"another name would lose them. Ask the user for the name with the same values, and set it "
+                        f"on the pipeline (update_pipeline, its {built[0]['element']}.indexName) after the doc.")
+
+
+async def _set_index_name(ctx: Context, pipeline: dict[str, Any], index_name: str) -> None:
+    from tools.pipeline_writes import set_pipeline_property
+    await set_pipeline_property(ctx, pipeline['uuid'], PropertyValue(element=pipeline['element'], name='indexName',
+                                                                     value=index_name))
+
+
+_INDEX_NAME = re.compile(r'^[a-z0-9][a-z0-9._-]*$')
+
+
+async def rename_index(
+        ctx: Context,
+        index_uuid: Annotated[str, Field(description="The build's Elastic Index doc.")],
+        index_name: Annotated[str, Field(description="The index or data stream name the user wants instead.")],
+        confirmation_id: Annotated[str | None, Field(description="From an earlier needs_confirmation reply.")] = None,
+) -> dict[str, Any]:
+    """
+    Use another Elasticsearch index name wherever the build uses one, when the user asks for it: the Elastic Index
+    doc's index name and that of each of the build's indexing pipelines writing to it, together. Only in a build.
+    The template agreed for the old name doesn't apply to the new one: propose_index_template again (its name and
+    index pattern follow the new name). The user confirms in a form; the reply gives what the cluster admin removes
+    for the old name (its index template, and an index this build wrote to).
+    """
+    stroom, guard = gateway_from(ctx), guard_from(ctx)
+    try:
+        doc = await stroom.get_doc('ElasticIndex', index_uuid)
+    except ToolError as e:
+        raise ToolError(f"{index_uuid} is not an Elastic Index doc: give the build's (find_documents type "
+                        f"ElasticIndex). A Lucene index is named by its doc: nothing to rename.") from e
+    build = await guard.check_in_build({'type': 'ElasticIndex', 'uuid': index_uuid, 'name': doc.get('name')})
+    new, old = index_name.strip(), doc.get('indexName') or ''
+    if not _INDEX_NAME.match(new) or new in ('.', '..'):
+        raise ToolError(f"'{new}' is not an Elasticsearch index name: lowercase letters, digits, '-', '_' and '.', not "
+                        f"starting with '-', '_' or '+'; no wildcard, space or comma")
+    if new == old:
+        return {'type': 'ElasticIndex', 'uuid': index_uuid, 'name': doc.get('name'), 'index name': new,
+                'hint': f"The doc already names '{new}': nothing changed."}
+    pipelines = [p for p in await _build_destinations(ctx, build) if old and _writes(p['index name'], old)]
+    _literal_names(pipelines)
+    from tools.processing_writes import drop_request
+    from utils.mappingstore import read_agreed_template
+    removals = []
+    for p in pipelines:
+        held = await stroom.get_doc('Pipeline', p['uuid'])
+        agreed = read_agreed_template(held.get('description')) or {}
+        if agreed.get('name') and not agreed.get('by_user'):
+            removals.append(f"DELETE _index_template/{agreed['name']}")
+        if await stroom.processor_filters(p['uuid']):
+            removals.append(drop_request(held, old))
+    removals = list(dict.fromkeys(removals))
+    details = {'build': build, 'index doc': doc.get('name'), 'index name': f"'{old}', to be '{new}'",
+               'indexing pipelines changed with it': [p['name'] for p in pipelines] or 'none in the build yet',
+               'index template': f"proposed again for '{new}': the one agreed was for '{old}'"}
+    if removals:
+        details['for the cluster admin, once they no longer want them'] = removals
+    gate = await consent_from(ctx).require(ctx, 'confirmation', 'rename_index',
+                                           f"Use index name '{new}' instead of '{old}'", details, confirmation_id)
+    if gate:
+        return gate
+    doc['indexName'] = new
+    doc = await stroom.put_doc(doc)
+    for p in pipelines:
+        await _set_index_name(ctx, p, new)
+    from utils import useractions
+    buttons = [useractions.es_request(f'remove-old-{n}', r, f"No longer used: the build now writes to '{new}'")
+               for n, r in enumerate(removals, 1)]
+    from tools.plan import with_next
+    return await with_next(ctx, build, {
+        'type': 'ElasticIndex', 'uuid': doc['uuid'], 'name': doc['name'], 'index name': new, 'was': old,
+        'pipelines': [p['name'] for p in pipelines],
+        **({'for_the_cluster_admin': removals} if removals else {}), **useractions.actions(*buttons),
+        'hint': (f"The build now uses '{new}'. propose_index_template again for it (its name and index pattern follow "
+                 f"the new name), with the user's example, and have them confirm it; then index as before."
+                 + (" Give the user for_the_cluster_admin: what the old name left on the cluster." if removals else ''))})
 
 
 async def _index_fields(stroom, doc_type: str, ref: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2566,7 +2743,7 @@ async def _agree(ctx: Context, action: str, pipeline_uuid: str, destination: dic
     cluster. None once agreed."""
     stroom = gateway_from(ctx)
     doc = await stroom.get_doc('Pipeline', pipeline_uuid)
-    await guard_from(ctx).check_managed({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
+    await guard_from(ctx).check_in_build({'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': doc.get('name')})
     dev_tools = render_dev_tools(name, body)
     from utils.mappingstore import read_agreed_template
     kept = read_agreed_template(doc.get('description')) or {}
@@ -2711,8 +2888,10 @@ async def propose_index_template(
     plan = await _with_convention(ctx, plan, pipeline_uuid)
     destination = await _destination(ctx, pipeline_uuid)
     index = destination['index name']
-    name = template_name or index
-    body = plan.model_copy(update={'index_name': index}).elastic_template(name, priority)['body']
+    await _same_index(ctx, pipeline_uuid, index)
+    default_name, pattern = template_target(index)
+    name = template_name or default_name
+    body = plan.model_copy(update={'index_name': pattern}).elastic_template(name, priority)['body']
     notes, components = [], {}
     include, exclude, ruled = await _component_choices(ctx, pipeline_uuid, include_components)
     kept_note = None
@@ -2727,7 +2906,7 @@ async def propose_index_template(
                          + ("; what was given as example_template is not an index template" if example_template else ""))
     if example_template:
         try:
-            _, example = parse_template(example_template)
+            example_name, example = parse_template(example_template)
             components = _given_components(ctx, component_templates, composition(
                 example.get('composed_of') or [], include, exclude), example_template)
         except ValueError as e:
@@ -2736,8 +2915,9 @@ async def propose_index_template(
                                    components, without_components)
         if wanted:
             return wanted
+        _not_theirs(name, template_name, example_name, list(components) + list(example.get('composed_of') or []))
         # Every planned field: the example says what it is composed of, and so which fields are left to that.
-        full = plan.model_copy(update={'index_name': index}).elastic_template(name, priority, leave_to_component=False)
+        full = plan.model_copy(update={'index_name': pattern}).elastic_template(name, priority, leave_to_component=False)
         body, notes = from_example(full['body'], example, components, discovery=plan.discovery is not None,
                                    include=include, exclude=exclude, ecs_base=_ecs_base(example))
         notes = ruled + notes
@@ -2859,6 +3039,14 @@ async def check_index_template(
                        "bring them (propose_index_template builds it that way)")
     body, missing = compose(body, components)
     destination = await _destination(ctx, pipeline_uuid)
+    await _same_index(ctx, pipeline_uuid, destination['index name'])
+    default_name, _ = template_target(destination['index name'])
+    kept = await _kept_example(ctx, pipeline_uuid, [destination['index name']])
+    try:
+        example_name = parse_template(kept[0])[0] if kept else None
+    except ValueError:  # an example kept as fields only (an index read through Stroom): no template name
+        example_name = None
+    _not_theirs(name or default_name, name, example_name, [])
     await _require_input(ctx, pipeline_uuid, events_stream_ids)
     result = compare(body, await _documents(ctx, pipeline_uuid, events_stream_ids, max_records),
                      destination['index name'])
@@ -2876,15 +3064,38 @@ async def check_index_template(
         result['hint'] = ("Compatible, but this is a mapping, not an index template: propose_index_template with it as "
                           "example_template builds the index template to agree.")
         return result
-    gate = await _agree(ctx, 'check_index_template', pipeline_uuid, destination, name or destination['index name'],
+    gate = await _agree(ctx, 'check_index_template', pipeline_uuid, destination, name or default_name,
                         own, components, result['notes'], confirmation_id, reviewed)
     if gate:
         return _asking(gate, result)
-    result.update({'agreed': True, **_commit_action(result, name or destination['index name'], destination), 'hint': (
+    result.update({'agreed': True, **_commit_action(result, name or default_name, destination), 'hint': (
         "The user agreed this index template; it is kept with the pipeline. Once they say the cluster admin has "
         "committed it to the cluster, create_processor_filter: its approval asks them to confirm that, and starts "
         "indexing.")})
     return result
+
+
+async def _same_index(ctx: Context, pipeline_uuid: str, index: str) -> None:
+    """Refuse a template for an index other than the one the build's Elastic Index doc names."""
+    from tools.plan import build_of
+    other = await other_index(ctx, await build_of(ctx, {'type': 'Pipeline', 'uuid': pipeline_uuid, 'name': None}), index,
+                              pipeline_uuid)
+    if other:
+        raise ToolError(f"{other} Ask the user which name is meant; rename_index sets it in both (the pipeline and the "
+                        f"doc), then propose the template again.")
+
+
+def _not_theirs(name: str, given: str | None, example: str | None, components: list[str]) -> None:
+    """Refuse a template name that is the example's own (or one of its components'): committed, it would replace the
+    sibling source's template. Seen in testing: a template made under another index's name and for its indices."""
+    if name and name == example:
+        raise ToolError(f"'{name}' is the example index template's own name: committed, this template would replace "
+                        f"it, and the sibling source's index would follow this one. "
+                        + ("Leave template_name out (the new index's name is used), or give a name of its own."
+                           if given else "The index name is the example's: rename_index to the new index's own name."))
+    if name and name in components:
+        raise ToolError(f"'{name}' is a component template's name, not a name for this index template: leave "
+                        f"template_name out (the new index's name is used), or give a name of its own.")
 
 
 def _commit_action(result: dict[str, Any], name: str, destination: dict[str, Any]) -> dict[str, Any]:
@@ -3356,4 +3567,4 @@ async def find_events(
 
 
 ALL_TOOLS = [get_field_conventions, draft_index_mapping, propose_index_template, check_index_template,
-             find_elastic_clusters, create_index_doc, create_indexing_pipeline, verify_index, find_events]
+             find_elastic_clusters, create_index_doc, create_indexing_pipeline, rename_index, verify_index, find_events]

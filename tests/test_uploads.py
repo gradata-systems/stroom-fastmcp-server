@@ -254,7 +254,7 @@ async def test_samples_go_to_a_build_on_an_existing_feed_only_through_a_feed_mad
     from tools import feeds
     ref = {'type': 'Feed', 'uuid': 'f9', 'name': 'VPN-GATEWAY-MCP-TEST'}
     stroom = SimpleNamespace(get=AsyncMock(return_value=ref))
-    guard = SimpleNamespace(check_managed=AsyncMock(), build_of=AsyncMock(return_value='b'))
+    guard = SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), build_of=AsyncMock(return_value='b'))
     entries = {'f9': {'output_for': ['VPN-GATEWAY']}}
     with patch.object(feeds, 'gateway_from', lambda ctx: stroom), patch.object(feeds, 'guard_from', lambda ctx: guard), \
             patch('tools.plan.works_from', AsyncMock(return_value=['VPN-GATEWAY'])), \

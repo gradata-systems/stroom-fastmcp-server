@@ -2,6 +2,7 @@
 working copy. Seen in VS Code: `next` said create_feed and upload_sample whatever the build was, so the agent uploaded
 a workspace file though the user chose production streams, and made a new feed to build an indexing pipeline's next
 version."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -15,7 +16,7 @@ def _doc(kind, uuid, name, **extra):
 
 
 async def status(docs, sources=(), stages=None, mappings=None, stepped=False, verified=False, own_raw=False,
-                 survey=None, checks=(), kept=None):
+                 survey=None, checks=(), kept=None, parsers=None):
     stroom = SimpleNamespace(
         get_doc=AsyncMock(side_effect=lambda t, u: {'uuid': u, 'name': {'prod-ev': 'ACME-V1.0-Events'}.get(u, u),
                                                     'description': u}),
@@ -31,7 +32,7 @@ async def status(docs, sources=(), stages=None, mappings=None, stepped=False, ve
             patch.object(plan, 'sample_streams', AsyncMock(return_value={'Raw Events': [{'id': 7}]} if own_raw else {})), \
             patch.object(plan, 'sample_format', AsyncMock(return_value=None)), \
             patch('utils.mappingstore.read_mapping', lambda d: (mappings or {}).get(d)), \
-            patch('tools.templates._shape', AsyncMock(side_effect=lambda s, u: {'stage': (stages or {})[u], 'parser': None})), \
+            patch('tools.templates._shape', AsyncMock(side_effect=lambda s, u: {'stage': (stages or {})[u], 'parser': (parsers or {}).get(u)})), \
             patch('tools.pipeline_writes.open_slots', AsyncMock(return_value=[])), \
             patch('tools.pipelines.merge_layers', lambda layers: {}), \
             patch('tools.stepping.stepped_clean', AsyncMock(return_value=stepped)), \
@@ -251,3 +252,45 @@ async def test_an_existing_feeds_format_is_read_from_its_survey():
     result = await status(docs, sources=['ACME'], survey=survey, stages={'ev': 'translation'},
                           mappings={'x': ('translation', {})})
     assert states(result)['converter'] == 'to do'      # delimited text needs a Data Splitter
+
+def _json_line(n: int, size: int = 0) -> str:
+    return json.dumps({'id': n, 'action': 'login', 'detail': 'x' * size})
+
+
+async def test_a_json_feeds_long_records_cut_in_its_survey_doc_need_no_converter():
+    # Seen in testing: JSON lines of 4,720 characters, kept cut at 4,000 in the survey doc, joined with the others
+    # read as text, and build_status asked for a Data Splitter (step 1 of 14) all through the build.
+    from utils.surveydoc import MAX_EXAMPLE_CHARS
+    cut = _json_line(2, 4720)[:MAX_EXAMPLE_CHARS]
+    kept = {'saturated': True, 'format': 'json lines', 'shapes': {
+        'a': {'examples': [{'text': _json_line(1), 'location': {'stream': 5, 'part': 0, 'record': 1}},
+                           {'text': cut, 'location': {'stream': 5, 'part': 0, 'record': 2}},
+                           {'text': _json_line(3), 'location': {'stream': 5, 'part': 0, 'record': 3}}]}}}
+    stroom = SimpleNamespace(get_doc=AsyncMock(return_value={}))
+    with patch('utils.surveydoc.read_state', lambda text: kept), patch('utils.stroom.body_text', lambda d: ''):
+        survey = await plan._survey_state(stroom, [{'uuid': 's'}])
+    assert cut not in survey['sample'] and len(survey['sample'].splitlines()) == 2
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'), _doc('XSLT', 'x', 'X')]
+    result = await status(docs, sources=['ACME'], survey=survey, stages={'ev': 'translation'},
+                          mappings={'x': ('translation', {})})
+    assert result['sample']['format'] == 'json lines' and states(result)['converter'] == 'not needed'
+    assert result['next']['step'] != 'converter'
+
+
+@pytest.mark.parametrize('sample', [None, '{"id": 1, "detail": "cut sh\n{"id": 2}'])
+async def test_without_whole_examples_the_surveys_own_format_stands(sample):
+    # Every example cut (none left), or examples that don't profile together: build_status failed on them.
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'), _doc('XSLT', 'x', 'X')]
+    survey = {'saturated': True, 'locations': None, 'streams': [5], 'sample': sample, 'format': 'json lines'}
+    result = await status(docs, sources=['ACME'], survey=survey, stages={'ev': 'translation'},
+                          mappings={'x': ('translation', {})})
+    assert result['sample']['format'] == 'json lines' and states(result)['converter'] == 'not needed'
+
+
+async def test_an_events_pipeline_reading_json_itself_needs_no_converter():
+    # Whatever the examples read as: the pipeline's JSON parser, stepped clean, is what reads the feed.
+    docs = [_doc('Documentation', 's', 'ACME - Survey'), _doc('Pipeline', 'ev', 'ACME-Events'), _doc('XSLT', 'x', 'X')]
+    survey = {'saturated': False, 'locations': None, 'streams': [5], 'sample': 'time,user,action\n10:00,alice,login\n'}
+    args = dict(sources=['ACME'], survey=survey, stages={'ev': 'translation'}, mappings={'x': ('translation', {})})
+    assert states(await status(docs, parsers={'ev': 'JSONParser'}, **args))['converter'] == 'not needed'
+    assert states(await status(docs, parsers={'ev': 'DSParser'}, **args))['converter'] == 'to do'

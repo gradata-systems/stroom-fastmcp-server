@@ -11,7 +11,7 @@ from tools import explorer, indexing, pipeline_writes, plan, streams, translatio
 
 def test_the_surface_is_smaller_and_every_core_tool_names_its_plan_step():
     tools = {t.__name__: t for m in main_tools.TOOL_MODULES for t in m.ALL_TOOLS}
-    assert len(tools) <= 57, sorted(tools)     # 53: draft_cef_mapping (CEF for ArcSight); 54: review_coverage; 55: describe_feed; 56: rebuild_mapping; 57: find_events
+    assert len(tools) <= 58, sorted(tools)     # 53: draft_cef_mapping (CEF for ArcSight); 54: review_coverage; 55: describe_feed; 56: rebuild_mapping; 57: find_events; 58: rename_index
     for gone in ('list_build', 'get_document', 'describe_pipeline', 'validate_events', 'create_xslt', 'update_xslt',
                  'set_pipeline_property', 'run_test_searches', 'summarise_events'):
         assert gone not in tools
@@ -320,7 +320,7 @@ async def test_schema_validation_is_never_changed_only_the_output():
             {'id': 'xsltFilter', 'type': 'XSLTFilter'}, {'id': 'schemaFilter', 'type': 'SchemaFilter'}]}}}]),
         put_doc=AsyncMock())
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
-    guard = SimpleNamespace(check_managed=AsyncMock())
+    guard = SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'))
     with patch.object(pipeline_writes, 'guard_from', lambda c: guard):
         with pytest.raises(ToolError, match='Fix the output instead'):
             await pipeline_writes.set_pipeline_property(ctx, 'p', pipeline_writes.PropertyValue(

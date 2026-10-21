@@ -364,7 +364,7 @@ async def test_the_user_confirms_the_template_or_their_correction_and_it_is_kept
     with patch('tools.indexing._destination', AsyncMock(return_value={'index name': 'ecs-acme-v2', 'cluster': 'ES_DEV'})), \
             patch('tools.indexing._documents', AsyncMock(return_value=documents)), \
             patch('tools.indexing.indexing_xslt_digest', AsyncMock(return_value='abc')), \
-            patch('tools.indexing.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+            patch('tools.indexing.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'))):
         # Shown first: the whole request for the chat, formatted (seen in VS Code: in a form it was one unformatted
         # line, and an invalid template was agreed).
         shown = await indexing.propose_index_template(context, 'p1', plan, [8], example_template=EXAMPLE,

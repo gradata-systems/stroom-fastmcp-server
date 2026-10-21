@@ -35,11 +35,11 @@ _RULES = """Rules for every run:
   stepped as saved; code written by hand is tried with draft_code before it is saved.
 - Document what you build (write_documentation; stream_ids default to the streams its current code last stepped
   clean on) and use the user's source notes for field meanings.
-- A sample's processor filter (create_processor_filter stream_ids=, an events or indexing pipeline) runs once the user
-  approves it in a form: Elasticsearch, only once the agreed index template is committed. An index the pipeline
-  wrote to before comes first: a drop_first reply, with a button; once the user says it is dropped, call again with
-  index_dropped=true for the form. Then wait_for_processing with its filter_id. Any other filter (a whole
-  feed, a CEF output, reference data) is created disabled, as promotion's are: give the user its pipeline_link, what
+- A processor filter on an events or indexing pipeline (create_processor_filter stream_ids=, or a feed's streams)
+  runs once the user approves it in a form: Elasticsearch, only once the agreed index template is committed. An index
+  the pipeline wrote to before comes first: a drop_first reply, with a button; once the user says it is dropped, call
+  again with index_dropped=true for the form. Then wait_for_processing with its filter_id. Any other filter (a CEF
+  output, reference data) is created disabled, as promotion's are: give the user its pipeline_link, what
   enabling does and anything before_enabling says; ask them to enable it on the pipeline's Processors tab and to tell
   you when they have. Then wait_for_processing with its filter_id: never before.
 - Reprocessing in a build, after a fix (reprocess_streams, at most 10 streams a call, one task at a time): for an
@@ -78,7 +78,9 @@ them and returns the plan), then stage 1, the events pipeline (feed, samples upl
 mapping, step every record, process, validate the Events, document), then stage 2, indexing, which reads the Events
 streams stage 1 produced, then promotion. One tool call is never the whole job: every write tool's result carries
 `next`, the plan's next step, and `done: false` until promotion; build_status shows every step's state. Keep going
-until `next` says promote. A task list you keep follows `next.progress`: the steps done, and the one now. A result's
+until `next` says promote. With a task-list tool (Stroom AI: task_list), write the plan's steps into it at the start and keep it to
+`next.progress` (the steps done, and the one now). A stage's end is no place to stop: don't end your turn to report
+it, go on to `next`; end your turn only for the user (a form, a paste, `user_actions`, promotion). A result's
 `user_actions` are the user's steps (enabling a filter, an Elasticsearch request for the cluster admin, a document to
 open), which a client may show as buttons: still say what each is for and wait for the user, and never take one as
 done; the next call reads Stroom to see. Never start with an indexing pipeline for raw data; create_indexing_pipeline refuses

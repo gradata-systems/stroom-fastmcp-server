@@ -2,15 +2,15 @@
 
 ## Processor filters
 
-**Processing the sample streams through an events (or records) or indexing pipeline in a build**, or
-**reprocessing** one after a fix: you approve it in a form, and the server creates the filter enabled so it runs
+**Processing the sample streams, or a feed's streams, through an events (or records) or indexing pipeline in a
+build**, or **reprocessing** one after a fix: you approve it in a form, and the server creates the filter enabled so it runs
 straight away. For Elasticsearch, the approval also confirms the agreed index template is committed to the cluster.
 If you committed an index template of your own instead of agreeing one with the agent, say so: you confirm that in a
 form of its own (the server doesn't check your template against what the pipeline writes), and it is recorded with
 the pipeline in place of an agreed one, so you aren't asked again.
 
-Every other processor filter is created **disabled**: a whole-feed scope, any other pipeline in a build (a CEF
-output, which sends to Kafka, or reference data), and a promoted pipeline's filter. Enabling one, and so starting
+Every other processor filter is created **disabled**: any other pipeline in a build (a CEF output, which sends to
+Kafka, or reference data), and a promoted pipeline's filter. Enabling one, and so starting
 processing, is yours, on the pipeline's Processors tab in Stroom. The agent gives you the pipeline's link and what
 enabling it will do (which streams, where the output goes, and anything to do first, such as having the
 Elasticsearch index template committed), then waits for you to say it's enabled before it waits for the processing.
@@ -21,6 +21,7 @@ one.
 | --- | --- | --- | --- |
 | Sample processing in a build | The sample stream ids only (`Meta Id IN (...)`) | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 1 (`STROOM_MCP_SAMPLE_MAX_TASKS`) |
 | Reprocessing in a build | At most 10 streams a call (`STROOM_MCP_MAX_REPROCESS_STREAMS`) | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 1 (`STROOM_MCP_REPROCESS_MAX_TASKS`) |
+| A feed in a build | The feed's streams created after a time you approve | Enabled once you approve, for an events or indexing pipeline; otherwise disabled | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 | A promoted pipeline's feed | Everything on its feed, existing data and the streams the pipeline processed in its build included | Disabled | 2 (`STROOM_MCP_MAX_FEED_FILTER_TASKS`) |
 
 Other limits:

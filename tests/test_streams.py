@@ -36,15 +36,19 @@ async def test_a_record_the_size_limit_would_cut_is_left_for_the_next_page():
     event = ('<?xml version="1.1" encoding="UTF-8"?><Events xmlns="event-logging:3"><Event><EventDetail>'
              '<TypeId>x</TypeId></EventDetail></Event></Events>')
     body = {'data': event, 'dataType': 'SEGMENTED', 'totalItemCount': {'count': 10}}
-    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(max_stream_chars=len(event) * 3 - 5))
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(read_stream_chars=len(event) * 3 - 5))
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     read = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5)
     assert len(read['records']) == 2 and all(etree.fromstring(r.encode()) is not None for r in read['records'])
     assert read['next_first_record'] == 2 and 'truncated' not in read
     # A single record larger than the limit is still returned (cut), flagged.
-    stroom.settings.max_stream_chars = 40
+    stroom.settings.read_stream_chars = 40
     one = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5)
     assert len(one['records']) == 1 and one['truncated']
+    # The limit is characters, which the user may raise: then all five fit.
+    assert 'not of records' in read['hint'] and 'max_chars' in one['hint']
+    more = await streams.read_stream(ctx, stream_id=7, first_record=0, record_count=5, max_chars=len(event) * 5 + 10)
+    assert len(more['records']) == 5 and 'truncated' not in more
 
 
 async def test_a_raw_stream_held_as_one_record_is_read_by_its_records():
@@ -54,7 +58,7 @@ async def test_a_raw_stream_held_as_one_record_is_read_by_its_records():
     lines = [f'<Event xmlns="urn:win"><Id>{n}</Id></Event>' for n in range(1000)]
     text = '\n'.join(lines) + '\n'
     body = {'data': text[:500], 'dataType': 'NON_SEGMENTED', 'totalItemCount': {'count': 1}}
-    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(max_stream_chars=20_000))
+    stroom = SimpleNamespace(fetch_data=AsyncMock(return_value=body), settings=SimpleNamespace(read_stream_chars=60_000))
     ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
     with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(text, False))):
         read = await streams.read_stream(ctx, stream_id=7, first_record=450, record_count=2)

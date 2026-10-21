@@ -86,6 +86,7 @@ TOOLS: dict[str, tuple[str, bool, bool, bool]] = {
     'check_index_template': ('indexing', False, False, True),
     'create_index_doc': ('indexing', False, False, True),
     'create_indexing_pipeline': ('indexing', False, False, False),
+    'rename_index': ('indexing', False, False, True),
     'verify_index': ('indexing', False, False, False),              # its dashboard, and the verified record
     'find_events': ('indexing', True, False, False),
     # cef

@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Upper bound on serialized tool output, to protect the model's context window.
     max_response_chars: int = 100_000
     max_stream_chars: int = 20_000
+    # Record data read_stream returns a call, unless the call asks for more (max_chars, up to 200,000): seen in testing,
+    # 20,000 held four of a source's 4,720-character JSON lines, and the agent took it for a limit of records.
+    read_stream_chars: int = 60_000
     # Raw text the server reads itself from sample streams (stream_ids in place of sample text) to profile, infer a
     # splitter, draft and check a mapping: never returned whole, so it is bounded by the server, not the model.
     max_sample_chars: int = 1_000_000

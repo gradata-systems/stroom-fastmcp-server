@@ -98,7 +98,7 @@ async def test_an_indexing_xslt_saved_from_its_plan_gets_the_required_imports():
 async def test_saving_over_an_xslt_is_held_to_the_required_imports_too():
     from tools import translation
     stroom = SimpleNamespace(get_doc=AsyncMock(return_value={'uuid': 'x', 'name': 'ACME-Events', 'data': ''}))
-    guard = SimpleNamespace(check_managed=AsyncMock(), build_of=AsyncMock(return_value='b'))
+    guard = SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), build_of=AsyncMock(return_value='b'))
     hand = '<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="3.0"><Events/></xsl:stylesheet>'
     with patch.object(translation, '_checked', AsyncMock()), patch.object(translation, 'gateway_from', lambda c: stroom), \
             patch.object(translation, 'guard_from', lambda c: guard), \

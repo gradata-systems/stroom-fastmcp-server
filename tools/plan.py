@@ -86,6 +86,12 @@ def checklist() -> list[dict[str, str]]:
             for s, w, t in steps]
 
 
+# With the plan when a build starts. Seen in testing: no task list kept, and the agent stopped at the end of each stage
+# to report.
+TASK_LIST = ("With a task-list tool (Stroom AI: task_list), write plan's steps into it now, and keep it to each result's "
+             "next.progress. Go on from stage to stage without stopping to report.")
+
+
 def onboarding_checklist() -> list[dict[str, str]]:
     """A new source's steps: without an existing feed's survey rounds or CEF output, which other builds take."""
     return [s for s in checklist() if s['step'] != 'covered' and s['stage'] != '3 output']
@@ -165,7 +171,7 @@ async def _survey_state(stroom, surveys: list[dict[str, Any]]) -> dict[str, Any]
     """What the build's survey docs say: covered (saturated) when every one is, every example's location (for
     step_records, at most 60), and examples of the records (to profile the feed's format)."""
     from utils.stroom import body_text
-    from utils.surveydoc import read_state
+    from utils.surveydoc import MAX_EXAMPLE_CHARS, read_state
     states = []
     for d in surveys:
         try:
@@ -179,11 +185,14 @@ async def _survey_state(stroom, surveys: list[dict[str, Any]]) -> dict[str, Any]
     examples = [e for s in states for shape in (s.get('shapes') or {}).values() for e in shape.get('examples') or []]
     locations = [e['location'] for e in examples if e.get('location')]
     streams = sorted({int(loc['stream']) for loc in locations if str(loc.get('stream', '')).isdigit()})
+    # Only whole examples make the sample: one the survey doc cut short isn't the format any more (seen in testing:
+    # JSON lines of 4,720 characters, kept cut at 4,000, read as text, and the plan asked for a Data Splitter).
+    whole = [e['text'] for e in examples if len(e.get('text') or '') < MAX_EXAMPLE_CHARS]
     return {'saturated': all(s.get('saturated') for s in states),
             'format': next((s['format'] for s in states if s.get('format')), None),
             'locations': locations if 0 < len(locations) <= 60 else None,
             'streams': streams[-10:],
-            'sample': '\n'.join(e['text'] for e in examples[:20]) or None}
+            'sample': '\n'.join(whole[:20]) or None}
 
 
 async def source_feeds(ctx: Context, build: str, docs: list[dict[str, Any]]) -> list[str]:
@@ -234,6 +243,23 @@ async def sample_format(ctx: Context, build: str, docs: list[dict[str, Any]] | N
         # messages' "User: x" taken for pairs, and create_pipeline refused the XMLFragmentParser (Qwen, VS Code).
         text = text[:text.rstrip('\n').rfind('\n') + 1]
     return {'stream_id': newest['id'], 'feed': newest['feed'], **text_format(text)}
+
+
+# Parsers that read the raw data themselves: no text converter before them.
+_NO_CONVERTER = ('JSONParser', 'XMLParser')
+
+
+def _survey_format(survey: dict[str, Any]) -> dict[str, Any]:
+    """An existing feed's format from its survey: its examples profiled, or, when there are none whole or they don't
+    profile, the format the survey split the streams by (read from whole text)."""
+    if survey.get('sample'):
+        try:
+            return text_format(survey['sample'])
+        except ToolError:   # examples that don't profile together: the survey's own reading stands
+            pass
+    fmt = survey.get('format') or 'unknown text'
+    return {'format': fmt, 'suggested_parser': PARSER_FOR_FORMAT.get(fmt, ('DSParser',))[0],
+            'needs_text_converter': fmt in TEXT_FORMATS or fmt == 'xml fragments'}
 
 
 def text_format(text: str) -> dict[str, Any]:
@@ -459,10 +485,10 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     existing = bool(sources or copies)
     own_feed = bool(by_type.get('Feed'))
     survey = await _survey_state(stroom, surveys) if surveys and existing else None
-    if survey and not fmt and survey.get('sample'):
+    if survey and not fmt and (survey.get('sample') or survey.get('format')):
         # The format of an existing feed, from the survey's examples: whether a text converter is needed.
         # Seen (e2e_existing_feed): profile()'s own result has no needs_text_converter, and the plan failed.
-        fmt = text_format(survey['sample'])
+        fmt = _survey_format(survey)
         if survey.get('format') == 'xml' and fmt['format'] != 'xml' and survey.get('streams'):
             # The examples are one document's records without its root: joined, they read as XML fragments (seen in
             # production: a <tweets> feed, and the plan said XMLFragmentParser). A surveyed stream's head is the document.
@@ -514,7 +540,10 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     done: dict[str, bool | None] = {
         'feed': bool(by_type.get('Feed')),
         'samples': bool(raw),
-        'converter': (bool(by_type.get('TextConverter')) if fmt and fmt['needs_text_converter'] else None),
+        # Not needed either once the events pipeline reads the raw data with a JSON or XML parser: its clean step is
+        # what proves the format (seen in testing: a JSON-lines feed's working pipeline, and step 1 still to do).
+        'converter': (bool(by_type.get('TextConverter')) if fmt and fmt['needs_text_converter']
+                      and not any(p['parser'] in _NO_CONVERTER for p in translation) else None),
         # A copied pipeline's XSLT is there already, with its mapping or written by hand.
         'translation': any(x['mapping'] == 'translation' for x in xslts)
                        or (existing and bool(translation) and any(x['mapping'] != 'index' for x in xslts)),
@@ -772,7 +801,7 @@ async def start_onboarding(
         'text_converter': ('needed: build_data_splitter from a spec, then save_text_converter' if fmt in TEXT_FORMATS else
                            'needed: the XML fragment wrapper (profile text_converter); build_data_splitter save_as=<name> saves it' if fmt == 'xml fragments' else
                            'not needed: the template\'s parser reads this format'),
-        'plan': plan,
+        'plan': plan, 'task_list': TASK_LIST,
         'next': nxt or dict(zip(('step', 'do', 'call', 'then'),
                                 ('feed', plan[0]['what'], *next_call('feed', name, [], [], [], None, None)))),
         'done': False,
@@ -814,7 +843,7 @@ async def _files_first(ctx: Context, source_name: str, files: list[str], build: 
     call, then = next_call('feed', name, [], [], [], None, None)
     return {
         'build': name, 'folder': folder['_path'], 'source': source_name, 'files': files,
-        'plan': plan,
+        'plan': plan, 'task_list': TASK_LIST,
         'next': {'step': step, 'do': do, 'call': call, 'then': then},
         'then': [f"upload_sample feed=<the feed> files={files}: run each command it gives in the user's terminal; "
                  f"each prints the stream_id",
@@ -841,7 +870,8 @@ STEP_OF = {
     'check_events': 'validated', 'write_documentation': 'documented',
     'get_field_conventions': 'index', 'draft_index_mapping': 'index', 'create_index_doc': 'index',
     'create_indexing_pipeline': 'indexing_pipeline', 'propose_index_template': 'index_template',
-    'check_index_template': 'index_template', 'verify_index': 'indexed', 'promote_build': 'promoted',
+    'check_index_template': 'index_template', 'rename_index': 'index_template', 'verify_index': 'indexed',
+    'promote_build': 'promoted',
 }
 
 

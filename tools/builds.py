@@ -72,14 +72,14 @@ async def start_build(
                 break
     if existing:
         await build_record.add_source_feeds(guard, build, existing)
-    from tools.plan import next_step, onboarding_checklist
+    from tools.plan import TASK_LIST, next_step, onboarding_checklist
     from utils.stroom import not_found
     return {'build': build, 'folder': folder['_path'], 'uuid': folder['uuid'],
             **({'works_from': existing} if existing else {}),
             **({'not_found': not_found(gateway_from(ctx).settings, f"No feed named {', '.join(map(repr, missing))}")
                 + " (A feed this build is to create is fine: it doesn't exist yet.)"} if missing else {}),
             'standing_instructions': await applicable_instructions(ctx, folders, feeds),
-            'plan': onboarding_checklist(), 'next': await next_step(ctx, build), 'done': False}
+            'plan': onboarding_checklist(), 'task_list': TASK_LIST, 'next': await next_step(ctx, build), 'done': False}
 
 
 async def _build_docs(ctx: Context, build: str) -> list[dict[str, Any]]:

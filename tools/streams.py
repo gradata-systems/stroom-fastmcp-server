@@ -101,13 +101,17 @@ async def read_stream(
         record_count: Annotated[int, Field(ge=1, le=100)] = 5,
         child_type: Annotated[str | None, Field(
             description="Read a child part instead, e.g. 'Meta Data' (receipt headers) or 'Context'.")] = None,
+        max_chars: Annotated[int | None, Field(ge=1000, le=200_000, description=(
+            "Characters of record data to return: leave the default (60,000) unless the user asks for more, for long "
+            "records; up to 200,000."))] = None,
 ) -> dict[str, Any]:
     """
     Read records from a stream: raw input, Events XML, or a child part such as the receipt headers.
-    Whole records within a size limit: when fewer fit than asked, next_first_record says where to read on.
+    Whole records within a limit of characters, not of records: when fewer fit than asked, next_first_record says
+    where to read on.
     """
     stroom = gateway_from(ctx)
-    limit = stroom.settings.max_stream_chars
+    limit = max_chars or stroom.settings.read_stream_chars
     try:
         records, first_body = await read_records(stroom, stream_id, first_record, record_count, child_type, limit)
     except ToolError as e:
@@ -136,12 +140,14 @@ async def read_stream(
                 return result
     if sum(len(r) for r in records) >= limit:
         result['truncated'] = True
-        result['hint'] = "Record data was trimmed; read fewer records at a time."
+        result['hint'] = (f"Record data was trimmed at {limit:,} characters: read fewer records at a time, or, if the "
+                          f"user asks for more, max_chars (up to 200,000).")
     elif len(records) < record_count and first_record + len(records) < (result['total_records'] or 0):
         # The size limit was reached before the next whole record: the rest from where this stops.
         result['next_first_record'] = first_record + len(records)
-        result['hint'] = (f"{len(records)} whole records fit the size limit; read on with "
-                          f"first_record={result['next_first_record']}.")
+        result['hint'] = (f"{len(records)} whole records fit in {limit:,} characters (a limit of characters, not of "
+                          f"records); read on with first_record={result['next_first_record']}. survey_feed reads a "
+                          f"stream's records without this limit.")
     return result
 
 

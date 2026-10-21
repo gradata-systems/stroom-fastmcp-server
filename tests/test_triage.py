@@ -124,3 +124,24 @@ def test_an_error_the_user_accepted_is_benign_with_their_reason_and_matches_its_
     exact = [entry('decorationFilter', 'No HR record for user svc-backup', 'x', '2026-10-04')]
     other = triage([marker('ERROR', 'decorationFilter', 'No HR record for user svc-deploy')], rules, set(), accepted=exact)
     assert other['groups'][0]['class'] == 'review'
+
+
+@pytest.mark.parametrize('error, says', [
+    ({'type': 'security_exception', 'reason': 'action [indices:admin/auto_create] is unauthorized for user [stroom] '
+      'with effective roles [stroom_writer] on indices [ecs-acme-v1], this action is granted by the index privileges '
+      '[auto_configure,create_index,manage,all]'}, 'grant the account the index privilege auto_configure'),
+    ({'type': 'security_exception', 'reason': 'action [indices:data/write/bulk[s]] is unauthorized for user [stroom] '
+      'on indices [ecs-acme-v1], this action is granted by the index privileges [create_doc,create,index,write,all]'},
+     'grant the account create_doc (a data stream) or index (an index)'),
+    ({'type': 'index_not_found_exception', 'reason': 'no such index [ecs-acme-v1]'}, "The index doesn't exist"),
+])
+def test_elasticsearch_refusing_the_account_names_the_privileges_and_the_index_name_first(error, says):
+    # Seen in testing: a 403 (the index name was wrong), called "rejected documents", and the next run refused alike.
+    import json
+    response = {'errors': True, 'items': [{'create': {'_index': 'ecs-acme-v1', 'status': 403, 'error': error}}]}
+    result = triage([marker('FATAL', 'elasticIndexingFilter',
+                            f'Bulk indexing request failed: BulkResponse: {json.dumps(response)}')],
+                    RULES, {'elasticIndexingFilter'})
+    [group] = result['groups']
+    assert result['verdict'] == 'blocking' and says in group['reason']
+    assert 'Check the index name' in group['reason'] and 'rejected these documents' not in group['reason']

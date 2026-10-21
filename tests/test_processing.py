@@ -53,7 +53,7 @@ def stepped(request):
 async def test_processing_refuses_a_pipeline_that_was_not_stepped_clean(ctx):
     mock_stroom(elastic=False)
     with patch.object(processing_writes, 'stepped_clean', AsyncMock(return_value=False)), \
-            patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock())):
+            patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match='no clean step of its current code recorded'):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[1])
 
@@ -123,13 +123,13 @@ async def gated_through(ctx, **kwargs) -> tuple[list[dict], dict]:
 @pytest.mark.parametrize('filtered, with_output', [([5], []), ([], [5])])
 async def test_streams_the_pipeline_already_processed_go_through_reprocessing(ctx, filtered, with_output):
     create = mock_stroom(elastic=False, filtered=filtered, with_output=with_output)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match=r"already processed stream\(s\) \[5\]: use reprocess_streams"):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[5, 6])
     assert not create.called
 
 
-GUARD = dict(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
+GUARD = dict(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
              build_of=AsyncMock(return_value='b'))
 # Not tagged managed: the development batch size is left alone.
 ES_GUARD = {**GUARD, 'tags': AsyncMock(return_value=['mcp-generated'])}
@@ -148,10 +148,36 @@ async def test_the_samples_filter_is_created_enabled_once_the_user_approves(ctx)
 
 
 @respx.mock
-@pytest.mark.parametrize('stage, scope', [('forwarding', {'stream_ids': [6]}),
-                                          ('translation', {'feed': 'ACME', 'created_after': '2026-10-10T00:00:00Z'})])
+async def test_a_feeds_filter_in_a_build_runs_once_the_user_approves(ctx):
+    # Seen in testing: the build's events pipeline given the feed, its filter made disabled, and the agent asked the
+    # user to enable it between its steps. Approved in a form instead, as a sample is (asked for by the user).
+    create = mock_stroom(elastic=False, feed_streams=[{'id': 12, 'createMs': FEED_MADE + 10 ** 8}])
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**GUARD)), \
+            patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
+        gates, result = await gated_through(ctx, feed='ACME', created_after='2026-10-10T00:00:00Z')
+    assert [g['status'] for g in gates] == ['needs_approval'] and 'process the feed' in gates[0]['summary']
+    assert gates[0]['details']['scope'].startswith('feed ACME (Raw Events) created after')
+    assert json.loads(create.calls.last.request.content)['enabled'] is True and result['enabled'] is True
+
+
+def test_every_pipelines_stage_is_read_by_the_policys_markers():
+    # Seen: a translation pipeline the template search found by the policy's markers, classed 'other' when processed,
+    # so its sample's filter was made disabled for the user to enable.
+    from security.policy import StageMarkers
+    from tools.templates import _classify, use_markers
+    acme = ({'p': 'JSONParser', 'x': 'XSLTFilter', 's': 'SchemaFilter'}, {('s', 'schemaGroup'): 'ACME-EVENTS'})
+    assert _classify(*acme) == ('other', None)
+    try:
+        use_markers({'translation': StageMarkers(schema_groups=['ACME-EVENTS'], stream_types=['Events'])})
+        assert _classify(*acme) == ('translation', None)
+    finally:
+        use_markers(None)
+
+
+@respx.mock
+@pytest.mark.parametrize('stage, scope', [('forwarding', {'stream_ids': [6]})])
 async def test_a_feeds_filter_or_one_sending_elsewhere_is_left_disabled_for_the_user(ctx, stage, scope):
-    # A whole feed, or a pipeline sending to Kafka: disabled, no form; enabling it in Stroom is the user's approval.
+    # A pipeline sending to Kafka: disabled, no form; enabling it in Stroom is the user's approval.
     create = mock_stroom(elastic=False, feed_streams=[{'id': 12, 'createMs': FEED_MADE + 10 ** 8}])
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(**GUARD)), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': stage})):
@@ -216,7 +242,7 @@ async def test_an_index_nothing_was_indexed_into_yet_needs_no_drop(ctx):
 async def test_indexing_into_elasticsearch_needs_a_template_agreed_for_the_current_pipeline(ctx, agreed, message):
     # Only a template the user confirmed, for this index and the documents the XSLT now writes, is asked about.
     create = mock_stroom(elastic=True, agreed=agreed)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match=message):
             await gated_through(ctx, stream_ids=[6], source_pipeline_uuid='ev')
     assert create.call_count == 0
@@ -240,7 +266,7 @@ async def reprocessed(ctx, **kwargs):
 async def test_reprocessing_runs_one_task_at_a_time_and_leaves_superseding_to_stroom(ctx):
     # An events pipeline in a build: the user approves, and the filter is created enabled (asked for by the user).
     create = mock_stroom(elastic=False, filtered=[5], with_output=[6])
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'translation'})):
         gates, result = await reprocessed(ctx, stream_ids=[5, 6])
     assert [g['status'] for g in gates] == ['needs_approval'] and 'superseded' in gates[0]['details']['earlier outputs']
@@ -255,7 +281,7 @@ async def test_reprocessing_runs_one_task_at_a_time_and_leaves_superseding_to_st
 async def test_reprocessing_any_other_pipeline_leaves_its_filter_to_the_user(ctx, stage):
     # Only events and indexing pipelines reprocess on the user's approval; a CEF output sends to Kafka.
     create = mock_stroom(elastic=False, filtered=[5])
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': stage})):
         gates, result = await reprocessed(ctx, stream_ids=[5])
     assert gates == [] and json.loads(create.calls.last.request.content)['enabled'] is False
@@ -266,7 +292,7 @@ async def test_reprocessing_any_other_pipeline_leaves_its_filter_to_the_user(ctx
 @pytest.mark.parametrize('ids, message', [(list(range(1, 12)), 'Give 1 to 10 streams'), ([5, 7], r'\[7\] have not been processed')])
 async def test_reprocessing_is_bounded_to_ten_streams_it_already_processed(ctx, ids, message):
     mock_stroom(elastic=False, filtered=[5])
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match=message):
             await processing_writes.reprocess_streams(ctx, 'p1', ids)
 
@@ -274,7 +300,7 @@ async def test_reprocessing_is_bounded_to_ten_streams_it_already_processed(ctx, 
 @respx.mock
 async def test_reprocessing_into_elasticsearch_confirms_the_template_in_its_approval(ctx):
     create = mock_stroom(elastic=True, filtered=[5])
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
         gates, result = await reprocessed(ctx, stream_ids=[5], source_pipeline_uuid='ev')
     assert [g['status'] for g in gates] == ['drop_first', 'needs_approval']
     assert [a['request'] for a in gates[0]['user_actions']] == ['DELETE ecs-acme-v2']
@@ -302,7 +328,7 @@ async def test_reprocessing_into_the_builds_own_lucene_index_empties_it_first(ct
         {'id': 434, 'status': 'OPEN', 'documentCount': 5, 'nodeName': 'node1a', 'indexUuid': 'ix'},
         {'id': 400, 'status': 'DELETED', 'documentCount': 3, 'nodeName': 'node1a', 'indexUuid': 'ix'}]}))
     delete = respx.post(f'{API}/index/v2/shard/delete').mock(return_value=httpx.Response(200, json=1))
-    guard = SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
+    guard = SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
                             build_of=AsyncMock(return_value=build), folder_contents=AsyncMock(return_value=others))
     with patch('tools.processing_writes.guard_from', return_value=guard), \
             patch('tools.templates._shape', AsyncMock(return_value={'stage': 'indexing'})), \
@@ -461,7 +487,7 @@ PIPELINE_TERM = {'type': 'term', 'field': 'Pipeline', 'condition': 'IS_DOC_REF',
 @respx.mock
 async def test_indexing_filter_only_selects_events_from_the_source_events_pipeline(ctx):
     create = mock_stroom(elastic=True)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))) as guard:
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))) as guard:
         gates, result = await gated_through(ctx, stream_ids=[6, 7], source_pipeline_uuid='ev')
     expression = json.loads(create.calls.last.request.content)['queryData']['expression']
     assert expression == {'type': 'operator', 'op': 'AND', 'children': [
@@ -472,14 +498,14 @@ async def test_indexing_filter_only_selects_events_from_the_source_events_pipeli
     assert "only Events from pipeline 'Acme-Events'" in result['scope']
     assert result['events_from_pipeline'] == 'Acme-Events'
     # the source must be one this server built (in the workspace or promoted)
-    assert {c.args[0]['uuid'] for c in guard.return_value.check_managed.call_args_list} == {'p1'}
+    assert {c.args[0]['uuid'] for c in guard.return_value.check_in_build.call_args_list} == {'p1'}
     assert {c.args[0]['uuid'] for c in guard.return_value.check_built.call_args_list} == {'ev'}
 
 
 @respx.mock
 async def test_feed_wide_indexing_filter_carries_the_pipeline_condition(ctx):
     create = mock_stroom(elastic=True)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-generated']))):
         await gated_through(ctx, feed='ACME', stream_type='Events', created_after='2026-09-29T00:00:00Z',
                             source_pipeline_uuid='ev')
     children = json.loads(create.calls.last.request.content)['queryData']['expression']['children']
@@ -495,7 +521,7 @@ async def test_feed_wide_indexing_filter_carries_the_pipeline_condition(ctx):
 ])
 async def test_indexing_refuses_events_it_cannot_tie_to_the_source(ctx, streams, ids, source, message):
     create = mock_stroom(elastic=True, streams=streams)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match=message):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=ids, source_pipeline_uuid=source)
     assert not create.called
@@ -504,7 +530,7 @@ async def test_indexing_refuses_events_it_cannot_tie_to_the_source(ctx, streams,
 @respx.mock
 async def test_translation_pipelines_take_no_source_pipeline(ctx):
     mock_stroom(elastic=False)
-    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
+    with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']), build_of=AsyncMock(return_value='b'))):
         with pytest.raises(ToolError, match='only for indexing pipelines'):
             await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6], source_pipeline_uuid='ev')
 
@@ -522,7 +548,7 @@ def guard(pipeline_build='b', feed_build='b', built=True):
     async def check_built(ref):
         if not built:
             raise ToolError('not built by this server')
-    return SimpleNamespace(check_managed=AsyncMock(), check_built=check_built, tags=tags, build_of=build_of)
+    return SimpleNamespace(check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=check_built, tags=tags, build_of=build_of)
 
 
 @respx.mock
@@ -581,7 +607,7 @@ async def test_a_builds_feed_is_found_whatever_case_the_stream_data_spells_it(ct
     async def build_of(ref):
         return 'b' if ref.get('type') == 'Pipeline' or ref.get('uuid') == 'new' else 'a'
     with patch('tools.processing_writes.guard_from', return_value=SimpleNamespace(
-            check_managed=AsyncMock(), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
+            check_managed=AsyncMock(), check_in_build=AsyncMock(return_value='b'), check_built=AsyncMock(), tags=AsyncMock(return_value=['mcp-managed']),
             build_of=build_of)):
         made = await processing_writes.create_processor_filter(ctx, 'p1', stream_ids=[6])
     assert made['filter_id'] == 9 and create.call_count == 1
@@ -1104,3 +1130,31 @@ async def test_the_user_can_go_on_with_an_index_template_of_their_own(monkeypatc
     assert "the user's own index template" in said and saved['description'].startswith('Indexes Acme.')
     # Kept: the approval that follows, and later calls, aren't stopped again.
     assert "the user's own" in await processing_writes._committed(ctx, pipeline, destination, 'reprocess_streams')
+
+
+def _refusing_stroom(markers, filters=({'queryData': {'expression': {'type': 'operator', 'op': 'OR', 'children': [
+        {'type': 'term', 'field': 'Id', 'condition': 'EQUALS', 'value': '6'}]}}},)):
+    return SimpleNamespace(
+        processor_filters=AsyncMock(return_value=list(filters)),
+        find_meta=AsyncMock(return_value={'values': [{'meta': {'id': 60, 'typeName': 'Error', 'pipelineUuid': 'ix'}}]}),
+        fetch_data=AsyncMock(return_value={'markers': [{'type': 'storedError', 'message': m} for m in markers]}))
+
+
+@pytest.mark.parametrize('markers, dropped', [
+    (["Elasticsearch rejected document 1 of 1 in a bulk request (security_exception): action [indices:admin/"
+      "auto_create] is unauthorized for user [stroom]"], False),
+    (["Elasticsearch rejected document 1 of 1 in a bulk request (index_not_found_exception): no such index"], False),
+    (["Elasticsearch rejected document 2 of 3 in a bulk request (document_parsing_exception): failed to parse"], True),
+])
+async def test_an_index_elasticsearch_refused_every_write_to_is_not_dropped(markers, dropped):
+    # Seen in testing: a 403, the index dropped first all the same, and the account, unable to create it, refused again.
+    from tools.processing_writes import _fresh_index
+    stroom = _refusing_stroom(markers)
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    details, _ = await _fresh_index(ctx, {'uuid': 'ix', 'description': None},
+                                    {'index name': 'ecs-acme-v1', 'cluster': 'ES'}, None)
+    assert ('already indexed' in details) is dropped
+    if not dropped:
+        assert 'nothing is dropped' in details['earlier runs'] and 'Approve only once' in details['earlier runs']
+    else:
+        assert 'auto_configure or create_index' in details['already indexed']

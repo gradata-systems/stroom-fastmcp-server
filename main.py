@@ -12,6 +12,7 @@ from security.auth import oidc_auth, oidc_http_client
 from security.lenient import LenientArguments
 from security.repeats import RepeatGuard
 from security.policy import AccessPolicy
+from tools.templates import use_markers
 from main_tools import TOOL_MODULES
 from tools import resources
 from tools.resources import SERVER_INSTRUCTIONS
@@ -27,6 +28,7 @@ settings = Settings()
 configure_audit_log(settings.audit_log_file, settings.cluster_name or settings.stroom_url)
 rules = ErrorRules.load(settings.error_rules_file)
 policy = AccessPolicy.load(settings.access_policy_file)
+use_markers(policy.markers())
 consent = ConsentStore(settings.use_elicitation, keys=[k.get_secret_value() for k in settings.request_state_keys])
 uploads = UploadTickets([k.get_secret_value() for k in settings.request_state_keys])
 

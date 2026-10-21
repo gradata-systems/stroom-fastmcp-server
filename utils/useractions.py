@@ -13,10 +13,11 @@ from typing import Any
 from utils.stroom import doc_link
 
 ACTIONS = ('enable_processor_filter', 'disable_processor_filter', 'open_document', 'elasticsearch_request')
-# The only Elasticsearch requests offered: committing an index template, dropping one index or data stream.
-# An index name never starts with _ - or + (so not _all), and a wildcard or comma would name several.
-_REQUEST = re.compile(r'^(PUT _index_template/[A-Za-z0-9][A-Za-z0-9._-]*\n\{.*\}|DELETE (_data_stream/)?[a-z0-9][a-z0-9._-]*)$',
-                      re.S)
+# The only Elasticsearch requests offered: committing an index template, removing one (the old name's, after
+# rename_index), dropping one index or data stream. An index name never starts with _ - or + (so not _all), and a
+# wildcard or comma would name several.
+_REQUEST = re.compile(r'^(PUT _index_template/[A-Za-z0-9][A-Za-z0-9._-]*\n\{.*\}|DELETE _index_template/[A-Za-z0-9][A-Za-z0-9._-]*'
+                      r'|DELETE (_data_stream/)?[a-z0-9][a-z0-9._-]*)$', re.S)
 
 
 def _doc(doc: dict[str, Any]) -> dict[str, str]:

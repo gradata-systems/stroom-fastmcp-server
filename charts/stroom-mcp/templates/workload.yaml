@@ -205,6 +205,8 @@ spec:
               value: {{ .Values.limits.maxResponseChars | quote }}
             - name: STROOM_MCP_MAX_STREAM_CHARS
               value: {{ .Values.limits.maxStreamChars | quote }}
+            - name: STROOM_MCP_READ_STREAM_CHARS
+              value: {{ .Values.limits.readStreamChars | quote }}
             - name: STROOM_MCP_MAX_SAMPLE_RECORDS
               value: {{ .Values.limits.maxSampleRecords | quote }}
             {{- if .Values.accessPolicy }}
