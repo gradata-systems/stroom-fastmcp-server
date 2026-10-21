@@ -5,6 +5,7 @@ prompts: start_onboarding and start_build return it, build_status derives each s
 holds (feed, sample streams, converter, XSLT with its mapping, pipeline, a clean step, Events, documentation,
 index), and every write tool's result carries `next`, the first unfinished step and the tool that does it.
 """
+import re
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -235,6 +236,96 @@ async def _translating(stroom: Any, feeds: list[str]) -> list[dict[str, str]]:
     return found
 
 
+_LOOKUP_MAP = re.compile(r"stroom:lookup\(\s*'([^']+)'")
+
+
+def own_references(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """The reference data a pipeline loads itself (its pipelineReferences, not its template's, which a child of the
+    same template inherits anyway), as Stroom keeps them."""
+    return [r for r in ((pipeline.get('pipelineData') or {}).get('pipelineReferences') or {}).get('add') or []
+            if (r.get('feed') or {}).get('uuid') and (r.get('pipeline') or {}).get('uuid')]
+
+
+def reference_text(ref: dict[str, Any]) -> str:
+    return f"{ref['feed'].get('name')} via {ref['pipeline'].get('name')} on {ref.get('element')}"
+
+
+async def current_translation(ctx: Context, build: str | None) -> dict[str, Any] | None:
+    """The pipeline translating the build's feed now (its processor filter reads the raw data), with what its own XSLT
+    looks up: the reference data the pipeline loads, the stroom:lookup() maps the XSLT names, and the functions and
+    named templates it calls from the XSLTs it imports. What a new version whose translation is written anew loses
+    unless its mapping keeps them (seen in testing: V1.3 drafted from the sample, and V1.2's IP lookups were gone).
+    None when no pipeline translates the feed, or the build works from no feed."""
+    stroom = gateway_from(ctx)
+    try:
+        found = await _translating(stroom, await works_from(ctx, build))
+    except Exception:   # advice: never a reason for the call that asks to fail
+        return None
+    if not found:
+        return None
+    from tools.pipelines import translation_docs
+    from tools.templates import shared_xslt_usage
+    pipeline = found[0]
+    try:
+        refs = own_references(await stroom.get_doc('Pipeline', pipeline['uuid']))
+        own = [e['doc'] for e in translation_docs(pipeline['uuid'], await stroom.pipeline_layers(pipeline['uuid']))
+               if not e['inherited_from_template'] and e['doc'].get('type') == 'XSLT']
+        maps: list[str] = []
+        for doc in own:
+            maps += _LOOKUP_MAP.findall((await stroom.get_doc('XSLT', doc['uuid'])).get('data') or '')
+        uses = await shared_xslt_usage(ctx, [pipeline])
+    except ToolError:
+        return {'pipeline': pipeline}
+    functions = [{k: u[k] for k in ('href', 'function', 'example') if u.get(k)} for u in uses if u.get('function')]
+    templates = [{k: u[k] for k in ('href', 'template', 'at', 'with_params') if u.get(k)} for u in uses if u.get('template')]
+    rules = [{'href': u['href'], 'note': u['note']} for u in uses if u.get('note') and 'href' in u]
+    entries = list(dict.fromkeys((u['href'], u['prefix'], u['namespace']) for u in uses
+                                 if u.get('function') and u.get('prefix') and u.get('namespace')))
+    return {'pipeline': pipeline, 'xslt': [{'name': d.get('name'), 'uuid': d['uuid']} for d in own],
+            **({'reference_data': [reference_text(r) for r in refs]} if refs else {}),
+            **({'lookup_maps': sorted(set(maps))} if maps else {}),
+            **({'functions_called': functions} if functions else {}),
+            **({'functions_entries': [{'href': h, 'prefix': p, 'namespace': n} for h, p, n in entries]}
+               if entries else {}),
+            **({'templates_called': templates} if templates else {}),
+            **({'imports_for_rules': rules} if rules else {})}
+
+
+def lookups_of(current: dict[str, Any] | None) -> bool:
+    """Whether the current translation looks anything up: reference data, stroom:lookup() maps or shared functions."""
+    return bool(current and (current.get('reference_data') or current.get('lookup_maps')
+                             or current.get('functions_called') or current.get('templates_called')))
+
+
+def lookups_kept(current: dict[str, Any], mapping: Any) -> bool:
+    """Whether a mapping keeps any of the current translation's lookups: a lookup entry, or an import of a shared XSLT
+    the current one calls. Read from the mapping's own settings, not its field names."""
+    entries = list(mapping.common) + [e for rule in mapping.events for e in rule.fields]
+    hrefs = ({f['href'] for f in current.get('functions_called') or []}
+             | {t['href'] for t in current.get('templates_called') or []})
+    used = {f.href for f in mapping.functions} | {s.href for s in mapping.shared} | set(mapping.imports)
+    return any(e.lookup for e in entries) or bool(hrefs & used)
+
+
+def lookups_note(current: dict[str, Any]) -> str:
+    """What the current translation looks up, and how a new mapping keeps it, for the user to decide."""
+    p = current['pipeline']
+    parts = []
+    if current.get('lookup_maps'):
+        parts.append(f"looks up reference map(s) {current['lookup_maps']} with stroom:lookup()")
+    for f in (current.get('functions_called') or [])[:6]:
+        parts.append(f"calls {f['function']}() from '{f['href']}'" + (f" (as {f['example']})" if f.get('example') else ''))
+    for t in (current.get('templates_called') or [])[:6]:
+        parts.append(f"calls template {t['template']} from '{t['href']}'" + (f" at {t['at']}" if t.get('at') else ''))
+    if current.get('reference_data'):
+        parts.append(f"loads reference data {current['reference_data']}")
+    return (f"The feed is translated now by '{p['name']}' ({p['uuid']}), whose XSLT " + '; '.join(parts) + ". Ask the "
+            f"user whether the new version keeps these lookups. To keep them: functions entries "
+            f"{current.get('functions_entries') or '(href, prefix, namespace)'} and the fields' xpaths calling the "
+            f"functions as it does, shared entries for its templates, lookup entries for its maps; then create_pipeline "
+            f"version_of='{p['uuid']}' keep_references=true, so the new version loads the same reference data.")
+
+
 async def works_from(ctx: Context, build: str | None) -> list[str]:
     """The existing feeds the build works from (source_feeds), with its documents read here; [] for no build."""
     if not build:
@@ -319,7 +410,8 @@ _ASK = "ask them to, on the pipeline's Processors tab, if they haven't said"
 def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: list[int],
               translation: str | None, indexing: str | None, processing: str | None = None,
               index: dict[str, Any] | None = None, *, sources: list[str] = (), discovery: bool = False,
-              locations: Any = None, cef: str | None = None, edited_xslt: str | None = None) -> tuple[dict[str, Any], str]:
+              locations: Any = None, cef: str | None = None, edited_xslt: str | None = None,
+              version: dict[str, str] | None = None) -> tuple[dict[str, Any], str]:
     """The step's first call, with the arguments the build already gives and <...> for those still to decide, and what
     follows it. One call rather than a list of tools: a small model given several options deliberated between them
     until its context ran out."""
@@ -342,6 +434,13 @@ def next_call(step: str, build: str, feeds: list[str], raw: list[int], events: l
                         'splitter, build and name: it saves the XSLT with the mapping'),
         'pipeline': (('find_pipeline_templates', {'stage': 'translation'}),
                      "then create_pipeline from the best candidate: it takes the build's converter and XSLT"),
+        # The feed's next version (V1.3 for V1.2): a child of the template the pipeline translating it now has.
+        'pipeline:version': (('create_pipeline', {'build': build, 'version_of': (version or {}).get('uuid'),
+                                                  'name': f"<the new version's name ('{(version or {}).get('name')}' "
+                                                          f"with its new version)>"}),
+                             f"a child of the template '{(version or {}).get('name')}' has, with the build's XSLT; "
+                             f"whether it loads that pipeline's reference data too is the user's choice "
+                             f"(keep_references): ask them when it asks"),
         'stepped': (('step_sample', {'pipeline_uuid': tr, 'stream_ids': raw}),
                     'until the verdict is clean: fix the mapping and build_translation_xslt uuid=... in between'),
         'stepped:surveyed': (('step_records', {'pipeline_uuid': tr, 'locations': locations}),
@@ -516,7 +615,9 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
     # output build does neither, whatever it works from.
     cef_only = cef_build and not translation and not indexing and not surveyed
     new_source = not existing and not cef_only
-    stage_1 = new_source or bool(translation) or surveyed
+    # A translation XSLT saved from a mapping starts it too: a next version written anew needn't survey first (seen in
+    # e2e: its XSLT saved, the plan still said to choose the work, and never reached its pipeline).
+    stage_1 = new_source or bool(translation) or surveyed or any(x['mapping'] == 'translation' for x in xslts)
     # Indexing too when the build onboards an existing feed (surveyed for its events pipeline), as for a new source,
     # or holds any indexing work (an indexing XSLT saved from its plan comes before the index doc and pipeline). Seen
     # in Ask Stroom AI: the user asked for an index, and after the events pipeline's documentation, and again after
@@ -614,7 +715,7 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                       else 'not recorded' if state is None else 'to do'})
     pending = [s for s in steps if s['state'] == 'to do']
     nxt = pending[0] if pending else None
-    processing, index = None, None
+    processing, index, version = None, None, None
     unstepped = [p for p in indexing if not p['stepped']]
     if nxt and nxt['step'] in ('index_template', 'indexed') and unstepped:
         # The template is checked against the documents a clean step writes, and processing needs one: step first.
@@ -649,6 +750,12 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
         processing = 'edited'
         kept = await kept_mapping(ctx, translation[0]['uuid'])
         edited = ((kept or {}).get('xslt') or {}).get('uuid')
+    elif nxt and nxt['step'] == 'pipeline' and existing and not translation and not copies:
+        # The feed's next version, its translation written anew (seen in testing: told to find the best template, the
+        # agent offered copying V1.2 or a pipeline unlike it, and the user had to ask why).
+        current = await _translating(stroom, sources)
+        if current:
+            processing, version = 'version', current[0]
     elif nxt and nxt['step'] == 'stepped' and survey and survey.get('locations'):
         # The survey's locations, when there are few enough to give: else step_sample over its streams, as the plan
         # says (seen in Ask Stroom AI: 66 locations, and create_pipeline's next said step_records with a placeholder).
@@ -661,7 +768,7 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                            indexing[0]['uuid'] if indexing else None, processing, index,
                            sources=sources, discovery=discovery, edited_xslt=edited,
                            locations=(survey or {}).get('locations') or "<every location survey_feed gave>",
-                           cef=forwarding[0]['uuid'] if forwarding else None)
+                           cef=forwarding[0]['uuid'] if forwarding else None, version=version)
     if existing and not stage_1 and not stage_2 and not cef_build:
         # On existing data, before any pipeline: which stage comes next is the work's (a survey, a copy, an index).
         nxt = None
@@ -679,8 +786,11 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                     f"to it: copy_pipeline source_uuid=<it> rename={{'V1.2': 'V1.3'}} (working_copy=true for a change "
                     f"in place), then build_translation_xslt uuid=<the copy's XSLT> changes= only what changes "
                     f"(rebuild_mapping uuid=<it> first, if its XSLT keeps no mapping): what it does, its lookups and "
-                    f"all, comes with the copy. survey_feed and draft_translation_mapping are for an events pipeline "
-                    f"written anew, when the user wants that. " + then[0].upper() + then[1:])
+                    f"all, comes with the copy. Or, its translation written anew (a new schema version, say): "
+                    f"survey_feed, draft_translation_mapping (its notes say what the current XSLT looks up, to keep "
+                    f"if the user wants), build_translation_xslt build= name=, then create_pipeline version_of=<it>: "
+                    f"a child of the same template with the new XSLT, and its reference data if the user keeps "
+                    f"them. Ask the user which. " + then[0].upper() + then[1:])
         start = {'step': 'existing data', 'do': f"Work from {named}, already in Stroom", 'call': call, 'then': then,
                  **({'translated_by': current} if current else {})}
     return {

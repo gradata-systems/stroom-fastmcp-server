@@ -126,3 +126,50 @@ Where it fits (`stroom-ai-impl`, at 6a6388ea):
 Nothing changes in the MCP server for it: its large arguments (`mapping`, `changes`, `example_template`) take an
 object or a string already. Once Stroom has it, the server's instructions can say so for Stroom AI, as they name its
 `task_list` and `ask_user`.
+
+**Done, and seen working** (testing on 21 October, the user's Stroom with the change, MCP server 0.18.41). Onboarding
+Fortigate V1.3, the agent cut the 30 KB draft out of its result with `jq ... out=`, edited it with two more `jq` calls
+into `/outputs/turn-2226/mapping-v13.json`, and saved it with `build_translation_xslt mapping={"$workspace":
+"/outputs/turn-2226/mapping-v13.json"}`. The server got the whole mapping and saved it; a second save the same way
+followed. No question to the user, no call cut short. Stroom's own guidance taught it, so the server's instructions
+don't repeat it.
+
+## Seen in the same testing, on 21 October
+
+Read from the transcript (`Onboarding a New Feed Using the Current Pipeline`), not from the code.
+
+### Editing a file with jq meets the query limit
+
+With `$workspace` arguments, `jq ... out=` is how the agent edits a large argument, and one edit of the mapping was a
+2,373-character query: refused, "The jq query may be at most 2000 characters", and done again as two queries through an
+intermediate file. A query using `test()` was refused too ("test is not available here"), so the agent dropped the
+condition it needed.
+
+Asked: a higher limit for a query that writes a file (8,000 characters, say), and `test`/`match` in `SafeJq`, with
+the bound on time it gives the rest of a query.
+
+### grep is literal unless told, and an alternation finds nothing
+
+Four `grep` calls with patterns such as `System|Environment|TimeZone|Version` answered "No lines match." on a file
+that has those words; the same pattern with `"regex": true` matched. The agent took the first answers as the truth
+("The grep found no System or Environment text") and read the file in pieces instead.
+
+Asked: when a literal pattern matches nothing and holds `|`, `.*` or `\`, say so in the answer ("searched as literal
+text; for a regular expression, regex: true"), or treat it as one.
+
+### A call that waits outlives the access token
+
+Three `survey_feed` calls (each one to two minutes, reading 40 to 60 streams) came back with "The user's sign-in
+(access token) expired while this call was waiting", and were sent again, unchanged, to succeed. Each lost the time it
+had already taken, about five minutes in all.
+
+Asked: refresh the user's token before an MCP call when it has less left than a call can take (five minutes, say),
+so a call doesn't start with a token about to expire.
+
+### A form not answered in ten minutes ends the run
+
+An `ask_user` form went unanswered from 09:08:51 to 09:18:52 ("not answered in time") while the user was away; the
+agent stopped, and the user had to write "ask me again" for the same questions.
+
+Asked: a longer wait (or none) for a form, or keep it answerable after the run ends, its answers starting the next
+turn.

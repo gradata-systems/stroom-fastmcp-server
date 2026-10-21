@@ -289,20 +289,30 @@ async def open_slots(stroom: StroomGateway, merged: dict[str, Any], replace_pars
 
 
 async def fill_open_slots(ctx: Context, build: str, merged: dict[str, Any], replace_parser: str | None,
-                          properties: list[PropertyValue]) -> tuple[list[PropertyValue], list[str], list[str]]:
+                          properties: list[PropertyValue], previous: dict[str, Any] | None = None
+                          ) -> tuple[list[PropertyValue], list[str], list[str]]:
     """Properties with the template's open slots filled from the build's own documents when there is exactly one
     candidate: (properties, what was filled, what is still open). A parser with no converter in the build is
-    refused: the pipeline could not parse anything."""
+    refused: the pipeline could not parse anything. A new version (previous, the pipeline it follows) with no
+    converter of its own reads the feed with the one previous runs."""
     from utils.mappingstore import read_mapping
     stroom = gateway_from(ctx)
     given = {(p.element, p.name) for p in properties}
     docs = await guard_from(ctx).folder_contents(build)
+    prior = {(p.get('element'), p.get('name')): (p.get('value') or {}).get('entity')
+             for p in _own_properties(previous or {})}
     filled, still_open = [], []
     for slot in await open_slots(stroom, merged, replace_parser):
         if (slot['element'], slot['property']) in given:
             continue
         if slot['property'] == 'textConverter':
             candidates = [d for d in docs if d['type'] == 'TextConverter']
+            was = prior.get((slot['element'], 'textConverter')) or {}
+            if not candidates and was.get('type') == 'TextConverter':
+                properties = [*properties, PropertyValue(element=slot['element'], name='textConverter',
+                                                         doc_uuid=was['uuid'], doc_type='TextConverter')]
+                filled.append(f"{slot['element']}.textConverter = {was.get('name')} (as {previous.get('name')} has it)")
+                continue
             if not candidates:
                 raise ToolError(f"The template's {slot['type']} ({slot['element']}) needs a text converter and build '{build}' has "
                                 f"none: build_data_splitter with the sample (save_as=<name>), or save_text_converter, then "
@@ -330,14 +340,20 @@ async def fill_open_slots(ctx: Context, build: str, merged: dict[str, Any], repl
     return properties, filled, still_open
 
 
-async def _own_documents(ctx: Context, build: str, properties: list[PropertyValue], allowed: bool) -> None:
+async def _own_documents(ctx: Context, build: str, properties: list[PropertyValue], allowed: bool,
+                         previous: dict[str, Any] | None = None) -> None:
     """The XSLT and text converter a child supplies must be the build's own (made with save_xslt /
-    save_text_converter), not another source's or a library's: those are inherited from the template."""
+    save_text_converter), not another source's or a library's: those are inherited from the template. A new
+    version may run the text converter the pipeline it follows runs."""
     if allowed:
         return
     guard = guard_from(ctx)
+    prior = {((p.get('value') or {}).get('entity') or {}).get('uuid') for p in _own_properties(previous or {})
+             if p.get('name') == 'textConverter'}
     for prop in properties:
         if prop.name not in ('xslt', 'textConverter') or not prop.doc_uuid:
+            continue
+        if prop.name == 'textConverter' and prop.doc_uuid in prior:
             continue
         ref = {'type': prop.doc_type, 'uuid': prop.doc_uuid}
         tags = await guard.tags(ref)
@@ -406,23 +422,52 @@ async def create_pipeline(
             "instructions name none): a pipeline of its own sending Events to Kafka, Source -> xmlParser -> "
             "splitFilter (one Event a record) -> xsltFilter -> schemaFilter (kafka-records:1) -> standardKafkaProducer; "
             "set_properties gives xsltFilter.xslt and standardKafkaProducer.kafkaConfig. The user confirms the chain."))] = None,
+        version_of: Annotated[str | None, Field(description=(
+            "The pipeline this one is the next version of (V1.2's, for a V1.3 with the build's new XSLT): its template "
+            "is the parent, unless template is given, and promotion puts the new version beside it. To keep its "
+            "XSLT as it is and change only parts, copy_pipeline instead."))] = None,
+        keep_references: Annotated[bool | None, Field(description=(
+            "With version_of: whether the new version loads the reference data that pipeline loads (for its lookups), "
+            "as the user chooses. Asked for when it loads any."))] = None,
 ) -> dict[str, Any]:
     """
     Create a new pipeline as a child of a template, setting only what the child supplies. It keeps the
     template's structure and defaults (including any optional steps such as an empty decoration XSLT),
     unless replace_parser swaps the parser. References attach reference data for stroom:lookup(). It refuses
     an XSLT or text converter from outside the build (a new source gets its own, from build_translation_xslt
-    and build_data_splitter) and a template whose parser cannot read the build's sample streams. The user
-    confirms the template and name first.
+    and build_data_splitter) and a template whose parser cannot read the build's sample streams. A production
+    pipeline's next version, with the build's XSLT: version_of= it, a child of its template, with its reference
+    data if the user keeps them. The user confirms the template and name first.
     """
     from tools.plan import resolve_build
     stroom = gateway_from(ctx)
     build = resolve_build(ctx, build, 'create_pipeline')
     if standalone:
-        if template_uuid or template:
+        if template_uuid or template or version_of:
             raise ToolError("standalone is for when there is no template: give it, or a template, not both")
         return await _standalone_kafka(ctx, build, name, description, list(set_properties), reuse_existing_docs,
                                        confirmation_id)
+    if keep_references is not None and not version_of:
+        raise ToolError("keep_references is for a new version (version_of=): other reference data go in references")
+    previous, carried = None, []
+    if version_of:
+        from tools.plan import own_references, reference_text
+        previous = await stroom.get_doc('Pipeline', version_of)
+        parent = (previous.get('parentPipeline') or {}).get('uuid')
+        if not (template_uuid or template):
+            if not parent:
+                raise ToolError(f"'{previous.get('name')}' inherits from no template, so a new version can't be its "
+                                f"template's child: copy_pipeline source_uuid='{version_of}' copies it as it is (with "
+                                f"set_properties for the build's XSLT), or give template.")
+            template_uuid = parent
+        carried = own_references(previous)
+        if carried and keep_references is None:
+            raise ToolError(f"'{previous.get('name')}' loads reference data for its lookups: "
+                            f"{[reference_text(r) for r in carried]}. Ask the user whether the new version keeps them "
+                            f"(its XSLT looks them up only if its mapping does), then call again with "
+                            f"keep_references=true or false.")
+        if not keep_references:
+            carried = []
     template_uuid = await _template_uuid(stroom, template_uuid or template)
     template = await stroom.get_doc('Pipeline', template_uuid)
     merged = merge_layers(await stroom.pipeline_layers(template_uuid))
@@ -442,15 +487,24 @@ async def create_pipeline(
     # The parser first: a template whose parser can't read the sample is the wrong one, whatever else it lacks (seen:
     # an XML source refused the Data Splitter template for want of a text converter, not for its parser).
     await _parser_reads_sample(ctx, build, merged, replace_parser, accept_parser_mismatch)
-    properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties))
+    properties, filled, still_open = await fill_open_slots(ctx, build, merged, replace_parser, list(set_properties),
+                                                           previous)
+    if previous:
+        kept = _plain_settings(previous, element_types, properties)
+        properties += kept
+        filled = list(filled or []) + [f"{p.element}.{p.name} = {p.value} (as {previous.get('name')} has it)" for p in kept]
     array = await _json_array_parser(stroom, merged, properties, await _sample_is_array(ctx, build))
     if array:
         properties.append(array)
         filled = list(filled or []) + [f"{array.element}.addRootObject = false (the sample is a JSON array: "
                                        f"each item is a record)"]
-    await _own_documents(ctx, build, properties, reuse_existing_docs)
+    await _own_documents(ctx, build, properties, reuse_existing_docs, previous)
     refs = await reference_entries(stroom, merged, references)
+    refs += _carried_references(merged, carried, refs)
+    left = _not_carried(previous, properties) if previous else []
     details = {'build': build, 'pipeline name': name, 'template': template.get('name'),
+               **({'new version of': previous.get('name')} if previous else {}),
+               **({f"set in {previous.get('name')}, not here": left} if left else {}),
                'sets': [f'{p.element}.{p.name}' for p in properties],
                **({'filled from the build': filled} if filled else {}),
                **({'still to set': still_open} if still_open else {}),
@@ -469,8 +523,10 @@ async def create_pipeline(
     ref = await guard_from(ctx).create('Pipeline', name, build, role=role)
     if role in SOURCE_ROLES:
         # The build's text converter and XSLT it runs, made before it, go where it went: Events or Records.
+        # Not the previous version's converter, which a new version runs where it is, in production.
+        theirs = {((p.get('value') or {}).get('entity') or {}).get('uuid') for p in _own_properties(previous or {})}
         for prop in properties:
-            if prop.doc_type in ('TextConverter', 'XSLT') and prop.doc_uuid:
+            if prop.doc_type in ('TextConverter', 'XSLT') and prop.doc_uuid and prop.doc_uuid not in theirs:
                 await guard_from(ctx).move_to_role(build, {'type': prop.doc_type, 'uuid': prop.doc_uuid}, role)
     doc = await stroom.get_doc('Pipeline', ref['uuid'])
     doc['parentPipeline'] = {'type': 'Pipeline', 'uuid': template_uuid, 'name': template.get('name')}
@@ -483,14 +539,84 @@ async def create_pipeline(
         data.setdefault('pipelineReferences', {})['add'] = refs
     doc['pipelineData'] = data
     doc = await stroom.put_doc(doc)
+    if previous:
+        await _record_version(ctx, build, ref, previous, properties)
     from tools.plan import with_next
     return await with_next(ctx, build, {'type': 'Pipeline', 'uuid': doc['uuid'], 'name': doc['name'], 'template': template.get('name'),
+                                        **({'version_of': previous.get('name')} if previous else {}),
+                                        **({f"set_in_{previous.get('name')}_not_here": left} if left else {}),
                                         'sets': [f'{p.element}.{p.name}' for p in properties],
                                         **({'filled_from_build': filled} if filled else {}),
                                         **({'still_to_set': still_open, 'hint': f"The pipeline cannot run until {still_open} is set: "
                                             f"save the translation XSLT (build_translation_xslt build=, name=) and update_pipeline with "
                                             f"set_properties=[{{element, name: 'xslt', doc_uuid, doc_type: 'XSLT'}}]"} if still_open else {}),
                                         **({'reference_data': [f"{r['feed']['name']} via {r['pipeline']['name']}" for r in refs]} if refs else {})})
+
+
+def _own_properties(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
+    return ((pipeline.get('pipelineData') or {}).get('properties') or {}).get('add') or []
+
+
+_SCALARS = ('boolean', 'integer', 'long', 'string')
+
+
+def _plain_settings(previous: dict[str, Any], types: dict[str, str], properties: list[PropertyValue]) -> list[PropertyValue]:
+    """The previous version's own plain settings (addRootObject false, say: not documents) on elements the new one
+    has, that nothing sets already: a new version is configured as the one it follows."""
+    setting = {(p.element, p.name) for p in properties}
+    out = []
+    for p in _own_properties(previous):
+        held = p.get('value') or {}
+        scalar = next((held[k] for k in _SCALARS if k in held), None)
+        if p.get('element') in types and (p.get('element'), p.get('name')) not in setting and scalar is not None                 and not held.get('entity'):
+            out.append(PropertyValue(element=p['element'], name=p['name'], value=scalar))
+    return out
+
+
+def _carried_references(merged: dict[str, Any], carried: list[dict[str, Any]], given: list[dict[str, Any]]
+                        ) -> list[dict[str, Any]]:
+    """The previous version's reference data for the new one, on the same element (the template's first XSLT step if
+    the new one has no element of that id), less those references gives already."""
+    types = {e['id']: e['type'] for e in merged['elements']}
+    steps = [e for e in chain_order(merged['elements'], merged['links']) if types.get(e) == 'XSLTFilter']
+    seen = {(r['element'], r['feed']['uuid'], r['pipeline']['uuid']) for r in given}
+    out = []
+    for r in carried:
+        element = r.get('element') if r.get('element') in types else (steps[0] if steps else None)
+        if not element:
+            raise ToolError("The template has no XSLT step to attach the previous version's reference data to")
+        key = (element, r['feed']['uuid'], r['pipeline']['uuid'])
+        if key not in seen:
+            seen.add(key)
+            out.append({'element': element, 'name': r.get('name') or 'pipelineReference', 'pipeline': r['pipeline'],
+                        'feed': r['feed'], 'streamType': r.get('streamType') or 'Reference'})
+    return out
+
+
+def _not_carried(previous: dict[str, Any], properties: list[PropertyValue]) -> list[str]:
+    """What the previous version sets itself that the new one doesn't (it is its template's child, with the build's
+    documents): shown to the user, who may want one set too (update_pipeline), or copy_pipeline instead."""
+    setting = {(p.element, p.name) for p in properties}
+    data = previous.get('pipelineData') or {}
+    out = [f"{p.get('element')}.{p.get('name')}" for p in _own_properties(previous)
+           if (p.get('element'), p.get('name')) not in setting]
+    out += [f"element {e.get('id')} ({e.get('type')}) added" for e in (data.get('elements') or {}).get('add') or []]
+    out += [f"element {e.get('id')} removed" for e in (data.get('elements') or {}).get('remove') or []]
+    return out
+
+
+async def _record_version(ctx: Context, build: str, ref: dict[str, Any], previous: dict[str, Any],
+                          properties: list[PropertyValue]) -> None:
+    """The new pipeline as the next version of the previous one, and each build document it runs in the place of one
+    the previous version runs (its XSLT for V1.2's), so promotion puts them beside their predecessors."""
+    guard = guard_from(ctx)
+    await build_record.update(guard, build, ref, lambda e: e.update(version_of=previous['uuid']))
+    before = {(p.get('element'), p.get('name')): (p.get('value') or {}).get('entity') for p in _own_properties(previous)}
+    for prop in properties:
+        was = before.get((prop.element, prop.name)) or {}
+        if prop.doc_uuid and was.get('uuid') and was.get('type') == prop.doc_type and was['uuid'] != prop.doc_uuid:
+            await build_record.update(guard, build, {'type': prop.doc_type, 'uuid': prop.doc_uuid},
+                                      lambda e, v=was['uuid']: e.update(version_of=v))
 
 
 KAFKA_CHAIN = [('Source', 'Source'), ('xmlParser', 'XMLParser'), ('splitFilter', 'SplitFilter'), ('xsltFilter', 'XSLTFilter'),

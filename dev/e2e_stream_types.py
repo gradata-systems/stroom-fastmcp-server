@@ -12,7 +12,10 @@ no children: found only by what they are.
    pipeline's reference names no loader, and the lookup fills the events. Its mapping lost, rebuild_mapping reads the
    lookup back from the XSLT as the entry that wrote it, and the events are filled as before. Processed, every event
    of the Events stream is filled. A pipeline made without the reference finds nothing; update_pipeline attaches it
-   to the translation step, and the lookup fills the event.
+   to the translation step, and the lookup fills the event. The events pipeline's next version, its translation
+   written anew: the draft names the current XSLT's lookups, a save without them warns, the plan's pipeline step is
+   create_pipeline version_of=, which asks whether to keep the reference data; the new version is a child of the same
+   template with the previous converter, its lookup filled when they are kept and empty when not.
 3. Records: a pipeline writing Records, from 'csv records v1'; its wait takes Records from the pipeline; the Records
    stream is refused as Events to plan an index from, and indexed as records (records:2 data) into Elasticsearch.
 """
@@ -36,8 +39,8 @@ from fastmcp.exceptions import ToolError  # noqa: E402
 from format_samples import SAMPLES  # noqa: E402
 from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
-from tools import (feeds, generation, indexing, pipeline_writes, plan, processing_writes, rebuild, reference, stepping,  # noqa: E402
-                   streams, templates, translation)
+from tools import (builds, feeds, generation, indexing, pipeline_writes, plan, processing_writes, rebuild, reference,  # noqa: E402
+                   stepping, streams, templates, translation)
 from tools.pipeline_writes import PipelineReference  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import Discovery, FieldPlan  # noqa: E402
@@ -206,6 +209,58 @@ async def reference_data(ctx, stroom: StroomGateway, stamp: str) -> None:
               f"update_pipeline attaches the reference to the translation step: {updated['reference_data']}")
     output = (await stepping.step_pipeline(ctx, late['uuid'], events_raw, 1))['elements']['translationFilter']['output']
     e2e.check(_user_name(output) == 'Bob Brown', f"the reference attached later fills the event: {_user_name(output)}")
+    await new_version(ctx, stroom, events, text, feed, events_feed, events_raw, stamp)
+
+
+async def new_version(ctx, stroom: StroomGateway, events: dict, text: dict, ref_feed: str, events_feed: str,
+                      events_raw: int, stamp: str) -> None:
+    """The events pipeline's next version, its translation written anew (asked for by the user): the draft and the
+    save name what the current XSLT looks up; the new version is a child of the same template with the new XSLT, the
+    previous version's converter, and its reference data when the user keeps them."""
+    build = f'st-badge2-{stamp}'
+    await builds.start_build(ctx, build, feeds=[events_feed])
+    draft = await generation.draft_translation_mapping(ctx, stream_ids=[events_raw], build=build, source_name='Door',
+                                                       system_name='Door Control', environment='Test')
+    current = draft.get('current_translation') or {}
+    e2e.check((current.get('pipeline') or {}).get('uuid') == events['uuid'] and current.get('lookup_maps') == ['USER_DIRECTORY']
+              and any(ref_feed in r for r in current.get('reference_data') or [])
+              and any('Ask the user whether the new version keeps these lookups' in n for n in draft['notes']),
+              f"the draft names the current translation's lookups: {current}")
+    without = {**BADGE_MAPPING, 'common': [c for c in BADGE_MAPPING['common'] if not c.get('lookup')]}
+    saved = await e2e.agreed(generation.build_translation_xslt, ctx=ctx, mapping=without, stream_ids=[events_raw],
+                             build=build, name=f'{events_feed}-Events-V2')
+    e2e.check(saved['ok'] and any("keeps none of the current translation's lookups" in w for w in saved['warnings']),
+              f"a mapping without the lookups is saved with a warning naming them: {saved['warnings'][:3]}")
+    saved = await e2e.agreed(generation.build_translation_xslt, ctx=ctx, mapping=BADGE_MAPPING, stream_ids=[events_raw],
+                             uuid=saved['saved']['uuid'])
+    e2e.check(saved['ok'], f"with the lookup kept: {saved.get('problems')}")
+    status = await plan.build_status(ctx, build)
+    e2e.check(status['next']['call']['tool'] == 'create_pipeline'
+              and status['next']['call']['arguments'].get('version_of') == events['uuid'],
+              f"the plan's pipeline step makes the next version of the current pipeline: {status['next']['call']}")
+    try:
+        await pipeline_writes.create_pipeline(ctx, build=build, name=f'{events_feed}-Events-V2', version_of=events['uuid'])
+        refused = ''
+    except ToolError as e:
+        refused = str(e)
+    e2e.check('loads reference data for its lookups' in refused and ref_feed in refused,
+              f"whether the new version keeps the reference data is asked: {refused[:120]}")
+    kept = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{events_feed}-Events-V2',
+                            version_of=events['uuid'], keep_references=True)
+    doc = await stroom.get_doc('Pipeline', kept['uuid'])
+    e2e.check((doc.get('parentPipeline') or {}).get('uuid') == text['uuid'] and len(kept.get('reference_data') or []) == 1
+              and any('as ' in f and 'textConverter' in f for f in kept.get('filled_from_build') or []),
+              f"a child of the same template, with its converter and reference data: {kept.get('filled_from_build')} "
+              f"{kept.get('reference_data')}")
+    output = (await stepping.step_pipeline(ctx, kept['uuid'], events_raw, 1))['elements']['translationFilter']['output']
+    e2e.check(_user_name(output) == 'Bob Brown', f"the new version's lookup fills the event: {_user_name(output)}")
+    status = await plan.build_status(ctx, build)
+    e2e.check(status['next']['step'] == 'stepped', f"the version recorded, it is stepped next: {status['next']['step']}")
+    dropped = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=build, name=f'{events_feed}-Events-V2-NoRef',
+                               version_of=events['uuid'], keep_references=False)
+    output = (await stepping.step_pipeline(ctx, dropped['uuid'], events_raw, 1))['elements']['translationFilter']['output']
+    e2e.check(not dropped.get('reference_data') and _user_name(output) is None,
+              f"its reference data left out, as the user chose: {_user_name(output)}")
 
 
 def _user_name(events: str) -> str | None:

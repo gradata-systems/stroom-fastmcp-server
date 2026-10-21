@@ -717,6 +717,12 @@ async def build_translation_xslt(
             contradictions = check_against_notes(mapping.model_dump(exclude_none=True), catalogue)
             result['source_notes_check'] = contradictions or 'the mapping agrees with the event catalogue'
             result['warnings'] += [f"source documentation: {c}" for c in contradictions]
+        from tools.plan import current_translation, lookups_kept, lookups_note, lookups_of
+        current = await current_translation(ctx, build)
+        if lookups_of(current) and not lookups_kept(current, mapping):
+            # Unless the user chose to drop them: a next version written anew loses its predecessor's lookups silently.
+            result['warnings'].append("This mapping keeps none of the current translation's lookups. "
+                                      + lookups_note(current))
     if mapping.input == 'json':
         # As create_pipeline takes them (set_properties): seen, a dict passed on as is, to a parameter of another name.
         result['set_properties'] = [{'element': 'jsonParser', 'name': 'addRootObject',
@@ -1077,6 +1083,13 @@ async def draft_translation_mapping(
     settled = version_settled(ctx, build, version)
     if settled:
         result['schema_version_settled'] = settled
+    from tools.plan import current_translation, lookups_note, lookups_of
+    current = await current_translation(ctx, build) if build else None
+    if lookups_of(current):
+        # A next version drafted from the sample: what the current XSLT looks up is in neither (seen in testing: V1.3
+        # drafted for a feed V1.2 translates, and its IP lookups were gone, though the user meant to keep them).
+        result['current_translation'] = current
+        result['notes'].append(lookups_note(current))
     # Kept for this session, so the first save sends only what changes (seen in testing: a 50 KB draft, written out
     # whole in one call, never reached the server).
     _remember_mapping(ctx, _DRAFT + (build or ''), result['mapping'])
