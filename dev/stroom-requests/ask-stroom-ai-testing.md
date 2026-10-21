@@ -148,6 +148,9 @@ condition it needed.
 Asked: a higher limit for a query that writes a file (8,000 characters, say), and `test`/`match` in `SafeJq`, with
 the bound on time it gives the rest of a query.
 
+**Done** in 65129ab: queries of up to 10,000 characters, and `test`, `match`, `capture`, `sub`, `gsub` (`SafeJqRegex`),
+stopped at the tool's time limit.
+
 ### grep is literal unless told, and an alternation finds nothing
 
 Four `grep` calls with patterns such as `System|Environment|TimeZone|Version` answered "No lines match." on a file
@@ -156,6 +159,8 @@ that has those words; the same pattern with `"regex": true` matched. The agent t
 
 Asked: when a literal pattern matches nothing and holds `|`, `.*` or `\`, say so in the answer ("searched as literal
 text; for a regular expression, regex: true"), or treat it as one.
+
+**Done** in 65129ab: grep says so.
 
 ### A call that waits outlives the access token
 
@@ -173,3 +178,51 @@ agent stopped, and the user had to write "ask me again" for the same questions.
 
 Asked: a longer wait (or none) for a form, or keep it answerable after the run ends, its answers starting the next
 turn.
+
+**Done** in 65129ab: the run stops while the questions wait, and they stay answerable for as long as the user takes.
+
+## Seen on 21 October, later: a new version of the Fortigate pipeline
+
+Read from the transcript (`Let's build a new version of this pipeline...`, 23:22 to 23:25 UTC) and from gh-5848 at
+65129ab, where both tools are as they were. Not reproduced. In both cases the cause is logged at DEBUG only, so the node
+log at the usual level won't show it.
+
+### run_stroomql says only "The query did not run."
+
+The agent asked which event types the pipeline's index (`ElasticIndex 'FortiOS-V1'`) holds, and three queries failed
+with nothing more. `validate_stroomql` passed the same query. They failed after 62 seconds, after 38 seconds and at once:
+
+- `from "FortiOS-V1" where @timestamp > day() - 30d eval Count = count() group by event.type_id, event.category,
+  event.dataset select event.type_id, event.category, event.dataset, Count`
+- the same, grouped by `event.type_id` only
+- `from "FortiOS-V1" where @timestamp > day() - 7d limit 20 select @timestamp, event.type_id, ...` (no grouping)
+
+The agent then gave up on the index and went to the streams.
+
+- `RunStroomQlTool.results()` (:191) says "did not run" when `QueryService.search()` returns null. The first call does
+  that, and so does any poll in the loop at :171. So a search that ran for a minute and then failed a poll reads as one
+  that never started.
+- `QueryServiceImpl.search()` (:564) returns null on an `InterruptedException` or `ExecutionException` from the
+  "Dashboard Search" task, and logs the cause at DEBUG (:567). `processRequest()` turns a `RuntimeException` from the
+  search into a response with errors, which the tool would show ("The query failed: ..."). So what came back here was
+  something else: an `Error`, an exception from the task wrapper, or an interrupt.
+
+Asked: the reason in the tool's answer. `search()` could return a response carrying the exception's message rather
+than null, or log it at WARN, or the tool could catch the cause itself. The answer should also tell a query that never
+started apart from one that stopped mid-poll (after how long, and how many rows had been found). If Elasticsearch
+couldn't be reached, the agent should hear that, not try a smaller query.
+
+### read_document on a processor filter: NullPointerException
+
+`read_document uuid=<processor filter>`, after `document_links` had found the filter and described it (selection,
+pipeline, "enabled"), answered "Error running built-in tool 'read_document': java.lang.NullPointerException".
+`LangChain4jTools` (:153) logs it at DEBUG only.
+
+The path is `ReadDocumentTool.readProcessorFilter()` (:168). `document_links` also calls
+`ProcessorFilterAccess.selection()` and `pipelineOf()` on the same filter without error. That leaves `status()`,
+`documentAccess.logView()` with a name-less `DocRef`, `context.links().document()` and `documentAccess.path()` (which
+catches). I couldn't narrow it further from the code.
+
+Asked: the NPE fixed (a test reading a filter with no tracker, no run-as user and no pipeline name, as the database
+may give one). And a built-in tool's failure logged at WARN with its stack, as the model only sees the exception's
+class.

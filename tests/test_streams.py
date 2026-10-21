@@ -73,3 +73,19 @@ async def test_a_raw_stream_held_as_one_record_is_read_by_its_records():
     stroom.fetch_data = AsyncMock(return_value=one)
     with patch.object(streams, '_cached_raw_text', AsyncMock(return_value=(one['data'], False))):
         assert (await streams.read_stream(ctx, stream_id=7))['records'] == [one['data']]
+
+
+async def test_a_child_part_the_stream_hasnt_says_which_it_has():
+    # Seen in production: 'Meta Data' asked of an Events stream, and only Stroom's "No source found for
+    # childStreamType Meta Data" came back.
+    import pytest
+    from fastmcp.exceptions import ToolError
+
+    async def fetch(stream_id, first, count, kind, child):
+        if child:
+            return {'errors': [f'Error fetching data: No source found for childStreamType {child}']}
+        return {'data': '<Events/>', 'dataType': 'SEGMENTED', 'availableChildStreamTypes': ['Context']}
+    stroom = SimpleNamespace(fetch_data=AsyncMock(side_effect=fetch), settings=SimpleNamespace(read_stream_chars=60_000))
+    ctx = SimpleNamespace(lifespan_context={'stroom': stroom})
+    with pytest.raises(ToolError, match=r"childStreamType Meta Data It has 'Context'\. .*raw stream it came from"):
+        await streams.read_stream(ctx, stream_id=7, child_type='Meta Data')

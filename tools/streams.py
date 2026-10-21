@@ -115,6 +115,8 @@ async def read_stream(
     try:
         records, first_body = await read_records(stroom, stream_id, first_record, record_count, child_type, limit)
     except ToolError as e:
+        if child_type is not None and NO_CHILD in str(e):
+            raise ToolError(f"{e} {await _child_types_note(stroom, stream_id)}") from e
         if child_type is not None or UNDECODABLE not in str(e):
             raise
         # Bytes its feed's character set can't decode: Stroom won't show the text. Read as a pipeline reads it, through
@@ -392,6 +394,20 @@ async def read_records(stroom: StroomGateway, stream_id: int, first: int, count:
         if len(records) >= count or index >= total or used >= char_budget or body.get('dataType') != 'SEGMENTED':
             return records, first_body
         body = await stroom.fetch_data(stream_id, index, 1, 'TEXT', child_type)
+
+
+NO_CHILD = 'No source found for childStreamType'    # Stroom's error for a child part the stream hasn't
+
+
+async def _child_types_note(stroom: StroomGateway, stream_id: int) -> str:
+    """The child parts a stream has, for a read of one it hasn't. Seen: 'Meta Data' asked of an Events stream, which
+    a pipeline wrote without receipt headers; they are on its raw parent."""
+    try:
+        types = (await stroom.fetch_data(stream_id, 0, 1, 'TEXT', None)).get('availableChildStreamTypes') or []
+    except ToolError:
+        types = []
+    has = f"It has {', '.join(repr(t) for t in types)}." if types else "It has no child parts."
+    return f"{has} A processed stream's receipt headers are on the raw stream it came from (its parent_id)."
 
 
 async def get_stream_attributes(ctx: Context, stream_id: StreamId) -> dict[str, Any]:
