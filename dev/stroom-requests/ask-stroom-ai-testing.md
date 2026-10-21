@@ -83,3 +83,46 @@ one; every document type has the field (`DashboardDoc.description`, say), so its
 
 Asked: a built-in tool that writes a document's Documentation tab when the user asks, approved by the user in the
 chat as other changes are.
+
+## A large tool argument must be written out by the model
+
+Seen in testing (onboarding a Fortigate feed as a new version of its pipeline): the agent saved a 49 KB draft mapping
+to its workspace (`/outputs/...`), read it with `jq` and `read_file`, and edited parts of it into files of its own; but
+the save (`build_translation_xslt mapping=`) takes the mapping as an argument, which the model has to write out in full
+in the call. At about 30 KB, with 60 regular expressions to copy exactly, it stopped twice to ask the user how to go
+on, and a first smaller save was cut short. The workspace holds the text the call needs; nothing passes it on.
+
+The MCP server now keeps a draft for the session, so a first save sends only its changes, and a key/value text's keys
+are one entry; but any tool taking a large document (a mapping, an index template, an XSLT) meets the same limit.
+
+Asked: a way for the agent to pass a workspace file, or a `jq` result of one, as a tool call's argument (expanded by
+Stroom before the call is sent), so a large argument doesn't pass through the model.
+
+Where it fits (`stroom-ai-impl`, at 6a6388ea):
+
+- An MCP call runs in `McpAgentChat.runAndRecord()` (:513), which has the chat id and already saves a large *result*
+  to the workspace (`saveOutput`, :1010). It calls `execute()` (:1203), and `McpToolset.callTool()` (:414) turns the
+  model's JSON into the call's arguments with `McpToolAdapter.parseArguments()` (:93). Built-in tools reach the
+  workspace through `ToolCallContext`; MCP calls don't, so the expansion belongs in `runAndRecord`, before
+  `execute`, for MCP tools only (`!isBuiltIn(name)`).
+- A reference: an argument value (at any depth) that is an object with one key, `{"$workspace": "/outputs/x.json"}`,
+  optionally with `"jq": ".mapping"`, or, for a parameter typed as a string, the string `"$workspace:/outputs/x.json"`.
+  A small class (`WorkspaceArguments.expand(chatId, argumentsJson)`) replaces each with the file's content: parsed
+  JSON when the file (or the jq result) is JSON, so an object argument stays an object, else the text. Then a new
+  `ToolExecutionRequest` with the same id and name carries the expanded JSON.
+- Reading: `ChatWorkspace.fileId(chatId, path)` (:117) already refuses an expired file or one whose source document
+  the user can no longer read (S6), and `localFile()` (:157) gives the whole content; `SafeJq` (as `JqTool` runs it)
+  for the query. A bound on the expanded size (a new `AiWorkspaceConfig` limit, 1 MB say). Any failure (no such file,
+  not available, bad jq, too large) is the call's result, `Error: ...`, and the server isn't called.
+- Records: the audit log (`auditLog.toolCall`, :563) and the stored tool call keep the arguments as the model wrote
+  them, the references, not the content; the expanded size can go beside them.
+- Trust: the content is what the model could already have written into the call, so no new reach; the call is
+  approved (or not) as now. Taint (`markTainted`) as for any read of the file.
+- The model is told once, in `ContextAssembler.TOOL_GUIDANCE` (:76): to pass a workspace file as an MCP tool's
+  argument, give `{"$workspace": "<path>"}` (with `"jq"` for a part of it) as the value; Stroom puts the content in.
+- Tests beside `McpAgentChat`'s: an object and a string reference expanded, JSON kept as JSON, jq, a nested
+  reference, each refusal, and the audit keeping the reference.
+
+Nothing changes in the MCP server for it: its large arguments (`mapping`, `changes`, `example_template`) take an
+object or a string already. Once Stroom has it, the server's instructions can say so for Stroom AI, as they name its
+`task_list` and `ask_user`.

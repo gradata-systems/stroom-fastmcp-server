@@ -209,6 +209,8 @@ spec:
               value: {{ .Values.limits.readStreamChars | quote }}
             - name: STROOM_MCP_MAX_SAMPLE_RECORDS
               value: {{ .Values.limits.maxSampleRecords | quote }}
+            - name: STROOM_MCP_SAMPLE_CHECK_SECONDS
+              value: {{ .Values.limits.sampleCheckSeconds | quote }}
             {{- if .Values.accessPolicy }}
             - name: STROOM_MCP_ACCESS_POLICY_FILE
               value: /etc/stroom-mcp/config/access_policy.yaml

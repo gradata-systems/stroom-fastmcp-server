@@ -87,7 +87,7 @@ async def test_changes_to_a_saved_xslt_start_from_the_mapping_kept_with_it():
 
 
 async def test_changes_need_a_mapping_to_change():
-    with pytest.raises(ToolError, match='Nothing was sent for those yet'):
+    with pytest.raises(ToolError, match='None was found for those: draft one, or give the whole mapping'):
         await generation.build_translation_xslt(ctx(), changes={'unmatched': 'warn'}, build='b', name='new')
     with pytest.raises(ToolError, match='not both'):
         await generation.build_translation_xslt(ctx(), mapping(), changes={'unmatched': 'warn'})

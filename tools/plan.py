@@ -221,6 +221,20 @@ async def source_feeds(ctx: Context, build: str, docs: list[dict[str, Any]]) -> 
     return [f for f in dict.fromkeys(found) if f.lower() not in own]
 
 
+async def _translating(stroom: Any, feeds: list[str]) -> list[dict[str, str]]:
+    """The pipelines translating the feeds' raw data now (their processor filters read it): what a new version of
+    the feed's translation starts from."""
+    from tools.describe import _pipelines_reading
+    found: list[dict[str, str]] = []
+    for feed in feeds[:3]:
+        try:
+            found += [{'name': p['name'], 'uuid': p['uuid']} for p in await _pipelines_reading(stroom, feed)
+                      if not p['reads_events'] and all(p['uuid'] != q['uuid'] for q in found)]
+        except Exception:   # advice: a Stroom that can't list its filters leaves the rest of the plan to go on
+            continue
+    return found
+
+
 async def works_from(ctx: Context, build: str | None) -> list[str]:
     """The existing feeds the build works from (source_feeds), with its documents read here; [] for no build."""
     if not build:
@@ -656,7 +670,19 @@ async def status(ctx: Context, build: str, made: dict[str, Any] | None = None) -
                 "user asked: an events pipeline for the feed, survey_feed build=... (its kinds of event); a production "
                 "pipeline's new version or working copy, copy_pipeline; indexing its Events, get_field_conventions "
                 "and the index; sending its Events on as CEF, draft_cef_mapping")
-        start = {'step': 'existing data', 'do': f"Work from {named}, already in Stroom", 'call': call, 'then': then}
+        current = await _translating(stroom, sources)
+        if current:
+            # Seen in testing: asked to onboard a feed "using the current pipeline as a reference", the agent surveyed
+            # and drafted anew, lost the current XSLT's lookups, and had a 50 KB mapping to send in one call.
+            shown = ', '.join(f"'{p['name']}' ({p['uuid']})" for p in current)
+            then = (f"{sources[0]} is translated now by {shown}. For its next version (V1.2 to V1.3, say), or a change "
+                    f"to it: copy_pipeline source_uuid=<it> rename={{'V1.2': 'V1.3'}} (working_copy=true for a change "
+                    f"in place), then build_translation_xslt uuid=<the copy's XSLT> changes= only what changes "
+                    f"(rebuild_mapping uuid=<it> first, if its XSLT keeps no mapping): what it does, its lookups and "
+                    f"all, comes with the copy. survey_feed and draft_translation_mapping are for an events pipeline "
+                    f"written anew, when the user wants that. " + then[0].upper() + then[1:])
+        start = {'step': 'existing data', 'do': f"Work from {named}, already in Stroom", 'call': call, 'then': then,
+                 **({'translated_by': current} if current else {})}
     return {
         'build': build,
         'documents': docs,

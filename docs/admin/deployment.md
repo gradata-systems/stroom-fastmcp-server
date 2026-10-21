@@ -198,6 +198,7 @@ brackets.
 | `MAX_STREAM_CHARS` | `20000` | Cap on stepping and diagnosis text returned [`limits.maxStreamChars`] |
 | `READ_STREAM_CHARS` | `60000` | Record data `read_stream` returns a call; the agent may ask for up to 200,000 when the user does [`limits.readStreamChars`] |
 | `MAX_SAMPLE_RECORDS` | `500` | Records per `step_sample` call [`limits.maxSampleRecords`] |
+| `SAMPLE_CHECK_SECONDS` | `60` | Time `build_translation_xslt` spends checking extract entries against the sample; any left unchecked are named in its warnings [`limits.sampleCheckSeconds`] |
 | `AUDIT_LOG_FILE` | stdout | Audit JSON lines; rotate with logrotate, not `copytruncate` ([Audit log](../operate/audit.md#rotation)) [`audit.file.enabled`, `audit.file.path`]. The chart mounts a volume at the file's directory, since the root file system is read-only: an `emptyDir`, or with `audit.file.persistence.enabled` a claim per replica in a StatefulSet, or with `audit.file.persistence.existingClaim` one claim every replica shares, each pod's file named after it |
 | `USE_ELICITATION` | `true` | Ask through forms when the client supports them |
 | `DEV_NO_AUTH`, `STROOM_API_KEY` | | Local development only: no sign-in, Stroom called with an API key; refused unless listening on localhost, and the key is refused when sign-in is on |

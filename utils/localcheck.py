@@ -246,6 +246,13 @@ def extracted_values(mapping: TranslationMapping, record: Any) -> dict[str, str]
     return values
 
 
+def _extracted(mapping: TranslationMapping, records: list[Any], extracted: list[Any] | None, n: int) -> Any:
+    """Record n's extracted values: from the list worked out once, else now (None without extract entries)."""
+    if not mapping.extract:
+        return None
+    return extracted[n] if extracted is not None else extracted_values(mapping, records[n])
+
+
 def rule_of(mapping: TranslationMapping, record: Any, extracted: dict[str, str] | None = None) -> str | None:
     """The rule a record falls into: a drop rule ('drop: reason'), an event rule's name, '' when none matches, or None
     when a condition on the way cannot be told here."""
@@ -284,7 +291,8 @@ def traits(records: list[Any]) -> str:
     return '; '.join(parts)
 
 
-def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[list[str], list[dict[str, Any]]]:
+def unknown_coverage(mapping: TranslationMapping, records: list[Any], extracted: list[Any] | None = None
+                     ) -> tuple[list[str], list[dict[str, Any]]]:
     """(problems, kept): sample records that rules writing EventDetail/Unknown catch. A rule without allow_unknown that
     catches any is a problem naming what the records hold (the conditions' rule is refused by the generator too; the
     rule for the rest is refused here); a rule with it is reported for the user to confirm."""
@@ -293,15 +301,15 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
     from utils.xsltgen import writes_unknown as unknown_in
     writes_unknown = {r.name: r for r in mapping.events if unknown_in(mapping, r)}
     caught: dict[str, list[Any]] = {}
-    for record in records:
-        extracted = extracted_values(mapping, record) if mapping.extract else None
-        name = rule_of(mapping, record, extracted)
+    for n, record in enumerate(records):
+        values = _extracted(mapping, records, extracted, n)
+        name = rule_of(mapping, record, values)
         if name in writes_unknown:
             # An XML record as its paths, and what extract finds in it, so what it holds is shown and its actions
             # found as a flat record's are.
             flat = xml_flat(record) if isinstance(record, etree._Element) else record
-            caught.setdefault(name, []).append({**flat, **{k: v for k, v in (extracted or {}).items() if v}}
-                                               if isinstance(flat, dict) and extracted else flat)
+            caught.setdefault(name, []).append({**flat, **{k: v for k, v in (values or {}).items() if v}}
+                                               if isinstance(flat, dict) and values else flat)
     problems, kept = [], []
     common = {f.path.strip('/'): f.field for f in mapping.common if f.field}
     for name, found in caught.items():
@@ -345,7 +353,7 @@ def unknown_coverage(mapping: TranslationMapping, records: list[Any]) -> tuple[l
     return problems, kept
 
 
-def shared_type_ids(mapping: TranslationMapping, records: list[Any]) -> list[str]:
+def shared_type_ids(mapping: TranslationMapping, records: list[Any], extracted: list[Any] | None = None) -> list[str]:
     """A TypeId read from one field for every rule that, in the sample, is the same for records of different rules:
     events of different kinds share it. Seen: TypeId the SecretServer category ('User') for logons, logoffs and role
     changes alike. Told from the sample, not the mapping's shape: a TypeId field whose values already differ per kind
@@ -356,12 +364,12 @@ def shared_type_ids(mapping: TranslationMapping, records: list[Any]) -> list[str
     own = {r.name for r in mapping.events if any(f.path.strip('/') == 'EventDetail/TypeId' for f in r.fields)}
     derived = {n for ex in mapping.extract for n in ex.names if n}
     by_value: dict[str, Counter] = {}
-    for record in records:
-        extracted = extracted_values(mapping, record) if mapping.extract else {}
-        name = rule_of(mapping, record, extracted)
+    for n, record in enumerate(records):
+        values = _extracted(mapping, records, extracted, n) if mapping.extract else {}
+        name = rule_of(mapping, record, values)
         if not name or name.startswith('drop: ') or name in own:
             continue
-        value = (extracted or {}).get(common.field) if common.field in derived else _value_of(record, common.field)
+        value = (values or {}).get(common.field) if common.field in derived else _value_of(record, common.field)
         if value:
             by_value.setdefault(value, Counter())[name] += 1
     shared = {v: rules for v, rules in by_value.items() if len(rules) > 1}
@@ -503,11 +511,13 @@ def check_mapping(mapping: TranslationMapping, records: list[Any]) -> dict[str, 
         warnings.append(f"fields in the sample that nothing reads: {unread[:12]}{' ...' if len(unread) > 12 else ''}: "
                         f"map each to the element that means it (a Data entry if nothing else fits), or leave it out on "
                         f"purpose.")
-    warnings += shared_type_ids(mapping, records)
-    unknown_problems, kept = unknown_coverage(mapping, records)
+    # Once a record, not once a check: seen, 60 extract entries over 8,600 records took 9 s, three times over.
+    extracted = [extracted_values(mapping, r) for r in records] if mapping.extract else None
+    warnings += shared_type_ids(mapping, records, extracted)
+    unknown_problems, kept = unknown_coverage(mapping, records, extracted)
     problems += unknown_problems
     if not mapping.for_each:
-        untold = sum(1 for r in records if rule_of(mapping, r, extracted_values(mapping, r) if mapping.extract else None)
+        untold = sum(1 for n, r in enumerate(records) if rule_of(mapping, r, _extracted(mapping, records, extracted, n))
                      is None)
         if untold:
             # Said, not passed over in silence: seen, a clean check of 1000 XML records whose every rule tested a

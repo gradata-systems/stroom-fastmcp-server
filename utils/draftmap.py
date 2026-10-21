@@ -15,6 +15,7 @@ from typing import Any
 
 from utils.actions import action_rules, described, read
 from utils.dsgen import SplitterSpec, dry_run, infer_spec
+from utils.pairs import BOUND, WORDS, key_name, pair_regex
 from utils.profile import _flatten, cut_document, profile, profile_many, value_type, xml_fragments
 from utils.samples import as_named_samples
 from utils.timefmt import EPOCH_NAMES
@@ -149,22 +150,10 @@ def _records(named: dict[str, str], given: SplitterSpec | None = None
     return info, records, spec
 
 
-# Key/value pairs in a text field, as survey_feed signs them (kv:). A key follows the text's start or a separator (; |
-# ( ) ] or a spaced dash) and is one to four words before ': ' (then its value, or [value]); or one word before '='
-# (value, or "value"). Seen in production: Secret Server's audit text in a Windows event's Data, "... Event: [User]
-# Action: [Login] By User: domain.com\priya.patel (Item Id: 219); Source IP: 192.0.2.45", its pairs parted by ;, | or
-# ' - ' from record to record, the agent writing 33 extractions by hand after the draft carried the text whole.
-_BOUND = r'(?:^|[;|()\]]|\s-)\s*'
-_WORDS = r'[A-Za-z][A-Za-z0-9_-]*(?: [A-Za-z][A-Za-z0-9_-]*){0,3}'
-_COLON_KEY = re.compile(_BOUND + f'({_WORDS}): (\\[)?')
+# Key/value pairs in a text field, as survey_feed signs them (kv:): the ways a text writes them are utils.pairs'.
+# Seen in production: the agent writing 33 extractions by hand after the draft carried such a text whole.
+_COLON_KEY = re.compile(BOUND + f'({WORDS}): (\\[)?')
 _EQ_KEY = re.compile(r'(?:^|[\s,;])([A-Za-z_][A-Za-z0-9_.-]*)=(")?')
-# The value runs to the next separator: a dash only where a key or a [ follows it ("Secret: Firewall - Edge Admin;").
-PAIR_REGEX = {
-    'colon': _BOUND + '{key}: (.*?)(?:\\s*[;|()]|\\s+-\\s+(?:\\[|' + _WORDS + ': )|\\s*$)',
-    'bracketed': _BOUND + '{key}: \\[([^\\]]*)\\]',
-    'equals': '(?:^|[\\s,;]){key}=([^\\s,;"]*)',
-    'quoted': '(?:^|[\\s,;]){key}="([^"]*)"',
-}
 
 
 def _pairs_in(text: str) -> list[tuple[str, str]]:
@@ -194,13 +183,12 @@ def pair_extracts(values: dict[str, list[str]], skip: set[str]) -> dict[str, tup
         for key, counted in list(styles.items())[:60]:
             if sum(counted.values()) < 2 and len(vals) >= 5:
                 continue
-            base = re.sub(r'[^A-Za-z0-9]+', '_', key).strip('_').lower()
+            base = key_name(key)
             name, n = base, 2
             while name in used:
                 name, n = f'{base}_{n}', n + 1
             used.add(name)
-            regex = PAIR_REGEX[counted.most_common(1)[0][0]].replace('{key}', key.replace('.', '\\.'))
-            extracts.append({'field': field, 'regex': regex, 'names': [name]})
+            extracts.append({'field': field, 'regex': pair_regex(counted.most_common(1)[0][0], key), 'names': [name]})
         if extracts:
             out[field] = (extracts, all(found))
     return out
@@ -311,8 +299,8 @@ def draft_mapping(samples: Any, source_name: str = '', system_name: str | None =
         if whole:
             json_fields = json_fields + [field]
         shown = ', '.join(f"'{e['names'][0]}'" for e in extracts[:6]) + (' ...' if len(extracts) > 6 else '')
-        notes.append(f"'{field}' holds key/value pairs: {len(extracts)} keys are fields of their own through extract "
-                     f"({shown}), one regex a key. " + ("The text itself isn't mapped (map it too, to Description say, "
+        notes.append(f"'{field}' holds key/value pairs: {len(extracts)} keys are fields of their own through pairs "
+                     f"({shown}), each read as an extract entry would. " + ("The text itself isn't mapped (map it too, to Description say, "
                                                         "if it's wanted whole). " if whole else '')
                      + "A key only one record shows is left out: add it the same way if it's wanted.")
     if paired:

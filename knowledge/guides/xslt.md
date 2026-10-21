@@ -175,11 +175,13 @@ any input field. An extraction can read a field an earlier one produced. Not `su
 ```
 
 Text of key/value pairs (`Event: [User] Action: [Login] By User: alice (Item Id: 219); Source IP: 10.0.0.1`, or
-`user=alice src="10.0.0.1"`) is drafted by `draft_translation_mapping` as one extraction a key, each named for its
-key in snake case (`source_ip` from `Source IP`) and read like any field: homed, ruled on (a key naming the kind,
-`Event`, gives the rules) and carried as Data. Extractions that differ only in their key are written as one
-function called with the key (`mcp:keyed_value($text, 'Source IP')`). The draft keeps the keys its sample shows
-more than once; add any it lacks the same way.
+`user=alice src="10.0.0.1"`) is drafted by `draft_translation_mapping` as `pairs` entries, one a text field and the
+way it writes its pairs: `{"field": "body", "style": "quoted", "keys": ["user", "src"]}` (styles `equals` key=value,
+`quoted` key="value", `colon` Key: value, `bracketed` Key: [value]; `names` for a key named otherwise, `{"Source IP":
+"src_ip"}`). Each key is a field named for it in snake case (`source_ip` from `Source IP`), read like any field:
+homed, ruled on (a key naming the kind, `Event`, gives the rules) and carried as Data. Each key is read as an extract
+entry would be, and the XSLT writes them as one function called with the key (`mcp:keyed_value($text, 'Source IP')`).
+The draft keeps the keys its sample shows more than once; add any it lacks to the entry's keys.
 
 The generated XSLT holds `analyze-string(message, regex)` in a variable per template, named for the first field it
 extracts (`ts_parts`), and reads each group from it; text two or more extractions read is the field's own variable

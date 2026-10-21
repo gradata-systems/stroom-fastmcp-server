@@ -12,8 +12,13 @@ environment-variable(), so only the check stands in its way.
 
 The XSLT the server saves runs in Stroom, on its nodes, with Stroom's access: the same functions are refused there,
 with the instructions that read or write a resource or evaluate an XPath made at run time, and imports by URL.
+
+The processor is made on the main thread, when this module is imported there (at startup): made on a worker thread
+it crashes the process (a fatal StackOverflowError in its isolate, even used from that thread alone), while one made
+on the main thread serves worker threads, several at once, as the sample check runs in them.
 """
 import re
+import threading
 
 from lxml import etree
 
@@ -53,6 +58,9 @@ def processor():
     """The server's one Saxon processor, locked down (above)."""
     global _processor
     if _processor is None:
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("Saxon is started on the main thread (utils.saxon imported there, at startup): started "
+                               "on a worker thread, it crashes the process")
         # A runtime dependency: it was a dev one, and build_translation_xslt failed in a deployed image.
         from saxonche import PySaxonProcessor
         proc = PySaxonProcessor(license=False)
@@ -280,3 +288,7 @@ def compile_errors(xslt: str) -> tuple[list[str], list[str]]:
     if not errors and not notes:
         errors.append(message.strip().splitlines()[0][:300] if message.strip() else 'it does not compile')
     return errors, notes
+
+
+if threading.current_thread() is threading.main_thread():
+    processor()

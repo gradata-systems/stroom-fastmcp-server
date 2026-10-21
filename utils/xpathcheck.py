@@ -9,6 +9,7 @@ evaluated, nor are for_each mappings, whose xpaths read items.
 """
 import json
 import re
+import time
 import unicodedata
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
@@ -211,6 +212,67 @@ def where_it_stops(regex: str, flags: str, texts: list[str]) -> str:
 _NOT_XML = re.compile('[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
 
 
+_XPATH_SPACE = ' \\t\\n\\r'
+_NO_TWIN = set('pPiIcCwWbBAZzG')     # escapes Python reads otherwise (or XPath lacks): \w is not letters and digits
+
+
+def python_twin(regex: str, flags: str) -> re.Pattern | None:
+    """The XPath regex as Python reads it the same way, or None where Python's rules differ: \\s is space, tab,
+    newline and carriage return; . is neither newline nor carriage return; $ is the end of the text (unless m); \\w,
+    \\p{..}, \\i, \\c and class subtraction ([a-z-[aeiou]]) aren't translated. For counting matches only: Saxon
+    still says whether the regex is valid XPath, and agrees on a share of the texts before the count is trusted."""
+    if set(flags) - {'i', 'm', 's'}:
+        return None
+    out, i, in_class = [], 0, False
+    while i < len(regex):
+        c = regex[i]
+        if c == '\\':
+            if i + 1 >= len(regex):
+                return None
+            e = regex[i + 1]
+            if e in _NO_TWIN or (in_class and e == 'S'):
+                return None
+            out.append((_XPATH_SPACE if in_class else f'[{_XPATH_SPACE}]') if e == 's' else
+                       f'[^{_XPATH_SPACE}]' if e == 'S' else c + e)
+            i += 2
+            continue
+        if in_class:
+            if c == '-' and regex[i + 1:i + 2] == '[':
+                return None
+            out.append(c)       # an unescaped [ in a class is an error to XPath: Saxon has refused the regex
+            in_class = c != ']'
+            i += 1
+            continue
+        out.append(c)
+        if c == '[':
+            in_class = True
+            if regex[i + 1:i + 2] == '^':
+                out.append('^')
+                i += 1
+        elif c == '.' and 's' not in flags:
+            out[-1] = '[^\\n\\r]'
+        elif c == '$' and 'm' not in flags:
+            out[-1] = '\\Z'
+        i += 1
+    py_flags = 0
+    for f in flags:
+        py_flags |= _PY_FLAGS[f]
+    try:
+        return re.compile(''.join(out), py_flags)
+    except re.error:
+        return None
+
+
+AGREEMENT_TEXTS = 100
+
+
+def _spread(texts: list[str], n: int) -> list[str]:
+    """n texts from across the list, its first and last among them (records of a kind cluster in a sample)."""
+    if len(texts) <= n:
+        return texts
+    return [texts[round(k * (len(texts) - 1) / (n - 1))] for k in range(n)]
+
+
 def _texts_document(proc, texts: list[str]):
     """The texts as <t><s>text</s>...</t>, for XPath to test a regex on all of them at once. A character XML can't
     hold becomes U+FFFD."""
@@ -219,11 +281,15 @@ def _texts_document(proc, texts: list[str]):
 
 
 def check_extractions(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None,
-                      records: list[Any]) -> tuple[list[str], list[str]]:
-    """Each extraction's regex run (with XPath's own regex rules, by Saxon) on the text it reads in the sample:
-    one that matches none is a problem, as its fields would be empty in every event; one that matches some, a
-    warning. Seen: a regex written with '-' where the text has an en dash matched nothing, nothing said so, and the
-    agent changed the escaping a hundred times."""
+                      records: list[Any], deadline: float | None = None) -> tuple[list[str], list[str]]:
+    """Each extraction's regex run (with XPath's own regex rules) on the text it reads in the sample: one that
+    matches none is a problem, as its fields would be empty in every event; one that matches some, a warning. Seen: a
+    regex written with '-' where the text has an en dash matched nothing, nothing said so, and the agent changed the
+    escaping a hundred times.
+
+    Saxon reads each regex on texts from across the sample; where Python reads it the same way (python_twin) and
+    agrees on those, Python counts the rest. Seen in production: Saxon alone took 85 s over a Fortigate sample's 8,600
+    texts and 60 regexes. Past the deadline (time.monotonic()), the entries left are named, not checked."""
     if mapping.for_each or not mapping.extract:
         return [], []
     from utils.localcheck import _value_of
@@ -234,6 +300,8 @@ def check_extractions(mapping: TranslationMapping, sample: str | list[str], spli
     produced = set()
     problems, warnings = [], []
     held: dict[str, Any] = {}       # each source's texts, as one document
+    spread: dict[str, tuple[list[str], Any]] = {}     # and some from across them, for Saxon to agree on
+    unchecked = []
     for n, ex in enumerate(mapping.extract):
         source = ex.field or ex.xpath
         where = f"extract[{n}] ({source})"
@@ -265,29 +333,51 @@ def check_extractions(mapping: TranslationMapping, sample: str | list[str], spli
                     texts.append(text)
         if not texts:
             continue    # nothing to read: the xpath and field checks say so
-        # Every text the sample has, in one document read once per source: the first 200 alone missed a VPN rule's
-        # keys, whose records began at the 557th of 3,933, and a sound mapping was refused (seen in production).
-        if source not in held:
-            held[source] = _texts_document(proc, texts)
-        xp = proc.new_xpath_processor()
-        xp.set_context(xdm_item=held[source])
+        if deadline is not None and time.monotonic() > deadline:
+            unchecked.append(where)
+            continue
+        texts = [_NOT_XML.sub(chr(0xfffd), t) for t in texts]      # as XPath reads them
         test = f"matches(., {literal(ex.regex)}, {literal(ex.flags)})"
+        if source not in spread:
+            some = _spread(texts, AGREEMENT_TEXTS)
+            spread[source] = (some, _texts_document(proc, some))
+        some, some_doc = spread[source]
+        xp = proc.new_xpath_processor()
+        xp.set_context(xdm_item=some_doc)
         try:
-            hits = xp.evaluate_single(f"count(/t/s[{test}])")
-            matched = int(hits.string_value) if hits is not None else 0
+            said = xp.evaluate_single(f"string-join(/t/s ! (if ({test}) then '1' else '0'))")
         except Exception as e:
             problems.append(f"{where}: the regex is not a valid XPath regular expression: "
                             f"{str(e).strip().splitlines()[0][:200]}." + (ESCAPED_TWICE if '\\\\' in ex.regex else ''))
             continue
+        twin = python_twin(ex.regex, ex.flags)
+        if twin and (said.string_value if said is not None else '') == ''.join(
+                '1' if twin.search(t) else '0' for t in some):
+            hits = [bool(twin.search(t)) for t in texts]
+            matched, missed = sum(hits), next((t for t, hit in zip(texts, hits) if not hit), None)
+        else:
+            # Every text the sample has, in one document read once per source: the first 200 alone missed a VPN
+            # rule's keys, whose records began at the 557th of 3,933, and a sound mapping was refused (seen in
+            # production).
+            if source not in held:
+                held[source] = _texts_document(proc, texts)
+            xp = proc.new_xpath_processor()
+            xp.set_context(xdm_item=held[source])
+            hits = xp.evaluate_single(f"count(/t/s[{test}])")
+            matched, missed = int(hits.string_value) if hits is not None else 0, None
+            if 0 < matched < len(texts):
+                first_miss = xp.evaluate_single(f"string((/t/s[not({test})])[1])")
+                missed = first_miss.string_value if first_miss is not None else None
         if matched == 0:
             problems.append(f"{where}: the regex matches none of the {len(texts)} sample texts, so {names} would be empty "
                             f"in every event. {where_it_stops(ex.regex, ex.flags, texts)}")
         elif matched < len(texts):
-            first_miss = xp.evaluate_single(f"string((/t/s[not({test})])[1])")
-            missed = first_miss.string_value if first_miss is not None else None
             warnings.append(f"{where}: the regex matches {matched} of the {len(texts)} sample texts; the rest leave "
                             f"{names} empty. E.g. {_shown(missed or '', 160)}: "
                             + (where_it_stops(ex.regex, ex.flags, [missed]) if missed else ''))
+    if unchecked:
+        warnings.append(f"{', '.join(unchecked)} not checked against the sample: the check's time ran out (the "
+                        f"server's sample_check_seconds). step_sample shows what they give.")
     return problems, warnings
 
 

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     max_sample_chars: int = 1_000_000
     # Records stepped per step_sample call before stopping.
     max_sample_records: int = 500
+    # Seconds build_translation_xslt spends checking a mapping's extract entries against the sample before saying which
+    # it left unchecked (seen in production: a 10 MB Fortigate sample's 60 regexes, 85 s in Saxon).
+    sample_check_seconds: int = 60
     # Error triage rules (see error_rules.yaml).
     error_rules_file: Path = Path('error_rules.yaml')
     # Template pipeline sources (and, later, write scope).

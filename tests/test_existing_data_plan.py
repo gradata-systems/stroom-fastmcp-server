@@ -294,3 +294,22 @@ async def test_an_events_pipeline_reading_json_itself_needs_no_converter():
     args = dict(sources=['ACME'], survey=survey, stages={'ev': 'translation'}, mappings={'x': ('translation', {})})
     assert states(await status(docs, parsers={'ev': 'JSONParser'}, **args))['converter'] == 'not needed'
     assert states(await status(docs, parsers={'ev': 'DSParser'}, **args))['converter'] == 'to do'
+
+
+async def test_an_existing_feeds_current_translation_is_where_its_next_version_starts():
+    # Seen in testing: asked to onboard a feed "using the current pipeline as a reference", the agent surveyed and
+    # drafted anew, losing the current XSLT's lookups, with a 50 KB mapping to send in one call.
+    reading = [{'uuid': 'prod-ev', 'name': 'FG-V1.2-Events', 'reads_events': False},
+               {'uuid': 'prod-ix', 'name': 'FG-V1.2-Indexing', 'reads_events': True}]
+    with patch('tools.describe._pipelines_reading', AsyncMock(return_value=reading)):
+        result = await status([], sources=['FG'])
+    assert result['next']['translated_by'] == [{'name': 'FG-V1.2-Events', 'uuid': 'prod-ev'}]
+    then = result['next']['then']
+    assert then.startswith("FG is translated now by 'FG-V1.2-Events' (prod-ev). For its next version")
+    assert "copy_pipeline source_uuid=<it> rename={'V1.2': 'V1.3'}" in then
+    assert 'build_translation_xslt uuid=<the copy\'s XSLT> changes= only what changes' in then
+    assert 'create no feed and upload nothing' in then
+    # A feed nothing translates yet: the plan as it was.
+    with patch('tools.describe._pipelines_reading', AsyncMock(return_value=[])):
+        result = await status([], sources=['FG'])
+    assert 'translated_by' not in result['next'] and result['next']['then'].startswith('this build works from')

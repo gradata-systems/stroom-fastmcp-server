@@ -1,5 +1,7 @@
 """Generating translation code from a mapping, so the model does not have to write XSLT by hand."""
+import asyncio
 import re
+import time
 import json
 from typing import Annotated, Any, Literal
 
@@ -27,7 +29,7 @@ from utils.xpathcheck import check_extractions, check_xpaths
 from utils.profile import _inventory
 from utils.refgen import ReferenceMapping, generate_reference
 from utils.fielddoc import field_mapping_markdown, sampled_events
-from utils.xsltgen import TranslationMapping, compact_rules, generate, grouped, kept_unknown
+from utils.xsltgen import TranslationMapping, compact_pairs, compact_rules, generate, grouped, kept_unknown
 
 
 def _first_sentence(text: str, limit: int = 220) -> str:
@@ -263,6 +265,54 @@ def _remember_mapping(ctx: Context, target: str, mapping: dict[str, Any] | Trans
         pass
 
 
+def _generated(mapping: TranslationMapping, schema: EventSchema, version: str) -> dict[str, Any]:
+    """generate's result, compiled as Stroom compiles it: seen, an XSLT saved ok:true whose every record failed at
+    stepping with "Variable kv has not been declared" (an xpath of $kv, an extract's name). One that doesn't compile
+    isn't saved. Run in a worker thread, as the sample check is."""
+    result = generate(mapping, schema, version)
+    if result['ok']:
+        from utils.saxon import compile_errors
+        errors, compile_notes = compile_errors(result['xslt'])
+        result['warnings'] += [f"compiling: {n}" for n in compile_notes]
+        if errors:
+            result['problems'] += [f"The XSLT doesn't compile, so it would fail every record: {e}. Fix the mapping "
+                                   f"entry it comes from (an xpath reads only the record and the XSLT's functions: a "
+                                   f"field, an extract's name included, is read with field=)" for e in errors]
+            result['ok'], result['xslt'] = False, None
+    return result
+
+
+def _check_seconds(ctx: Context) -> int:
+    try:
+        seconds = gateway_from(ctx).settings.sample_check_seconds
+    except Exception:
+        seconds = None
+    return seconds if isinstance(seconds, int) else 60
+
+
+def _sample_check(mapping: TranslationMapping, sample: str | list[str], splitter: SplitterSpec | None,
+                  schema: EventSchema, inferred: bool, seconds: int = 60) -> dict[str, Any]:
+    """The mapping checked against the sample's records. Run in a worker thread: seen in production, a Fortigate
+    sample's check (10 streams of 1 MB, 60 extract entries) held the event loop for over a minute, the health probe
+    went unanswered, and the pod was restarted mid-call."""
+    deadline = time.monotonic() + seconds
+    records, note = sample_records(mapping, sample, splitter)
+    check = check_mapping(mapping, records)
+    check['problems'] += check_schema_values(mapping, records, schema)
+    check['warnings'] += check_xpaths(mapping, sample, splitter)
+    extraction_problems, extraction_warnings = check_extractions(mapping, sample, splitter, records, deadline)
+    check['problems'] += extraction_problems
+    check['warnings'] += extraction_warnings
+    if inferred:
+        # Read with a guess at the converter, a field the guess doesn't name may be one the build's own converter
+        # does (seen: a hand-written syslog splitter's 'pwd' refused, as the inferred one has no such field).
+        missing = [p for p in check['problems'] if p.startswith("field '") and ' is in none of the ' in p]
+        check['problems'] = [p for p in check['problems'] if p not in missing]
+        check['warnings'] += [f"{p} (the sample was read with an inferred Data Splitter: give splitter if the "
+                              f"build's converter names its fields otherwise)" for p in missing]
+    return {**check, **({'note': note} if note else {})}
+
+
 def _fix_hint(uuid: str | None, build: str | None, name: str | None) -> str:
     return ("Fix the problems in the mapping (not the XSLT) and call again with changes= only the rules or entries that "
             "change" + (f" and uuid='{uuid}'" if uuid else " and the same build and name" if build and name else
@@ -304,25 +354,49 @@ async def _remember_unknown_agreed(ctx: Context, uuid: str, agreed: dict[str, st
     return (await stroom.put_doc(doc)).get('version')
 
 
-async def _mapping_to_change(ctx: Context, target: str, uuid: str | None) -> dict[str, Any]:
+_DRAFT = 'draft:'
+
+
+def _sent(ctx: Context, target: str) -> dict[str, Any] | None:
     from tools.plan import _user
     try:
-        sent = ctx.lifespan_context.get(_SENT, {}).get((_user(ctx), target)) if target else None
+        return ctx.lifespan_context.get(_SENT, {}).get((_user(ctx), target)) if target else None
     except Exception:
-        sent = None
+        return None
+
+
+async def _mapping_to_change(ctx: Context, target: str, uuid: str | None, build: str | None = None,
+                             name: str | None = None) -> tuple[dict[str, Any], str | None]:
+    """(mapping, base): the mapping changes= apply to, the one last sent for the XSLT, else the one kept with it
+    (uuid, or the build's XSLT of that name), else the draft draft_translation_mapping made for the build this session;
+    base names the draft when it was that. Seen in testing: a first save from a 50 KB draft had to send it whole,
+    which the agent couldn't write out in one call."""
+    sent = _sent(ctx, target)
     if sent:
-        return sent
+        return sent, None
+    if not uuid and build and name:
+        from security.guard import guard_from
+        try:
+            uuid = next((d['uuid'] for d in await guard_from(ctx).folder_contents(build)
+                         if d['type'] == 'XSLT' and d['name'] == name), None)
+        except Exception:     # no such build yet: nothing saved in it
+            uuid = None
+        if not uuid:
+            draft = _sent(ctx, _DRAFT + build) or _sent(ctx, _DRAFT)
+            if draft:
+                return draft, 'the draft draft_translation_mapping made'
     if uuid:
         doc = await gateway_from(ctx).get_doc('XSLT', uuid)
         kept = read_mapping(doc.get('description'))
         if kept and kept[0] == 'translation' and (kept[1] or {}).get('mapping'):
-            return kept[1]['mapping']
+            return kept[1]['mapping'], None
         from tools.translation import lost_mapping
         raise ToolError(await lost_mapping(ctx, {'type': 'XSLT', 'uuid': uuid, 'name': doc.get('name')},
                                            doc.get('description'))
                         or f"XSLT {uuid} keeps no translation mapping to change: give the whole mapping")
-    raise ToolError("changes needs the XSLT they apply to: uuid= the saved XSLT, or the same build and name as the "
-                    "mapping sent before. Nothing was sent for those yet: give the whole mapping.")
+    raise ToolError("changes needs a mapping to apply to: uuid= the saved XSLT, the same build and name as a mapping "
+                    "sent or saved before, or a draft from draft_translation_mapping this session (build= the same "
+                    "build). None was found for those: draft one, or give the whole mapping.")
 
 
 async def _kept_mapping(ctx: Context, target: str, uuid: str | None) -> tuple[dict[str, Any], str | None]:
@@ -338,7 +412,7 @@ async def _kept_mapping(ctx: Context, target: str, uuid: str | None) -> tuple[di
                                            doc.get('description'))
                         or f"XSLT {uuid} keeps no translation mapping to regenerate from: give the whole mapping "
                            f"(draft_translation_mapping drafts one)")
-    return await _mapping_to_change(ctx, target, None), None
+    return (await _mapping_to_change(ctx, target, None))[0], None
 
 
 async def _required_for(ctx: Context, stage: str, build: str | None, feeds: Any = ()) -> list[dict[str, str]]:
@@ -479,7 +553,8 @@ async def build_translation_xslt(
             "processed'."))] = None,
         changes: Annotated[dict[str, Any] | str | None, Field(description=(
             "Instead of mapping, to fix one: only what changes, merged into the mapping last sent for this XSLT (the "
-            "same uuid, or build and name; else the one saved with uuid). events: rules, each replacing the rule of "
+            "same uuid, or build and name; else the one saved with it; else, for a build and name not saved yet, the "
+            "draft draft_translation_mapping made this session). events: rules, each replacing the rule of "
             "that name whole (or added); common: entries, each replacing the one with that path (and data_name); "
             "{name or path, \"remove\": true} removes one; any other key replaces it. Much less to write than the "
             "whole mapping again."))] = None,
@@ -514,7 +589,7 @@ async def build_translation_xslt(
     """
     version = None
     target = uuid or (f"{build}/{name}" if build and name else '')
-    applied = None
+    applied = based_on = None
     if changes is not None:
         if mapping is not None:
             raise ToolError("Give mapping (the whole one) or changes (only what changes), not both")
@@ -524,7 +599,8 @@ async def build_translation_xslt(
             except json.JSONDecodeError as e:
                 raise ToolError(f"changes is text that is not JSON ({e.msg} at character {e.pos}): pass it as an "
                                 f"object. " + ESCAPING)
-        mapping, applied = apply_changes(await _mapping_to_change(ctx, target, uuid), changes)
+        base, based_on = await _mapping_to_change(ctx, target, uuid, build, name)
+        mapping, applied = apply_changes(base, changes)
     elif mapping is None:
         if not target:
             raise ToolError("Give mapping (draft_translation_mapping drafts one), changes to fix the one sent before, "
@@ -555,7 +631,7 @@ async def build_translation_xslt(
             # The draft is made only for a list of fields given as the mapping (small models do), not for every
             # mistake: drafting a large sample took long, to answer what a precise error answers at once.
             if sample is not None and looks_like_inventory:
-                draft = draft_mapping(sample if isinstance(sample, list) else [sample])
+                draft = await asyncio.to_thread(draft_mapping, sample if isinstance(sample, list) else [sample])
                 return {'status': 'needs_mapping', 'ok': False,
                         'problems': ["mapping is a list of fields, not a translation mapping" if looks_like_inventory else
                                      "mapping is not a translation mapping"] + problems,
@@ -585,18 +661,7 @@ async def build_translation_xslt(
                {*mapping.imports, *(u.href for u in mapping.shared), *(f.href for f in mapping.functions)}]
     if missing:
         mapping = mapping.model_copy(update={'imports': [*mapping.imports, *missing]})
-    result = generate(mapping, schema, version)
-    if result['ok']:
-        # Compiled as Stroom compiles it: seen, an XSLT saved ok:true whose every record failed at stepping with
-        # "Variable kv has not been declared" (an xpath of $kv, an extract's name). One that doesn't compile isn't saved.
-        from utils.saxon import compile_errors
-        errors, compile_notes = compile_errors(result['xslt'])
-        result['warnings'] += [f"compiling: {n}" for n in compile_notes]
-        if errors:
-            result['problems'] += [f"The XSLT doesn't compile, so it would fail every record: {e}. Fix the mapping "
-                                   f"entry it comes from (an xpath reads only the record and the XSLT's functions: a "
-                                   f"field, an extract's name included, is read with field=)" for e in errors]
-            result['ok'], result['xslt'] = False, None
+    result = await asyncio.to_thread(_generated, mapping, schema, version)
     result['schema_version'] = version
     if schema_version is None and (settled := version_settled(ctx, build, version)):
         result['schema_version_settled'] = settled
@@ -612,6 +677,8 @@ async def build_translation_xslt(
                       hint=_fix_hint(uuid, build, name) + " The sample is checked once they are fixed.")
         if applied:
             result['changes_applied'] = applied
+        if based_on:
+            result['changes_applied_to'] = based_on
         return result
     if sample is None and stream_ids:
         texts, read_notes = await read_sample_streams(ctx, stream_ids)
@@ -635,21 +702,8 @@ async def build_translation_xslt(
             result['warnings'].append("sample: read with the Data Splitter spec inferred from it (as build_data_splitter "
                                       "does); give splitter if the build's converter differs")
     if sample is not None:
-        records, note = sample_records(mapping, sample, splitter)
-        check = check_mapping(mapping, records)
-        check['problems'] += check_schema_values(mapping, records, schema)
-        check['warnings'] += check_xpaths(mapping, sample, splitter)
-        extraction_problems, extraction_warnings = check_extractions(mapping, sample, splitter, records)
-        check['problems'] += extraction_problems
-        check['warnings'] += extraction_warnings
-        if inferred:
-            # Read with a guess at the converter, a field the guess doesn't name may be one the build's own converter
-            # does (seen: a hand-written syslog splitter's 'pwd' refused, as the inferred one has no such field).
-            missing = [p for p in check['problems'] if p.startswith("field '") and ' is in none of the ' in p]
-            check['problems'] = [p for p in check['problems'] if p not in missing]
-            check['warnings'] += [f"{p} (the sample was read with an inferred Data Splitter: give splitter if the "
-                                  f"build's converter names its fields otherwise)" for p in missing]
-        result['sample_check'] = {**check, **({'note': note} if note else {})}
+        check = await asyncio.to_thread(_sample_check, mapping, sample, splitter, schema, inferred, _check_seconds(ctx))
+        result['sample_check'] = check
         result['warnings'] += [f"sample: {w}" for w in check['warnings']]
         if check['problems']:
             # A time format no sample value fits fails every record at stepping: as good as a schema problem.
@@ -677,7 +731,7 @@ async def build_translation_xslt(
         pipeline = await _Pipeline.load(stroom, pipeline_uuid)
         element = pipeline.default_outputs()[0]
         # The documentation run steps a copy that marks each Event with its rule; the returned XSLT has no marks.
-        marked = generate(mapping, schema, version, mark_rules=True)['xslt']
+        marked = (await asyncio.to_thread(generate, mapping, schema, version, True))['xslt']
         outputs = await _outputs(stroom, pipeline, stream_ids, element, {element: marked}, max_records)
         events = sampled_events(list(outputs.values()))
         result['field_mapping'] = field_mapping_markdown(mapping, schema, events)
@@ -764,6 +818,8 @@ async def build_translation_xslt(
             result.pop('xslt')
     if applied:
         result['changes_applied'] = applied
+    if based_on:
+        result['changes_applied_to'] = based_on
     if not result['ok']:
         result['hint'] = _fix_hint(uuid, build, name)
     elif saved:
@@ -997,8 +1053,9 @@ async def draft_translation_mapping(
             pass
     if isinstance(splitter, dict):
         splitter = SplitterSpec.model_validate(splitter)
-    result = draft_mapping(samples, source_name, system_name, environment, source_notes, detail_check, splitter)
-    result['mapping'] = compact_rules(result['mapping'])
+    result = await asyncio.to_thread(draft_mapping, samples, source_name, system_name, environment, source_notes,
+                                     detail_check, splitter)
+    result['mapping'] = compact_pairs(compact_rules(result['mapping']))
     if result['mapping'].get('input') == 'xml_fragments':
         # Read in the namespace of the wrapper the environment uses, which need not be records:2.
         from tools.translation import with_fragment_setup
@@ -1008,7 +1065,8 @@ async def draft_translation_mapping(
         if setup.get('xslt_input'):
             result['mapping']['xml_namespace'] = setup['xslt_input']['namespace']
     try:
-        checked = generate(TranslationMapping.model_validate(result['mapping']), await event_schema(ctx, version), version)
+        schema = await event_schema(ctx, version)
+        checked = await asyncio.to_thread(generate, TranslationMapping.model_validate(result['mapping']), schema, version)
         # Each problem's first sentence: build_translation_xslt gives them whole, and the draft's notes say the rest.
         result['schema_check'] = {'ok': checked['ok'],
                                   'problems': [_first_sentence(p) for p in grouped(checked['problems'])],
@@ -1019,12 +1077,18 @@ async def draft_translation_mapping(
     settled = version_settled(ctx, build, version)
     if settled:
         result['schema_version_settled'] = settled
+    # Kept for this session, so the first save sends only what changes (seen in testing: a 50 KB draft, written out
+    # whole in one call, never reached the server).
+    _remember_mapping(ctx, _DRAFT + (build or ''), result['mapping'])
+    if build:
+        _remember_mapping(ctx, _DRAFT, result['mapping'])
     result['hint'] = ((f"{settled} " if settled else '') +
                       "Decide what the notes ask (the action element per kind of event, System Name and Environment, the "
-                      "time zone), then build_translation_xslt(mapping=this mapping, schema_version=this schema_version, "
-                      "stream_ids=the sample streams (or sample=the texts), splitter=this splitter, build and name to "
-                      "save it). A rule's data lists the fields it carries as Data "
-                      "of its action element; keep it when you change the element.")
+                      "time zone), then build_translation_xslt(build=, name= to save it, changes= only the rules and "
+                      "entries you change, schema_version=this schema_version, stream_ids=the sample streams (or "
+                      "sample=the texts), splitter=this splitter): the server keeps this draft for the session, so it "
+                      "needn't be sent whole. A rule's data lists the fields it carries as Data of its action element; "
+                      "keep it when you change the element.")
     return result
 
 

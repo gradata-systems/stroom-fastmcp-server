@@ -27,6 +27,7 @@ from lxml import etree
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from utils.eventschema import Child, EventSchema
+from utils.pairs import key_name, pair_of, pair_regex
 from utils.saxon import refused
 
 XSL = 'http://www.w3.org/1999/XSL/Transform'
@@ -345,8 +346,12 @@ class EventRule(BaseModel):
         if self.data:
             home = action_home([f.path for f in self.fields])
             if home is None:
-                raise ValueError(f"[{self.name}] data needs the rule's action element: map one of its fields (e.g. "
-                                 f"EventDetail/Alert/Type) first, or give each as a '.../Data' entry with data_name")
+                # Seen in testing: a rule of fields [] and a data list, for Network events with no typed child.
+                raise ValueError(f"[{self.name}] data needs the rule's action element, which none of its fields names: "
+                                 f"map one field there first (EventDetail/Alert/Type, say; for an element whose only "
+                                 f"fit is Data, as Network's is for a DNS lookup, a Data entry of it: "
+                                 f"{{\"path\": \"EventDetail/Network/Data\", \"data_name\": \"action\", \"field\": "
+                                 f"\"action\"}}), and data carries the rest beside it")
             have = {(f.path.strip('/'), f.data_name) for f in self.fields}
             self.fields = self.fields + [FieldMapping(path=f'{home}/Data', data_name=n, field=n) for n in self.data
                                          if (f'{home}/Data', n) not in have]
@@ -443,6 +448,57 @@ class XsltStyle(BaseModel):
         "with select=\".\". named: the same, as named templates called with xsl:call-template. inline: every event "
         "kind written in the record template's xsl:choose, shared parts still named templates. Set it from an AGENTS "
         "style guide or when the user asks for one."))
+
+
+class KeyValuePairs(BaseModel):
+    """Key/value pairs in one text field, each key a field of its own: an extract entry a key, written as one."""
+    field: str = Field(description="The input field holding the text (a Data Splitter name, JSON key, XML path, or a "
+                                   "name from an extract entry).")
+    style: Literal['equals', 'quoted', 'colon', 'bracketed'] = Field(description=(
+        "How the text writes each pair: equals key=value (to the next space, comma or semicolon), quoted key=\"value\", "
+        "colon 'Key Words: value' (to the next ; | ( or ), or ' - ' before the next key), bracketed 'Key: [value]'. "
+        "Keys written two ways go in two entries."))
+    keys: list[str] = Field(min_length=1, description="The keys, as the text writes them: each value is a field named "
+                                                      "after its key in snake case ('Source IP' -> source_ip).")
+    names: dict[str, str] = Field(default_factory=dict, description=(
+        "Field names for keys named otherwise: {key: name}, for a name an input field already has, say."))
+
+    @model_validator(mode='after')
+    def _known_keys(self):
+        unknown = sorted(set(self.names) - set(self.keys))
+        if unknown:
+            raise ValueError(f"pairs names {unknown}, which aren't among its keys")
+        return self
+
+
+def compact_pairs(mapping: dict[str, Any]) -> dict[str, Any]:
+    """The mapping with its extract entries that read a key's value as a pairs entry would (utils.pairs) folded into
+    pairs entries, one a text field and style: the same mapping, its extract a fraction of the size (seen in testing:
+    60 such entries in a Fortigate draft). Entries reading another extraction's name, and any other, stay as they are."""
+    derived = {n for ex in mapping.get('extract') or [] for n in ex.get('names') or []}
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    rest = []
+    for ex in mapping.get('extract') or []:
+        found = pair_of(ex.get('regex') or '') if set(ex) <= {'field', 'regex', 'names'} and ex.get('field') else None
+        names = [n for n in ex.get('names') or [] if n]
+        if not found or len(ex.get('names') or []) != 1 or not names or ex['field'] in derived:
+            rest.append(ex)
+            continue
+        style, key = found
+        entry = pairs.setdefault((ex['field'], style), {'field': ex['field'], 'style': style, 'keys': []})
+        if key in entry['keys']:        # the same key twice (two names): left as written
+            rest.append(ex)
+            continue
+        entry['keys'].append(key)
+        if names[0] != key_name(key):
+            entry.setdefault('names', {})[key] = names[0]
+    if not pairs:
+        return mapping
+    out = {k: v for k, v in mapping.items() if k != 'extract'}
+    out['pairs'] = [*(mapping.get('pairs') or []), *pairs.values()]
+    if rest:
+        out['extract'] = rest
+    return out
 
 
 class Extraction(BaseModel):
@@ -611,6 +667,10 @@ class TranslationMapping(BaseModel):
         "(payload/Envelope/Body/Login/User), '//' for anywhere below (payload//User), '@name' for an attribute. Read "
         "safely: a record whose field is empty, or isn't XML, gives nothing. Never map the field itself into an "
         "element."))
+    pairs: list[KeyValuePairs] = Field(default_factory=list, description=(
+        "Key/value pairs in a text field (srcip=10.0.0.1 type=\"traffic\", or 'Source IP: 192.0.2.45; User: [x]'), "
+        "each key a field of its own: one entry for many keys, read as extract reads one (each key becomes an extract "
+        "entry). e.g. {\"field\": \"body\", \"style\": \"quoted\", \"keys\": [\"type\", \"subtype\"]}."))
     extract: list[Extraction] = Field(default_factory=list, description=(
         "Fields parsed out of text fields with regular expressions, e.g. a message string holding the time, user "
         "and action; their names are then used as fields in common, events and when."))
@@ -631,6 +691,21 @@ class TranslationMapping(BaseModel):
     unmatched: Literal['warn', 'skip'] = Field('warn', description="Records no rule matches: log a warning, or skip.")
     style: XsltStyle = Field(default_factory=XsltStyle, description="How the XSLT is written: naming, and when "
                                                                     "to use variables and xsl:maps.")
+    @model_validator(mode='after')
+    def _pairs_as_extract(self) -> 'TranslationMapping':
+        # Each key an extract entry, as the draft writes them: the generator, the checks and the kept mapping see
+        # extract alone. A text another extraction gives is read after that one.
+        extract, front = list(self.extract), 0
+        for p in self.pairs:
+            entries = [Extraction(field=p.field, regex=pair_regex(p.style, key), names=[p.names.get(key) or key_name(key)])
+                       for key in p.keys]
+            giving = max((n for n, ex in enumerate(extract) if p.field in ex.names), default=None)
+            at = front if giving is None else giving + 1
+            extract[at:at] = entries
+            front += len(entries) if giving is None else 0
+        self.extract, self.pairs = extract, []
+        return self
+
     @model_validator(mode='after')
     def _data_names_in_style(self) -> 'TranslationMapping':
         # Applied to the mapping itself, so the XSLT, the documentation's tables and the sample checks all use the
@@ -1498,7 +1573,10 @@ class _Generator:
         # The nearest element above it that takes Data (a destination_key under Destination), then the action the
         # rule maps, then the element itself.
         nearest = ['/'.join(parts[:k] + ['Data']) for k in range(len(parts) - 1, 2, -1)]
-        for candidate in (*nearest, *siblings, '/'.join(parts[:2] + ['Data'])):
+        # A path through a Data element (Network/Data/Source/...: Network's action may be Data itself) carries the value
+        # as that Data, not a Data inside it. Seen in testing: Network/Data/Data suggested, then refused for a data list.
+        through = ['/'.join(parts[:k]) for k in range(3, len(parts)) if parts[k - 1] == 'Data']
+        for candidate in (*through, *nearest, *siblings, '/'.join(parts[:2] + ['Data'])):
             try:
                 if self.schema.resolve(candidate)[-1].name == 'Data':
                     home = candidate
