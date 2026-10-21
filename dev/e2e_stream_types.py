@@ -10,7 +10,9 @@ no children: found only by what they are.
 2. Raw Reference: the reference-data template and the loaders are found by what they are; a Raw Reference feed's
    whole-feed filter takes the feed's stream type; the wait takes the pipeline's output type (Reference); an events
    pipeline's reference names no loader, and the lookup fills the events. Its mapping lost, rebuild_mapping reads the
-   lookup back from the XSLT as the entry that wrote it, and the events are filled as before.
+   lookup back from the XSLT as the entry that wrote it, and the events are filled as before. Processed, every event
+   of the Events stream is filled. A pipeline made without the reference finds nothing; update_pipeline attaches it
+   to the translation step, and the lookup fills the event.
 3. Records: a pipeline writing Records, from 'csv records v1'; its wait takes Records from the pipeline; the Records
    stream is refused as Events to plan an index from, and indexed as records (records:2 data) into Elasticsearch.
 """
@@ -35,7 +37,7 @@ from format_samples import SAMPLES  # noqa: E402
 from security.guard import guard_from  # noqa: E402
 from security.policy import AccessPolicy  # noqa: E402
 from tools import (feeds, generation, indexing, pipeline_writes, plan, processing_writes, rebuild, reference, stepping,  # noqa: E402
-                   templates, translation)
+                   streams, templates, translation)
 from tools.pipeline_writes import PipelineReference  # noqa: E402
 from utils.consent import ConsentStore  # noqa: E402
 from utils.fieldplan import Discovery, FieldPlan  # noqa: E402
@@ -180,6 +182,36 @@ async def reference_data(ctx, stroom: StroomGateway, stamp: str) -> None:
     output = (await stepping.step_pipeline(ctx, events['uuid'], events_raw, 0))['elements']['translationFilter']['output']
     name = etree.fromstring(output.encode()).findtext('.//{event-logging:3}EventSource/{event-logging:3}User/{event-logging:3}Name')
     e2e.check(name == 'Alice Anderson', f"the XSLT saved from the rebuilt mapping fills the event the same: {name}")
+    # Processed, not only stepped: every event of the Events stream filled by its own lookup.
+    sampled = await stepping.step_sample(ctx, events['uuid'], [events_raw])
+    e2e.check(sampled['verdict'] == 'clean', f"the events pipeline steps the sample clean: {sampled['verdict']} "
+                                             f"{[(g['class'], g.get('reason')) for g in sampled['groups']]}")
+    await e2e.agreed(processing_writes.create_processor_filter, ctx=ctx, pipeline_uuid=events['uuid'],
+                     stream_ids=[events_raw])
+    done = await processing_writes.wait_for_processing(ctx, events['uuid'], [events_raw])
+    e2e.check(done['gate'] == 'pass', f"the events processed: {done['streams']} {done['problems']}")
+    records = (await streams.read_stream(ctx, done['streams'][0]['events'][0], 0, 10))['records']
+    names = [_user_name(r) for r in records]
+    e2e.check(names == ['Alice Anderson', 'Bob Brown', 'Alice Anderson'],
+              f"processing fills each event's lookup, as stepping does: {names}")
+    # A pipeline made without the reference, which update_pipeline then attaches (an agent that left it out).
+    late = await e2e.agreed(pipeline_writes.create_pipeline, ctx=ctx, build=events_build,
+                            name=f'{events_feed}-Events-Late', template_uuid=text['uuid'])
+    e2e.check(not late.get('still_to_set'), f"the later pipeline takes the build's XSLT: {late.get('still_to_set')}")
+    output = (await stepping.step_pipeline(ctx, late['uuid'], events_raw, 0))['elements']['translationFilter']['output']
+    e2e.check(_user_name(output) is None, f"with no reference, the lookup finds nothing: {_user_name(output)}")
+    updated = await pipeline_writes.update_pipeline(ctx, late['uuid'], references=[PipelineReference(feed=feed)])
+    e2e.check(len(updated['reference_data'] or []) == 1 and feed in updated['reference_data'][0]
+              and updated['reference_data'][0].endswith('on translationFilter'),
+              f"update_pipeline attaches the reference to the translation step: {updated['reference_data']}")
+    output = (await stepping.step_pipeline(ctx, late['uuid'], events_raw, 1))['elements']['translationFilter']['output']
+    e2e.check(_user_name(output) == 'Bob Brown', f"the reference attached later fills the event: {_user_name(output)}")
+
+
+def _user_name(events: str) -> str | None:
+    """EventSource/User/Name of the (first) event in Events XML."""
+    return etree.fromstring(events.encode()).findtext(
+        './/{event-logging:3}EventSource/{event-logging:3}User/{event-logging:3}Name')
 
 
 async def records(ctx, stroom: StroomGateway, template: dict, stamp: str) -> None:
