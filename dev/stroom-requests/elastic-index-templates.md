@@ -10,6 +10,10 @@ doc instead, and have Stroom fetch them. Pasting stays, for an example no Elasti
 and a doc of another type, or without an index name or cluster, answers 400 (the server then uses the doc's
 fields, saying why). The same branch adds a chat tool, `elastic_index_templates`, giving the same templates as
 Markdown (each name in a heading, its body in a `json` code block); the server reads that when pasted.
+Proven end to end on 21 October 2026: `dev/e2e_field_types.py` passed on a local stack running an image built
+from `6a6388ea` (the branch head, API only), its like_index step drafting from the template Stroom read; the
+body the endpoint returned carried `created_date_millis`, refused by Elasticsearch in a `PUT` as it was, accepted
+once parsed by the server.
 
 The MCP server never connects to Elasticsearch itself: Stroom already holds each cluster's connection and
 credentials, and applies the user's permissions on the doc. So Stroom reads the templates and returns them.
